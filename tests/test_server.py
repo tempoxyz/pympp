@@ -3,7 +3,7 @@
 import pytest
 
 from mpay import Challenge, Credential, Receipt
-from mpay.server import intent, verify_or_challenge
+from mpay.server import intent, requires_payment, verify_or_challenge
 from mpay.server.intent import VerificationError
 
 
@@ -152,3 +152,199 @@ class TestVerificationError:
                 request={"amount": "1000"},
                 realm="api.example.com",
             )
+
+
+class MockRequest:
+    """Mock request object for testing."""
+
+    def __init__(self, authorization: str | None = None) -> None:
+        self.headers = {"authorization": authorization} if authorization else {}
+
+
+class DjangoStyleRequest:
+    """Mock Django-style request object for testing."""
+
+    def __init__(self, authorization: str | None = None) -> None:
+        self.META = {"HTTP_AUTHORIZATION": authorization} if authorization else {}
+
+
+class TestRequiresPayment:
+    @pytest.mark.asyncio
+    async def test_returns_402_when_no_authorization(self) -> None:
+        """Should return 402 dict when no Authorization header."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        async def handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid content"}
+
+        result = await handler(MockRequest())
+
+        assert isinstance(result, dict)
+        assert result["_mpay_challenge"] is True
+        assert result["status"] == 402
+        assert "WWW-Authenticate" in result["headers"]
+        assert "Payment" in result["headers"]["WWW-Authenticate"]
+
+    @pytest.mark.asyncio
+    async def test_calls_handler_with_valid_credential(self) -> None:
+        """Should call handler with credential and receipt when authorized."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        async def handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {
+                "data": "paid content",
+                "credential_id": credential.id,
+                "receipt_ref": receipt.reference,
+            }
+
+        credential = Credential(id="test-cred-id", payload={"hash": "0xabc"})
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid content"
+        assert result["credential_id"] == "test-cred-id"
+        assert result["receipt_ref"] == "tx-ref-123"
+
+    @pytest.mark.asyncio
+    async def test_supports_dynamic_request_params(self) -> None:
+        """Should support callable request params."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            assert request["amount"] == "2000"
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request=lambda req: {"amount": req.query_amount},
+            realm="api.example.com",
+        )
+        async def handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        class RequestWithQuery(MockRequest):
+            query_amount = "2000"
+
+        credential = Credential(id="test", payload={})
+        request = RequestWithQuery(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid"
+
+    @pytest.mark.asyncio
+    async def test_supports_django_style_requests(self) -> None:
+        """Should extract authorization from Django META."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        async def handler(
+            req: DjangoStyleRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"credential_id": credential.id}
+
+        credential = Credential(id="django-cred", payload={})
+        request = DjangoStyleRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["credential_id"] == "django-cred"
+
+    @pytest.mark.asyncio
+    async def test_returns_402_for_invalid_scheme(self) -> None:
+        """Should return 402 for non-Payment authorization."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        async def handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        request = MockRequest(authorization="Bearer some-token")
+        result = await handler(request)
+
+        assert result["_mpay_challenge"] is True
+        assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    async def test_preserves_function_metadata(self) -> None:
+        """Decorator should preserve function name and docstring."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        async def my_handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            """My handler docstring."""
+            return {"data": "paid"}
+
+        assert my_handler.__name__ == "my_handler"
+        assert my_handler.__doc__ == "My handler docstring."
+
+    @pytest.mark.asyncio
+    async def test_custom_method_name(self) -> None:
+        """Should pass custom method name to verify_or_challenge."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @requires_payment(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            method="custom-method",
+        )
+        async def handler(
+            req: MockRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(MockRequest())
+
+        assert result["_mpay_challenge"] is True
+        www_auth = result["headers"]["WWW-Authenticate"]
+        challenge = Challenge.from_www_authenticate(www_auth)
+        assert challenge.method == "custom-method"

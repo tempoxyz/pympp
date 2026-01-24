@@ -1,18 +1,14 @@
 # mpay
 
-HTTP Payment Authentication for Python. Implements the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/) with pluggable payment methods & intents.
+Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/).
 
-## Install
+## Design Principles
 
-```bash
-pip install mpay
-
-# With Tempo support
-pip install mpay[tempo]
-
-# With server support (Pydantic schemas)
-pip install mpay[server]
-```
+- **Protocol-first** — Core types (`Challenge`, `Credential`, `Receipt`) map directly to HTTP headers
+- **Async-native** — Built on httpx for modern async Python
+- **Pluggable methods** — Payment networks (Tempo, Stripe, Ethereum) are independently packaged
+- **Minimal dependencies** — Core has no dependencies; extras add what you need
+- **Designed for extension** — `Method` and `Intent` are `typing.Protocol` definitions. Bring your own classes or functions—if they match the interface, they work. No base classes, no registration.
 
 ## Quick Start
 
@@ -38,14 +34,12 @@ async def handler(request):
         realm="api.example.com",
     )
 
-    # Payment required — send 402 response with challenge
     if isinstance(result, Challenge):
         return Response(
             status=402,
             headers={"WWW-Authenticate": result.to_www_authenticate("api.example.com")},
         )
 
-    # Payment verified — return resource
     credential, receipt = result
     return Response(
         {"data": "..."},
@@ -57,8 +51,6 @@ async def handler(request):
 
 #### Automatic: Client Wrapper
 
-The easiest way to use mpay on the client is with the `Client` wrapper that automatically handles 402 responses:
-
 ```python
 from mpay.client import Client
 from mpay.methods.tempo import tempo, TempoAccount
@@ -66,14 +58,11 @@ from mpay.methods.tempo import tempo, TempoAccount
 account = TempoAccount.from_key("0x...")
 
 async with Client(methods=[tempo(account=account, rpc_url="https://rpc.tempo.xyz")]) as client:
-    # Handles 402 automatically
     r1 = await client.get("https://api.example.com/a")
     r2 = await client.get("https://api.example.com/b")
 ```
 
 #### Automatic: One-liner
-
-For simple requests without connection pooling:
 
 ```python
 from mpay.client import get
@@ -81,7 +70,6 @@ from mpay.methods.tempo import tempo, TempoAccount
 
 account = TempoAccount.from_key("0x...")
 
-# Simple one-liner — handles 402 automatically
 response = await get(
     "https://api.example.com/resource",
     methods=[tempo(account=account, rpc_url="https://rpc.tempo.xyz")],
@@ -89,8 +77,6 @@ response = await get(
 ```
 
 #### Automatic: Custom httpx Transport
-
-If you prefer to use your own httpx client, use `PaymentTransport`:
 
 ```python
 from mpay.client import PaymentTransport
@@ -107,8 +93,6 @@ async with httpx.AsyncClient(transport=transport) as client:
 
 #### Manual
 
-For more control, you can manually create credentials:
-
 ```python
 from mpay import Challenge, Credential
 from mpay.methods.tempo import tempo, TempoAccount
@@ -123,10 +107,8 @@ async with httpx.AsyncClient() as client:
         return
 
     challenge = Challenge.from_www_authenticate(res.headers["www-authenticate"])
-
     credential = await method.create_credential(challenge)
 
-    # Retry with credential
     res2 = await client.get(
         "https://api.example.com/resource",
         headers={"Authorization": credential.to_authorization()},
@@ -151,16 +133,13 @@ challenge = Challenge(
     request={"amount": "1000000", "asset": "0x...", "destination": "0x..."},
 )
 
-# Serialize to header
 header = challenge.to_www_authenticate("api.example.com")
-
-# Parse from header
 parsed = Challenge.from_www_authenticate(header)
 ```
 
 #### `Credential`
 
-The credential passed to the `verify` function, containing the challenge ID and client payload.
+The credential passed to the `verify` function.
 
 ```python
 from mpay import Credential
@@ -168,19 +147,16 @@ from mpay import Credential
 credential = Credential(
     id="challenge-id",
     payload={"hash": "0x..."},
-    source="did:pkh:eip155:1:0x...",  # Optional payer DID
+    source="did:pkh:eip155:1:0x...",
 )
 
-# Serialize to header
 header = credential.to_authorization()
-
-# Parse from header
 parsed = Credential.from_authorization(header)
 ```
 
 #### `Receipt`
 
-Payment receipt returned after successful verification, sent via the `Payment-Receipt` header.
+Payment receipt returned after successful verification.
 
 ```python
 from mpay import Receipt
@@ -191,18 +167,53 @@ receipt = Receipt(
     reference="0x...",
 )
 
-# Serialize to header
 header = receipt.to_payment_receipt()
-
-# Parse from header
 parsed = Receipt.from_payment_receipt(header)
 ```
 
 ### Server
 
+#### `@requires_payment` Decorator
+
+Simplifies payment-protected endpoints by handling the 402 challenge flow automatically:
+
+```python
+from mpay.server import requires_payment
+from mpay.methods.tempo import ChargeIntent
+
+intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
+
+@app.get("/resource")
+@requires_payment(
+    intent=intent,
+    request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+    realm="api.example.com",
+)
+async def get_resource(request: Request, credential: Credential, receipt: Receipt):
+    return {"data": "paid content", "payer": credential.source}
+```
+
+With dynamic request params:
+
+```python
+@requires_payment(
+    intent=intent,
+    request=lambda req: {"amount": req.query_params.get("price", "1000"), ...},
+    realm="api.example.com",
+)
+async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
+    return {"data": "..."}
+```
+
+The decorator:
+- Extracts Authorization header from the request (supports Starlette/FastAPI and Django)
+- Calls `verify_or_challenge` internally
+- Returns 402 with `WWW-Authenticate` header if payment required
+- Calls handler with `(request, credential, receipt)` if verified
+
 #### `verify_or_challenge`
 
-Core function for server-side payment verification.
+For more control, use `verify_or_challenge` directly:
 
 ```python
 from mpay.server import verify_or_challenge
@@ -215,17 +226,13 @@ result = await verify_or_challenge(
 )
 
 if isinstance(result, Challenge):
-    # No valid credential — return 402
-    ...
+    ...  # Return 402
 else:
     credential, receipt = result
-    # Payment verified — return resource
-    ...
+    ...  # Return resource
 ```
 
 #### Custom Intents
-
-##### Class-based
 
 ```python
 from mpay import Credential, Receipt
@@ -235,10 +242,8 @@ class MyChargeIntent:
     name = "charge"
 
     async def verify(self, credential: Credential, request: dict) -> Receipt:
-        # Custom verification logic
         if not await self.validate_payment(credential):
             raise VerificationError("Payment invalid")
-
         return Receipt(
             status="success",
             timestamp=datetime.now().isoformat(),
@@ -246,14 +251,11 @@ class MyChargeIntent:
         )
 ```
 
-##### Functional
-
 ```python
 from mpay.server import intent
 
 @intent(name="charge")
 async def my_charge(credential: Credential, request: dict) -> Receipt:
-    # Custom verification logic
     return Receipt(status="success", ...)
 ```
 
@@ -262,26 +264,28 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 ```python
 from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
-# Create account
 account = TempoAccount.from_key("0x...")
-# Or from environment
 account = TempoAccount.from_env("TEMPO_PRIVATE_KEY")
 
-# Client-side method
 method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
-
-# Server-side intent
 intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
 ```
 
 ## Development
 
 ```bash
+pip install mpay                      # Core only
+pip install mpay[tempo]               # With Tempo support
+pip install mpay[server]              # With server support (Pydantic)
+pip install -e ".[dev,tempo,server]"  # Development install
+```
+
+```bash
 make install  # Install dependencies
 make test     # Run tests
 make lint     # Lint
 make format   # Format code
-make check    # Run all checks (lint + format-check + test)
+make check    # Run all checks
 ```
 
 ## License
