@@ -1,0 +1,84 @@
+"""Tempo account management for signing transactions.
+
+Wraps eth-account for key management and signing operations.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from eth_account.signers.local import LocalAccount
+
+
+@dataclass(frozen=True)
+class TempoAccount:
+    """Wrapper around eth-account for signing.
+
+    Example:
+        # From hex private key
+        account = TempoAccount.from_key("0x...")
+
+        # From environment variable
+        account = TempoAccount.from_env("TEMPO_PRIVATE_KEY")
+
+        # Sign a hash
+        signature = account.sign_hash(msg_hash)
+    """
+
+    _account: LocalAccount
+
+    @classmethod
+    def from_key(cls, private_key: str) -> TempoAccount:
+        """Load from hex private key (0x-prefixed).
+
+        Args:
+            private_key: Hex-encoded private key with 0x prefix.
+
+        Returns:
+            A TempoAccount instance.
+        """
+        from eth_account import Account
+
+        return cls(_account=Account.from_key(private_key))
+
+    @classmethod
+    def from_env(cls, var: str = "TEMPO_PRIVATE_KEY") -> TempoAccount:
+        """Load from environment variable.
+
+        Args:
+            var: Environment variable name (default: TEMPO_PRIVATE_KEY).
+
+        Returns:
+            A TempoAccount instance.
+
+        Raises:
+            ValueError: If the environment variable is not set.
+        """
+        key = os.environ.get(var)
+        if not key:
+            raise ValueError(f"${var} not set")
+        return cls.from_key(key)
+
+    @property
+    def address(self) -> str:
+        """Get the account's Ethereum address."""
+        return self._account.address
+
+    def sign_hash(self, msg_hash: bytes) -> bytes:
+        """Sign a 32-byte hash, return 65-byte signature.
+
+        Args:
+            msg_hash: 32-byte hash to sign.
+
+        Returns:
+            65-byte signature (r || s || v).
+        """
+        signed = self._account.unsafe_sign_hash(msg_hash)
+        return (
+            signed.r.to_bytes(32, "big")
+            + signed.s.to_bytes(32, "big")
+            + bytes([signed.v])
+        )
