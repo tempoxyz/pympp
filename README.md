@@ -1,4 +1,4 @@
-# mpay
+# mpay-python
 
 Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/).
 
@@ -206,6 +206,7 @@ async def dynamic_pricing(request: Request, credential: Credential, receipt: Rec
 ```
 
 The decorator:
+
 - Extracts Authorization header from the request (supports Starlette/FastAPI and Django)
 - Calls `verify_or_challenge` internally
 - Returns 402 with `WWW-Authenticate` header if payment required
