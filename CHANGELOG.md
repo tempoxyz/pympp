@@ -1,0 +1,94 @@
+# Changelog
+
+## 0.4.0 (2026-03-06)
+
+### Minor Changes
+
+- Require explicit server secret key — remove implicit `.env` auto-generation/persistence. `MPP_SECRET_KEY` must be set in the environment or `secret_key` passed explicitly; whitespace-only values are rejected. Preserves `__wrapped__` on payment decorators. Aligns pympp with mpp-rs and mppx behavior. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Consolidated `expires` from the request body into the challenge-level `expires` auth-param exclusively. Removed `expires` as a field from `ChargeRequest` schema and updated all server, intent, and test code to read expiry from `credential.challenge.expires` instead. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Added `digest` and `opaque` fields to `MCPChallenge` for extended challenge metadata propagation. Fixed deterministic body digest computation by adding `sort_keys=True` to JSON serialization, and corrected ISO 8601 timestamp formatting. Added cross-realm attack prevention by validating echoed challenge fields (`realm`, `method`, `intent`) against server-expected values in both HTTP and MCP transports. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+
+### Patch Changes
+
+- Applied `transform_request` method hook in `Mpp.charge` and `Mpp.pay` helpers, ensuring the method's request transform is called before verification. Added tests covering both helpers. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Updated documentation URLs from `machinepayments.dev` to `mpp.dev`, updated the IETF draft reference link, removed the `currency` parameter from the README example, updated the example API endpoint, and updated the package description in `pyproject.toml`. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Added server-side expiry enforcement to reject replayed credentials after their challenge has expired. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+
+## 0.3.0 (2026-02-23)
+
+### Minor Changes
+
+- Added extensive test coverage for memo-based transfers, including unit tests for `_match_transfer_calldata` and `_verify_transfer_logs` with memo fields, integration tests for end-to-end charge flows with server-specified memos, and new test modules for body digest computation, error types, expires helpers, and keychain signature handling. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+- Added 0x78 fee payer envelope encoding/decoding module with `encode_fee_payer_envelope` and `decode_fee_payer_envelope` functions. Updated `ChargeIntent._cosign_as_fee_payer` to use the new 0x78 wire format instead of 0x76, including sender address verification against the recovered signer. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+- Added chain-specific default currency selection: mainnet now defaults to USDC and testnet defaults to pathUSD. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. Updated tests to reflect the new default currency behavior. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+
+### Patch Changes
+
+- Added pyright, build, and twine as dev dependencies. Improved CI pipeline with separate lint, test, and package jobs, concurrency cancellation, coverage enforcement, and package validation. Fixed pyright type errors with `type: ignore` annotations and refactored `ChargeIntent` to use a `_get_rpc_url()` helper to safely unwrap the optional RPC URL. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+
+## 0.2.0 (2026-02-20)
+
+### Minor Changes
+
+- Added `opaque`/`meta` field support for server-defined correlation data in challenges. The `meta` parameter on `Challenge.create()` and `verify_or_challenge()` stores arbitrary string key-value pairs as an HMAC-bound `opaque` field, included in challenge IDs and serialized in `WWW-Authenticate` and `Authorization` headers. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+- Added full fee payer support to the Tempo method, allowing servers to co-sign sponsored transactions locally using a configured `fee_payer` account instead of forwarding to an external service. Updated the `tempo()` factory and `ChargeIntent` to propagate the fee payer account, and introduced expiring nonce logic for replay protection on sponsored transactions. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+- Added chain-specific default currency selection: mainnet now defaults to USDC and testnet defaults to pathUSD. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. Updated tests to reflect the new default currency behavior. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+
+### Patch Changes
+
+- Reordered `_REALM_ENV_VARS` list alphabetically and added `FLY_APP_NAME`, `HEROKU_APP_NAME`, and `WEBSITE_HOSTNAME` environment variables for realm detection. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+
+## 0.1.5 (2026-02-18)
+
+### Patch Changes
+
+- chore: remove release environment requirement from publish workflow (by @BrendanRyan, [#58](https://github.com/tempoxyz/pympp/pull/58))
+
+## 0.1.4 (2026-02-18)
+
+### Patch Changes
+
+- Moved `VerificationError` from `mpp.server.intent` to `mpp.errors` so that client-only imports no longer transitively load server dependencies. Added a re-export shim in `mpp.server.intent` for backwards compatibility and added import isolation tests to enforce the invariant. (by @BrendanRyan, [#55](https://github.com/tempoxyz/pympp/pull/55))
+- Sorted imports to satisfy ruff I001 linting rules in `src/mpp/methods/tempo/intents.py`. (by @BrendanRyan, [#55](https://github.com/tempoxyz/pympp/pull/55))
+
+## 0.1.3 (2026-02-18)
+
+### Patch Changes
+
+- fix: accept `transferWithMemo` calls in pre-broadcast validation when no explicit memo is required
+- Aligns with mppx behavior — clients may auto-generate attribution memos via `transferWithMemo` even when the server request has no explicit memo. Previously, the server would reject these with `VerificationError: Invalid transaction: no matching payment call found`. (by @BrendanRyan, [#52](https://github.com/tempoxyz/pympp/pull/52))
+
+## 0.1.2 (2026-02-17)
+
+### Patch Changes
+
+- Fixed PyPI publish workflow by using Python 3.12 for building (package requires >=3.12). (by @BrendanRyan, [#46](https://github.com/tempoxyz/pympp/pull/46))
+
+## 0.1.1 (2026-02-17)
+
+### Patch Changes
+
+- Test publish to verify end-to-end PyPI release pipeline. (by @BrendanRyan, [#44](https://github.com/tempoxyz/pympp/pull/44))
+
+## 0.1.0 (2026-02-17)
+
+### Minor Changes
+
+- Added HMAC-bound challenge IDs for stateless MCP transport security and support for optional description/externalId fields in ChargeRequest. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+- Renamed `@requires_payment` decorator to `@pay` across the codebase, including all documentation, examples, and tests. Added `server.pay()` decorator method on `Mpp` class. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+- Removed streaming payment support from the Tempo payment method. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+
+### Patch Changes
+
+- Switched pytempo dependency from git reference to PyPI package version. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+- Fixed conformance issues by rejecting duplicate authentication parameters and requiring the `method` field in payment receipts. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+- Added `sort_keys=True` to all `json.dumps()` calls to ensure JCS (RFC 8785) canonical JSON serialization when generating challenge IDs and credentials. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+- Switched payment token from AlphaUSD to PathUSD by updating currency address from `0x20c0000000000000000000000000000000000001` to `0x20c0000000000000000000000000000000000000` and removed deprecated `ALPHA_USD` constant. (by @BrendanRyan, [#41](https://github.com/tempoxyz/pympp/pull/41))
+
+## `pympp@0.0.1`
+
+### Patch Changes
+
+**Breaking:** `tempo()` now requires an explicit `intents` parameter. The implicit `ChargeIntent` default has been removed. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
+- Initial release of pympp - HTTP 402 Payment Authentication for Python. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
+

@@ -1,0 +1,8 @@
+ecosystem = "python"
+
+dependent_bump = "patch"
+
+[changelog]
+format = "root"
+
+ignore = []
