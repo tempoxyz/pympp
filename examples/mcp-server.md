@@ -17,7 +17,7 @@ Works with any MCP server implementation. Extract `_meta` from params and use `v
 
 ```python
 from mpay import Receipt
-from mpay.mcp import (
+from mpay.extensions.mcp import (
     MCPChallenge,
     PaymentRequiredError,
     verify_or_challenge,
@@ -60,7 +60,7 @@ async def handle_tool_call(params: dict) -> dict:
 For FastMCP and similar frameworks where tool params are unpacked as `**kwargs`:
 
 ```python
-from mpay.mcp import (
+from mpay.extensions.mcp import (
     MCPCredential,
     MCPReceipt,
     PaymentRequiredError,
@@ -103,7 +103,7 @@ async def handle_web_search(params: dict):
 MCP uses JSON-RPC error codes for payment errors:
 
 ```python
-from mpay.mcp import (
+from mpay.extensions.mcp import (
     create_challenge,
     PaymentRequiredError,
     PaymentVerificationError,
@@ -136,7 +136,7 @@ print(error2.to_jsonrpc_error())
 
 ```python
 import asyncio
-from mpay.mcp import (
+from mpay.extensions.mcp import (
     MCPChallenge,
     MCPCredential,
     PaymentRequiredError,

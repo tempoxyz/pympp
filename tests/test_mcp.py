@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from mpay import Challenge, Credential, Receipt
-from mpay.mcp import (
+from mpay.extensions.mcp import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,

@@ -7,7 +7,7 @@ Protocol (MCP) per draft-payment-transport-mcp-00.
 
 For any MCP server, use verify_or_challenge() directly:
 
-    from mpay.mcp import (
+    from mpay.extensions.mcp import (
         verify_or_challenge,
         create_challenge,
         MCPChallenge,
@@ -41,7 +41,7 @@ For any MCP server, use verify_or_challenge() directly:
 For FastMCP-style frameworks, use the @requires_payment decorator:
 
     from mcp.server.fastmcp import FastMCP
-    from mpay.mcp import requires_payment, payment_capabilities
+    from mpay.extensions.mcp import requires_payment, payment_capabilities
 
     mcp = FastMCP(
         "paid-api",
@@ -58,22 +58,22 @@ For FastMCP-style frameworks, use the @requires_payment decorator:
         return f"Result for {query}, paid by {credential.source}"
 """
 
-from mpay.mcp.capabilities import payment_capabilities
-from mpay.mcp.constants import (
+from mpay.extensions.mcp.capabilities import payment_capabilities
+from mpay.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,
     META_CREDENTIAL,
     META_RECEIPT,
 )
-from mpay.mcp.decorator import requires_payment
-from mpay.mcp.errors import (
+from mpay.extensions.mcp.decorator import requires_payment
+from mpay.extensions.mcp.errors import (
     MalformedCredentialError,
     PaymentRequiredError,
     PaymentVerificationError,
 )
-from mpay.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpay.mcp.verify import create_challenge, verify_or_challenge
+from mpay.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
+from mpay.extensions.mcp.verify import create_challenge, verify_or_challenge
 
 __all__ = [
     "CODE_MALFORMED_CREDENTIAL",

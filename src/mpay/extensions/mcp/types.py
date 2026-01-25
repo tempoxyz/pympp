@@ -136,7 +136,7 @@ class MCPCredential:
 
     def to_meta(self) -> dict[str, Any]:
         """Serialize to the _meta dict format."""
-        from mpay.mcp.constants import META_CREDENTIAL
+        from mpay.extensions.mcp.constants import META_CREDENTIAL
 
         return {META_CREDENTIAL: self.to_dict()}
 
@@ -152,7 +152,7 @@ class MCPCredential:
     @classmethod
     def from_meta(cls, meta: dict[str, Any]) -> MCPCredential | None:
         """Extract credential from _meta dict, returns None if not present."""
-        from mpay.mcp.constants import META_CREDENTIAL
+        from mpay.extensions.mcp.constants import META_CREDENTIAL
 
         if META_CREDENTIAL not in meta:
             return None
@@ -223,7 +223,7 @@ class MCPReceipt:
 
     def to_meta(self) -> dict[str, Any]:
         """Serialize to the _meta dict format."""
-        from mpay.mcp.constants import META_RECEIPT
+        from mpay.extensions.mcp.constants import META_RECEIPT
 
         return {META_RECEIPT: self.to_dict()}
 
@@ -242,7 +242,7 @@ class MCPReceipt:
     @classmethod
     def from_meta(cls, meta: dict[str, Any]) -> MCPReceipt | None:
         """Extract receipt from _meta dict, returns None if not present."""
-        from mpay.mcp.constants import META_RECEIPT
+        from mpay.extensions.mcp.constants import META_RECEIPT
 
         if META_RECEIPT not in meta:
             return None

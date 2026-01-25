@@ -5,7 +5,11 @@ frameworks where tool params are unpacked as **kwargs.
 
 For other MCP server implementations, use verify_or_challenge() directly:
 
-    from mpay.mcp import verify_or_challenge, MCPChallenge, PaymentRequiredError
+    from mpay.extensions.mcp import (
+        MCPChallenge,
+        PaymentRequiredError,
+        verify_or_challenge,
+    )
 
     async def handle_tool(params: dict):
         result = await verify_or_challenge(
@@ -27,14 +31,14 @@ from datetime import timedelta
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from mpay.mcp.constants import META_CREDENTIAL
-from mpay.mcp.errors import (
+from mpay.extensions.mcp.constants import META_CREDENTIAL
+from mpay.extensions.mcp.errors import (
     MalformedCredentialError,
     PaymentRequiredError,
     PaymentVerificationError,
 )
-from mpay.mcp.types import MCPCredential, MCPReceipt
-from mpay.mcp.verify import DEFAULT_CHALLENGE_TTL, create_challenge
+from mpay.extensions.mcp.types import MCPCredential, MCPReceipt
+from mpay.extensions.mcp.verify import DEFAULT_CHALLENGE_TTL, create_challenge
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent

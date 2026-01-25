@@ -4,7 +4,7 @@ This module provides framework-agnostic functions for MCP payment handling.
 Use these with any MCP server implementation (FastMCP, mcp-python, custom, etc.).
 
 Example with raw JSON-RPC handling:
-    from mpay.mcp import verify_or_challenge, MCPChallenge
+    from mpay.extensions.mcp import verify_or_challenge, MCPChallenge
 
     async def handle_tool_call(params: dict) -> dict:
         meta = params.get("_meta", {})
@@ -39,9 +39,12 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from mpay.mcp.constants import META_CREDENTIAL
-from mpay.mcp.errors import MalformedCredentialError, PaymentVerificationError
-from mpay.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
+from mpay.extensions.mcp.constants import META_CREDENTIAL
+from mpay.extensions.mcp.errors import (
+    MalformedCredentialError,
+    PaymentVerificationError,
+)
+from mpay.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent

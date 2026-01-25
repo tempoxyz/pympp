@@ -13,13 +13,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from mpay.mcp.constants import (
+from mpay.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,
     HTTP_STATUS_PAYMENT_REQUIRED,
 )
-from mpay.mcp.types import MCPChallenge
+from mpay.extensions.mcp.types import MCPChallenge
 
 
 @dataclass
