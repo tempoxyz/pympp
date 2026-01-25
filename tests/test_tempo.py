@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from pytest_httpx import HTTPXMock
 
 from mpay import Challenge, Credential
 from mpay.methods.tempo import TempoAccount, tempo
@@ -406,6 +407,139 @@ class TestChargeIntent:
             )
 
 
+class TestSponsoredTransfer:
+    @pytest.mark.asyncio
+    async def test_client_builds_sponsored_transaction(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Client should build and return raw tx when fee_payer=True."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(account=account, rpc_url="https://rpc.test")
+
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-sponsored",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "asset": "0x20c0000000000000000000000000000000000001",
+                "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "fee_payer": True,
+                "fee_payer_url": "https://sponsor.test",
+            },
+        )
+
+        credential = await method.create_credential(challenge)
+
+        assert credential.id == "test-sponsored"
+        assert credential.payload["type"] == "transaction"
+        assert credential.payload["signature"].startswith("0x76")
+
+    @pytest.mark.asyncio
+    async def test_server_submits_sponsored_transaction(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Server should submit sponsored tx to fee payer URL."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+
+        httpx_mock.add_response(
+            url="https://sponsor.test",
+            json={"jsonrpc": "2.0", "result": "0xsponsored_hash", "id": 1},
+        )
+
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={
+                "jsonrpc": "2.0",
+                "result": {
+                    "status": "0x1",
+                    "logs": [
+                        {
+                            "address": "0x20c0000000000000000000000000000000000001",
+                            "topics": [
+                                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                                "0x000000000000000000000000sender00000000000000000000000000000000",
+                                "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                            ],
+                            "data": (
+                                "0x000000000000000000000000000000000000"
+                                "00000000000000000000000000000f4240"
+                            ),
+                        }
+                    ],
+                },
+                "id": 1,
+            },
+        )
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        credential = Credential(
+            id="test",
+            payload={"type": "transaction", "signature": "0x76abcdef"},
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000000",
+                "asset": "0x20c0000000000000000000000000000000000001",
+                "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "expires": future,
+                "fee_payer": True,
+                "fee_payer_url": "https://sponsor.test",
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == "0xsponsored_hash"
+
+    @pytest.mark.asyncio
+    async def test_server_fee_payer_error(self, httpx_mock: HTTPXMock) -> None:
+        """Server should raise VerificationError when fee payer fails."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+
+        httpx_mock.add_response(
+            url="https://sponsor.test",
+            json={
+                "jsonrpc": "2.0",
+                "error": {"code": -32000, "message": "insufficient funds"},
+                "id": 1,
+            },
+        )
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        credential = Credential(
+            id="test",
+            payload={"type": "transaction", "signature": "0x76abcdef"},
+        )
+
+        with pytest.raises(VerificationError, match="Transaction submission failed"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "asset": "0x20c0000000000000000000000000000000000001",
+                    "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                    "expires": future,
+                    "fee_payer": True,
+                    "fee_payer_url": "https://sponsor.test",
+                },
+            )
+
+
 class TestSchemas:
     def test_charge_request_valid(self) -> None:
         """Should validate charge request."""
@@ -417,6 +551,19 @@ class TestSchemas:
         )
         assert req.amount == "1000"
         assert req.fee_payer is False
+
+    def test_charge_request_with_fee_payer(self) -> None:
+        """Should accept fee_payer and fee_payer_url."""
+        req = ChargeRequest(
+            amount="1000",
+            asset="0x20c0000000000000000000000000000000000001",
+            destination="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+            fee_payer=True,
+            fee_payer_url="https://sponsor.test",
+        )
+        assert req.fee_payer is True
+        assert req.fee_payer_url == "https://sponsor.test"
 
     def test_hash_credential_payload(self) -> None:
         """Should validate hash credential payload."""
