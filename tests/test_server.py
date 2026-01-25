@@ -6,6 +6,14 @@ from mpay import Challenge, Credential, Receipt
 from mpay.server import intent, requires_payment, verify_or_challenge
 from mpay.server.intent import VerificationError
 
+try:
+    from starlette.responses import Response as StarletteResponse
+
+    HAS_STARLETTE = True
+except ImportError:
+    HAS_STARLETTE = False
+    StarletteResponse = None  # type: ignore[misc, assignment]
+
 
 class TestVerifyOrChallenge:
     @pytest.mark.asyncio
@@ -189,11 +197,17 @@ class TestRequiresPayment:
 
         result = await handler(MockRequest())
 
-        assert isinstance(result, dict)
-        assert result["_mpay_challenge"] is True
-        assert result["status"] == 402
-        assert "WWW-Authenticate" in result["headers"]
-        assert "Payment" in result["headers"]["WWW-Authenticate"]
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+            assert "WWW-Authenticate" in result.headers
+            assert "Payment" in result.headers["WWW-Authenticate"]
+        else:
+            assert isinstance(result, dict)
+            assert result["_mpay_challenge"] is True
+            assert result["status"] == 402
+            assert "WWW-Authenticate" in result["headers"]
+            assert "Payment" in result["headers"]["WWW-Authenticate"]
 
     @pytest.mark.asyncio
     async def test_calls_handler_with_valid_credential(self) -> None:
@@ -298,8 +312,12 @@ class TestRequiresPayment:
         request = MockRequest(authorization="Bearer some-token")
         result = await handler(request)
 
-        assert result["_mpay_challenge"] is True
-        assert result["status"] == 402
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+        else:
+            assert result["_mpay_challenge"] is True
+            assert result["status"] == 402
 
     @pytest.mark.asyncio
     async def test_preserves_function_metadata(self) -> None:
@@ -344,7 +362,12 @@ class TestRequiresPayment:
 
         result = await handler(MockRequest())
 
-        assert result["_mpay_challenge"] is True
-        www_auth = result["headers"]["WWW-Authenticate"]
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            assert result["_mpay_challenge"] is True
+            www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.method == "custom-method"
