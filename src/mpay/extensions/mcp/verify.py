@@ -151,7 +151,7 @@ async def verify_or_challenge(
         raise PaymentVerificationError(
             challenges=[challenge],
             reason="verification-failed",
-            detail=str(e),
+            detail="Payment verification failed",
         ) from e
 
     mcp_receipt = MCPReceipt.from_core(

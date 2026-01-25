@@ -106,7 +106,6 @@ class TempoMethod:
         Returns the transaction hash.
         """
         import httpx
-        from eth_account import Account
 
         if self.account is None:
             raise ValueError("No account configured")
@@ -129,7 +128,7 @@ class TempoMethod:
                 json={
                     "jsonrpc": "2.0",
                     "method": "eth_getTransactionCount",
-                    "params": [self.account.address, "latest"],
+                    "params": [self.account.address, "pending"],
                     "id": 1,
                 },
             )
@@ -164,7 +163,7 @@ class TempoMethod:
                 "chainId": chain_id,
             }
 
-            signed = Account.sign_transaction(tx, self.account._account.key)
+            signed = self.account.sign_transaction(tx)
             raw_tx = signed.raw_transaction.hex()
             if not raw_tx.startswith("0x"):
                 raw_tx = "0x" + raw_tx

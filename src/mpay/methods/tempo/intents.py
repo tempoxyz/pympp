@@ -155,7 +155,7 @@ class ChargeIntent:
         result = response.json()
 
         if "error" in result:
-            raise VerificationError(f"RPC error: {result['error']}")
+            raise VerificationError("RPC request failed")
 
         receipt_data = result.get("result")
         if not receipt_data:
@@ -175,8 +175,19 @@ class ChargeIntent:
         self,
         receipt: dict[str, Any],
         request: ChargeRequest,
+        expected_sender: str | None = None,
     ) -> bool:
-        """Check if receipt contains matching Transfer logs."""
+        """Check if receipt contains matching Transfer logs.
+
+        Args:
+            receipt: Transaction receipt from RPC.
+            request: The charge request with expected amount/asset/destination.
+            expected_sender: If provided, validates the 'from' address in the
+                Transfer log matches this address (for payer identity verification).
+
+        Returns:
+            True if a matching Transfer log is found, False otherwise.
+        """
         transfer_topic = (
             "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         )
@@ -189,14 +200,19 @@ class ChargeIntent:
             if len(topics) < 3 or topics[0] != transfer_topic:
                 continue
 
+            from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
+
             if to_address.lower() != request.destination.lower():
+                continue
+
+            if expected_sender and from_address.lower() != expected_sender.lower():
                 continue
 
             data = log.get("data", "0x")
             if len(data) >= 66:
                 amount = int(data, 16)
-                if str(amount) == request.amount:
+                if amount == int(request.amount):
                     return True
 
         return False
@@ -222,7 +238,7 @@ class ChargeIntent:
         result = response.json()
 
         if "error" in result:
-            raise VerificationError(f"Transaction failed: {result['error']}")
+            raise VerificationError("Transaction submission failed")
 
         tx_hash = result.get("result")
         if not tx_hash:
@@ -240,9 +256,19 @@ class ChargeIntent:
         receipt_response.raise_for_status()
         receipt_result = receipt_response.json()
 
-        receipt_data = receipt_result.get("result")
-        is_success = receipt_data and receipt_data.get("status") == "0x1"
+        if "error" in receipt_result:
+            raise VerificationError("Failed to fetch transaction receipt")
 
-        if is_success:
-            return Receipt.success(tx_hash)
-        return Receipt.failed(tx_hash)
+        receipt_data = receipt_result.get("result")
+        if not receipt_data:
+            raise VerificationError("Transaction receipt not found")
+
+        if receipt_data.get("status") != "0x1":
+            return Receipt.failed(tx_hash)
+
+        if not self._verify_transfer_logs(receipt_data, request):
+            raise VerificationError(
+                "Transaction must contain a Transfer log matching request parameters"
+            )
+
+        return Receipt.success(tx_hash)

@@ -320,9 +320,30 @@ class TestChargeIntent:
 
     @pytest.mark.asyncio
     async def test_verify_transaction_success(self) -> None:
-        """Should verify transaction credential."""
+        """Should verify transaction credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        amount = 1000
+
+        transfer_topic = (
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        )
+        from_topic = "0x" + "0" * 24 + "abcd" * 10
+        to_topic = "0x" + "0" * 24 + destination[2:]
+
+        receipt_with_logs = {
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [transfer_topic, from_topic, to_topic],
+                    "data": "0x" + hex(amount)[2:].zfill(64),
+                }
+            ],
+        }
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -331,7 +352,7 @@ class TestChargeIntent:
                     200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}
                 ),
                 mock_response(
-                    200, {"jsonrpc": "2.0", "result": {"status": "0x1"}, "id": 1}
+                    200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
                 ),
             ]
         )
@@ -344,9 +365,9 @@ class TestChargeIntent:
         receipt = await intent.verify(
             credential,
             {
-                "amount": "1000",
-                "asset": "0x1234567890123456789012345678901234567890",
-                "destination": "0x4567890123456789012345678901234567890123",
+                "amount": str(amount),
+                "asset": asset,
+                "destination": destination,
                 "expires": future,
             },
         )
@@ -373,7 +394,7 @@ class TestChargeIntent:
             id="test",
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
         )
-        with pytest.raises(VerificationError, match="Transaction failed"):
+        with pytest.raises(VerificationError, match="Transaction submission failed"):
             await intent.verify(
                 credential,
                 {

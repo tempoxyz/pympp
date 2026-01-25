@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
@@ -71,14 +71,41 @@ class TempoAccount:
         """Sign a 32-byte hash, return 65-byte signature.
 
         Args:
-            msg_hash: 32-byte hash to sign.
+            msg_hash: 32-byte hash to sign. Must be exactly 32 bytes.
 
         Returns:
             65-byte signature (r || s || v).
+
+        Raises:
+            ValueError: If msg_hash is not exactly 32 bytes.
+
+        Note:
+            This uses unsafe_sign_hash which does NOT apply EIP-191 prefix.
+            For message signing with domain separation, use EIP-712 typed data
+            or manually prefix with "\\x19Ethereum Signed Message:\\n32".
         """
+        if len(msg_hash) != 32:
+            raise ValueError(f"msg_hash must be 32 bytes, got {len(msg_hash)}")
+
         signed = self._account.unsafe_sign_hash(msg_hash)
         return (
             signed.r.to_bytes(32, "big")
             + signed.s.to_bytes(32, "big")
             + bytes([signed.v])
         )
+
+    def sign_transaction(self, tx: dict) -> Any:
+        """Sign a transaction dict.
+
+        Args:
+            tx: Transaction dict with nonce, gasPrice, gas, to, value, data, chainId.
+
+        Returns:
+            SignedTransaction object with raw_transaction attribute.
+
+        Note:
+            This encapsulates key access to prevent external key exposure.
+        """
+        from eth_account import Account
+
+        return Account.sign_transaction(tx, self._account.key)

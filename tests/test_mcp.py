@@ -585,7 +585,7 @@ class TestVerifyOrChallenge:
                 realm="api.example.com",
             )
 
-        assert "Payment failed" in exc_info.value.detail  # type: ignore[operator]
+        assert exc_info.value.detail == "Payment verification failed"
 
 
 class TestCreateChallenge:
