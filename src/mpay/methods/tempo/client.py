@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 DEFAULT_GAS_LIMIT = 100_000
 DEFAULT_TIMEOUT = 30.0
+DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
 
 class TransactionError(Exception):
@@ -81,17 +82,30 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
-        tx_hash = await self._build_and_sign_transfer(
-            amount=request["amount"],
-            asset=request["asset"],
-            destination=request["destination"],
-        )
+        fee_payer = request.get("fee_payer", False)
 
-        return Credential(
-            id=challenge.id,
-            payload={"type": "hash", "hash": tx_hash},
-            source=f"did:pkh:eip155:1:{self.account.address}",
-        )
+        if fee_payer:
+            raw_tx = await self._build_sponsored_transfer(
+                amount=request["amount"],
+                asset=request["asset"],
+                destination=request["destination"],
+            )
+            return Credential(
+                id=challenge.id,
+                payload={"type": "transaction", "signature": raw_tx},
+                source=f"did:pkh:eip155:1:{self.account.address}",
+            )
+        else:
+            tx_hash = await self._build_and_sign_transfer(
+                amount=request["amount"],
+                asset=request["asset"],
+                destination=request["destination"],
+            )
+            return Credential(
+                id=challenge.id,
+                payload={"type": "hash", "hash": tx_hash},
+                source=f"did:pkh:eip155:1:{self.account.address}",
+            )
 
     async def _build_and_sign_transfer(
         self,
@@ -188,6 +202,122 @@ class TempoMethod:
                 raise TransactionError("No transaction hash returned")
 
             return tx_hash
+
+    async def _build_sponsored_transfer(
+        self,
+        amount: str,
+        asset: str,
+        destination: str,
+    ) -> str:
+        """Build a client-signed Tempo transaction for fee sponsorship.
+
+        Creates a TempoTransaction (type 0x76) with a fee payer placeholder,
+        signed by the client. The server will forward this to a fee payer
+        service which adds its signature and broadcasts.
+
+        Returns the raw signed transaction hex (0x76-prefixed).
+        """
+        import httpx
+        import rlp
+        from eth_utils import keccak, to_bytes
+
+        if self.account is None:
+            raise ValueError("No account configured")
+
+        transfer_data = self._encode_transfer(destination, int(amount))
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            chain_resp = await client.post(
+                self.rpc_url,
+                json={"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1},
+            )
+            chain_resp.raise_for_status()
+            chain_result = chain_resp.json()
+            if "error" in chain_result:
+                raise TransactionError("Failed to fetch chain ID")
+            chain_id = int(chain_result["result"], 16)
+
+            nonce_resp = await client.post(
+                self.rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "tempo_getTransactionCount",
+                    "params": [self.account.address, 0, "pending"],
+                    "id": 1,
+                },
+            )
+            nonce_resp.raise_for_status()
+            nonce_result = nonce_resp.json()
+            if "error" in nonce_result:
+                raise TransactionError("Failed to fetch Tempo nonce")
+            nonce = int(nonce_result["result"], 16)
+
+            gas_resp = await client.post(
+                self.rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_gasPrice",
+                    "params": [],
+                    "id": 1,
+                },
+            )
+            gas_resp.raise_for_status()
+            gas_result = gas_resp.json()
+            if "error" in gas_result:
+                raise TransactionError("Failed to fetch gas price")
+            gas_price = int(gas_result["result"], 16)
+
+            calls = [[to_bytes(hexstr=asset), 0, to_bytes(hexstr=transfer_data)]]
+            access_list: list = []
+            nonce_key = 0
+            valid_before = b""
+            valid_after = b""
+            fee_token = b""
+            fee_payer_placeholder = bytes([0x00])
+            authorization_list: list = []
+
+            fields_for_signing = [
+                chain_id,
+                gas_price,
+                gas_price,
+                DEFAULT_GAS_LIMIT,
+                calls,
+                access_list,
+                nonce_key,
+                nonce,
+                valid_before,
+                valid_after,
+                b"",
+                fee_payer_placeholder,
+                authorization_list,
+            ]
+
+            encoded_for_signing = rlp.encode(fields_for_signing)
+            signing_hash = keccak(bytes([0x76]) + encoded_for_signing)
+
+            signature = self.account.sign_hash(signing_hash)
+
+            fields_with_sig = [
+                chain_id,
+                gas_price,
+                gas_price,
+                DEFAULT_GAS_LIMIT,
+                calls,
+                access_list,
+                nonce_key,
+                nonce,
+                valid_before,
+                valid_after,
+                fee_token,
+                fee_payer_placeholder,
+                authorization_list,
+                signature,
+            ]
+
+            encoded_tx = rlp.encode(fields_with_sig)
+            raw_tx = "0x76" + encoded_tx.hex()
+
+            return raw_tx
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call."""

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 DEFAULT_TIMEOUT = 30.0
+DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
 
 class ChargeIntent:
@@ -222,23 +223,41 @@ class ChargeIntent:
         payload: TransactionCredentialPayload,
         request: ChargeRequest,
     ) -> Receipt:
-        """Verify and submit a signed transaction."""
+        """Verify and submit a signed transaction.
+
+        For sponsored transactions (fee_payer=True), forwards the client-signed
+        transaction to the fee payer service which adds its signature and broadcasts.
+        For regular transactions, submits directly to the RPC.
+        """
         client = await self._get_client()
 
-        response = await client.post(
-            self.rpc_url,
-            json={
-                "jsonrpc": "2.0",
-                "method": "eth_sendRawTransaction",
-                "params": [payload.signature],
-                "id": 1,
-            },
-        )
+        if request.fee_payer:
+            fee_payer_url = request.fee_payer_url or DEFAULT_FEE_PAYER_URL
+            response = await client.post(
+                fee_payer_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_sendRawTransaction",
+                    "params": [payload.signature],
+                    "id": 1,
+                },
+            )
+        else:
+            response = await client.post(
+                self.rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_sendRawTransaction",
+                    "params": [payload.signature],
+                    "id": 1,
+                },
+            )
         response.raise_for_status()
         result = response.json()
 
         if "error" in result:
-            raise VerificationError("Transaction submission failed")
+            error_msg = result["error"].get("message", "Unknown error")
+            raise VerificationError(f"Transaction submission failed: {error_msg}")
 
         tx_hash = result.get("result")
         if not tx_hash:

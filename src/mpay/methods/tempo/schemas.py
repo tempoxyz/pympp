@@ -15,6 +15,7 @@ class ChargeRequest(BaseModel):
     destination: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     expires: str
     fee_payer: bool = False
+    fee_payer_url: str | None = None
 
 
 class HashCredentialPayload(BaseModel):
