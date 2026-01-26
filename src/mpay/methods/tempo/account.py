@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
@@ -103,19 +103,3 @@ class TempoAccount:
             + signed.s.to_bytes(32, "big")
             + bytes([signed.v])
         )
-
-    def sign_transaction(self, tx: dict) -> Any:
-        """Sign a transaction dict.
-
-        Args:
-            tx: Transaction dict with nonce, gasPrice, gas, to, value, data, chainId.
-
-        Returns:
-            SignedTransaction object with raw_transaction attribute.
-
-        Note:
-            This encapsulates key access to prevent external key exposure.
-        """
-        from eth_account import Account
-
-        return Account.sign_transaction(tx, self._account.key)
