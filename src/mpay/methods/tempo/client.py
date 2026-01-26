@@ -62,18 +62,19 @@ class TempoMethod:
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
 
-        For the charge intent, this builds and signs a transfer transaction,
-        then returns a credential with the signed transaction.
+        For the charge intent, this builds and signs a TempoTransaction (type 0x76)
+        with a fee payer placeholder. The server will forward this to a fee payer
+        service which adds its signature and broadcasts.
 
         Args:
             challenge: The payment challenge from the server.
 
         Returns:
-            A credential that satisfies the challenge.
+            A credential with the signed transaction.
 
         Raises:
             ValueError: If no account is configured or intent is unsupported.
-            TransactionError: If transaction building or submission fails.
+            TransactionError: If transaction building fails.
         """
         if self.account is None:
             raise ValueError("No account configured for signing")
@@ -82,132 +83,31 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
-        fee_payer = request.get("fee_payer", False)
+        nonce_key = request.get("nonce_key", 0)
+        if isinstance(nonce_key, str):
+            if nonce_key.startswith("0x"):
+                nonce_key = int(nonce_key, 16)
+            else:
+                nonce_key = int(nonce_key)
 
-        if fee_payer:
-            raw_tx = await self._build_sponsored_transfer(
-                amount=request["amount"],
-                asset=request["asset"],
-                destination=request["destination"],
-            )
-            return Credential(
-                id=challenge.id,
-                payload={"type": "transaction", "signature": raw_tx},
-                source=f"did:pkh:eip155:1:{self.account.address}",
-            )
-        else:
-            tx_hash = await self._build_and_sign_transfer(
-                amount=request["amount"],
-                asset=request["asset"],
-                destination=request["destination"],
-            )
-            return Credential(
-                id=challenge.id,
-                payload={"type": "hash", "hash": tx_hash},
-                source=f"did:pkh:eip155:1:{self.account.address}",
-            )
+        raw_tx = await self._build_tempo_transfer(
+            amount=request["amount"],
+            asset=request["asset"],
+            destination=request["destination"],
+            nonce_key=nonce_key,
+        )
+        return Credential(
+            id=challenge.id,
+            payload={"type": "transaction", "signature": raw_tx},
+            source=f"did:pkh:eip155:1:{self.account.address}",
+        )
 
-    async def _build_and_sign_transfer(
+    async def _build_tempo_transfer(
         self,
         amount: str,
         asset: str,
         destination: str,
-    ) -> str:
-        """Build, sign, and submit a transfer transaction.
-
-        Uses eth-account for proper EIP-155 transaction signing.
-
-        Returns the transaction hash.
-        """
-        import httpx
-
-        if self.account is None:
-            raise ValueError("No account configured")
-
-        transfer_data = self._encode_transfer(destination, int(amount))
-
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            chain_resp = await client.post(
-                self.rpc_url,
-                json={"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1},
-            )
-            chain_resp.raise_for_status()
-            chain_result = chain_resp.json()
-            if "error" in chain_result:
-                raise TransactionError("Failed to fetch chain ID")
-            chain_id = int(chain_result["result"], 16)
-
-            nonce_resp = await client.post(
-                self.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_getTransactionCount",
-                    "params": [self.account.address, "pending"],
-                    "id": 1,
-                },
-            )
-            nonce_resp.raise_for_status()
-            nonce_result = nonce_resp.json()
-            if "error" in nonce_result:
-                raise TransactionError("Failed to fetch nonce")
-            nonce = int(nonce_result["result"], 16)
-
-            gas_resp = await client.post(
-                self.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_gasPrice",
-                    "params": [],
-                    "id": 1,
-                },
-            )
-            gas_resp.raise_for_status()
-            gas_result = gas_resp.json()
-            if "error" in gas_result:
-                raise TransactionError("Failed to fetch gas price")
-            gas_price = int(gas_result["result"], 16)
-
-            tx = {
-                "nonce": nonce,
-                "gasPrice": gas_price,
-                "gas": DEFAULT_GAS_LIMIT,
-                "to": asset,
-                "value": 0,
-                "data": transfer_data,
-                "chainId": chain_id,
-            }
-
-            signed = self.account.sign_transaction(tx)
-            raw_tx = signed.raw_transaction.hex()
-            if not raw_tx.startswith("0x"):
-                raw_tx = "0x" + raw_tx
-
-            send_resp = await client.post(
-                self.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [raw_tx],
-                    "id": 1,
-                },
-            )
-            send_resp.raise_for_status()
-            result = send_resp.json()
-
-            if "error" in result:
-                raise TransactionError("Transaction submission failed")
-
-            tx_hash = result.get("result")
-            if not tx_hash:
-                raise TransactionError("No transaction hash returned")
-
-            return tx_hash
-
-    async def _build_sponsored_transfer(
-        self,
-        amount: str,
-        asset: str,
-        destination: str,
+        nonce_key: int = 0,
     ) -> str:
         """Build a client-signed Tempo transaction for fee sponsorship.
 
@@ -215,7 +115,14 @@ class TempoMethod:
         signed by the client. The server will forward this to a fee payer
         service which adds its signature and broadcasts.
 
-        Returns the raw signed transaction hex (0x76-prefixed).
+        Args:
+            amount: Transfer amount as string.
+            asset: TIP-20 token contract address.
+            destination: Recipient address.
+            nonce_key: 2D nonce key for parallel transaction streams (default: 0).
+
+        Returns:
+            Raw signed transaction hex (0x76-prefixed).
         """
         import httpx
         from pytempo import create_tempo_transaction
@@ -241,7 +148,7 @@ class TempoMethod:
                 json={
                     "jsonrpc": "2.0",
                     "method": "tempo_getTransactionCount",
-                    "params": [self.account.address, 0, "pending"],
+                    "params": [self.account.address, nonce_key, "pending"],
                     "id": 1,
                 },
             )
@@ -274,7 +181,7 @@ class TempoMethod:
                 max_fee_per_gas=gas_price,
                 max_priority_fee_per_gas=gas_price,
                 nonce=nonce,
-                nonce_key=0,
+                nonce_key=nonce_key,
                 chain_id=chain_id,
                 _will_have_fee_payer=True,
             )
