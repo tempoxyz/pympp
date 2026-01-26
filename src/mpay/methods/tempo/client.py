@@ -125,7 +125,7 @@ class TempoMethod:
             Raw signed transaction hex (0x76-prefixed).
         """
         import httpx
-        from pytempo import create_tempo_transaction
+        from pytempo import Call, TempoTransaction
 
         if self.account is None:
             raise ValueError("No account configured")
@@ -173,21 +173,19 @@ class TempoMethod:
                 raise TransactionError("Failed to fetch gas price")
             gas_price = int(gas_result["result"], 16)
 
-            tx = create_tempo_transaction(
-                to=asset,
-                value=0,
-                data=transfer_data,
-                gas=DEFAULT_GAS_LIMIT,
+            tx = TempoTransaction.create(
+                chain_id=chain_id,
+                gas_limit=DEFAULT_GAS_LIMIT,
                 max_fee_per_gas=gas_price,
                 max_priority_fee_per_gas=gas_price,
                 nonce=nonce,
                 nonce_key=nonce_key,
-                chain_id=chain_id,
-                _will_have_fee_payer=True,
+                awaiting_fee_payer=True,
+                calls=(Call.create(to=asset, value=0, data=transfer_data),),
             )
 
-            tx.sign(self.account.private_key)
-            return "0x" + tx.encode().hex()
+            signed_tx = tx.sign(self.account.private_key)
+            return "0x" + signed_tx.encode().hex()
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call."""
