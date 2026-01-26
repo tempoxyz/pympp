@@ -67,6 +67,16 @@ class TempoAccount:
         """Get the account's Ethereum address."""
         return self._account.address
 
+    @property
+    def private_key(self) -> str:
+        """Get the private key as hex string for signing.
+
+        Note:
+            This is intentionally exposed for use with pytempo's
+            TempoTransaction.sign() method which requires the key as hex.
+        """
+        return self._account.key.hex()
+
     def sign_hash(self, msg_hash: bytes) -> bytes:
         """Sign a 32-byte hash, return 65-byte signature.
 

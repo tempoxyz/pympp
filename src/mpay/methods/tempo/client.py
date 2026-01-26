@@ -218,8 +218,7 @@ class TempoMethod:
         Returns the raw signed transaction hex (0x76-prefixed).
         """
         import httpx
-        import rlp
-        from eth_utils import keccak, to_bytes
+        from pytempo import create_tempo_transaction
 
         if self.account is None:
             raise ValueError("No account configured")
@@ -267,57 +266,21 @@ class TempoMethod:
                 raise TransactionError("Failed to fetch gas price")
             gas_price = int(gas_result["result"], 16)
 
-            calls = [[to_bytes(hexstr=asset), 0, to_bytes(hexstr=transfer_data)]]
-            access_list: list = []
-            nonce_key = 0
-            valid_before = b""
-            valid_after = b""
-            fee_token = b""
-            fee_payer_placeholder = bytes([0x00])
-            authorization_list: list = []
+            tx = create_tempo_transaction(
+                to=asset,
+                value=0,
+                data=transfer_data,
+                gas=DEFAULT_GAS_LIMIT,
+                max_fee_per_gas=gas_price,
+                max_priority_fee_per_gas=gas_price,
+                nonce=nonce,
+                nonce_key=0,
+                chain_id=chain_id,
+                _will_have_fee_payer=True,
+            )
 
-            fields_for_signing = [
-                chain_id,
-                gas_price,
-                gas_price,
-                DEFAULT_GAS_LIMIT,
-                calls,
-                access_list,
-                nonce_key,
-                nonce,
-                valid_before,
-                valid_after,
-                b"",
-                fee_payer_placeholder,
-                authorization_list,
-            ]
-
-            encoded_for_signing = rlp.encode(fields_for_signing)
-            signing_hash = keccak(bytes([0x76]) + encoded_for_signing)
-
-            signature = self.account.sign_hash(signing_hash)
-
-            fields_with_sig = [
-                chain_id,
-                gas_price,
-                gas_price,
-                DEFAULT_GAS_LIMIT,
-                calls,
-                access_list,
-                nonce_key,
-                nonce,
-                valid_before,
-                valid_after,
-                fee_token,
-                fee_payer_placeholder,
-                authorization_list,
-                signature,
-            ]
-
-            encoded_tx = rlp.encode(fields_with_sig)
-            raw_tx = "0x76" + encoded_tx.hex()
-
-            return raw_tx
+            tx.sign(self.account.private_key)
+            return "0x" + tx.encode().hex()
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call."""
