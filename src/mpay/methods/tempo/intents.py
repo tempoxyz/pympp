@@ -27,10 +27,21 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
-# Receipt verification retry configuration
-# Receipts are typically available in ~400ms on Tempo testnet
-MAX_RECEIPT_RETRY_ATTEMPTS = 10
-RECEIPT_RETRY_DELAY_SECONDS = 0.1
+# Receipt polling configuration
+#
+# After submitting a transaction, we poll for the receipt since it won't be
+# available until the transaction is included in a block. Block times vary:
+# - Tempo mainnet: ~400ms
+# - Tempo testnet: ~2-4s (can be slower under load)
+#
+# For comparison, viem's waitForTransactionReceipt uses:
+# - 6 retries with exponential backoff (200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s)
+# - 180s total timeout
+#
+# We use a simpler fixed-delay approach that provides ~10s total wait time,
+# sufficient for testnet latency while keeping the implementation simple.
+MAX_RECEIPT_RETRY_ATTEMPTS = 20
+RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
 
 class ChargeIntent:
