@@ -18,6 +18,7 @@ RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
 DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION", "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 )
+ALPHA_USD = "0x20c0000000000000000000000000000000000001"
 
 intent = ChargeIntent(rpc_url=RPC_URL)
 
@@ -29,7 +30,7 @@ def get_payment_request(_request=None):
         expires = expires[:-6] + "Z"
     return {
         "amount": "1000",
-        "currency": "0x20c0000000000000000000000000000000000001",
+        "currency": ALPHA_USD,
         "recipient": DESTINATION,
         "expires": expires,
         "methodDetails": {"feePayer": True},
