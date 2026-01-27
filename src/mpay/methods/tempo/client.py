@@ -173,6 +173,7 @@ class TempoMethod:
                 raise TransactionError("Failed to fetch gas price")
             gas_price = int(gas_result["result"], 16)
 
+            # Build a sponsored Tempo transaction (type 0x76) with fee payer placeholder
             tx = TempoTransaction.create(
                 chain_id=chain_id,
                 gas_limit=DEFAULT_GAS_LIMIT,
