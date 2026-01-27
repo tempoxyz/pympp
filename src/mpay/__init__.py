@@ -37,6 +37,9 @@ class Challenge:
     method: str
     intent: str
     request: dict[str, Any]
+    digest: str | None = None
+    expires: str | None = None
+    description: str | None = None
 
     @classmethod
     def from_www_authenticate(cls, header: str) -> "Challenge":
