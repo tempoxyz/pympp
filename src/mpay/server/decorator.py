@@ -74,7 +74,7 @@ def requires_payment(
         @app.get("/resource")
         @requires_payment(
             intent=ChargeIntent(rpc_url="..."),
-            request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
         )
         async def get_resource(request: Request, credential: Credential, receipt: Receipt):

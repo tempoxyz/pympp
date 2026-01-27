@@ -92,7 +92,7 @@ async def verify_or_challenge(
         result = await verify_or_challenge(
             meta=meta,
             intent=ChargeIntent(rpc_url="..."),
-            request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
         )
 

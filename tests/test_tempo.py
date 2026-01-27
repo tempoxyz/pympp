@@ -15,6 +15,7 @@ from mpay.methods.tempo.intents import ChargeIntent
 from mpay.methods.tempo.schemas import (
     ChargeRequest,
     HashCredentialPayload,
+    MethodDetails,
     TransactionCredentialPayload,
 )
 from mpay.server.intent import VerificationError
@@ -90,7 +91,7 @@ class TestTempoMethod:
             id="test",
             method="tempo",
             intent="charge",
-            request={"amount": "1000", "asset": "0x123", "destination": "0x456"},
+            request={"amount": "1000", "currency": "0x123", "recipient": "0x456"},
         )
         with pytest.raises(ValueError, match="No account configured"):
             await method.create_credential(challenge)
@@ -145,8 +146,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x123",
-                    "destination": "0x456",
+                    "currency": "0x123",
+                    "recipient": "0x456",
                     "expires": expired,
                 },
             )
@@ -163,8 +164,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x123",
-                    "destination": "0x456",
+                    "currency": "0x123",
+                    "recipient": "0x456",
                     "expires": future,
                 },
             )
@@ -181,8 +182,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x123",
-                    "destination": "0x456",
+                    "currency": "0x123",
+                    "recipient": "0x456",
                     "expires": future,
                 },
             )
@@ -227,8 +228,8 @@ class TestChargeIntent:
             credential,
             {
                 "amount": "1000",
-                "asset": "0x20c0000000000000000000000000000000000001",
-                "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "currency": "0x20c0000000000000000000000000000000000001",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 "expires": future,
             },
         )
@@ -254,8 +255,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x1234567890123456789012345678901234567890",
-                    "destination": "0x4567890123456789012345678901234567890123",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
                     "expires": future,
                 },
             )
@@ -280,8 +281,8 @@ class TestChargeIntent:
             credential,
             {
                 "amount": "1000",
-                "asset": "0x1234567890123456789012345678901234567890",
-                "destination": "0x4567890123456789012345678901234567890123",
+                "currency": "0x1234567890123456789012345678901234567890",
+                "recipient": "0x4567890123456789012345678901234567890123",
                 "expires": future,
             },
         )
@@ -309,8 +310,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x1234567890123456789012345678901234567890",
-                    "destination": "0x4567890123456789012345678901234567890123",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
                     "expires": future,
                 },
             )
@@ -357,8 +358,8 @@ class TestChargeIntent:
             credential,
             {
                 "amount": str(amount),
-                "asset": asset,
-                "destination": destination,
+                "currency": asset,
+                "recipient": destination,
                 "expires": future,
             },
         )
@@ -390,8 +391,8 @@ class TestChargeIntent:
                 credential,
                 {
                     "amount": "1000",
-                    "asset": "0x1234567890123456789012345678901234567890",
-                    "destination": "0x4567890123456789012345678901234567890123",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
                     "expires": future,
                 },
             )
@@ -423,10 +424,12 @@ class TestSponsoredTransfer:
             intent="charge",
             request={
                 "amount": "1000000",
-                "asset": "0x20c0000000000000000000000000000000000001",
-                "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "fee_payer": True,
-                "fee_payer_url": "https://sponsor.test",
+                "currency": "0x20c0000000000000000000000000000000000001",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {
+                    "feePayer": True,
+                    "feePayerUrl": "https://sponsor.test",
+                },
             },
         )
 
@@ -481,11 +484,13 @@ class TestSponsoredTransfer:
             credential,
             {
                 "amount": "1000000",
-                "asset": "0x20c0000000000000000000000000000000000001",
-                "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "currency": "0x20c0000000000000000000000000000000000001",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 "expires": future,
-                "fee_payer": True,
-                "fee_payer_url": "https://sponsor.test",
+                "methodDetails": {
+                    "feePayer": True,
+                    "feePayerUrl": "https://sponsor.test",
+                },
             },
         )
 
@@ -517,39 +522,44 @@ class TestSponsoredTransfer:
                 credential,
                 {
                     "amount": "1000000",
-                    "asset": "0x20c0000000000000000000000000000000000001",
-                    "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                    "currency": "0x20c0000000000000000000000000000000000001",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                     "expires": future,
-                    "fee_payer": True,
-                    "fee_payer_url": "https://sponsor.test",
+                    "methodDetails": {
+                        "feePayer": True,
+                        "feePayerUrl": "https://sponsor.test",
+                    },
                 },
             )
 
 
 class TestSchemas:
     def test_charge_request_valid(self) -> None:
-        """Should validate charge request."""
+        """Should validate charge request with default methodDetails."""
         req = ChargeRequest(
             amount="1000",
-            asset="0x20c0000000000000000000000000000000000001",
-            destination="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            currency="0x20c0000000000000000000000000000000000001",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             expires="2030-01-20T12:00:00Z",
         )
         assert req.amount == "1000"
-        assert req.fee_payer is False
+        assert req.methodDetails.feePayer is False
+        assert req.methodDetails.chainId == 42431
 
     def test_charge_request_with_fee_payer(self) -> None:
-        """Should accept fee_payer and fee_payer_url."""
+        """Should accept methodDetails with feePayer and feePayerUrl."""
         req = ChargeRequest(
             amount="1000",
-            asset="0x20c0000000000000000000000000000000000001",
-            destination="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            currency="0x20c0000000000000000000000000000000000001",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             expires="2030-01-20T12:00:00Z",
-            fee_payer=True,
-            fee_payer_url="https://sponsor.test",
+            methodDetails=MethodDetails(
+                feePayer=True,
+                feePayerUrl="https://sponsor.test",
+            ),
         )
-        assert req.fee_payer is True
-        assert req.fee_payer_url == "https://sponsor.test"
+        assert req.methodDetails.feePayer is True
+        assert req.methodDetails.feePayerUrl == "https://sponsor.test"
 
     def test_hash_credential_payload(self) -> None:
         """Should validate hash credential payload."""

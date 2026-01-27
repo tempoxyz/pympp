@@ -53,10 +53,10 @@ def get_payment_request() -> dict:
 
     return {
         "amount": "100",
-        "asset": ALPHA_USD_ADDRESS,
-        "destination": DESTINATION,
+        "currency": ALPHA_USD_ADDRESS,
+        "recipient": DESTINATION,
         "expires": expires,
-        "fee_payer": True,
+        "methodDetails": {"feePayer": True},
     }
 
 

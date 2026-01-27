@@ -15,7 +15,7 @@ class TestChallenge:
             id="test-id-123",
             method="tempo",
             intent="charge",
-            request={"amount": "1000", "asset": "0x123", "destination": "0x456"},
+            request={"amount": "1000", "currency": "0x123", "recipient": "0x456"},
         )
 
         header = challenge.to_www_authenticate("api.example.com")

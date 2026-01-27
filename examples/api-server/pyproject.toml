@@ -1,7 +1,7 @@
 [project]
 name = "api-server-example"
 version = "0.1.0"
-description = "Payment-protected API server example using mpay"
+description = "Payment-protected API server example using the Machine Payments Protocol"
 requires-python = ">=3.12"
 dependencies = [
     "mpay[tempo,server]",

@@ -7,7 +7,7 @@ Example:
     result = await verify_or_challenge(
         authorization=request.headers.get("Authorization"),
         intent=ChargeIntent(client),
-        request={"amount": "1000", "asset": "0x...", ...},
+        request={"amount": "1000", "currency": "0x...", ...},
         realm="api.example.com",
     )
 

@@ -121,10 +121,10 @@ The server requires this payment for `premium_echo`:
 ```json
 {
   "amount": "100",
-  "asset": "0x20c0000000000000000000000000000000000001",
-  "destination": "<DESTINATION_ADDRESS>",
+  "currency": "0x20c0000000000000000000000000000000000001",
+  "recipient": "<DESTINATION_ADDRESS>",
   "expires": "<5 minutes from now>",
-  "fee_payer": true
+  "methodDetails": {"feePayer": true}
 }
 ```
 

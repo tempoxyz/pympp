@@ -27,8 +27,8 @@ async def handler(request):
         intent=intent,
         request={
             "amount": "1000000",
-            "asset": "0x20c0000000000000000000000000000000000001",
-            "destination": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            "currency": "0x20c0000000000000000000000000000000000001",
+            "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             "expires": "2030-01-20T12:00:00Z",
         },
         realm="api.example.com",
@@ -130,7 +130,7 @@ challenge = Challenge(
     id="challenge-id",
     method="tempo",
     intent="charge",
-    request={"amount": "1000000", "asset": "0x...", "destination": "0x..."},
+    request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
 )
 
 header = challenge.to_www_authenticate("api.example.com")
@@ -186,7 +186,7 @@ intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
 @app.get("/resource")
 @requires_payment(
     intent=intent,
-    request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+    request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
     realm="api.example.com",
 )
 async def get_resource(request: Request, credential: Credential, receipt: Receipt):

@@ -48,4 +48,4 @@ When a request returns `402 Payment Required`:
 2. Creates a credential by executing the payment on Tempo
 3. Retries the request with the `Authorization` header
 
-This happens automatically via the `mpay.client.Client` wrapper.
+This happens automatically via the Machine Payments Protocol client wrapper.

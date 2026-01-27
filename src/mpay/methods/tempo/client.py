@@ -92,8 +92,8 @@ class TempoMethod:
 
         raw_tx = await self._build_tempo_transfer(
             amount=request["amount"],
-            asset=request["asset"],
-            destination=request["destination"],
+            currency=request["currency"],
+            recipient=request["recipient"],
             nonce_key=nonce_key,
         )
         return Credential(
@@ -105,8 +105,8 @@ class TempoMethod:
     async def _build_tempo_transfer(
         self,
         amount: str,
-        asset: str,
-        destination: str,
+        currency: str,
+        recipient: str,
         nonce_key: int = 0,
     ) -> str:
         """Build a client-signed Tempo transaction for fee sponsorship.
@@ -117,8 +117,8 @@ class TempoMethod:
 
         Args:
             amount: Transfer amount as string.
-            asset: TIP-20 token contract address.
-            destination: Recipient address.
+            currency: TIP-20 token contract address.
+            recipient: Recipient address.
             nonce_key: 2D nonce key for parallel transaction streams (default: 0).
 
         Returns:
@@ -130,7 +130,7 @@ class TempoMethod:
         if self.account is None:
             raise ValueError("No account configured")
 
-        transfer_data = self._encode_transfer(destination, int(amount))
+        transfer_data = self._encode_transfer(recipient, int(amount))
 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             chain_resp = await client.post(
@@ -182,7 +182,7 @@ class TempoMethod:
                 nonce=nonce,
                 nonce_key=nonce_key,
                 awaiting_fee_payer=True,
-                calls=(Call.create(to=asset, value=0, data=transfer_data),),
+                calls=(Call.create(to=currency, value=0, data=transfer_data),),
             )
 
             signed_tx = tx.sign(self.account.private_key)

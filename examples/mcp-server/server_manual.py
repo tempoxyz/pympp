@@ -104,10 +104,10 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         request = {
             "amount": "100",
-            "asset": ALPHA_USD_ADDRESS,
-            "destination": DESTINATION,
+            "currency": ALPHA_USD_ADDRESS,
+            "recipient": DESTINATION,
             "expires": expires,
-            "fee_payer": True,
+            "methodDetails": {"feePayer": True},
         }
 
         result = await verify_or_challenge(

@@ -29,7 +29,7 @@ class Challenge:
             id="challenge-id",
             method="tempo",
             intent="charge",
-            request={"amount": "1000000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
         )
     """
 

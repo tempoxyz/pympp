@@ -59,7 +59,7 @@ class ChargeIntent:
         async with ChargeIntent(rpc_url="https://rpc.tempo.xyz") as intent:
             receipt = await intent.verify(
                 credential=Credential(id="...", payload={"type": "hash", ...}),
-                request={"amount": "1000", "asset": "0x...", ...},
+                request={"amount": "1000", "currency": "0x...", ...},
             )
 
         # Or with external client
@@ -199,7 +199,7 @@ class ChargeIntent:
 
         Args:
             receipt: Transaction receipt from RPC.
-            request: The charge request with expected amount/asset/destination.
+            request: The charge request with expected amount/currency/recipient.
             expected_sender: If provided, validates the 'from' address in the
                 Transfer log matches this address (for payer identity verification).
 
@@ -209,7 +209,7 @@ class ChargeIntent:
         transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
         for log in receipt.get("logs", []):
-            if log.get("address", "").lower() != request.asset.lower():
+            if log.get("address", "").lower() != request.currency.lower():
                 continue
 
             topics = log.get("topics", [])
@@ -219,7 +219,7 @@ class ChargeIntent:
             from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
 
-            if to_address.lower() != request.destination.lower():
+            if to_address.lower() != request.recipient.lower():
                 continue
 
             if expected_sender and from_address.lower() != expected_sender.lower():
@@ -240,14 +240,14 @@ class ChargeIntent:
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
-        For sponsored transactions (fee_payer=True), forwards the client-signed
-        transaction to the fee payer service which adds its signature and broadcasts.
-        For regular transactions, submits directly to the RPC.
+        For sponsored transactions (methodDetails.feePayer=True), forwards the
+        client-signed transaction to the fee payer service which adds its signature
+        and broadcasts. For regular transactions, submits directly to the RPC.
         """
         client = await self._get_client()
 
-        if request.fee_payer:
-            fee_payer_url = request.fee_payer_url or DEFAULT_FEE_PAYER_URL
+        if request.methodDetails.feePayer:
+            fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
             response = await client.post(
                 fee_payer_url,
                 json={

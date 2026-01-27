@@ -1,6 +1,6 @@
 # API Server Example
 
-A FastAPI server with payment-protected endpoints using mpay.
+A FastAPI server with payment-protected endpoints using the Machine Payments Protocol.
 
 ## What This Demonstrates
 
@@ -77,8 +77,8 @@ The `ChargeIntent` handles payment verification. When a client submits a credent
 ```python
 PAYMENT_REQUEST = {
     "amount": "1000",
-    "asset": "0x20c0000000000000000000000000000000000001",
-    "destination": DESTINATION,
+    "currency": "0x20c0000000000000000000000000000000000001",
+    "recipient": DESTINATION,
 }
 ```
 

@@ -1,4 +1,4 @@
-"""Payment-protected API server using FastAPI and mpay."""
+"""Payment-protected API server using FastAPI and the Machine Payments Protocol."""
 
 import os
 from datetime import UTC, datetime, timedelta
@@ -11,7 +11,7 @@ from mpay.server import requires_payment
 
 app = FastAPI(
     title="Payment-Protected API",
-    description="Example API demonstrating mpay payment protection",
+    description="Example API demonstrating Machine Payments Protocol payment protection",
 )
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
@@ -29,10 +29,10 @@ def get_payment_request(_request=None):
         expires = expires[:-6] + "Z"
     return {
         "amount": "1000",
-        "asset": "0x20c0000000000000000000000000000000000001",
-        "destination": DESTINATION,
+        "currency": "0x20c0000000000000000000000000000000000001",
+        "recipient": DESTINATION,
         "expires": expires,
-        "fee_payer": True,
+        "methodDetails": {"feePayer": True},
     }
 
 
