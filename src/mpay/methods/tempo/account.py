@@ -98,8 +98,4 @@ class TempoAccount:
             raise ValueError(f"msg_hash must be 32 bytes, got {len(msg_hash)}")
 
         signed = self._account.unsafe_sign_hash(msg_hash)
-        return (
-            signed.r.to_bytes(32, "big")
-            + signed.s.to_bytes(32, "big")
-            + bytes([signed.v])
-        )
+        return signed.r.to_bytes(32, "big") + signed.s.to_bytes(32, "big") + bytes([signed.v])

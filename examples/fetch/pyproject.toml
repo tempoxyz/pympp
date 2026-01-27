@@ -1,0 +1,12 @@
+[project]
+name = "fetch-cli"
+version = "0.1.0"
+description = "CLI tool for fetching URLs with automatic payment handling"
+requires-python = ">=3.12"
+dependencies = ["mpay[tempo]"]
+
+[project.scripts]
+fetch = "fetch:main"
+
+[tool.uv.sources]
+mpay = { path = "../.." }

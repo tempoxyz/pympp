@@ -1,0 +1,13 @@
+[project]
+name = "api-server-example"
+version = "0.1.0"
+description = "Payment-protected API server example using mpay"
+requires-python = ">=3.12"
+dependencies = [
+    "mpay[tempo,server]",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.uv.sources]
+mpay = { path = "../.." }

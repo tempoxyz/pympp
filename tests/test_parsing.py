@@ -29,10 +29,7 @@ class TestChallenge:
     def test_parse_valid_header(self) -> None:
         """Should parse a valid WWW-Authenticate header."""
         # {"id":"test","method":"tempo","intent":"charge","request":{}}
-        b64 = (
-            "eyJpZCI6InRlc3QiLCJtZXRob2QiOiJ0ZW1wbyIsImludGVudCI6ImNoYXJnZSIs"
-            "InJlcXVlc3QiOnt9fQ"
-        )
+        b64 = "eyJpZCI6InRlc3QiLCJtZXRob2QiOiJ0ZW1wbyIsImludGVudCI6ImNoYXJnZSIsInJlcXVlc3QiOnt9fQ"
         header = f'Payment realm="api.example.com", {b64}'
         challenge = Challenge.from_www_authenticate(header)
 

@@ -125,7 +125,7 @@ class TempoMethod:
             Raw signed transaction hex (0x76-prefixed).
         """
         import httpx
-        from pytempo import Call, TempoTransaction
+        from pytempo import create_tempo_transaction
 
         if self.account is None:
             raise ValueError("No account configured")
@@ -147,15 +147,15 @@ class TempoMethod:
                 self.rpc_url,
                 json={
                     "jsonrpc": "2.0",
-                    "method": "tempo_getTransactionCount",
-                    "params": [self.account.address, nonce_key, "pending"],
+                    "method": "eth_getTransactionCount",
+                    "params": [self.account.address, "pending"],
                     "id": 1,
                 },
             )
             nonce_resp.raise_for_status()
             nonce_result = nonce_resp.json()
             if "error" in nonce_result:
-                raise TransactionError("Failed to fetch Tempo nonce")
+                raise TransactionError("Failed to fetch nonce")
             nonce = int(nonce_result["result"], 16)
 
             gas_resp = await client.post(
@@ -173,15 +173,16 @@ class TempoMethod:
                 raise TransactionError("Failed to fetch gas price")
             gas_price = int(gas_result["result"], 16)
 
-            tx = TempoTransaction.create(
-                chain_id=chain_id,
-                gas_limit=DEFAULT_GAS_LIMIT,
+            tx = create_tempo_transaction(
+                to=asset,
+                value=0,
+                data=transfer_data,
+                gas=DEFAULT_GAS_LIMIT,
                 max_fee_per_gas=gas_price,
                 max_priority_fee_per_gas=gas_price,
                 nonce=nonce,
                 nonce_key=nonce_key,
-                awaiting_fee_payer=True,
-                calls=(Call.create(to=asset, value=0, data=transfer_data),),
+                chain_id=chain_id,
             )
 
             signed_tx = tx.sign(self.account.private_key)

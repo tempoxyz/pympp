@@ -5,6 +5,7 @@ Implements the charge intent for Tempo payments.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
+
+# Receipt verification retry configuration
+# Receipts are typically available in ~400ms on Tempo testnet
+MAX_RECEIPT_RETRY_ATTEMPTS = 10
+RECEIPT_RETRY_DELAY_SECONDS = 0.1
 
 
 class ChargeIntent:
@@ -189,9 +195,7 @@ class ChargeIntent:
         Returns:
             True if a matching Transfer log is found, False otherwise.
         """
-        transfer_topic = (
-            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-        )
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
         for log in receipt.get("logs", []):
             if log.get("address", "").lower() != request.asset.lower():
@@ -256,31 +260,51 @@ class ChargeIntent:
         result = response.json()
 
         if "error" in result:
-            error_msg = result["error"].get("message", "Unknown error")
-            raise VerificationError(f"Transaction submission failed: {error_msg}")
+            error_obj = result["error"]
+            if isinstance(error_obj, dict):
+                error_msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
+                error_data = error_obj.get("data", "")
+            else:
+                error_msg = str(error_obj)
+                error_data = ""
+            full_error = f"{error_msg}: {error_data}" if error_data else error_msg
+            raise VerificationError(f"Transaction submission failed: {full_error}")
 
         tx_hash = result.get("result")
         if not tx_hash:
             raise VerificationError("No transaction hash returned")
 
-        receipt_response = await client.post(
-            self.rpc_url,
-            json={
-                "jsonrpc": "2.0",
-                "method": "eth_getTransactionReceipt",
-                "params": [tx_hash],
-                "id": 1,
-            },
-        )
-        receipt_response.raise_for_status()
-        receipt_result = receipt_response.json()
+        print(f"[mpay] Transaction submitted: {tx_hash}")
 
-        if "error" in receipt_result:
-            raise VerificationError("Failed to fetch transaction receipt")
+        receipt_data = None
+        # Check immediately first, then retry with short delays (receipts available in ~400ms)
+        for attempt in range(MAX_RECEIPT_RETRY_ATTEMPTS):
+            receipt_response = await client.post(
+                self.rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getTransactionReceipt",
+                    "params": [tx_hash],
+                    "id": 1,
+                },
+            )
+            receipt_response.raise_for_status()
+            receipt_result = receipt_response.json()
 
-        receipt_data = receipt_result.get("result")
+            if "error" in receipt_result:
+                raise VerificationError("Failed to fetch transaction receipt")
+
+            receipt_data = receipt_result.get("result")
+            if receipt_data:
+                print(f"[mpay] Receipt found on attempt {attempt + 1}")
+                break
+
+            # Wait between retries (don't sleep after the last attempt)
+            if attempt < MAX_RECEIPT_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(RECEIPT_RETRY_DELAY_SECONDS)
+
         if not receipt_data:
-            raise VerificationError("Transaction receipt not found")
+            raise VerificationError("Transaction receipt not found after retries")
 
         if receipt_data.get("status") != "0x1":
             return Receipt.failed(tx_hash)

@@ -81,9 +81,7 @@ class FunctionalIntent:
 
 def intent(
     name: str,
-) -> Callable[
-    [Callable[[Credential, dict[str, Any]], Awaitable[Receipt]]], FunctionalIntent
-]:
+) -> Callable[[Callable[[Credential, dict[str, Any]], Awaitable[Receipt]]], FunctionalIntent]:
     """Decorator to define an intent from a function.
 
     Example:

@@ -129,9 +129,7 @@ async def verify_or_challenge(
     try:
         mcp_credential = MCPCredential.from_dict(credential_data)
     except (KeyError, TypeError) as e:
-        raise MalformedCredentialError(
-            detail=f"Invalid credential structure: {e}"
-        ) from e
+        raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
 
     from mpay.server.intent import VerificationError
 

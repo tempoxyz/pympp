@@ -53,12 +53,13 @@ packages = ["src/mpay"]
 allow-direct-references = true
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 target-version = "py312"
+exclude = ["examples"]
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP", "ANN"]
-ignore = ["ANN401"]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = []
 
 [tool.ruff.format]
 quote-style = "double"

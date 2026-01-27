@@ -1,0 +1,18 @@
+[project]
+name = "mcp-server-example"
+version = "0.1.0"
+description = "MCP server with payment-protected tools"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.1.0",
+    "mpay[tempo,mcp]",
+    "starlette",
+    "uvicorn",
+]
+
+[project.scripts]
+mcp-server-decorator = "server_decorator:main"
+mcp-server-manual = "server_manual:main"
+
+[tool.uv.sources]
+mpay = { path = "../.." }
