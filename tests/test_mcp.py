@@ -84,7 +84,7 @@ class TestMCPChallenge:
         )
         core = mcp_challenge.to_core()
         assert isinstance(core, Challenge)
-        assert core.id == "ch_abc"
+        assert core.id == "ch_abc"  # Still accessible via Challenge.id
         assert core.method == "tempo"
         assert core.intent == "charge"
         assert core.request == {"amount": "1000"}
@@ -181,7 +181,9 @@ class TestMCPCredential:
         )
         core = mcp_credential.to_core()
         assert isinstance(core, Credential)
-        assert core.id == "ch_abc"
+        assert core.challenge.id == "ch_abc"
+        assert core.challenge.realm == "api.example.com"
+        assert core.challenge.method == "tempo"
         assert core.payload == {"signature": "0xabc"}
         assert core.source == "0x1234"
 
@@ -242,11 +244,13 @@ class TestMCPReceipt:
         core = mcp_receipt.to_core()
         assert isinstance(core, Receipt)
         assert core.status == "success"
+        assert core.method == "tempo"
         assert core.reference == "0xtx789"
 
     def test_from_core(self) -> None:
         core = Receipt(
             status="success",
+            method="tempo",
             timestamp=datetime(2025, 1, 15, 12, 0, 30, tzinfo=UTC),
             reference="0xtx789",
         )
@@ -329,7 +333,7 @@ class TestRequiresPaymentDecorator:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         @requires_payment(
             intent=MockIntent(),  # type: ignore[arg-type]
@@ -354,7 +358,7 @@ class TestRequiresPaymentDecorator:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         @requires_payment(
             intent=MockIntent(),  # type: ignore[arg-type]
@@ -385,7 +389,7 @@ class TestRequiresPaymentDecorator:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         @requires_payment(
             intent=MockIntent(),  # type: ignore[arg-type]
@@ -435,14 +439,14 @@ class TestRequiresPaymentDecorator:
 
         error = exc_info.value.to_jsonrpc_error()
         assert error["code"] == CODE_PAYMENT_VERIFICATION_FAILED
-        assert "Payment failed" in error["data"]["failure"]["detail"]
+        assert "verification failed" in error["data"]["failure"]["detail"].lower()
 
     async def test_dynamic_request_params(self) -> None:
         class MockIntent:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         @requires_payment(
             intent=MockIntent(),  # type: ignore[arg-type]
@@ -467,7 +471,7 @@ class TestVerifyOrChallenge:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         result = await verify_or_challenge(
             meta=None,
@@ -486,7 +490,7 @@ class TestVerifyOrChallenge:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         result = await verify_or_challenge(
             meta={},
@@ -502,7 +506,7 @@ class TestVerifyOrChallenge:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         challenge = MCPChallenge(
             id="ch_test",
@@ -536,7 +540,7 @@ class TestVerifyOrChallenge:
             name = "charge"
 
             async def verify(self, credential: object, request: dict) -> Receipt:
-                return Receipt.success(reference="0x123")
+                return Receipt.success(reference="0x123", method="tempo")
 
         with pytest.raises(MalformedCredentialError):
             await verify_or_challenge(

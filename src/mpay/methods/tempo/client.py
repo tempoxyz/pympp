@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from mpay import Challenge, Credential
+from mpay import Challenge, ChallengeEcho, Credential
 from mpay.methods.tempo.intents import ChargeIntent
 
 if TYPE_CHECKING:
@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 DEFAULT_GAS_LIMIT = 100_000
 DEFAULT_TIMEOUT = 30.0
-DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
 
 class TransactionError(Exception):
@@ -59,6 +58,25 @@ class TempoMethod:
         """Available intents for this method."""
         return self._intents
 
+    async def _get_chain_id(self) -> int:
+        """Get and cache the chain ID from RPC."""
+        if hasattr(self, "_chain_id_cache"):
+            return self._chain_id_cache
+
+        import httpx
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            response = await client.post(
+                self.rpc_url,
+                json={"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1},
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "error" in result:
+                raise TransactionError("Failed to fetch chain ID")
+            self._chain_id_cache = int(result["result"], 16)
+        return self._chain_id_cache
+
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
 
@@ -96,10 +114,21 @@ class TempoMethod:
             recipient=request["recipient"],
             nonce_key=nonce_key,
         )
-        return Credential(
+        chain_id = await self._get_chain_id()
+        challenge_echo = ChallengeEcho(
             id=challenge.id,
+            realm=challenge.realm or "",
+            method=challenge.method,
+            intent=challenge.intent,
+            request=challenge.request,
+            digest=challenge.digest,
+            expires=challenge.expires,
+            description=challenge.description,
+        )
+        return Credential(
+            challenge=challenge_echo,
             payload={"type": "transaction", "signature": raw_tx},
-            source=f"did:pkh:eip155:1:{self.account.address}",
+            source=f"did:pkh:eip155:{chain_id}:{self.account.address}",
         )
 
     async def _build_tempo_transfer(
