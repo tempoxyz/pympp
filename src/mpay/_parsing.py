@@ -59,8 +59,23 @@ def _b64_decode(encoded: str) -> dict[str, Any]:
         if not isinstance(obj, dict):
             raise ParseError("Expected JSON object")
         return obj
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
         raise ParseError("Invalid base64 or JSON encoding") from None
+
+
+def _b64_encode_str(data: str) -> str:
+    """Encode string as URL-safe base64 (no padding)."""
+    encoded = base64.urlsafe_b64encode(data.encode()).decode()
+    return encoded.rstrip("=")
+
+
+def _b64_decode_str(encoded: str) -> str:
+    """Decode URL-safe base64 to string."""
+    try:
+        padded = encoded + "=" * (-len(encoded) % 4)
+        return base64.urlsafe_b64decode(padded).decode()
+    except (ValueError, UnicodeDecodeError):
+        raise ParseError("Invalid base64 encoding") from None
 
 
 def _escape_quoted(s: str) -> str:
@@ -129,13 +144,19 @@ def parse_www_authenticate(header: str) -> Challenge:
     # Decode request JSON
     request = _b64_decode(request_b64)
 
+    # Parse expires to datetime if present
+    expires = None
+    if params.get("expires"):
+        expires = _parse_timestamp(params["expires"])
+
     return Challenge(
         id=id_,
         method=method,
         intent=intent,
         request=request,
+        realm=realm,
         digest=params.get("digest"),
-        expires=params.get("expires"),
+        expires=expires,
         description=params.get("description"),
     )
 
@@ -162,7 +183,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     if challenge.digest:
         parts.append(f'digest="{_escape_quoted(challenge.digest)}"')
     if challenge.expires:
-        parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
+        expires_str = challenge.expires.isoformat().replace("+00:00", "Z")
+        parts.append(f'expires="{_escape_quoted(expires_str)}"')
     if challenge.description:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
 
@@ -176,11 +198,11 @@ def parse_authorization(header: str) -> Credential:
         Payment <base64-credential>
 
     The credential payload is a base64-encoded JSON object with:
-        - id: Challenge identifier (matches the original challenge)
+        - challenge: Full challenge object (with nested base64-encoded request)
         - payload: Method-specific credential data
         - source: Optional payer DID
     """
-    from mpay import Credential
+    from mpay import ChallengeEcho, Credential
 
     header = header.strip()
 
@@ -190,13 +212,49 @@ def parse_authorization(header: str) -> Credential:
     credential_b64 = header[8:].strip()
     data = _b64_decode(credential_b64)
 
-    if "id" not in data:
-        raise ParseError("Credential missing required field: id")
+    if "challenge" not in data:
+        raise ParseError("Credential missing required field: challenge")
     if "payload" not in data:
         raise ParseError("Credential missing required field: payload")
 
+    challenge_data = data["challenge"]
+    if not isinstance(challenge_data, dict):
+        raise ParseError("Credential challenge must be an object")
+
+    # Validate required challenge fields
+    required_challenge_fields = ["id", "realm", "method", "intent", "request"]
+    for field in required_challenge_fields:
+        if field not in challenge_data:
+            raise ParseError(f"Credential challenge missing required field: {field}")
+
+    # The request field inside challenge is base64url-encoded per spec (nested base64)
+    request_b64 = challenge_data["request"]
+    if isinstance(request_b64, str):
+        request = _b64_decode(request_b64)
+    else:
+        # Allow already-decoded request for backwards compatibility
+        request = request_b64
+
+    # Parse expires to datetime if present
+    expires = None
+    if challenge_data.get("expires"):
+        expires = _parse_timestamp(str(challenge_data["expires"]))
+
+    challenge_echo = ChallengeEcho(
+        id=str(challenge_data["id"]),
+        realm=str(challenge_data["realm"]),
+        method=str(challenge_data["method"]),
+        intent=str(challenge_data["intent"]),
+        request=request,
+        digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
+        expires=expires,
+        description=(
+            str(challenge_data["description"]) if challenge_data.get("description") else None
+        ),
+    )
+
     return Credential(
-        id=str(data["id"]),
+        challenge=challenge_echo,
         payload=data["payload"],
         source=str(data["source"]) if data.get("source") else None,
     )
@@ -207,9 +265,30 @@ def format_authorization(credential: Credential) -> str:
 
     Output format:
         Payment <base64-credential>
+
+    The credential contains a challenge object with nested base64-encoded request.
     """
+    # Encode the request as base64url (nested encoding per spec)
+    request_b64 = _b64_encode(credential.challenge.request)
+
+    challenge_obj: dict[str, Any] = {
+        "id": credential.challenge.id,
+        "realm": credential.challenge.realm,
+        "method": credential.challenge.method,
+        "intent": credential.challenge.intent,
+        "request": request_b64,
+    }
+
+    # Add optional challenge fields
+    if credential.challenge.digest:
+        challenge_obj["digest"] = credential.challenge.digest
+    if credential.challenge.expires:
+        challenge_obj["expires"] = credential.challenge.expires.isoformat().replace("+00:00", "Z")
+    if credential.challenge.description:
+        challenge_obj["description"] = credential.challenge.description
+
     payload: dict[str, Any] = {
-        "id": credential.id,
+        "challenge": challenge_obj,
         "payload": credential.payload,
     }
     if credential.source:
@@ -235,6 +314,7 @@ def parse_payment_receipt(header: str) -> Receipt:
 
     The receipt payload is a base64-encoded JSON object with:
         - status: "success" or "failed"
+        - method: The payment method used
         - timestamp: ISO 8601 timestamp
         - reference: Method-specific reference
     """
@@ -243,7 +323,7 @@ def parse_payment_receipt(header: str) -> Receipt:
     header = header.strip()
     data = _b64_decode(header)
 
-    required = {"status", "timestamp", "reference"}
+    required = {"status", "method", "timestamp", "reference"}
     missing = required - set(data.keys())
     if missing:
         raise ParseError(f"Receipt missing required fields: {missing}")
@@ -252,10 +332,12 @@ def parse_payment_receipt(header: str) -> Receipt:
     if status not in ("success", "failed"):
         raise ParseError("Invalid receipt status")
 
+    method = str(data["method"])
     timestamp = _parse_timestamp(str(data["timestamp"]))
 
     return Receipt(
         status=status,
+        method=method,
         timestamp=timestamp,
         reference=str(data["reference"]),
     )
@@ -271,6 +353,7 @@ def format_payment_receipt(receipt: Receipt) -> str:
 
     payload = {
         "status": receipt.status,
+        "method": receipt.method,
         "timestamp": timestamp_str,
         "reference": receipt.reference,
     }

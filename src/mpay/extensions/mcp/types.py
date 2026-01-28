@@ -159,11 +159,18 @@ class MCPCredential:
         return cls.from_dict(meta[META_CREDENTIAL])
 
     def to_core(self) -> Credential:
-        """Convert to core Credential type (uses challenge.id only)."""
-        from mpay import Credential
+        """Convert to core Credential type."""
+        from mpay import ChallengeEcho, Credential
 
-        return Credential(
+        challenge_echo = ChallengeEcho(
             id=self.challenge.id,
+            realm=self.challenge.realm,
+            method=self.challenge.method,
+            intent=self.challenge.intent,
+            request=self.challenge.request,
+        )
+        return Credential(
+            challenge=challenge_echo,
             payload=self.payload,
             source=self.source,
         )
@@ -249,11 +256,12 @@ class MCPReceipt:
         return cls.from_dict(meta[META_RECEIPT])
 
     def to_core(self) -> Receipt:
-        """Convert to core Receipt type (loses challengeId, method, settlement)."""
+        """Convert to core Receipt type (loses challengeId, settlement)."""
         from mpay import Receipt
 
         return Receipt(
             status=self.status,
+            method=self.method,
             timestamp=datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")),
             reference=self.reference or "",
         )

@@ -2,9 +2,10 @@
 
 import pytest
 
-from mpay import Challenge, Credential, Receipt
+from mpay import Challenge, ChallengeEcho, Credential, Receipt
 from mpay.server import intent, requires_payment, verify_or_challenge
 from mpay.server.intent import VerificationError
+from mpay.server.verify import _compute_challenge_id, verify_challenge_id
 
 try:
     from starlette.responses import Response as StarletteResponse
@@ -22,7 +23,7 @@ class TestVerifyOrChallenge:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         result = await verify_or_challenge(
             authorization=None,
@@ -42,7 +43,7 @@ class TestVerifyOrChallenge:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         result = await verify_or_challenge(
             authorization="Bearer token123",
@@ -59,11 +60,20 @@ class TestVerifyOrChallenge:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            assert credential.id == "test-id"
+            assert credential.challenge.id == "test-id"
             assert credential.payload == {"hash": "0xabc"}
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
-        credential = Credential(id="test-id", payload={"hash": "0xabc"})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test-id",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
+            payload={"hash": "0xabc"},
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -75,8 +85,172 @@ class TestVerifyOrChallenge:
 
         assert isinstance(result, tuple)
         cred, receipt = result
-        assert cred.id == "test-id"
+        assert cred.challenge.id == "test-id"
         assert receipt.status == "success"
+
+
+class TestHMACBoundChallengeIds:
+    def test_compute_challenge_id_deterministic(self) -> None:
+        """HMAC challenge ID should be deterministic."""
+        id1 = _compute_challenge_id(
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires=None,
+            digest=None,
+            secret_key="test-secret",
+        )
+        id2 = _compute_challenge_id(
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires=None,
+            digest=None,
+            secret_key="test-secret",
+        )
+        assert id1 == id2
+
+    def test_compute_challenge_id_different_inputs(self) -> None:
+        """Different inputs should produce different HMAC IDs."""
+        id1 = _compute_challenge_id(
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires=None,
+            digest=None,
+            secret_key="test-secret",
+        )
+        id2 = _compute_challenge_id(
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "2000"},  # Different amount
+            expires=None,
+            digest=None,
+            secret_key="test-secret",
+        )
+        assert id1 != id2
+
+    def test_verify_challenge_id_valid(self) -> None:
+        """Should verify valid HMAC-bound challenge ID."""
+        secret_key = "test-secret"
+        realm = "api.example.com"
+        request = {"amount": "1000"}
+
+        # Compute the expected ID
+        challenge_id = _compute_challenge_id(
+            realm=realm,
+            method="tempo",
+            intent="charge",
+            request=request,
+            expires=None,
+            digest=None,
+            secret_key=secret_key,
+        )
+
+        # Create credential with the computed ID
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id=challenge_id,
+                realm=realm,
+                method="tempo",
+                intent="charge",
+                request=request,
+            ),
+            payload={"hash": "0xabc"},
+        )
+
+        assert verify_challenge_id(credential, realm, secret_key) is True
+
+    def test_verify_challenge_id_invalid(self) -> None:
+        """Should reject invalid HMAC-bound challenge ID."""
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="tampered-id",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
+            payload={"hash": "0xabc"},
+        )
+
+        assert verify_challenge_id(credential, "api.example.com", "test-secret") is False
+
+    @pytest.mark.asyncio
+    async def test_verify_or_challenge_with_secret_key(self) -> None:
+        """Should use HMAC-bound IDs when secret_key is provided."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123", method="tempo")
+
+        secret_key = "test-secret"
+        realm = "api.example.com"
+        request = {"amount": "1000"}
+
+        # Get challenge with HMAC-bound ID
+        result = await verify_or_challenge(
+            authorization=None,
+            intent=test_intent,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.expires is not None
+
+        # Verify the challenge ID is HMAC-bound with the actual expires
+        expected_id = _compute_challenge_id(
+            realm=realm,
+            method="tempo",
+            intent="charge",
+            request=request,
+            expires=result.expires,
+            digest=None,
+            secret_key=secret_key,
+        )
+        assert result.id == expected_id
+
+    @pytest.mark.asyncio
+    async def test_verify_or_challenge_rejects_invalid_hmac(self) -> None:
+        """Should reject credentials with invalid HMAC IDs."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123", method="tempo")
+
+        secret_key = "test-secret"
+        realm = "api.example.com"
+        request = {"amount": "1000"}
+
+        # Create credential with invalid ID
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="invalid-id",
+                realm=realm,
+                method="tempo",
+                intent="charge",
+                request=request,
+            ),
+            payload={"hash": "0xabc"},
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+        )
+
+        # Should return a new challenge instead of accepting invalid credential
+        assert isinstance(result, Challenge)
 
 
 class TestFunctionalIntent:
@@ -86,12 +260,21 @@ class TestFunctionalIntent:
 
         @intent(name="subscribe")
         async def my_subscribe(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success(f"sub-{credential.id}")
+            return Receipt.success(f"sub-{credential.challenge.id}", method="tempo")
 
         assert my_subscribe.name == "subscribe"
 
         receipt = await my_subscribe.verify(
-            Credential(id="test", payload={}),
+            Credential(
+                challenge=ChallengeEcho(
+                    id="test",
+                    realm="test.com",
+                    method="tempo",
+                    intent="subscribe",
+                    request={"plan": "premium"},
+                ),
+                payload={},
+            ),
             {"plan": "premium"},
         )
         assert receipt.reference == "sub-test"
@@ -106,9 +289,18 @@ class TestClassBasedIntent:
             name = "custom"
 
             async def verify(self, credential: Credential, request: dict) -> Receipt:
-                return Receipt.success("custom-ref")
+                return Receipt.success("custom-ref", method="custom-method")
 
-        credential = Credential(id="test", payload={})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test",
+                realm="test.com",
+                method="custom-method",
+                intent="custom",
+                request={},
+            ),
+            payload={},
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -131,7 +323,7 @@ class TestVerificationError:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         result = await verify_or_challenge(
             authorization="Payment not-valid-base64!!",
@@ -143,23 +335,32 @@ class TestVerificationError:
         assert isinstance(result, Challenge)
 
     @pytest.mark.asyncio
-    async def test_intent_can_raise_verification_error(self) -> None:
-        """VerificationError should propagate from intent."""
+    async def test_intent_verification_error_returns_challenge(self) -> None:
+        """VerificationError should return a new challenge (not propagate as 500)."""
 
         @intent(name="charge")
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
             raise VerificationError("Payment verification failed")
 
-        credential = Credential(id="test", payload={})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
+            payload={},
+        )
         auth_header = credential.to_authorization()
 
-        with pytest.raises(VerificationError, match="Payment verification failed"):
-            await verify_or_challenge(
-                authorization=auth_header,
-                intent=failing_intent,
-                request={"amount": "1000"},
-                realm="api.example.com",
-            )
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=failing_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+        )
+        assert isinstance(result, Challenge)
 
 
 class MockRequest:
@@ -183,7 +384,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -213,7 +414,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("tx-ref-123")
+            return Receipt.success("tx-ref-123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -223,11 +424,20 @@ class TestRequiresPayment:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
-                "credential_id": credential.id,
+                "credential_id": credential.challenge.id,
                 "receipt_ref": receipt.reference,
             }
 
-        credential = Credential(id="test-cred-id", payload={"hash": "0xabc"})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test-cred-id",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
+            payload={"hash": "0xabc"},
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -242,7 +452,7 @@ class TestRequiresPayment:
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             assert request["amount"] == "2000"
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -255,7 +465,16 @@ class TestRequiresPayment:
         class RequestWithQuery(MockRequest):
             query_amount = "2000"
 
-        credential = Credential(id="test", payload={})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "2000"},
+            ),
+            payload={},
+        )
         request = RequestWithQuery(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -267,7 +486,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -277,9 +496,18 @@ class TestRequiresPayment:
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
-            return {"credential_id": credential.id}
+            return {"credential_id": credential.challenge.id}
 
-        credential = Credential(id="django-cred", payload={})
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="django-cred",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
+            payload={},
+        )
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -291,7 +519,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -317,7 +545,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="tempo")
 
         @requires_payment(
             intent=test_intent,
@@ -337,7 +565,7 @@ class TestRequiresPayment:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("0x123")
+            return Receipt.success("0x123", method="custom-method")
 
         @requires_payment(
             intent=test_intent,

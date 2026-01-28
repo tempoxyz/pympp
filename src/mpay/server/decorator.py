@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -28,20 +29,37 @@ def _get_authorization(request: Any) -> str | None:
 
 
 def _make_challenge_response(challenge: Challenge, realm: str) -> Any:
-    """Build 402 response for a challenge."""
+    """Build 402 response for a challenge with RFC 9457 problem details."""
+    headers = {
+        "WWW-Authenticate": challenge.to_www_authenticate(realm),
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json",
+    }
+    body = json.dumps(
+        {
+            "type": "https://httpauth.org/problems/payment-required",
+            "title": "Payment Required",
+            "status": 402,
+            "detail": (
+                f"Access to this resource requires payment via the {challenge.method} method."
+            ),
+        }
+    )
     try:
         from starlette.responses import Response
 
         return Response(
-            content=None,
+            content=body,
             status_code=402,
-            headers={"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            headers=headers,
+            media_type="application/problem+json",
         )
     except ImportError:
         return {
             "_mpay_challenge": True,
             "status": 402,
-            "headers": {"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            "headers": headers,
+            "body": body,
         }
 
 

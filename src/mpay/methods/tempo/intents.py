@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -23,9 +24,23 @@ if TYPE_CHECKING:
 
     from mpay import Credential
 
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
+
+
+def _extract_address_from_did(did: str | None) -> str | None:
+    """Extract address from a did:pkh DID."""
+    if not did:
+        return None
+    # Format: did:pkh:eip155:{chain}:{address}
+    parts = did.split(":")
+    if len(parts) >= 5 and parts[0] == "did" and parts[1] == "pkh" and parts[2] == "eip155":
+        return parts[4]
+    return None
+
 
 # Receipt polling configuration
 #
@@ -147,15 +162,18 @@ class ChargeIntent:
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
+        expected_sender = _extract_address_from_did(credential.source)
+
         if isinstance(payload, HashCredentialPayload):
-            return await self._verify_hash(payload, req)
+            return await self._verify_hash(payload, req, expected_sender)
         else:
-            return await self._verify_transaction(payload, req)
+            return await self._verify_transaction(payload, req, expected_sender)
 
     async def _verify_hash(
         self,
         payload: HashCredentialPayload,
         request: ChargeRequest,
+        expected_sender: str | None = None,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
         client = await self._get_client()
@@ -180,14 +198,14 @@ class ChargeIntent:
             raise VerificationError("Transaction not found")
 
         if receipt_data.get("status") != "0x1":
-            return Receipt.failed(payload.hash)
+            return Receipt.failed(payload.hash, method="tempo")
 
-        if not self._verify_transfer_logs(receipt_data, request):
+        if not self._verify_transfer_logs(receipt_data, request, expected_sender):
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
-        return Receipt.success(payload.hash)
+        return Receipt.success(payload.hash, method="tempo")
 
     def _verify_transfer_logs(
         self,
@@ -237,6 +255,7 @@ class ChargeIntent:
         self,
         payload: TransactionCredentialPayload,
         request: ChargeRequest,
+        expected_sender: str | None = None,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -285,7 +304,7 @@ class ChargeIntent:
         if not tx_hash:
             raise VerificationError("No transaction hash returned")
 
-        print(f"[mpay] Transaction submitted: {tx_hash}")
+        logger.info("Transaction submitted: %s", tx_hash)
 
         receipt_data = None
         # Check immediately first, then retry with short delays (receipts available in ~400ms)
@@ -307,7 +326,7 @@ class ChargeIntent:
 
             receipt_data = receipt_result.get("result")
             if receipt_data:
-                print(f"[mpay] Receipt found on attempt {attempt + 1}")
+                logger.debug("Receipt found on attempt %d", attempt + 1)
                 break
 
             # Wait between retries (don't sleep after the last attempt)
@@ -318,11 +337,11 @@ class ChargeIntent:
             raise VerificationError("Transaction receipt not found after retries")
 
         if receipt_data.get("status") != "0x1":
-            return Receipt.failed(tx_hash)
+            return Receipt.failed(tx_hash, method="tempo")
 
-        if not self._verify_transfer_logs(receipt_data, request):
+        if not self._verify_transfer_logs(receipt_data, request, expected_sender):
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
-        return Receipt.success(tx_hash)
+        return Receipt.success(tx_hash, method="tempo")

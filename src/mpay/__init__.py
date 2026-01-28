@@ -17,7 +17,7 @@ from mpay._parsing import (
     parse_www_authenticate,
 )
 
-__all__ = ["Challenge", "Credential", "ParseError", "Receipt"]
+__all__ = ["Challenge", "ChallengeEcho", "Credential", "ParseError", "Receipt"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +37,9 @@ class Challenge:
     method: str
     intent: str
     request: dict[str, Any]
+    realm: str | None = None
     digest: str | None = None
-    expires: str | None = None
+    expires: datetime | None = None
     description: str | None = None
 
     @classmethod
@@ -52,17 +53,37 @@ class Challenge:
 
 
 @dataclass(frozen=True, slots=True)
+class ChallengeEcho:
+    """The challenge echoed back in a credential."""
+
+    id: str
+    realm: str
+    method: str
+    intent: str
+    request: dict[str, Any]
+    digest: str | None = None
+    expires: datetime | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Credential:
     """The credential passed to the verify function.
 
     Example:
         credential = Credential(
-            id="challenge-id",
+            challenge=ChallengeEcho(
+                id="challenge-id",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            ),
             payload={"signature": "0x..."},
         )
     """
 
-    id: str
+    challenge: ChallengeEcho
     payload: dict[str, Any]
     source: str | None = None
 
@@ -85,12 +106,14 @@ class Receipt:
 
         receipt = Receipt(
             status="success",
+            method="tempo",
             timestamp=datetime.now(UTC),
             reference="0x...",
         )
     """
 
     status: Literal["success", "failed"]
+    method: str
     timestamp: datetime
     reference: str
 
@@ -104,19 +127,21 @@ class Receipt:
         return format_payment_receipt(self)
 
     @classmethod
-    def success(cls, reference: str, timestamp: datetime | None = None) -> "Receipt":
+    def success(cls, reference: str, method: str, timestamp: datetime | None = None) -> "Receipt":
         """Create a success receipt with current timestamp."""
         return cls(
             status="success",
+            method=method,
             timestamp=timestamp or datetime.now(UTC),
             reference=reference,
         )
 
     @classmethod
-    def failed(cls, reference: str, timestamp: datetime | None = None) -> "Receipt":
+    def failed(cls, reference: str, method: str, timestamp: datetime | None = None) -> "Receipt":
         """Create a failed receipt with current timestamp."""
         return cls(
             status="failed",
+            method=method,
             timestamp=timestamp or datetime.now(UTC),
             reference=reference,
         )

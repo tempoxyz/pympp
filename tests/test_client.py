@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpay import Challenge, Credential
+from mpay import Challenge, ChallengeEcho, Credential
 from mpay.client import Client, PaymentTransport, get, post, request
 
 
@@ -18,7 +18,13 @@ class MockMethod:
     def __init__(self) -> None:
         self.create_credential = AsyncMock(
             return_value=Credential(
-                id="test-id",
+                challenge=ChallengeEcho(
+                    id="test-id",
+                    realm="example.com",
+                    method="tempo",
+                    intent="charge",
+                    request={"amount": "1000"},
+                ),
                 payload={"hash": "0xabc"},
             )
         )

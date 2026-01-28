@@ -9,6 +9,7 @@ Implements automatic 402 Payment Required handling by:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
@@ -65,22 +66,32 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         if response.status_code != 402:
             return response
 
-        www_auth = response.headers.get("www-authenticate")
-        if not www_auth or not www_auth.lower().startswith("payment "):
-            return response
-
         await response.aread()
 
-        try:
-            challenge = Challenge.from_www_authenticate(www_auth)
-        except ParseError:
+        www_auth_headers = response.headers.get_list("www-authenticate")
+
+        challenge = None
+        matched_method = None
+        for header in www_auth_headers:
+            if not header.lower().startswith("payment "):
+                continue
+            try:
+                parsed = Challenge.from_www_authenticate(header)
+                if parsed.method in self._methods:
+                    challenge = parsed
+                    matched_method = self._methods[parsed.method]
+                    break
+            except ParseError:
+                continue
+
+        if not challenge or not matched_method:
             return response
 
-        method = self._methods.get(challenge.method)
-        if not method:
-            return response
+        if challenge.expires:
+            if challenge.expires < datetime.now(UTC):
+                return response
 
-        credential = await method.create_credential(challenge)
+        credential = await matched_method.create_credential(challenge)
         auth_header = credential.to_authorization()
 
         headers = httpx.Headers(request.headers)
