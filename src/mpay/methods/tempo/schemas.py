@@ -7,15 +7,25 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 
+class MethodDetails(BaseModel):
+    """Method-specific details for Tempo charge requests."""
+
+    chainId: int = 42431
+    feePayer: bool = False
+    feePayerUrl: str | None = None
+
+
 class ChargeRequest(BaseModel):
-    """Request schema for the charge intent."""
+    """Request schema for the charge intent.
+
+    Follows the IETF Payment Authentication Scheme spec for Tempo method.
+    """
 
     amount: str
-    asset: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
-    destination: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+    currency: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+    recipient: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     expires: str
-    fee_payer: bool = False
-    fee_payer_url: str | None = None
+    methodDetails: MethodDetails = Field(default_factory=MethodDetails)
 
 
 class HashCredentialPayload(BaseModel):

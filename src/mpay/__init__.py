@@ -29,7 +29,7 @@ class Challenge:
             id="challenge-id",
             method="tempo",
             intent="charge",
-            request={"amount": "1000000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
         )
     """
 
@@ -37,6 +37,9 @@ class Challenge:
     method: str
     intent: str
     request: dict[str, Any]
+    digest: str | None = None
+    expires: str | None = None
+    description: str | None = None
 
     @classmethod
     def from_www_authenticate(cls, header: str) -> "Challenge":

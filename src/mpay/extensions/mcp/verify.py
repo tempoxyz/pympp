@@ -92,7 +92,7 @@ async def verify_or_challenge(
         result = await verify_or_challenge(
             meta=meta,
             intent=ChargeIntent(rpc_url="..."),
-            request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
         )
 
@@ -129,9 +129,7 @@ async def verify_or_challenge(
     try:
         mcp_credential = MCPCredential.from_dict(credential_data)
     except (KeyError, TypeError) as e:
-        raise MalformedCredentialError(
-            detail=f"Invalid credential structure: {e}"
-        ) from e
+        raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
 
     from mpay.server.intent import VerificationError
 

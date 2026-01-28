@@ -336,9 +336,7 @@ class TestRequiresPaymentDecorator:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def my_tool(
-            query: str, *, credential: MCPCredential, receipt: MCPReceipt
-        ) -> str:
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:
@@ -363,9 +361,7 @@ class TestRequiresPaymentDecorator:
             request={"amount": "1000", "currency": "usd"},
             realm="api.example.com",
         )
-        async def my_tool(
-            query: str, *, credential: MCPCredential, receipt: MCPReceipt
-        ) -> str:
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}, paid by {credential.source}"
 
         challenge = MCPChallenge(
@@ -396,9 +392,7 @@ class TestRequiresPaymentDecorator:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def my_tool(
-            query: str, *, credential: MCPCredential, receipt: MCPReceipt
-        ) -> str:
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
 
         with pytest.raises(MalformedCredentialError) as exc_info:
@@ -421,9 +415,7 @@ class TestRequiresPaymentDecorator:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def my_tool(
-            query: str, *, credential: MCPCredential, receipt: MCPReceipt
-        ) -> str:
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
 
         challenge = MCPChallenge(
@@ -457,9 +449,7 @@ class TestRequiresPaymentDecorator:
             request=lambda query, **kw: {"amount": str(len(query) * 10)},
             realm="api.example.com",
         )
-        async def my_tool(
-            query: str, *, credential: MCPCredential, receipt: MCPReceipt
-        ) -> str:
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:

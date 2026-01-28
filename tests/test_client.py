@@ -135,9 +135,7 @@ class TestPaymentTransport:
         """Should return 402 if challenge cannot be parsed."""
         inner = MockTransport(
             [
-                httpx.Response(
-                    402, headers={"www-authenticate": "Payment invalid-base64!!"}
-                ),
+                httpx.Response(402, headers={"www-authenticate": "Payment invalid-base64!!"}),
             ]
         )
 
@@ -226,9 +224,7 @@ class TestConvenienceFunctions:
     @pytest.mark.asyncio
     async def test_post_function(self, httpx_mock: HTTPXMock) -> None:
         """post() should send POST request."""
-        httpx_mock.add_response(
-            url="https://example.com/test", method="POST", json={"ok": True}
-        )
+        httpx_mock.add_response(url="https://example.com/test", method="POST", json={"ok": True})
 
         response = await post("https://example.com/test", methods=[])
         assert response.status_code == 200

@@ -15,7 +15,7 @@ class TestChallenge:
             id="test-id-123",
             method="tempo",
             intent="charge",
-            request={"amount": "1000", "asset": "0x123", "destination": "0x456"},
+            request={"amount": "1000", "currency": "0x123", "recipient": "0x456"},
         )
 
         header = challenge.to_www_authenticate("api.example.com")
@@ -28,12 +28,11 @@ class TestChallenge:
 
     def test_parse_valid_header(self) -> None:
         """Should parse a valid WWW-Authenticate header."""
-        # {"id":"test","method":"tempo","intent":"charge","request":{}}
-        b64 = (
-            "eyJpZCI6InRlc3QiLCJtZXRob2QiOiJ0ZW1wbyIsImludGVudCI6ImNoYXJnZSIs"
-            "InJlcXVlc3QiOnt9fQ"
+        # request = {} -> base64url = "e30"
+        header = (
+            'Payment id="test", realm="api.example.com", '
+            'method="tempo", intent="charge", request="e30"'
         )
-        header = f'Payment realm="api.example.com", {b64}'
         challenge = Challenge.from_www_authenticate(header)
 
         assert challenge.id == "test"
@@ -47,30 +46,61 @@ class TestChallenge:
 
     def test_parse_missing_realm(self) -> None:
         """Should reject headers without realm."""
-        with pytest.raises(ParseError):
-            Challenge.from_www_authenticate("Payment eyJpZCI6InRlc3QifQ")
+        header = 'Payment id="test", method="tempo", intent="charge", request="e30"'
+        with pytest.raises(ParseError, match="Missing 'realm' field"):
+            Challenge.from_www_authenticate(header)
 
     def test_parse_invalid_base64(self) -> None:
-        """Should reject invalid base64."""
+        """Should reject invalid base64 in request field."""
+        header = (
+            'Payment id="test", realm="test", method="tempo", '
+            'intent="charge", request="!!!invalid!!!"'
+        )
         with pytest.raises(ParseError):
-            Challenge.from_www_authenticate('Payment realm="test", !!!invalid!!!')
+            Challenge.from_www_authenticate(header)
 
     def test_parse_non_dict_json(self) -> None:
-        """Should reject JSON that decodes to non-dict."""
+        """Should reject JSON that decodes to non-dict in request field."""
         import base64
 
         # base64 of JSON array []
         b64_array = base64.urlsafe_b64encode(b"[]").decode().rstrip("=")
+        header = (
+            f'Payment id="test", realm="test", method="tempo", '
+            f'intent="charge", request="{b64_array}"'
+        )
         with pytest.raises(ParseError, match="Expected JSON object"):
-            Challenge.from_www_authenticate(f'Payment realm="test", {b64_array}')
+            Challenge.from_www_authenticate(header)
 
     def test_parse_missing_fields(self) -> None:
         """Should reject challenges missing required fields."""
-        # {"id":"test","intent":"charge","request":{}} - missing method
-        b64 = "eyJpZCI6InRlc3QiLCJpbnRlbnQiOiJjaGFyZ2UiLCJyZXF1ZXN0Ijp7fX0"
-        header = f'Payment realm="test", {b64}'
-        with pytest.raises(ParseError):
+        # Missing method field
+        header = 'Payment id="test", realm="test", intent="charge", request="e30"'
+        with pytest.raises(ParseError, match="Missing 'method' field"):
             Challenge.from_www_authenticate(header)
+
+    def test_roundtrip_with_optional_fields(self) -> None:
+        """Challenge with optional fields should survive roundtrip."""
+        challenge = Challenge(
+            id="test-id-123",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires="2025-01-15T12:00:00Z",
+            digest="sha-256=:abc123:",
+            description="Pay for API access",
+        )
+
+        header = challenge.to_www_authenticate("api.example.com")
+        parsed = Challenge.from_www_authenticate(header)
+
+        assert parsed.id == challenge.id
+        assert parsed.method == challenge.method
+        assert parsed.intent == challenge.intent
+        assert parsed.request == challenge.request
+        assert parsed.expires == challenge.expires
+        assert parsed.digest == challenge.digest
+        assert parsed.description == challenge.description
 
 
 class TestCredential:

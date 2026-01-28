@@ -3,10 +3,11 @@
 This module handles the critical path of parsing WWW-Authenticate, Authorization,
 and Payment-Receipt headers according to the Payment HTTP Authentication Scheme.
 
-Format:
-    WWW-Authenticate: Payment realm="api.example.com", <base64-encoded-challenge>
-    Authorization: Payment <base64-encoded-credential>
-    Payment-Receipt: <base64-encoded-receipt>
+Format per IETF draft-ietf-httpauth-payment:
+    WWW-Authenticate: Payment id="...", realm="...", method="...",
+                      intent="...", request="<base64url>"
+    Authorization: Payment <base64url-json>
+    Payment-Receipt: <base64url-json>
 """
 
 from __future__ import annotations
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
 
 
 MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
+
+# RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
+# Matches: key="value" or key=token, handles escaped quotes in quoted strings
+_AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
 
 
 class ParseError(Exception):
@@ -58,70 +63,110 @@ def _b64_decode(encoded: str) -> dict[str, Any]:
         raise ParseError("Invalid base64 or JSON encoding") from None
 
 
-_REALM_PATTERN = re.compile(r'realm="([^"]*)"')
+def _escape_quoted(s: str) -> str:
+    """Escape a string for use in a quoted-string. Rejects CRLF."""
+    if "\r" in s or "\n" in s:
+        raise ParseError("Header value contains invalid CRLF characters")
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _unescape_quoted(s: str) -> str:
+    """Unescape a quoted-string value (remove backslash escapes)."""
+    return re.sub(r"\\(.)", r"\1", s)
+
+
+def _parse_auth_params(params_str: str) -> dict[str, str]:
+    """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
+    params: dict[str, str] = {}
+    for match in _AUTH_PARAM_RE.finditer(params_str):
+        key = match.group(1)
+        # Group 2 is quoted value, group 3 is unquoted token
+        value = match.group(2) if match.group(2) is not None else match.group(3)
+        params[key] = _unescape_quoted(value) if match.group(2) is not None else value
+    return params
 
 
 def parse_www_authenticate(header: str) -> Challenge:
     """Parse a WWW-Authenticate header into a Challenge.
 
-    Expected format:
-        Payment realm="api.example.com", <base64-challenge>
+    Expected format (per IETF draft-ietf-httpauth-payment):
+        Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
 
-    The challenge payload is a base64-encoded JSON object with:
-        - id: Challenge identifier
-        - method: Payment method name
-        - intent: Intent name
-        - request: Method-specific request data
+    Optional parameters: digest, expires, description
     """
     from mpay import Challenge
 
     header = header.strip()
 
+    # Case-insensitive scheme matching
     if not header.lower().startswith("payment "):
         raise ParseError("Expected 'Payment' authentication scheme")
 
-    content = header[8:].strip()
+    params_str = header[8:].strip()
+    params = _parse_auth_params(params_str)
 
-    parts = content.split(",", 1)
-    if len(parts) != 2:
-        raise ParseError("Missing realm or challenge in WWW-Authenticate header")
+    # Extract required fields
+    id_ = params.get("id")
+    if not id_:
+        raise ParseError("Missing 'id' field")
 
-    realm_part = parts[0].strip()
-    challenge_b64 = parts[1].strip()
+    realm = params.get("realm")
+    if not realm:
+        raise ParseError("Missing 'realm' field")
 
-    realm_match = _REALM_PATTERN.match(realm_part)
-    if not realm_match:
-        raise ParseError(f"Invalid realm format: {realm_part}")
+    method = params.get("method")
+    if not method:
+        raise ParseError("Missing 'method' field")
 
-    data = _b64_decode(challenge_b64)
+    intent = params.get("intent")
+    if not intent:
+        raise ParseError("Missing 'intent' field")
 
-    required = {"id", "method", "intent", "request"}
-    missing = required - set(data.keys())
-    if missing:
-        raise ParseError(f"Challenge missing required fields: {missing}")
+    request_b64 = params.get("request")
+    if not request_b64:
+        raise ParseError("Missing 'request' field")
+
+    # Decode request JSON
+    request = _b64_decode(request_b64)
 
     return Challenge(
-        id=str(data["id"]),
-        method=str(data["method"]),
-        intent=str(data["intent"]),
-        request=data["request"],
+        id=id_,
+        method=method,
+        intent=intent,
+        request=request,
+        digest=params.get("digest"),
+        expires=params.get("expires"),
+        description=params.get("description"),
     )
 
 
 def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     """Format a Challenge as a WWW-Authenticate header value.
 
-    Output format:
-        Payment realm="api.example.com", <base64-challenge>
+    Output format (per IETF draft-ietf-httpauth-payment):
+        Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
-    payload = {
-        "id": challenge.id,
-        "method": challenge.method,
-        "intent": challenge.intent,
-        "request": challenge.request,
-    }
-    encoded = _b64_encode(payload)
-    return f'Payment realm="{realm}", {encoded}'
+    # Encode request as base64url JSON
+    request_b64 = _b64_encode(challenge.request)
+
+    # Build auth-params
+    parts = [
+        f'id="{_escape_quoted(challenge.id)}"',
+        f'realm="{_escape_quoted(realm)}"',
+        f'method="{_escape_quoted(challenge.method)}"',
+        f'intent="{_escape_quoted(challenge.intent)}"',
+        f'request="{request_b64}"',
+    ]
+
+    # Add optional parameters
+    if challenge.digest:
+        parts.append(f'digest="{_escape_quoted(challenge.digest)}"')
+    if challenge.expires:
+        parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
+    if challenge.description:
+        parts.append(f'description="{_escape_quoted(challenge.description)}"')
+
+    return "Payment " + ", ".join(parts)
 
 
 def parse_authorization(header: str) -> Credential:

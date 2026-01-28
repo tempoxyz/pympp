@@ -190,9 +190,7 @@ class TestRequiresPayment:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid content"}
 
         result = await handler(MockRequest())
@@ -222,9 +220,7 @@ class TestRequiresPayment:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
                 "credential_id": credential.id,
@@ -253,9 +249,7 @@ class TestRequiresPayment:
             request=lambda req: {"amount": req.query_amount},
             realm="api.example.com",
         )
-        async def handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
         class RequestWithQuery(MockRequest):
@@ -304,9 +298,7 @@ class TestRequiresPayment:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
         request = MockRequest(authorization="Bearer some-token")
@@ -332,9 +324,7 @@ class TestRequiresPayment:
             request={"amount": "1000"},
             realm="api.example.com",
         )
-        async def my_handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def my_handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             """My handler docstring."""
             return {"data": "paid"}
 
@@ -355,9 +345,7 @@ class TestRequiresPayment:
             realm="api.example.com",
             method="custom-method",
         )
-        async def handler(
-            req: MockRequest, credential: Credential, receipt: Receipt
-        ) -> dict:
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
         result = await handler(MockRequest())

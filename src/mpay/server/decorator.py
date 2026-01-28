@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -20,9 +21,7 @@ RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 def _get_authorization(request: Any) -> str | None:
     """Extract Authorization header from various request types."""
     if hasattr(request, "headers"):
-        return request.headers.get("authorization") or request.headers.get(
-            "Authorization"
-        )
+        return request.headers.get("authorization") or request.headers.get("Authorization")
     if hasattr(request, "META"):
         return request.META.get("HTTP_AUTHORIZATION")
     return None
@@ -75,10 +74,10 @@ def requires_payment(
         @app.get("/resource")
         @requires_payment(
             intent=ChargeIntent(rpc_url="..."),
-            request={"amount": "1000", "asset": "0x...", "destination": "0x..."},
+            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
         )
-        async def get_resource(request, credential, receipt):
+        async def get_resource(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "paid content", "payer": credential.source}
 
         # With dynamic request params:
@@ -87,15 +86,25 @@ def requires_payment(
             request=lambda req: {"amount": req.query_params.get("price"), ...},
             realm="api.example.com",
         )
-        async def dynamic_pricing(request, credential, receipt):
+        async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "..."}
     """
 
     def decorator(
         handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
     ) -> Callable[[Any], Awaitable[R | Any]]:
+        sig = inspect.signature(handler)
+        params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
+        new_sig = sig.replace(parameters=params)
+
+        request_param_name = params[0].name if params else "request"
+
         @wraps(handler)
-        async def wrapper(request_obj: Any) -> R | Any:
+        async def wrapper(*args: Any, **kwargs: Any) -> R | Any:
+            if args:
+                request_obj = args[0]
+            else:
+                request_obj = kwargs.get(request_param_name)
             authorization = _get_authorization(request_obj)
 
             if callable(request):
@@ -116,6 +125,9 @@ def requires_payment(
 
             credential, receipt_obj = result
             return await handler(request_obj, credential, receipt_obj)
+
+        wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
+        del wrapper.__wrapped__
 
         return wrapper
 

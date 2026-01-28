@@ -5,6 +5,7 @@ Implements the charge intent for Tempo payments.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,22 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
+# Receipt polling configuration
+#
+# After submitting a transaction, we poll for the receipt since it won't be
+# available until the transaction is included in a block. Block times vary:
+# - Tempo mainnet: ~400ms
+# - Tempo testnet: ~2-4s (can be slower under load)
+#
+# For comparison, viem's waitForTransactionReceipt uses:
+# - 6 retries with exponential backoff (200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s)
+# - 180s total timeout
+#
+# We use a simpler fixed-delay approach that provides ~10s total wait time,
+# sufficient for testnet latency while keeping the implementation simple.
+MAX_RECEIPT_RETRY_ATTEMPTS = 20
+RECEIPT_RETRY_DELAY_SECONDS = 0.5
+
 
 class ChargeIntent:
     """Tempo charge intent for one-time payments.
@@ -42,7 +59,7 @@ class ChargeIntent:
         async with ChargeIntent(rpc_url="https://rpc.tempo.xyz") as intent:
             receipt = await intent.verify(
                 credential=Credential(id="...", payload={"type": "hash", ...}),
-                request={"amount": "1000", "asset": "0x...", ...},
+                request={"amount": "1000", "currency": "0x...", ...},
             )
 
         # Or with external client
@@ -182,19 +199,17 @@ class ChargeIntent:
 
         Args:
             receipt: Transaction receipt from RPC.
-            request: The charge request with expected amount/asset/destination.
+            request: The charge request with expected amount/currency/recipient.
             expected_sender: If provided, validates the 'from' address in the
                 Transfer log matches this address (for payer identity verification).
 
         Returns:
             True if a matching Transfer log is found, False otherwise.
         """
-        transfer_topic = (
-            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-        )
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
         for log in receipt.get("logs", []):
-            if log.get("address", "").lower() != request.asset.lower():
+            if log.get("address", "").lower() != request.currency.lower():
                 continue
 
             topics = log.get("topics", [])
@@ -204,7 +219,7 @@ class ChargeIntent:
             from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
 
-            if to_address.lower() != request.destination.lower():
+            if to_address.lower() != request.recipient.lower():
                 continue
 
             if expected_sender and from_address.lower() != expected_sender.lower():
@@ -225,14 +240,14 @@ class ChargeIntent:
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
-        For sponsored transactions (fee_payer=True), forwards the client-signed
-        transaction to the fee payer service which adds its signature and broadcasts.
-        For regular transactions, submits directly to the RPC.
+        For sponsored transactions (methodDetails.feePayer=True), forwards the
+        client-signed transaction to the fee payer service which adds its signature
+        and broadcasts. For regular transactions, submits directly to the RPC.
         """
         client = await self._get_client()
 
-        if request.fee_payer:
-            fee_payer_url = request.fee_payer_url or DEFAULT_FEE_PAYER_URL
+        if request.methodDetails.feePayer:
+            fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
             response = await client.post(
                 fee_payer_url,
                 json={
@@ -256,31 +271,51 @@ class ChargeIntent:
         result = response.json()
 
         if "error" in result:
-            error_msg = result["error"].get("message", "Unknown error")
-            raise VerificationError(f"Transaction submission failed: {error_msg}")
+            error_obj = result["error"]
+            if isinstance(error_obj, dict):
+                error_msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
+                error_data = error_obj.get("data", "")
+            else:
+                error_msg = str(error_obj)
+                error_data = ""
+            full_error = f"{error_msg}: {error_data}" if error_data else error_msg
+            raise VerificationError(f"Transaction submission failed: {full_error}")
 
         tx_hash = result.get("result")
         if not tx_hash:
             raise VerificationError("No transaction hash returned")
 
-        receipt_response = await client.post(
-            self.rpc_url,
-            json={
-                "jsonrpc": "2.0",
-                "method": "eth_getTransactionReceipt",
-                "params": [tx_hash],
-                "id": 1,
-            },
-        )
-        receipt_response.raise_for_status()
-        receipt_result = receipt_response.json()
+        print(f"[mpay] Transaction submitted: {tx_hash}")
 
-        if "error" in receipt_result:
-            raise VerificationError("Failed to fetch transaction receipt")
+        receipt_data = None
+        # Check immediately first, then retry with short delays (receipts available in ~400ms)
+        for attempt in range(MAX_RECEIPT_RETRY_ATTEMPTS):
+            receipt_response = await client.post(
+                self.rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_getTransactionReceipt",
+                    "params": [tx_hash],
+                    "id": 1,
+                },
+            )
+            receipt_response.raise_for_status()
+            receipt_result = receipt_response.json()
 
-        receipt_data = receipt_result.get("result")
+            if "error" in receipt_result:
+                raise VerificationError("Failed to fetch transaction receipt")
+
+            receipt_data = receipt_result.get("result")
+            if receipt_data:
+                print(f"[mpay] Receipt found on attempt {attempt + 1}")
+                break
+
+            # Wait between retries (don't sleep after the last attempt)
+            if attempt < MAX_RECEIPT_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(RECEIPT_RETRY_DELAY_SECONDS)
+
         if not receipt_data:
-            raise VerificationError("Transaction receipt not found")
+            raise VerificationError("Transaction receipt not found after retries")
 
         if receipt_data.get("status") != "0x1":
             return Receipt.failed(tx_hash)
