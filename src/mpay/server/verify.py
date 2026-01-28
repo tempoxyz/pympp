@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError, _b64_encode
-from mpay.server.intent import VerificationError
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent
@@ -136,7 +135,10 @@ async def verify_or_challenge(
         raise ValueError("realm must be a non-empty string")
 
     method_name = method or "tempo"
-    expires = datetime.now(UTC) + expires_in
+    # For HMAC-bound deterministic IDs, do not include time-varying expires
+    # since it cannot be securely enforced without state.
+    # For random IDs, expires is included as the client echoes it back.
+    expires = None if secret_key is not None else (datetime.now(UTC) + expires_in)
 
     if authorization is None:
         return _create_challenge(
@@ -186,18 +188,10 @@ async def verify_or_challenge(
                 digest=digest,
             )
 
-    try:
-        receipt: Receipt = await intent.verify(credential, request)
-    except VerificationError:
-        return _create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires=expires,
-            digest=digest,
-        )
+    # VerificationError is re-raised so callers can distinguish between
+    # "missing/invalid credential" (returns Challenge) and "verification failed"
+    # (raises VerificationError for 403/specific error handling).
+    receipt: Receipt = await intent.verify(credential, request)
 
     return (credential, receipt)
 
@@ -208,7 +202,7 @@ def _create_challenge(
     request: dict[str, Any],
     realm: str,
     secret_key: str | None = None,
-    expires: str | None = None,
+    expires: datetime | None = None,
     digest: str | None = None,
 ) -> Challenge:
     """Create a new payment challenge.
