@@ -202,15 +202,16 @@ class TestHMACBoundChallengeIds:
         )
 
         assert isinstance(result, Challenge)
-        assert result.expires is not None
+        # HMAC mode uses expires=None for deterministic IDs (stateless verification)
+        assert result.expires is None
 
-        # Verify the challenge ID is HMAC-bound with the actual expires
+        # Verify the challenge ID is HMAC-bound
         expected_id = _compute_challenge_id(
             realm=realm,
             method="tempo",
             intent="charge",
             request=request,
-            expires=result.expires,
+            expires=None,
             digest=None,
             secret_key=secret_key,
         )
@@ -335,8 +336,8 @@ class TestVerificationError:
         assert isinstance(result, Challenge)
 
     @pytest.mark.asyncio
-    async def test_intent_verification_error_returns_challenge(self) -> None:
-        """VerificationError should return a new challenge (not propagate as 500)."""
+    async def test_intent_can_raise_verification_error(self) -> None:
+        """VerificationError from intent should propagate to caller."""
 
         @intent(name="charge")
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
@@ -354,13 +355,13 @@ class TestVerificationError:
         )
         auth_header = credential.to_authorization()
 
-        result = await verify_or_challenge(
-            authorization=auth_header,
-            intent=failing_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-        )
-        assert isinstance(result, Challenge)
+        with pytest.raises(VerificationError, match="Payment verification failed"):
+            await verify_or_challenge(
+                authorization=auth_header,
+                intent=failing_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+            )
 
 
 class MockRequest:
