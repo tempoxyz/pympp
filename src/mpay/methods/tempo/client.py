@@ -109,11 +109,10 @@ class TempoMethod:
         recipient: str,
         nonce_key: int = 0,
     ) -> str:
-        """Build a client-signed Tempo transaction for fee sponsorship.
+        """Build a client-signed Tempo transaction.
 
-        Creates a TempoTransaction (type 0x76) with a fee payer placeholder,
-        signed by the client. The server will forward this to a fee payer
-        service which adds its signature and broadcasts.
+        Creates a TempoTransaction (type 0x76) with fee token set to the
+        transfer currency, allowing gas to be paid in the same token.
 
         Args:
             amount: Transfer amount as string.
@@ -147,15 +146,15 @@ class TempoMethod:
                 self.rpc_url,
                 json={
                     "jsonrpc": "2.0",
-                    "method": "tempo_getTransactionCount",
-                    "params": [self.account.address, nonce_key, "pending"],
+                    "method": "eth_getTransactionCount",
+                    "params": [self.account.address, "pending"],
                     "id": 1,
                 },
             )
             nonce_resp.raise_for_status()
             nonce_result = nonce_resp.json()
             if "error" in nonce_result:
-                raise TransactionError("Failed to fetch Tempo nonce")
+                raise TransactionError("Failed to fetch nonce")
             nonce = int(nonce_result["result"], 16)
 
             gas_resp = await client.post(
@@ -173,7 +172,7 @@ class TempoMethod:
                 raise TransactionError("Failed to fetch gas price")
             gas_price = int(gas_result["result"], 16)
 
-            # Build a sponsored Tempo transaction (type 0x76) with fee payer placeholder
+            # Build a Tempo transaction (type 0x76) with fee token for gas payment
             tx = TempoTransaction.create(
                 chain_id=chain_id,
                 gas_limit=DEFAULT_GAS_LIMIT,
@@ -181,7 +180,7 @@ class TempoMethod:
                 max_priority_fee_per_gas=gas_price,
                 nonce=nonce,
                 nonce_key=nonce_key,
-                awaiting_fee_payer=True,
+                fee_token=currency,
                 calls=(Call.create(to=currency, value=0, data=transfer_data),),
             )
 
