@@ -6,6 +6,7 @@ import pytest
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
+from tests import make_credential
 
 
 class TestChallenge:
@@ -106,8 +107,8 @@ class TestChallenge:
 class TestCredential:
     def test_roundtrip(self) -> None:
         """Credential should survive roundtrip through header format."""
-        credential = Credential(
-            id="test-id-123",
+        credential = make_credential(
+            challenge_id="test-id-123",
             payload={"hash": "0xabc123"},
             source="did:pkh:eip155:1:0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         )
@@ -115,21 +116,21 @@ class TestCredential:
         header = credential.to_authorization()
         parsed = Credential.from_authorization(header)
 
-        assert parsed.id == credential.id
+        assert parsed.challenge.id == credential.challenge.id
         assert parsed.payload == credential.payload
         assert parsed.source == credential.source
 
     def test_roundtrip_without_source(self) -> None:
         """Credential without source should roundtrip."""
-        credential = Credential(
-            id="test-id",
+        credential = make_credential(
+            challenge_id="test-id",
             payload={"signature": "0x123"},
         )
 
         header = credential.to_authorization()
         parsed = Credential.from_authorization(header)
 
-        assert parsed.id == credential.id
+        assert parsed.challenge.id == credential.challenge.id
         assert parsed.payload == credential.payload
         assert parsed.source is None
 
@@ -139,7 +140,7 @@ class TestCredential:
             Credential.from_authorization("Bearer abc123")
 
     def test_parse_missing_id(self) -> None:
-        """Should reject credentials without id."""
+        """Should reject credentials without challenge."""
         header = "Payment eyJwYXlsb2FkIjp7fX0"  # {"payload": {}}
         with pytest.raises(ParseError):
             Credential.from_authorization(header)

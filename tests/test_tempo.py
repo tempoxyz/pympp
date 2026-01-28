@@ -8,7 +8,7 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpay import Challenge, Credential
+from mpay import Challenge
 from mpay.methods.tempo import TempoAccount, tempo
 from mpay.methods.tempo.client import TempoMethod
 from mpay.methods.tempo.intents import ChargeIntent
@@ -19,6 +19,7 @@ from mpay.methods.tempo.schemas import (
     TransactionCredentialPayload,
 )
 from mpay.server.intent import VerificationError
+from tests import make_credential
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -138,7 +139,7 @@ class TestChargeIntent:
     async def test_verify_expired_request(self) -> None:
         """Should reject expired requests."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = Credential(id="test", payload={"type": "hash", "hash": "0x123"})
+        credential = make_credential(payload={"type": "hash", "hash": "0x123"})
         expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
 
         with pytest.raises(VerificationError, match="expired"):
@@ -156,7 +157,7 @@ class TestChargeIntent:
     async def test_verify_invalid_payload(self) -> None:
         """Should reject invalid credential payload."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = Credential(id="test", payload="not-a-dict")
+        credential = make_credential(payload="not-a-dict")
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
         with pytest.raises(VerificationError, match="Invalid credential payload"):
@@ -174,7 +175,7 @@ class TestChargeIntent:
     async def test_verify_unknown_credential_type(self) -> None:
         """Should reject unknown credential types."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = Credential(id="test", payload={"type": "unknown"})
+        credential = make_credential(payload={"type": "unknown"})
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
         with pytest.raises(VerificationError, match="Invalid credential type"):
@@ -223,7 +224,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(id="test", payload={"type": "hash", "hash": "0xabc123"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"})
         receipt = await intent.verify(
             credential,
             {
@@ -249,7 +250,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(id="test", payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
         with pytest.raises(VerificationError, match="Transaction not found"):
             await intent.verify(
                 credential,
@@ -276,7 +277,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(id="test", payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
         receipt = await intent.verify(
             credential,
             {
@@ -304,7 +305,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(id="test", payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
         with pytest.raises(VerificationError, match="Transfer log"):
             await intent.verify(
                 credential,
@@ -350,8 +351,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(
-            id="test",
+        credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
         )
         receipt = await intent.verify(
@@ -382,8 +382,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = Credential(
-            id="test",
+        credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
         )
         with pytest.raises(VerificationError, match="Transaction submission failed"):
@@ -417,6 +416,10 @@ class TestSponsoredTransfer:
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
 
         challenge = Challenge(
             id="test-sponsored",
@@ -431,11 +434,13 @@ class TestSponsoredTransfer:
                     "feePayerUrl": "https://sponsor.test",
                 },
             },
+            realm="test.example.com",
+            request_b64="e30",
         )
 
         credential = await method.create_credential(challenge)
 
-        assert credential.id == "test-sponsored"
+        assert credential.challenge.id == "test-sponsored"
         assert credential.payload["type"] == "transaction"
         assert credential.payload["signature"].startswith("0x76")
 
@@ -475,8 +480,7 @@ class TestSponsoredTransfer:
         )
 
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = Credential(
-            id="test",
+        credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
         )
 
@@ -512,8 +516,7 @@ class TestSponsoredTransfer:
         )
 
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = Credential(
-            id="test",
+        credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
         )
 

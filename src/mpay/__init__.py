@@ -23,7 +23,14 @@ from mpay._parsing import (
     parse_www_authenticate,
 )
 
-__all__ = ["Challenge", "Credential", "ParseError", "Receipt", "generate_challenge_id"]
+__all__ = [
+    "Challenge",
+    "ChallengeEcho",
+    "Credential",
+    "ParseError",
+    "Receipt",
+    "generate_challenge_id",
+]
 
 
 def _b64url_encode(data: str) -> str:
@@ -124,6 +131,8 @@ class Challenge:
     method: str
     intent: str
     request: dict[str, Any]
+    realm: str = ""
+    request_b64: str = ""
     digest: str | None = None
     expires: str | None = None
     description: str | None = None
@@ -215,19 +224,68 @@ class Challenge:
         )
         return _constant_time_equal(self.id, expected_id)
 
+    def to_echo(self) -> ChallengeEcho:
+        """Create a ChallengeEcho for use in credentials.
+
+        Returns:
+            A ChallengeEcho with the challenge parameters.
+        """
+        return ChallengeEcho(
+            id=self.id,
+            realm=self.realm,
+            method=self.method,
+            intent=self.intent,
+            request=self.request_b64,
+            expires=self.expires,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ChallengeEcho:
+    """Challenge echo in credential (echoes server challenge parameters).
+
+    This is included in the credential to bind the payment to the original challenge.
+    The `request` field is the raw base64url string (not re-encoded).
+
+    Example:
+        echo = ChallengeEcho(
+            id="challenge-id",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request="eyJhbW91bnQiOiIxMDAwIn0",
+        )
+    """
+
+    id: str
+    realm: str
+    method: str
+    intent: str
+    request: str
+    expires: str | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class Credential:
     """The credential passed to the verify function.
 
+    Contains the challenge echo and the payment proof.
+
     Example:
-        credential = Credential(
+        echo = ChallengeEcho(
             id="challenge-id",
-            payload={"signature": "0x..."},
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request="eyJhbW91bnQiOiIxMDAwIn0",
+        )
+        credential = Credential(
+            challenge=echo,
+            payload={"type": "transaction", "signature": "0x..."},
         )
     """
 
-    id: str
+    challenge: ChallengeEcho
     payload: dict[str, Any]
     source: str | None = None
 

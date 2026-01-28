@@ -159,11 +159,25 @@ class MCPCredential:
         return cls.from_dict(meta[META_CREDENTIAL])
 
     def to_core(self) -> Credential:
-        """Convert to core Credential type (uses challenge.id only)."""
-        from mpay import Credential
+        """Convert to core Credential type."""
+        import base64
+        import json
 
-        return Credential(
+        from mpay import ChallengeEcho, Credential
+
+        request_json = json.dumps(self.challenge.request, separators=(",", ":"))
+        request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
+
+        echo = ChallengeEcho(
             id=self.challenge.id,
+            realm=self.challenge.realm,
+            method=self.challenge.method,
+            intent=self.challenge.intent,
+            request=request_b64,
+            expires=self.challenge.expires,
+        )
+        return Credential(
+            challenge=echo,
             payload=self.payload,
             source=self.source,
         )
