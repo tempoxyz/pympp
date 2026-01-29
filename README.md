@@ -32,6 +32,7 @@ async def handler(request):
             "expires": "2030-01-20T12:00:00Z",
         },
         realm="api.example.com",
+        secret_key="my-server-secret",  # Enables HMAC-bound challenge IDs
     )
 
     if isinstance(result, Challenge):
@@ -188,6 +189,7 @@ intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
     intent=intent,
     request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 async def get_resource(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "paid content", "payer": credential.source}
@@ -200,6 +202,7 @@ With dynamic request params:
     intent=intent,
     request=lambda req: {"amount": req.query_params.get("price", "1000"), ...},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "..."}
@@ -224,6 +227,7 @@ result = await verify_or_challenge(
     intent=intent,
     request={"amount": "1000", ...},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 
 if isinstance(result, Challenge):

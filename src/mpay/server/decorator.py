@@ -50,6 +50,7 @@ def requires_payment(
     intent: Intent,
     request: RequestParamsType,
     realm: str,
+    secret_key: str,
     method: str | None = None,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
@@ -68,6 +69,8 @@ def requires_payment(
         request: Payment request params - either a static dict or a callable
             that takes the request and returns the params.
         realm: The realm for the WWW-Authenticate header.
+        secret_key: Server secret for HMAC-bound challenge IDs. Required.
+            Enables stateless challenge verification.
         method: The payment method name (defaults to "tempo").
 
     Example:
@@ -76,6 +79,7 @@ def requires_payment(
             intent=ChargeIntent(rpc_url="..."),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
+            secret_key="my-server-secret",  # Enables HMAC-bound IDs
         )
         async def get_resource(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "paid content", "payer": credential.source}
@@ -85,6 +89,7 @@ def requires_payment(
             intent=ChargeIntent(rpc_url="..."),
             request=lambda req: {"amount": req.query_params.get("price"), ...},
             realm="api.example.com",
+            secret_key="my-server-secret",
         )
         async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "..."}
@@ -117,6 +122,7 @@ def requires_payment(
                 intent=intent,
                 request=request_params,
                 realm=realm,
+                secret_key=secret_key,
                 method=method,
             )
 

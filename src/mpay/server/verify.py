@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import secrets
 from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
@@ -18,6 +17,7 @@ async def verify_or_challenge(
     intent: Intent,
     request: dict[str, Any],
     realm: str,
+    secret_key: str,
     method: str | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
@@ -26,11 +26,20 @@ async def verify_or_challenge(
     It checks for an Authorization header, verifies the credential if present,
     or generates a new challenge if not.
 
+    When `secret_key` is provided, the challenge ID is computed as HMAC-SHA256
+    over the challenge parameters (realm|method|intent|request|expires|digest),
+    cryptographically binding the ID to its contents. This enables stateless
+    verification - the server can verify a challenge was issued by it without
+    storing state.
+
     Args:
         authorization: The Authorization header value (or None if missing).
         intent: The payment intent to verify against.
         request: The payment request parameters.
         realm: The realm for the WWW-Authenticate header.
+        secret_key: Server secret for HMAC-bound challenge IDs. Required.
+            Enables stateless challenge verification by computing challenge IDs
+            as HMAC-SHA256 over the challenge parameters.
         method: The payment method name (defaults to "tempo").
 
     Returns:
@@ -45,6 +54,7 @@ async def verify_or_challenge(
             intent=ChargeIntent(client),
             request={"amount": "1000", ...},
             realm="api.example.com",
+            secret_key="my-server-secret",  # Enables HMAC-bound IDs
         )
 
         if isinstance(result, Challenge):
@@ -62,15 +72,15 @@ async def verify_or_challenge(
     method_name = method or "tempo"
 
     if authorization is None:
-        return _create_challenge(method_name, intent.name, request)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key)
 
     if not authorization.lower().startswith("payment "):
-        return _create_challenge(method_name, intent.name, request)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key)
 
     try:
         credential = Credential.from_authorization(authorization)
     except ParseError:
-        return _create_challenge(method_name, intent.name, request)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key)
 
     receipt: Receipt = await intent.verify(credential, request)
     return (credential, receipt)
@@ -80,10 +90,13 @@ def _create_challenge(
     method: str,
     intent_name: str,
     request: dict[str, Any],
+    realm: str,
+    secret_key: str,
 ) -> Challenge:
-    """Create a new payment challenge."""
-    return Challenge(
-        id=secrets.token_urlsafe(16),
+    """Create a new payment challenge with HMAC-bound ID."""
+    return Challenge.create(
+        secret_key=secret_key,
+        realm=realm,
         method=method,
         intent=intent_name,
         request=request,
