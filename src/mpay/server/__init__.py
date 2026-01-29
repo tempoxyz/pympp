@@ -20,11 +20,13 @@ Example:
 from mpay.server.decorator import requires_payment
 from mpay.server.intent import Intent, VerificationError, intent
 from mpay.server.method import Method
+from mpay.server.mpay import Mpay
 from mpay.server.verify import verify_or_challenge
 
 __all__ = [
     "Intent",
     "Method",
+    "Mpay",
     "VerificationError",
     "intent",
     "requires_payment",
