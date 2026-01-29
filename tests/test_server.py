@@ -167,6 +167,50 @@ class TestVerificationError:
                 secret_key="test-secret",
             )
 
+    @pytest.mark.asyncio
+    async def test_raises_error_for_failed_receipt(self) -> None:
+        """Per IETF spec, failed receipts should raise VerificationError."""
+
+        @intent(name="charge")
+        async def failing_receipt_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.failed("tx-reverted-123")
+
+        credential = Credential(id="test", payload={})
+        auth_header = credential.to_authorization()
+
+        with pytest.raises(VerificationError, match="payment failed: tx-reverted-123"):
+            await verify_or_challenge(
+                authorization=auth_header,
+                intent=failing_receipt_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+            )
+
+    @pytest.mark.asyncio
+    async def test_returns_receipt_for_success(self) -> None:
+        """Successful receipts should be returned normally."""
+
+        @intent(name="charge")
+        async def success_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-success-456")
+
+        credential = Credential(id="test", payload={})
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=success_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, tuple)
+        cred, receipt = result
+        assert receipt.status == "success"
+        assert receipt.reference == "tx-success-456"
+
 
 class MockRequest:
     """Mock request object for testing."""
