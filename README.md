@@ -16,28 +16,31 @@ Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["
 
 ```python
 from mpay import Challenge
-from mpay.server import verify_or_challenge
-from mpay.methods.tempo import ChargeIntent
+from mpay.server import Mpay
+from mpay.methods.tempo import TempoMethod
 
-intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
+# Create handler with bound secret_key
+payment = Mpay(
+    method=TempoMethod(rpc_url="https://rpc.tempo.xyz"),
+    realm="api.example.com",
+    secret_key="my-server-secret",
+)
 
 async def handler(request):
-    result = await verify_or_challenge(
+    result = await payment.charge(
         authorization=request.headers.get("Authorization"),
-        intent=intent,
         request={
             "amount": "1000000",
             "currency": "0x20c0000000000000000000000000000000000001",
             "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             "expires": "2030-01-20T12:00:00Z",
         },
-        realm="api.example.com",
     )
 
     if isinstance(result, Challenge):
         return Response(
             status=402,
-            headers={"WWW-Authenticate": result.to_www_authenticate("api.example.com")},
+            headers={"WWW-Authenticate": result.to_www_authenticate(payment.realm)},
         )
 
     credential, receipt = result
@@ -188,6 +191,7 @@ intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
     intent=intent,
     request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 async def get_resource(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "paid content", "payer": credential.source}
@@ -200,6 +204,7 @@ With dynamic request params:
     intent=intent,
     request=lambda req: {"amount": req.query_params.get("price", "1000"), ...},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "..."}
@@ -224,6 +229,7 @@ result = await verify_or_challenge(
     intent=intent,
     request={"amount": "1000", ...},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 
 if isinstance(result, Challenge):

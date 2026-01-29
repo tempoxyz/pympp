@@ -4,10 +4,11 @@ import os
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from mpay import Credential, Receipt
-from mpay.methods.tempo import ChargeIntent
-from mpay.server import requires_payment
+from mpay import Challenge, Credential, Receipt
+from mpay.methods.tempo import TempoMethod
+from mpay.server import Mpay
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -18,12 +19,18 @@ RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
 DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION", "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 )
+SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
 ALPHA_USD = "0x20c0000000000000000000000000000000000001"
 
-intent = ChargeIntent(rpc_url=RPC_URL)
+# Create payment handler with bound secret_key
+payment = Mpay(
+    method=TempoMethod(rpc_url=RPC_URL),
+    realm="localhost:8000",
+    secret_key=SECRET_KEY,
+)
 
 
-def get_payment_request(_request=None):
+def get_payment_request():
     """Build payment request with fresh expiration."""
     expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     if expires.endswith("+00:00"):
@@ -44,9 +51,21 @@ async def free_endpoint():
 
 
 @app.get("/paid")
-@requires_payment(intent=intent, request=get_payment_request, realm="localhost:8000")
-async def paid_endpoint(request: Request, credential: Credential, receipt: Receipt):
+async def paid_endpoint(request: Request):
     """A paid endpoint that requires payment to access."""
+    result = await payment.charge(
+        authorization=request.headers.get("Authorization"),
+        request=get_payment_request(),
+    )
+
+    if isinstance(result, Challenge):
+        return JSONResponse(
+            status_code=402,
+            content={"error": "Payment required"},
+            headers={"WWW-Authenticate": result.to_www_authenticate(payment.realm)},
+        )
+
+    credential, receipt = result
     return {
         "message": "This is paid content!",
         "payer": credential.source,

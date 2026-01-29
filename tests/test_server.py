@@ -29,6 +29,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
 
         assert isinstance(result, Challenge)
@@ -49,6 +50,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
 
         assert isinstance(result, Challenge)
@@ -71,6 +73,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
 
         assert isinstance(result, tuple)
@@ -116,6 +119,7 @@ class TestClassBasedIntent:
             intent=MyIntent(),
             request={},
             realm="test",
+            secret_key="test-secret",
             method="custom-method",
         )
 
@@ -138,6 +142,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
 
         assert isinstance(result, Challenge)
@@ -159,6 +164,7 @@ class TestVerificationError:
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
+                secret_key="test-secret",
             )
 
 
@@ -189,6 +195,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid content"}
@@ -219,6 +226,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
@@ -248,6 +256,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request=lambda req: {"amount": req.query_amount},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
@@ -273,6 +282,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
@@ -297,6 +307,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
@@ -323,6 +334,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
         )
         async def my_handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             """My handler docstring."""
@@ -343,6 +355,7 @@ class TestRequiresPayment:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key="test-secret",
             method="custom-method",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
