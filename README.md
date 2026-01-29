@@ -19,7 +19,7 @@ from mpay import Challenge
 from mpay.server import Mpay
 from mpay.methods.tempo import TempoMethod
 
-# Create handler with bound secret_key (matches TypeScript pattern)
+# Create handler with bound secret_key
 payment = Mpay(
     method=TempoMethod(rpc_url="https://rpc.tempo.xyz"),
     realm="api.example.com",
