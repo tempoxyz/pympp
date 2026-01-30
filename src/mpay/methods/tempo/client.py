@@ -90,16 +90,20 @@ class TempoMethod:
             else:
                 nonce_key = int(nonce_key)
 
-        raw_tx = await self._build_tempo_transfer(
+        method_details = request.get("methodDetails", {})
+        memo = method_details.get("memo") if isinstance(method_details, dict) else None
+
+        raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
             recipient=request["recipient"],
             nonce_key=nonce_key,
+            memo=memo,
         )
         return Credential(
             id=challenge.id,
             payload={"type": "transaction", "signature": raw_tx},
-            source=f"did:pkh:eip155:1:{self.account.address}",
+            source=f"did:pkh:eip155:{chain_id}:{self.account.address}",
         )
 
     async def _build_tempo_transfer(
@@ -108,7 +112,8 @@ class TempoMethod:
         currency: str,
         recipient: str,
         nonce_key: int = 0,
-    ) -> str:
+        memo: str | None = None,
+    ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
         Creates a TempoTransaction (type 0x76) with fee token set to the
@@ -119,9 +124,10 @@ class TempoMethod:
             currency: TIP-20 token contract address.
             recipient: Recipient address.
             nonce_key: 2D nonce key for parallel transaction streams (default: 0).
+            memo: Optional 32-byte memo (hex string) for transferWithMemo.
 
         Returns:
-            Raw signed transaction hex (0x76-prefixed).
+            Tuple of (raw signed transaction hex, chain ID).
         """
         import httpx
         from pytempo import Call, TempoTransaction
@@ -129,7 +135,10 @@ class TempoMethod:
         if self.account is None:
             raise ValueError("No account configured")
 
-        transfer_data = self._encode_transfer(recipient, int(amount))
+        if memo:
+            transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
+        else:
+            transfer_data = self._encode_transfer(recipient, int(amount))
 
         async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
             chain_resp = await client.post(
@@ -185,14 +194,29 @@ class TempoMethod:
             )
 
             signed_tx = tx.sign(self.account.private_key)
-            return "0x" + signed_tx.encode().hex()
+            return "0x" + signed_tx.encode().hex(), chain_id
 
     def _encode_transfer(self, to: str, amount: int) -> str:
-        """Encode a TIP-20 transfer call."""
+        """Encode a TIP-20 transfer call.
+
+        Selector: 0xa9059cbb = keccak256("transfer(address,uint256)")[:4]
+        """
         selector = "a9059cbb"
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         return f"0x{selector}{to_padded}{amount_padded}"
+
+    def _encode_transfer_with_memo(self, to: str, amount: int, memo: str) -> str:
+        """Encode a TIP-20 transferWithMemo call.
+
+        Selector: 0xb452ef41 = keccak256("transferWithMemo(address,uint256,bytes32)")[:4]
+        """
+        selector = "b452ef41"
+        to_padded = to[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        memo_clean = memo[2:] if memo.startswith("0x") else memo
+        memo_padded = memo_clean.lower().zfill(64)
+        return f"0x{selector}{to_padded}{amount_padded}{memo_padded}"
 
 
 def tempo(
