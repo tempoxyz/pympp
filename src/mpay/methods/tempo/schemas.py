@@ -13,6 +13,7 @@ class MethodDetails(BaseModel):
     chainId: int = 42431
     feePayer: bool = False
     feePayerUrl: str | None = None
+    memo: str | None = None
 
 
 class ChargeRequest(BaseModel):

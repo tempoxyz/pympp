@@ -43,6 +43,14 @@ DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 MAX_RECEIPT_RETRY_ATTEMPTS = 20
 RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
+# TIP-20 function selectors
+TRANSFER_SELECTOR = "a9059cbb"  # keccak256("transfer(address,uint256)")[:4]
+TRANSFER_WITH_MEMO_SELECTOR = "b452ef41"  # keccak256("transferWithMemo(...)")[:4]
+
+# Event topic hashes
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+TRANSFER_WITH_MEMO_TOPIC = "0x97e41cc1bb1f9e89199e4cb296a2ce65e20810e029dbbf3e3b46096f31e4fb48"
+
 
 class ChargeIntent:
     """Tempo charge intent for one-time payments.
@@ -195,7 +203,7 @@ class ChargeIntent:
         request: ChargeRequest,
         expected_sender: str | None = None,
     ) -> bool:
-        """Check if receipt contains matching Transfer logs.
+        """Check if receipt contains matching Transfer or TransferWithMemo logs.
 
         Args:
             receipt: Transaction receipt from RPC.
@@ -204,18 +212,19 @@ class ChargeIntent:
                 Transfer log matches this address (for payer identity verification).
 
         Returns:
-            True if a matching Transfer log is found, False otherwise.
+            True if a matching Transfer/TransferWithMemo log is found, False otherwise.
         """
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        expected_memo = request.methodDetails.memo
 
         for log in receipt.get("logs", []):
             if log.get("address", "").lower() != request.currency.lower():
                 continue
 
             topics = log.get("topics", [])
-            if len(topics) < 3 or topics[0] != transfer_topic:
+            if len(topics) < 3:
                 continue
 
+            event_topic = topics[0]
             from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
 
@@ -225,11 +234,27 @@ class ChargeIntent:
             if expected_sender and from_address.lower() != expected_sender.lower():
                 continue
 
-            data = log.get("data", "0x")
-            if len(data) >= 66:
-                amount = int(data, 16)
-                if amount == int(request.amount):
+            if expected_memo:
+                if event_topic != TRANSFER_WITH_MEMO_TOPIC:
+                    continue
+                data = log.get("data", "0x")
+                if len(data) < 130:
+                    continue
+                amount = int(data[2:66], 16)
+                memo = "0x" + data[66:130]
+                memo_clean = expected_memo.lower()
+                if not memo_clean.startswith("0x"):
+                    memo_clean = "0x" + memo_clean
+                if amount == int(request.amount) and memo.lower() == memo_clean:
                     return True
+            else:
+                if event_topic != TRANSFER_TOPIC:
+                    continue
+                data = log.get("data", "0x")
+                if len(data) >= 66:
+                    amount = int(data, 16)
+                    if amount == int(request.amount):
+                        return True
 
         return False
 
@@ -240,10 +265,12 @@ class ChargeIntent:
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
-        For sponsored transactions (methodDetails.feePayer=True), forwards the
-        client-signed transaction to the fee payer service which adds its signature
-        and broadcasts. For regular transactions, submits directly to the RPC.
+        Pre-validates the transaction contains the expected TIP-20 transfer call
+        before broadcasting. For sponsored transactions (methodDetails.feePayer=True),
+        forwards to fee payer service. For regular transactions, submits directly.
         """
+        self._validate_transaction_payload(payload.signature, request)
+
         client = await self._get_client()
 
         if request.methodDetails.feePayer:
@@ -285,10 +312,7 @@ class ChargeIntent:
         if not tx_hash:
             raise VerificationError("No transaction hash returned")
 
-        print(f"[mpay] Transaction submitted: {tx_hash}")
-
         receipt_data = None
-        # Check immediately first, then retry with short delays (receipts available in ~400ms)
         for attempt in range(MAX_RECEIPT_RETRY_ATTEMPTS):
             receipt_response = await client.post(
                 self.rpc_url,
@@ -307,10 +331,8 @@ class ChargeIntent:
 
             receipt_data = receipt_result.get("result")
             if receipt_data:
-                print(f"[mpay] Receipt found on attempt {attempt + 1}")
                 break
 
-            # Wait between retries (don't sleep after the last attempt)
             if attempt < MAX_RECEIPT_RETRY_ATTEMPTS - 1:
                 await asyncio.sleep(RECEIPT_RETRY_DELAY_SECONDS)
 
@@ -326,3 +348,105 @@ class ChargeIntent:
             )
 
         return Receipt.success(tx_hash)
+
+    def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
+        """Validate that a signed transaction contains the expected transfer call.
+
+        Deserializes the transaction and checks that it contains a call to the
+        expected currency contract with the correct function selector and parameters.
+
+        This is a security enhancement to reject malicious transactions before
+        broadcasting. If decoding fails, we skip validation and rely on post-broadcast
+        log verification as the fallback.
+
+        Args:
+            signature: The signed transaction hex (0x76-prefixed for Tempo transactions).
+            request: The charge request with expected amount/currency/recipient/memo.
+
+        Raises:
+            VerificationError: If the transaction decodes successfully but doesn't
+                match expected parameters.
+        """
+        try:
+            import rlp
+        except ImportError:
+            return
+
+        try:
+            tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
+        except ValueError:
+            return
+
+        if not tx_bytes or tx_bytes[0] != 0x76:
+            return
+
+        try:
+            decoded = rlp.decode(tx_bytes[1:])
+        except Exception:
+            return
+
+        if not isinstance(decoded, list) or len(decoded) < 5:
+            return
+
+        calls_data = decoded[4] if len(decoded) > 4 else []
+        if not calls_data:
+            raise VerificationError("Transaction contains no calls")
+
+        expected_memo = request.methodDetails.memo
+        expected_selector = TRANSFER_WITH_MEMO_SELECTOR if expected_memo else TRANSFER_SELECTOR
+
+        for call_item in calls_data:
+            if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
+                continue
+
+            call_to_bytes = call_item[0]
+            call_data_bytes = call_item[2]
+
+            if not call_to_bytes or not call_data_bytes:
+                continue
+
+            call_to = (
+                "0x" + call_to_bytes.hex()
+                if isinstance(call_to_bytes, bytes)
+                else str(call_to_bytes)
+            )
+            call_data = (
+                call_data_bytes.hex()
+                if isinstance(call_data_bytes, bytes)
+                else str(call_data_bytes)
+            )
+
+            if call_to.lower() != request.currency.lower():
+                continue
+
+            if len(call_data) < 8:
+                continue
+
+            selector = call_data[:8].lower()
+            if selector != expected_selector:
+                continue
+
+            if len(call_data) < 136:
+                continue
+            decoded_to = "0x" + call_data[32:72]
+            decoded_amount = int(call_data[72:136], 16)
+
+            if decoded_to.lower() != request.recipient.lower():
+                continue
+
+            if decoded_amount != int(request.amount):
+                continue
+
+            if expected_memo:
+                if len(call_data) < 200:
+                    continue
+                decoded_memo = "0x" + call_data[136:200]
+                memo_clean = expected_memo.lower()
+                if not memo_clean.startswith("0x"):
+                    memo_clean = "0x" + memo_clean
+                if decoded_memo.lower() != memo_clean:
+                    continue
+
+            return
+
+        raise VerificationError("Invalid transaction: no matching payment call found")
