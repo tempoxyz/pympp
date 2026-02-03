@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mpay import Challenge, Credential
+from mpay.methods.tempo._defaults import RPC_URL
 from mpay.methods.tempo.intents import ChargeIntent
 
 if TYPE_CHECKING:
@@ -45,7 +46,7 @@ class TempoMethod:
     name: str = "tempo"
     account: TempoAccount | None = None
     root_account: str | None = None
-    rpc_url: str = "https://rpc.tempo.xyz"
+    rpc_url: str = RPC_URL
     _intents: dict[str, Intent] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -238,7 +239,7 @@ class TempoMethod:
 
 def tempo(
     account: TempoAccount | None = None,
-    rpc_url: str = "https://rpc.tempo.xyz",
+    rpc_url: str = RPC_URL,
     root_account: str | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
