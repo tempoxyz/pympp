@@ -154,6 +154,68 @@ class TestPaymentTransport:
         transport = PaymentTransport(methods=[], inner=inner)
         await transport.aclose()
 
+    @pytest.mark.asyncio
+    async def test_skips_expired_challenge(self) -> None:
+        """Should return 402 without paying if challenge is expired."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires="2020-01-01T00:00:00Z",  # Expired
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+            ]
+        )
+
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        request = httpx.Request("GET", "https://example.com")
+        response = await transport.handle_async_request(request)
+
+        assert response.status_code == 402
+        assert len(inner.requests) == 1
+        method.create_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handles_multiple_www_authenticate_headers(self) -> None:
+        """Should find matching method across multiple WWW-Authenticate headers."""
+        tempo_challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        tempo_auth = tempo_challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers=[
+                        ("www-authenticate", "Bearer realm=test"),
+                        ("www-authenticate", tempo_auth),
+                    ],
+                ),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        request = httpx.Request("GET", "https://example.com")
+        response = await transport.handle_async_request(request)
+
+        assert response.status_code == 200
+        assert len(inner.requests) == 2
+        method.create_credential.assert_called_once()
+
 
 class TestClient:
     @pytest.mark.asyncio

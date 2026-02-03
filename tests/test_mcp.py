@@ -578,7 +578,7 @@ class TestVerifyOrChallenge:
                 realm="api.example.com",
             )
 
-        assert exc_info.value.detail == "Payment verification failed"
+        assert exc_info.value.detail == "Payment failed"
 
 
 class TestCreateChallenge:
