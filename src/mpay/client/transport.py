@@ -9,12 +9,16 @@ Implements automatic 402 Payment Required handling by:
 
 from __future__ import annotations
 
+import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
 from mpay import Challenge, Credential
 from mpay._parsing import ParseError
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -65,22 +69,39 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         if response.status_code != 402:
             return response
 
-        www_auth = response.headers.get("www-authenticate")
-        if not www_auth or not www_auth.lower().startswith("payment "):
-            return response
-
         await response.aread()
 
-        try:
-            challenge = Challenge.from_www_authenticate(www_auth)
-        except ParseError:
+        # Handle multiple WWW-Authenticate headers (per RFC 9110)
+        www_auth_headers = response.headers.get_list("www-authenticate")
+
+        challenge = None
+        matched_method = None
+        for header in www_auth_headers:
+            if not header.lower().startswith("payment "):
+                continue
+            try:
+                parsed = Challenge.from_www_authenticate(header)
+                if parsed.method in self._methods:
+                    challenge = parsed
+                    matched_method = self._methods[parsed.method]
+                    break
+            except ParseError:
+                continue
+
+        if not challenge or not matched_method:
             return response
 
-        method = self._methods.get(challenge.method)
-        if not method:
-            return response
+        # Check expiry before paying (client-side guardrail)
+        if challenge.expires:
+            try:
+                expires_dt = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
+                if expires_dt < datetime.now(UTC):
+                    logger.warning("Challenge expired at %s, not paying", challenge.expires)
+                    return response
+            except ValueError:
+                pass  # If we can't parse, let server validate
 
-        credential = await method.create_credential(challenge)
+        credential = await matched_method.create_credential(challenge)
         auth_header = credential.to_authorization()
 
         headers = httpx.Headers(request.headers)

@@ -31,14 +31,14 @@ from datetime import timedelta
 from functools import wraps
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from mpay.extensions.mcp.constants import META_CREDENTIAL
-from mpay.extensions.mcp.errors import (
-    MalformedCredentialError,
-    PaymentRequiredError,
-    PaymentVerificationError,
+from mpay.extensions.mcp.errors import PaymentRequiredError
+from mpay.extensions.mcp.types import MCPChallenge
+from mpay.extensions.mcp.verify import (
+    DEFAULT_CHALLENGE_TTL,
 )
-from mpay.extensions.mcp.types import MCPCredential, MCPReceipt
-from mpay.extensions.mcp.verify import DEFAULT_CHALLENGE_TTL, create_challenge
+from mpay.extensions.mcp.verify import (
+    verify_or_challenge as mcp_verify_or_challenge,
+)
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent
@@ -115,74 +115,31 @@ def requires_payment(
     ) -> Callable[P, Awaitable[R]]:
         @wraps(handler)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            meta = kwargs.pop("_meta", None) or {}
+            meta = kwargs.pop("_meta", None)
 
             if callable(request):
                 request_params = request(*args, **kwargs)
             else:
                 request_params = request
 
-            credential_data = meta.get(META_CREDENTIAL)
-
-            if credential_data is None:
-                challenge = create_challenge(
-                    method=method_name,
-                    intent_name=intent.name,
-                    request=request_params,
-                    realm=realm,
-                    expires_in=expires_in,
-                    description=description,
-                )
-                raise PaymentRequiredError(challenges=[challenge])
-
-            try:
-                mcp_credential = MCPCredential.from_dict(credential_data)
-            except (KeyError, TypeError) as e:
-                raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
-
-            from mpay.server.intent import VerificationError
-
-            core_credential = mcp_credential.to_core()
-
-            try:
-                core_receipt = await intent.verify(core_credential, request_params)
-            except VerificationError as e:
-                challenge = create_challenge(
-                    method=method_name,
-                    intent_name=intent.name,
-                    request=request_params,
-                    realm=realm,
-                    expires_in=expires_in,
-                    description=description,
-                )
-                raise PaymentVerificationError(
-                    challenges=[challenge],
-                    reason="verification-failed",
-                    detail=str(e),
-                ) from e
-
-            mcp_receipt = MCPReceipt.from_core(
-                receipt=core_receipt,
-                challenge_id=mcp_credential.challenge.id,
-                method=mcp_credential.challenge.method,
-                settlement=_extract_settlement(request_params),
+            result = await mcp_verify_or_challenge(
+                meta=meta,
+                intent=intent,
+                request=request_params,
+                realm=realm,
+                method=method_name,
+                expires_in=expires_in,
+                description=description,
             )
 
-            kwargs["credential"] = mcp_credential
-            kwargs["receipt"] = mcp_receipt
+            if isinstance(result, MCPChallenge):
+                raise PaymentRequiredError(challenges=[result])
 
+            credential, receipt = result
+            kwargs["credential"] = credential
+            kwargs["receipt"] = receipt
             return await handler(*args, **kwargs)
 
         return wrapper
 
     return decorator
-
-
-def _extract_settlement(request: dict[str, Any]) -> dict[str, Any] | None:
-    """Extract settlement info from request if available."""
-    settlement: dict[str, Any] = {}
-    if "amount" in request:
-        settlement["amount"] = request["amount"]
-    if "currency" in request:
-        settlement["currency"] = request["currency"]
-    return settlement if settlement else None
