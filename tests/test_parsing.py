@@ -163,15 +163,6 @@ class TestReceipt:
         assert parsed.timestamp == receipt.timestamp
         assert parsed.reference == receipt.reference
 
-    def test_roundtrip_failed(self) -> None:
-        """Failed receipt should roundtrip."""
-        receipt = Receipt.failed("0x000")
-
-        header = receipt.to_payment_receipt()
-        parsed = Receipt.from_payment_receipt(header)
-
-        assert parsed.status == "failed"
-
     def test_success_factory(self) -> None:
         """Receipt.success() should create success receipt with timestamp."""
         receipt = Receipt.success("0xabc123")
@@ -179,13 +170,6 @@ class TestReceipt:
         assert receipt.reference == "0xabc123"
         assert isinstance(receipt.timestamp, datetime)
         assert receipt.timestamp.tzinfo is not None
-
-    def test_failed_factory(self) -> None:
-        """Receipt.failed() should create failed receipt with timestamp."""
-        receipt = Receipt.failed("0xdef456")
-        assert receipt.status == "failed"
-        assert receipt.reference == "0xdef456"
-        assert isinstance(receipt.timestamp, datetime)
 
     def test_parse_invalid_status(self) -> None:
         """Should reject invalid status values."""

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
-from mpay.server.intent import VerificationError
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent
@@ -84,11 +83,6 @@ async def verify_or_challenge(
         return _create_challenge(method_name, intent.name, request, realm, secret_key)
 
     receipt: Receipt = await intent.verify(credential, request)
-
-    # Per IETF spec, synchronous flows MUST NOT return 200 with a failed receipt.
-    # Convert failed receipts to VerificationError.
-    if receipt.status == "failed":
-        raise VerificationError(f"payment failed: {receipt.reference}")
 
     return (credential, receipt)
 

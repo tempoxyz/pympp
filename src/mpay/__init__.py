@@ -313,7 +313,7 @@ class Receipt:
         )
     """
 
-    status: Literal["success", "failed"]
+    status: Literal["success"]
     timestamp: datetime
     reference: str
 
@@ -331,15 +331,6 @@ class Receipt:
         """Create a success receipt with current timestamp."""
         return cls(
             status="success",
-            timestamp=timestamp or datetime.now(UTC),
-            reference=reference,
-        )
-
-    @classmethod
-    def failed(cls, reference: str, timestamp: datetime | None = None) -> Receipt:
-        """Create a failed receipt with current timestamp."""
-        return cls(
-            status="failed",
             timestamp=timestamp or datetime.now(UTC),
             reference=reference,
         )

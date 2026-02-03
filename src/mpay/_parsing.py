@@ -281,7 +281,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         raise ParseError(f"Receipt missing required fields: {missing}")
 
     status = data["status"]
-    if status not in ("success", "failed"):
+    if status != "success":
         raise ParseError("Invalid receipt status")
 
     timestamp = _parse_timestamp(str(data["timestamp"]))
