@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
-from mpay.server.intent import VerificationError
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent
