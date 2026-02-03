@@ -100,8 +100,10 @@ class TempoMethod:
             nonce_key=nonce_key,
             memo=memo,
         )
+
+        chain_id = await self._get_chain_id()
         return Credential(
-            id=challenge.id,
+            challenge=challenge.to_echo(),
             payload={"type": "transaction", "signature": raw_tx},
             source=f"did:pkh:eip155:{chain_id}:{self.account.address}",
         )
@@ -217,6 +219,21 @@ class TempoMethod:
         memo_clean = memo[2:] if memo.startswith("0x") else memo
         memo_padded = memo_clean.lower().zfill(64)
         return f"0x{selector}{to_padded}{amount_padded}{memo_padded}"
+
+    async def _get_chain_id(self) -> int:
+        """Fetch the chain ID from the RPC endpoint."""
+        import httpx
+
+        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+            chain_resp = await client.post(
+                self.rpc_url,
+                json={"jsonrpc": "2.0", "method": "eth_chainId", "params": [], "id": 1},
+            )
+            chain_resp.raise_for_status()
+            chain_result = chain_resp.json()
+            if "error" in chain_result:
+                raise TransactionError("Failed to fetch chain ID")
+            return int(chain_result["result"], 16)
 
 
 def tempo(

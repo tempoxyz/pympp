@@ -5,6 +5,7 @@ import pytest
 from mpay import Challenge, Credential, Receipt
 from mpay.server import intent, requires_payment, verify_or_challenge
 from mpay.server.intent import VerificationError
+from tests import make_credential
 
 try:
     from starlette.responses import Response as StarletteResponse
@@ -61,11 +62,11 @@ class TestVerifyOrChallenge:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            assert credential.id == "test-id"
+            assert credential.challenge.id == "test-id"
             assert credential.payload == {"hash": "0xabc"}
             return Receipt.success("0x123")
 
-        credential = Credential(id="test-id", payload={"hash": "0xabc"})
+        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-id")
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -78,7 +79,7 @@ class TestVerifyOrChallenge:
 
         assert isinstance(result, tuple)
         cred, receipt = result
-        assert cred.id == "test-id"
+        assert cred.challenge.id == "test-id"
         assert receipt.status == "success"
 
 
@@ -89,12 +90,12 @@ class TestFunctionalIntent:
 
         @intent(name="subscribe")
         async def my_subscribe(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success(f"sub-{credential.id}")
+            return Receipt.success(f"sub-{credential.challenge.id}")
 
         assert my_subscribe.name == "subscribe"
 
         receipt = await my_subscribe.verify(
-            Credential(id="test", payload={}),
+            make_credential(payload={}, challenge_id="test"),
             {"plan": "premium"},
         )
         assert receipt.reference == "sub-test"
@@ -111,7 +112,7 @@ class TestClassBasedIntent:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success("custom-ref")
 
-        credential = Credential(id="test", payload={})
+        credential = make_credential(payload={}, challenge_id="test")
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -155,7 +156,7 @@ class TestVerificationError:
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
             raise VerificationError("Payment verification failed")
 
-        credential = Credential(id="test", payload={})
+        credential = make_credential(payload={}, challenge_id="test")
         auth_header = credential.to_authorization()
 
         with pytest.raises(VerificationError, match="Payment verification failed"):
@@ -175,7 +176,7 @@ class TestVerificationError:
         async def failing_receipt_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.failed("tx-reverted-123")
 
-        credential = Credential(id="test", payload={})
+        credential = make_credential(payload={}, challenge_id="test")
         auth_header = credential.to_authorization()
 
         with pytest.raises(VerificationError, match="payment failed: tx-reverted-123"):
@@ -195,7 +196,7 @@ class TestVerificationError:
         async def success_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-success-456")
 
-        credential = Credential(id="test", payload={})
+        credential = make_credential(payload={}, challenge_id="test")
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -275,11 +276,11 @@ class TestRequiresPayment:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
-                "credential_id": credential.id,
+                "credential_id": credential.challenge.id,
                 "receipt_ref": receipt.reference,
             }
 
-        credential = Credential(id="test-cred-id", payload={"hash": "0xabc"})
+        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-cred-id")
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -308,7 +309,7 @@ class TestRequiresPayment:
         class RequestWithQuery(MockRequest):
             query_amount = "2000"
 
-        credential = Credential(id="test", payload={})
+        credential = make_credential(payload={}, challenge_id="test")
         request = RequestWithQuery(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -331,9 +332,9 @@ class TestRequiresPayment:
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
-            return {"credential_id": credential.id}
+            return {"credential_id": credential.challenge.id}
 
-        credential = Credential(id="django-cred", payload={})
+        credential = make_credential(payload={}, challenge_id="django-cred")
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 

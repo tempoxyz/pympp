@@ -181,7 +181,10 @@ class TestMCPCredential:
         )
         core = mcp_credential.to_core()
         assert isinstance(core, Credential)
-        assert core.id == "ch_abc"
+        assert core.challenge.id == "ch_abc"
+        assert core.challenge.realm == "api.example.com"
+        assert core.challenge.method == "tempo"
+        assert core.challenge.intent == "charge"
         assert core.payload == {"signature": "0xabc"}
         assert core.source == "0x1234"
 

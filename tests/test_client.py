@@ -6,8 +6,9 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpay import Challenge, Credential
+from mpay import Challenge
 from mpay.client import Client, PaymentTransport, get, post, request
+from tests import make_credential
 
 
 class MockMethod:
@@ -17,9 +18,9 @@ class MockMethod:
 
     def __init__(self) -> None:
         self.create_credential = AsyncMock(
-            return_value=Credential(
-                id="test-id",
+            return_value=make_credential(
                 payload={"hash": "0xabc"},
+                challenge_id="test-id",
             )
         )
 

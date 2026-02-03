@@ -134,6 +134,8 @@ def parse_www_authenticate(header: str) -> Challenge:
         method=method,
         intent=intent,
         request=request,
+        realm=realm,
+        request_b64=request_b64,
         digest=params.get("digest"),
         expires=params.get("expires"),
         description=params.get("description"),
@@ -176,11 +178,11 @@ def parse_authorization(header: str) -> Credential:
         Payment <base64-credential>
 
     The credential payload is a base64-encoded JSON object with:
-        - id: Challenge identifier (matches the original challenge)
+        - challenge: ChallengeEcho object containing id, realm, method, intent, request
         - payload: Method-specific credential data
         - source: Optional payer DID
     """
-    from mpay import Credential
+    from mpay import ChallengeEcho, Credential
 
     header = header.strip()
 
@@ -190,13 +192,28 @@ def parse_authorization(header: str) -> Credential:
     credential_b64 = header[8:].strip()
     data = _b64_decode(credential_b64)
 
-    if "id" not in data:
-        raise ParseError("Credential missing required field: id")
+    if "challenge" not in data:
+        raise ParseError("Credential missing required field: challenge")
     if "payload" not in data:
         raise ParseError("Credential missing required field: payload")
 
+    challenge_data = data["challenge"]
+    if not isinstance(challenge_data, dict):
+        raise ParseError("Credential challenge must be an object")
+    if "id" not in challenge_data:
+        raise ParseError("Credential challenge missing required field: id")
+
+    echo = ChallengeEcho(
+        id=str(challenge_data["id"]),
+        realm=str(challenge_data.get("realm", "")),
+        method=str(challenge_data.get("method", "")),
+        intent=str(challenge_data.get("intent", "")),
+        request=str(challenge_data.get("request", "")),
+        expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
+    )
+
     return Credential(
-        id=str(data["id"]),
+        challenge=echo,
         payload=data["payload"],
         source=str(data["source"]) if data.get("source") else None,
     )
@@ -207,9 +224,24 @@ def format_authorization(credential: Credential) -> str:
 
     Output format:
         Payment <base64-credential>
+
+    The credential is a JSON object with:
+        - challenge: ChallengeEcho with id, realm, method, intent, request, expires
+        - payload: Method-specific credential data
+        - source: Optional payer DID
     """
+    challenge_dict: dict[str, Any] = {
+        "id": credential.challenge.id,
+        "realm": credential.challenge.realm,
+        "method": credential.challenge.method,
+        "intent": credential.challenge.intent,
+        "request": credential.challenge.request,
+    }
+    if credential.challenge.expires:
+        challenge_dict["expires"] = credential.challenge.expires
+
     payload: dict[str, Any] = {
-        "id": credential.id,
+        "challenge": challenge_dict,
         "payload": credential.payload,
     }
     if credential.source:
