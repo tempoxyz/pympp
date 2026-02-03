@@ -264,7 +264,7 @@ class TestChargeIntent:
 
     @pytest.mark.asyncio
     async def test_verify_hash_tx_failed(self) -> None:
-        """Should return failed receipt for failed transaction."""
+        """Should raise VerificationError for failed transaction."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -278,17 +278,16 @@ class TestChargeIntent:
         intent._http_client = mock_client
 
         credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000",
-                "currency": "0x1234567890123456789012345678901234567890",
-                "recipient": "0x4567890123456789012345678901234567890123",
-                "expires": future,
-            },
-        )
-
-        assert receipt.status == "failed"
+        with pytest.raises(VerificationError, match="Transaction reverted"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                    "expires": future,
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_verify_hash_no_matching_logs(self) -> None:

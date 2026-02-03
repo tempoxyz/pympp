@@ -85,11 +85,6 @@ async def verify_or_challenge(
 
     receipt: Receipt = await intent.verify(credential, request)
 
-    # Per IETF spec, synchronous flows MUST NOT return 200 with a failed receipt.
-    # Convert failed receipts to VerificationError.
-    if receipt.status == "failed":
-        raise VerificationError(f"payment failed: {receipt.reference}")
-
     return (credential, receipt)
 
 

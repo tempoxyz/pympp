@@ -214,7 +214,7 @@ class MCPReceipt:
         )
     """
 
-    status: Literal["success", "failed"]
+    status: Literal["success"]
     challenge_id: str
     method: str
     timestamp: str

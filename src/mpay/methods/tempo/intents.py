@@ -188,7 +188,7 @@ class ChargeIntent:
             raise VerificationError("Transaction not found")
 
         if receipt_data.get("status") != "0x1":
-            return Receipt.failed(payload.hash)
+            raise VerificationError("Transaction reverted")
 
         if not self._verify_transfer_logs(receipt_data, request):
             raise VerificationError(
@@ -340,7 +340,7 @@ class ChargeIntent:
             raise VerificationError("Transaction receipt not found after retries")
 
         if receipt_data.get("status") != "0x1":
-            return Receipt.failed(tx_hash)
+            raise VerificationError("Transaction reverted")
 
         if not self._verify_transfer_logs(receipt_data, request):
             raise VerificationError(
