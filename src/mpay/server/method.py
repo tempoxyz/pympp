@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from mpay import Challenge, Credential
@@ -16,6 +16,7 @@ class Method(Protocol):
     A method represents a payment network (e.g., Tempo, Stripe) and provides:
     - Named intents for different payment operations
     - Client-side credential creation
+    - Optional request transformation
 
     Example:
         class StripeMethod:
@@ -45,3 +46,27 @@ class Method(Protocol):
             A credential that satisfies the challenge.
         """
         ...
+
+
+def transform_request(
+    method: Method,
+    request: dict[str, Any],
+    credential: Credential | None,
+) -> dict[str, Any]:
+    """Transform request using method's transform_request if available.
+
+    This hook allows methods to modify the request before challenge creation,
+    with access to the credential (if present) for conditional logic like
+    feePayer sponsorship.
+
+    Args:
+        method: The payment method.
+        request: The original request parameters.
+        credential: The parsed credential, or None if not provided.
+
+    Returns:
+        The transformed request.
+    """
+    if hasattr(method, "transform_request"):
+        return method.transform_request(request, credential)
+    return request

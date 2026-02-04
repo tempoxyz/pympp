@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
+from mpay._parsing import ParseError
+from mpay.server.method import transform_request
 from mpay.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
@@ -46,6 +48,7 @@ class Mpay:
         method: Method,
         realm: str,
         secret_key: str,
+        defaults: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the payment handler.
 
@@ -54,10 +57,12 @@ class Mpay:
             realm: Server realm for WWW-Authenticate header.
             secret_key: Server secret for HMAC-bound challenge IDs.
                 Enables stateless challenge verification.
+            defaults: Default request values merged with per-call request params.
         """
         self.method = method
         self.realm = realm
         self.secret_key = secret_key
+        self.defaults = defaults or {}
 
     async def charge(
         self,
@@ -83,37 +88,21 @@ class Mpay:
         if intent is None:
             raise ValueError(f"Method {self.method.name} does not support charge intent")
 
-        return await verify_or_challenge(
-            authorization=authorization,
-            intent=intent,
-            request=request,
-            realm=self.realm,
-            secret_key=self.secret_key,
-            method=self.method.name,
-        )
+        merged_request = {**self.defaults, **request}
 
-    async def authorize(
-        self,
-        authorization: str | None,
-        request: dict[str, Any],
-    ) -> Challenge | tuple[Credential, Receipt]:
-        """Handle an authorize intent.
+        credential: Credential | None = None
+        if authorization and authorization.lower().startswith("payment "):
+            try:
+                credential = Credential.from_authorization(authorization)
+            except ParseError:
+                pass
 
-        Args:
-            authorization: The Authorization header value (or None).
-            request: Authorization request parameters.
-
-        Returns:
-            Challenge if payment required, or (Credential, Receipt) if verified.
-        """
-        intent = self.method.intents.get("authorize")
-        if intent is None:
-            raise ValueError(f"Method {self.method.name} does not support authorize intent")
+        transformed_request = transform_request(self.method, merged_request, credential)
 
         return await verify_or_challenge(
             authorization=authorization,
             intent=intent,
-            request=request,
+            request=transformed_request,
             realm=self.realm,
             secret_key=self.secret_key,
             method=self.method.name,

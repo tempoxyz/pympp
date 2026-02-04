@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
+
+DEFAULT_EXPIRES_MINUTES = 5
 
 if TYPE_CHECKING:
     from mpay.server.intent import Intent
@@ -95,6 +98,10 @@ def _create_challenge(
     secret_key: str,
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID."""
+    if "expires" not in request:
+        expires = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
+        request = {**request, "expires": expires.isoformat().replace("+00:00", "Z")}
+
     return Challenge.create(
         secret_key=secret_key,
         realm=realm,

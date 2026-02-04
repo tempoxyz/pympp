@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpay import Receipt
+from mpay.methods.tempo._defaults import RPC_URL
 from mpay.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -80,7 +81,7 @@ class ChargeIntent:
 
     def __init__(
         self,
-        rpc_url: str,
+        rpc_url: str = RPC_URL,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
