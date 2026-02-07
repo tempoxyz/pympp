@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from mpay import Challenge, Credential, Receipt
+from mpay import Challenge, Credential, Receipt, StreamReceipt
 from mpay._parsing import ParseError
+from mpay._units import transform_units
 from mpay.server.method import transform_request
 from mpay.server.verify import verify_or_challenge
 
@@ -88,7 +89,51 @@ class Mpay:
         if intent is None:
             raise ValueError(f"Method {self.method.name} does not support charge intent")
 
-        merged_request = {**self.defaults, **request}
+        merged_request = transform_units({**self.defaults, **request})
+
+        credential: Credential | None = None
+        if authorization and authorization.lower().startswith("payment "):
+            try:
+                credential = Credential.from_authorization(authorization)
+            except ParseError:
+                pass
+
+        transformed_request = transform_request(self.method, merged_request, credential)
+
+        return await verify_or_challenge(
+            authorization=authorization,
+            intent=intent,
+            request=transformed_request,
+            realm=self.realm,
+            secret_key=self.secret_key,
+            method=self.method.name,
+        )
+
+    async def stream(
+        self,
+        authorization: str | None,
+        request: dict[str, Any],
+    ) -> Challenge | tuple[Credential, StreamReceipt]:
+        """Handle a stream intent.
+
+        If no valid Authorization header is provided, returns a Challenge
+        that should be sent as a 402 response.
+
+        If a valid credential is provided, verifies it and returns
+        the (Credential, StreamReceipt) tuple.
+
+        Args:
+            authorization: The Authorization header value (or None).
+            request: Payment request parameters (amount, unitType, currency, etc.).
+
+        Returns:
+            Challenge if payment required, or (Credential, StreamReceipt) if verified.
+        """
+        intent = self.method.intents.get("stream")
+        if intent is None:
+            raise ValueError(f"Method {self.method.name} does not support stream intent")
+
+        merged_request = transform_units({**self.defaults, **request})
 
         credential: Credential | None = None
         if authorization and authorization.lower().startswith("payment "):
