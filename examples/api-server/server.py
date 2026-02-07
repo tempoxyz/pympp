@@ -7,8 +7,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from mpay import Challenge, Credential, Receipt
-from mpay.methods.tempo import TempoMethod
-from mpay.server import Mpay
+from mpay.methods.tempo import ChargeIntent, TempoMethod
+from mpay.server import Mpay, requires_payment
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -66,6 +66,22 @@ async def paid_endpoint(request: Request):
         )
 
     credential, receipt = result
+    return {
+        "message": "This is paid content!",
+        "payer": credential.source,
+        "tx": receipt.reference,
+    }
+
+
+@app.get("/paid-decorator")
+@requires_payment(
+    intent=ChargeIntent(rpc_url=RPC_URL),
+    request=get_payment_request,
+    realm="localhost:8000",
+    secret_key=SECRET_KEY,
+)
+async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
+    """A paid endpoint using the @requires_payment decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,
