@@ -30,9 +30,7 @@ UINT128_MAX = 2**128 - 1
 _GET_CHANNEL_SELECTOR = keccak(text="getChannel(bytes32)")[:4]
 _SETTLE_SELECTOR = keccak(text="settle(bytes32,uint128,bytes)")[:4]
 _CLOSE_SELECTOR = keccak(text="close(bytes32,uint128,bytes)")[:4]
-_OPEN_SELECTOR = keccak(
-    text="open(address,address,uint128,bytes32,address)"
-)[:4]
+_OPEN_SELECTOR = keccak(text="open(address,address,uint128,bytes32,address)")[:4]
 _TOP_UP_SELECTOR = keccak(text="topUp(bytes32,uint128)")[:4]
 _COMPUTE_CHANNEL_ID_SELECTOR = keccak(
     text="computeChannelId(address,address,address,uint128,bytes32,address)"
@@ -220,9 +218,7 @@ async def compute_channel_id(
     client: Any | None = None,
 ) -> str:
     """Compute channelId via the escrow contract."""
-    call_data = _encode_compute_channel_id(
-        payer, payee, token, deposit, salt, authorized_signer
-    )
+    call_data = _encode_compute_channel_id(payer, payee, token, deposit, salt, authorized_signer)
     result = await _rpc_call(
         rpc_url,
         "eth_call",
@@ -270,16 +266,12 @@ async def broadcast_open_transaction(
 
     except Exception as e:
         # If broadcast fails, check if channel already exists on-chain
-        on_chain = await get_on_chain_channel(
-            rpc_url, escrow_contract, channel_id, client=client
-        )
+        on_chain = await get_on_chain_channel(rpc_url, escrow_contract, channel_id, client=client)
         if on_chain.deposit > 0:
             return BroadcastResult(tx_hash=None, on_chain=on_chain)
         raise e
 
-    on_chain = await get_on_chain_channel(
-        rpc_url, escrow_contract, channel_id, client=client
-    )
+    on_chain = await get_on_chain_channel(rpc_url, escrow_contract, channel_id, client=client)
     return BroadcastResult(tx_hash=tx_hash, on_chain=on_chain)
 
 
@@ -311,9 +303,7 @@ async def broadcast_top_up_transaction(
     if receipt.get("status") != "0x1":
         raise StreamError(f"topUp transaction reverted: {tx_hash}")
 
-    on_chain = await get_on_chain_channel(
-        rpc_url, escrow_contract, channel_id, client=client
-    )
+    on_chain = await get_on_chain_channel(rpc_url, escrow_contract, channel_id, client=client)
     if on_chain.deposit <= previous_deposit:
         raise StreamError("channel deposit did not increase after topUp")
 
@@ -359,9 +349,7 @@ async def settle_on_chain(
     signed = tx.sign(account.private_key)
     raw_tx = "0x" + signed.encode().hex()
 
-    tx_hash = await _rpc_call(
-        rpc_url, "eth_sendRawTransaction", [raw_tx], client=client
-    )
+    tx_hash = await _rpc_call(rpc_url, "eth_sendRawTransaction", [raw_tx], client=client)
 
     receipt = await _wait_for_receipt(rpc_url, tx_hash, client=client)
     if receipt.get("status") != "0x1":
@@ -407,9 +395,7 @@ async def close_on_chain(
     signed = tx.sign(account.private_key)
     raw_tx = "0x" + signed.encode().hex()
 
-    tx_hash = await _rpc_call(
-        rpc_url, "eth_sendRawTransaction", [raw_tx], client=client
-    )
+    tx_hash = await _rpc_call(rpc_url, "eth_sendRawTransaction", [raw_tx], client=client)
 
     receipt = await _wait_for_receipt(rpc_url, tx_hash, client=client)
     if receipt.get("status") != "0x1":
@@ -466,8 +452,5 @@ async def _wait_for_receipt(
         await asyncio.sleep(RECEIPT_RETRY_DELAY)
 
     raise StreamError(
-        f"transaction receipt not found after "
-        f"{MAX_RECEIPT_ATTEMPTS} attempts: {tx_hash}"
+        f"transaction receipt not found after {MAX_RECEIPT_ATTEMPTS} attempts: {tx_hash}"
     )
-
-

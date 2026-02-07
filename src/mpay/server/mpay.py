@@ -188,9 +188,7 @@ class Mpay:
         escrow_contract = getattr(self.method, "escrow_contract", None) or getattr(
             intent, "escrow_contract", ""
         )
-        chain_id = getattr(self.method, "chain_id", None) or getattr(
-            intent, "chain_id", 42431
-        )
+        chain_id = getattr(self.method, "chain_id", None) or getattr(intent, "chain_id", 42431)
 
         request: dict[str, Any] = {
             "amount": base_amount,

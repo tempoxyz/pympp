@@ -111,11 +111,7 @@ class TempoMethod:
                 nonce_key = int(nonce_key)
 
         method_details = request.get("methodDetails", {})
-        memo = (
-            method_details.get("memo")
-            if isinstance(method_details, dict)
-            else None
-        )
+        memo = method_details.get("memo") if isinstance(method_details, dict) else None
 
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
@@ -160,15 +156,11 @@ class TempoMethod:
             raise ValueError("No account configured")
 
         if memo:
-            transfer_data = self._encode_transfer_with_memo(
-                recipient, int(amount), memo
-            )
+            transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
-        chain_id, nonce, gas_price = await get_tx_params(
-            self.rpc_url, self.account.address
-        )
+        chain_id, nonce, gas_price = await get_tx_params(self.rpc_url, self.account.address)
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
@@ -178,11 +170,7 @@ class TempoMethod:
             nonce=nonce,
             nonce_key=nonce_key,
             fee_token=currency,
-            calls=(
-                Call.create(
-                    to=currency, value=0, data=transfer_data
-                ),
-            ),
+            calls=(Call.create(to=currency, value=0, data=transfer_data),),
         )
 
         signed_tx = tx.sign(self.account.private_key)
@@ -198,9 +186,7 @@ class TempoMethod:
         amount_padded = hex(amount)[2:].zfill(64)
         return f"0x{selector}{to_padded}{amount_padded}"
 
-    def _encode_transfer_with_memo(
-        self, to: str, amount: int, memo: str
-    ) -> str:
+    def _encode_transfer_with_memo(self, to: str, amount: int, memo: str) -> str:
         """Encode a TIP-20 transferWithMemo call.
 
         Selector: 0xb452ef41 = keccak256(
@@ -299,9 +285,7 @@ class StreamMethod:
         account = self.account
 
         if context and context.get("action"):
-            payload = await self._manual_credential(
-                challenge, account, context
-            )
+            payload = await self._manual_credential(challenge, account, context)
         elif self.deposit is not None:
             payload = await self._auto_manage_credential(challenge, account)
         else:
@@ -346,9 +330,7 @@ class StreamMethod:
         if entry is None:
             suggested = md.get("channelId")
             if suggested:
-                entry = await self._try_recover_channel(
-                    escrow, suggested, key
-                )
+                entry = await self._try_recover_channel(escrow, suggested, key)
 
         if entry is not None and entry.opened:
             entry.cumulative_amount += amount
@@ -401,13 +383,9 @@ class StreamMethod:
         )
 
         approve_data = encode_approve_call(escrow_contract, deposit)
-        open_data = encode_open_call(
-            payee, currency, deposit, salt, account.address
-        )
+        open_data = encode_open_call(payee, currency, deposit, salt, account.address)
 
-        chain_id_val, nonce, gas_price = await get_tx_params(
-            self.rpc_url, account.address
-        )
+        chain_id_val, nonce, gas_price = await get_tx_params(self.rpc_url, account.address)
 
         tx = TempoTransaction.create(
             chain_id=chain_id_val,
@@ -418,12 +396,8 @@ class StreamMethod:
             nonce_key=0,
             fee_token=currency,
             calls=(
-                Call.create(
-                    to=currency, value=0, data=approve_data
-                ),
-                Call.create(
-                    to=escrow_contract, value=0, data=open_data
-                ),
+                Call.create(to=currency, value=0, data=approve_data),
+                Call.create(to=escrow_contract, value=0, data=open_data),
             ),
         )
         signed = tx.sign(account.private_key)
@@ -431,12 +405,8 @@ class StreamMethod:
 
         from mpay.methods.tempo.stream.types import Voucher
 
-        voucher = Voucher(
-            channel_id=channel_id, cumulative_amount=initial_amount
-        )
-        signature = sign_voucher(
-            account, voucher, escrow_contract, chain_id
-        )
+        voucher = Voucher(channel_id=channel_id, cumulative_amount=initial_amount)
+        signature = sign_voucher(account, voucher, escrow_contract, chain_id)
 
         entry = _ChannelEntry(
             channel_id=channel_id,
@@ -467,9 +437,7 @@ class StreamMethod:
         import logging
 
         try:
-            on_chain = await get_on_chain_channel(
-                self.rpc_url, escrow_contract, channel_id
-            )
+            on_chain = await get_on_chain_channel(self.rpc_url, escrow_contract, channel_id)
             if on_chain.deposit > 0 and not on_chain.finalized:
                 entry = _ChannelEntry(
                     channel_id=channel_id,
@@ -513,9 +481,7 @@ class StreamMethod:
             if not transaction:
                 raise ValueError("transaction required for open action")
             if cumulative_amount is None:
-                raise ValueError(
-                    "cumulativeAmount required for open action"
-                )
+                raise ValueError("cumulativeAmount required for open action")
 
             from mpay.methods.tempo.stream.types import Voucher
 
@@ -529,9 +495,7 @@ class StreamMethod:
                 "type": "transaction",
                 "channelId": channel_id,
                 "transaction": transaction,
-                "authorizedSigner": context.get(
-                    "authorizedSigner", account.address
-                ),
+                "authorizedSigner": context.get("authorizedSigner", account.address),
                 "cumulativeAmount": str(cumulative_amount),
                 "signature": signature,
             }
@@ -542,9 +506,7 @@ class StreamMethod:
             if not transaction:
                 raise ValueError("transaction required for topUp action")
             if additional_deposit is None:
-                raise ValueError(
-                    "additionalDeposit required for topUp action"
-                )
+                raise ValueError("additionalDeposit required for topUp action")
             return {
                 "action": "topUp",
                 "type": "transaction",
@@ -556,9 +518,7 @@ class StreamMethod:
         elif action == "voucher":
             cumulative_amount = context.get("cumulativeAmount")
             if cumulative_amount is None:
-                raise ValueError(
-                    "cumulativeAmount required for voucher action"
-                )
+                raise ValueError("cumulativeAmount required for voucher action")
             return await self._voucher_payload(
                 account,
                 channel_id,
@@ -570,9 +530,7 @@ class StreamMethod:
         elif action == "close":
             cumulative_amount = context.get("cumulativeAmount")
             if cumulative_amount is None:
-                raise ValueError(
-                    "cumulativeAmount required for close action"
-                )
+                raise ValueError("cumulativeAmount required for close action")
 
             from mpay.methods.tempo.stream.types import Voucher
 
@@ -610,9 +568,7 @@ class StreamMethod:
             channel_id=channel_id,
             cumulative_amount=cumulative_amount,
         )
-        signature = sign_voucher(
-            account, voucher, escrow_contract, chain_id
-        )
+        signature = sign_voucher(account, voucher, escrow_contract, chain_id)
         return {
             "action": "voucher",
             "channelId": channel_id,
@@ -620,15 +576,11 @@ class StreamMethod:
             "signature": signature,
         }
 
-    def _channel_key(
-        self, payee: str, currency: str, escrow: str
-    ) -> str:
+    def _channel_key(self, payee: str, currency: str, escrow: str) -> str:
         """Generate a cache key for a (payee, currency, escrow) triple."""
         return f"{payee.lower()}:{currency.lower()}:{escrow.lower()}"
 
-    def _get_method_details(
-        self, challenge: Challenge
-    ) -> dict[str, Any]:
+    def _get_method_details(self, challenge: Challenge) -> dict[str, Any]:
         """Extract methodDetails from a challenge."""
         md = challenge.request.get("methodDetails", {})
         return md if isinstance(md, dict) else {}

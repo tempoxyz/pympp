@@ -52,9 +52,7 @@ from mpay.methods.tempo.stream.voucher import (
 # Test accounts and constants
 # ──────────────────────────────────────────────────────────────
 
-PAYER = TempoAccount.from_key(
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-)
+PAYER = TempoAccount.from_key("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80")
 RECIPIENT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 CURRENCY = "0x20c0000000000000000000000000000000000001"
 ESCROW = "0x9d136eEa063eDE5418A6BC7bEafF009bBb6CFa70"
@@ -327,9 +325,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -376,9 +372,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -398,9 +392,7 @@ class TestStreamServerOpen:
                 },
             )
 
-            with pytest.raises(
-                (AmountExceedsDepositError, InsufficientBalanceError)
-            ):
+            with pytest.raises((AmountExceedsDepositError, InsufficientBalanceError)):
                 await intent.verify(credential, {})
 
     @pytest.mark.asyncio
@@ -421,9 +413,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -464,9 +454,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -534,9 +522,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -592,9 +578,7 @@ class TestStreamServerOpen:
         ):
             from mpay.methods.tempo.stream.chain import BroadcastResult
 
-            mock_broadcast.return_value = BroadcastResult(
-                tx_hash="0xtxhash", on_chain=on_chain
-            )
+            mock_broadcast.return_value = BroadcastResult(tx_hash="0xtxhash", on_chain=on_chain)
 
             intent = StreamIntent(
                 storage=storage,
@@ -640,32 +624,38 @@ class TestStreamServerVoucher:
 
     async def _seed_channel(self, storage: MemoryStorage, channel_id: str) -> None:
         """Seed a channel in storage for voucher tests."""
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=0,
-            highest_voucher_amount=1_000_000,
-            highest_voucher=SignedVoucher(
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
                 channel_id=channel_id,
-                cumulative_amount=1_000_000,
-                signature=sign_test_voucher(channel_id, 1_000_000),
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=0,
+                highest_voucher_amount=1_000_000,
+                highest_voucher=SignedVoucher(
+                    channel_id=channel_id,
+                    cumulative_amount=1_000_000,
+                    signature=sign_test_voucher(channel_id, 1_000_000),
+                ),
+                active_session_id="open-challenge",
+                finalized=False,
+                created_at=datetime.now(UTC),
             ),
-            active_session_id="open-challenge",
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
-        await storage.update_session("open-challenge", lambda _: SessionState(
-            challenge_id="open-challenge",
-            channel_id=channel_id,
-            accepted_cumulative=1_000_000,
-            spent=0,
-            units=0,
-            created_at=datetime.now(UTC),
-        ))
+        )
+        await storage.update_session(
+            "open-challenge",
+            lambda _: SessionState(
+                challenge_id="open-challenge",
+                channel_id=channel_id,
+                accepted_cumulative=1_000_000,
+                spent=0,
+                units=0,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_accepts_increasing_voucher(self) -> None:
@@ -849,24 +839,27 @@ class TestStreamServerClose:
     """Tests for the 'close' action handler."""
 
     async def _seed_channel(self, storage: MemoryStorage, channel_id: str) -> None:
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=0,
-            highest_voucher_amount=1_000_000,
-            highest_voucher=SignedVoucher(
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
                 channel_id=channel_id,
-                cumulative_amount=1_000_000,
-                signature=sign_test_voucher(channel_id, 1_000_000),
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=0,
+                highest_voucher_amount=1_000_000,
+                highest_voucher=SignedVoucher(
+                    channel_id=channel_id,
+                    cumulative_amount=1_000_000,
+                    signature=sign_test_voucher(channel_id, 1_000_000),
+                ),
+                active_session_id="open-challenge",
+                finalized=False,
+                created_at=datetime.now(UTC),
             ),
-            active_session_id="open-challenge",
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
+        )
 
     @pytest.mark.asyncio
     async def test_accepts_close(self) -> None:
@@ -919,20 +912,23 @@ class TestStreamServerClose:
         storage = MemoryStorage()
         channel_id = "0x" + "01" * 32
         # Seed with highest_voucher_amount = 3_000_000
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=0,
-            highest_voucher_amount=3_000_000,
-            highest_voucher=None,
-            active_session_id=None,
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
+                channel_id=channel_id,
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=0,
+                highest_voucher_amount=3_000_000,
+                highest_voucher=None,
+                active_session_id=None,
+                finalized=False,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         intent = StreamIntent(
             storage=storage,
@@ -1019,20 +1015,23 @@ class TestStreamServerTopUp:
     """Tests for the 'topUp' action handler."""
 
     async def _seed_channel(self, storage: MemoryStorage, channel_id: str) -> None:
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=0,
-            highest_voucher_amount=1_000_000,
-            highest_voucher=None,
-            active_session_id="open-challenge",
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
+                channel_id=channel_id,
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=0,
+                highest_voucher_amount=1_000_000,
+                highest_voucher=None,
+                active_session_id="open-challenge",
+                finalized=False,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
     @pytest.mark.asyncio
     async def test_accepts_top_up(self) -> None:
@@ -1104,14 +1103,17 @@ class TestCharge:
     @pytest.mark.asyncio
     async def test_deducts_balance(self) -> None:
         storage = MemoryStorage()
-        await storage.update_session("s1", lambda _: SessionState(
-            challenge_id="s1",
-            channel_id="0x" + "01" * 32,
-            accepted_cumulative=5_000_000,
-            spent=0,
-            units=0,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_session(
+            "s1",
+            lambda _: SessionState(
+                challenge_id="s1",
+                channel_id="0x" + "01" * 32,
+                accepted_cumulative=5_000_000,
+                spent=0,
+                units=0,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         session = await charge(storage, "s1", 1_000_000)
         assert session.spent == 1_000_000
@@ -1124,14 +1126,17 @@ class TestCharge:
     @pytest.mark.asyncio
     async def test_rejects_overdraft(self) -> None:
         storage = MemoryStorage()
-        await storage.update_session("s1", lambda _: SessionState(
-            challenge_id="s1",
-            channel_id="0x" + "01" * 32,
-            accepted_cumulative=1_000_000,
-            spent=0,
-            units=0,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_session(
+            "s1",
+            lambda _: SessionState(
+                challenge_id="s1",
+                channel_id="0x" + "01" * 32,
+                accepted_cumulative=1_000_000,
+                spent=0,
+                units=0,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         with pytest.raises(InsufficientBalanceError):
             await charge(storage, "s1", 2_000_000)
@@ -1152,14 +1157,17 @@ class TestMonotonicity:
     @pytest.mark.asyncio
     async def test_charge_does_not_decrease_accepted(self) -> None:
         storage = MemoryStorage()
-        await storage.update_session("s1", lambda _: SessionState(
-            challenge_id="s1",
-            channel_id="0x" + "01" * 32,
-            accepted_cumulative=5_000_000,
-            spent=0,
-            units=0,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_session(
+            "s1",
+            lambda _: SessionState(
+                challenge_id="s1",
+                channel_id="0x" + "01" * 32,
+                accepted_cumulative=5_000_000,
+                spent=0,
+                units=0,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         session = await charge(storage, "s1", 1_000_000)
         assert session.spent == 1_000_000
@@ -1169,19 +1177,22 @@ class TestMonotonicity:
     async def test_settle_max_does_not_regress(self) -> None:
         storage = MemoryStorage()
         channel_id = "0x" + "01" * 32
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=3_000_000,
-            highest_voucher_amount=5_000_000,
-            highest_voucher=None,
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
+                channel_id=channel_id,
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=3_000_000,
+                highest_voucher_amount=5_000_000,
+                highest_voucher=None,
+                finalized=False,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         # Attempt to set settled to a lower value
         from mpay.methods.tempo.intents import _settle_update
@@ -1194,19 +1205,22 @@ class TestMonotonicity:
     async def test_settle_updates_when_higher(self) -> None:
         storage = MemoryStorage()
         channel_id = "0x" + "01" * 32
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=1_000_000,
-            highest_voucher_amount=5_000_000,
-            highest_voucher=None,
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
+                channel_id=channel_id,
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=1_000_000,
+                highest_voucher_amount=5_000_000,
+                highest_voucher=None,
+                finalized=False,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         from mpay.methods.tempo.intents import _settle_update
 
@@ -1217,14 +1231,17 @@ class TestMonotonicity:
     @pytest.mark.asyncio
     async def test_accept_voucher_monotonic(self) -> None:
         storage = MemoryStorage()
-        await storage.update_session("s1", lambda _: SessionState(
-            challenge_id="s1",
-            channel_id="0x" + "01" * 32,
-            accepted_cumulative=5_000_000,
-            spent=2_000_000,
-            units=3,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_session(
+            "s1",
+            lambda _: SessionState(
+                challenge_id="s1",
+                channel_id="0x" + "01" * 32,
+                accepted_cumulative=5_000_000,
+                spent=2_000_000,
+                units=3,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         # Accept with lower amount — should not decrease
         session = await _accept_voucher(storage, "s1", "0x" + "01" * 32, 3_000_000)
@@ -1238,38 +1255,47 @@ class TestMonotonicity:
         storage = MemoryStorage()
         channel_id = "0x" + "01" * 32
 
-        await storage.update_channel(channel_id, lambda _: ChannelState(
-            channel_id=channel_id,
-            payer=PAYER.address,
-            payee=RECIPIENT,
-            token=CURRENCY,
-            authorized_signer=PAYER.address,
-            deposit=10_000_000,
-            settled_on_chain=0,
-            highest_voucher_amount=5_000_000,
-            highest_voucher=None,
-            active_session_id="existing-session",
-            finalized=False,
-            created_at=datetime.now(UTC),
-        ))
-        await storage.update_session("existing-session", lambda _: SessionState(
-            challenge_id="existing-session",
-            channel_id=channel_id,
-            accepted_cumulative=5_000_000,
-            spent=1_000_000,
-            units=3,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_channel(
+            channel_id,
+            lambda _: ChannelState(
+                channel_id=channel_id,
+                payer=PAYER.address,
+                payee=RECIPIENT,
+                token=CURRENCY,
+                authorized_signer=PAYER.address,
+                deposit=10_000_000,
+                settled_on_chain=0,
+                highest_voucher_amount=5_000_000,
+                highest_voucher=None,
+                active_session_id="existing-session",
+                finalized=False,
+                created_at=datetime.now(UTC),
+            ),
+        )
+        await storage.update_session(
+            "existing-session",
+            lambda _: SessionState(
+                challenge_id="existing-session",
+                channel_id=channel_id,
+                accepted_cumulative=5_000_000,
+                spent=1_000_000,
+                units=3,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         # Pre-create new session
-        await storage.update_session("new-session", lambda _: SessionState(
-            challenge_id="new-session",
-            channel_id=channel_id,
-            accepted_cumulative=2_000_000,
-            spent=0,
-            units=0,
-            created_at=datetime.now(UTC),
-        ))
+        await storage.update_session(
+            "new-session",
+            lambda _: SessionState(
+                challenge_id="new-session",
+                channel_id=channel_id,
+                accepted_cumulative=2_000_000,
+                spent=0,
+                units=0,
+                created_at=datetime.now(UTC),
+            ),
+        )
 
         # Attempt channel update — should raise conflict
         def _conflict_update(existing):
@@ -1278,9 +1304,7 @@ class TestMonotonicity:
                 and existing.active_session_id
                 and existing.active_session_id != "new-session"
             ):
-                raise ChannelConflictError(
-                    "another stream is active on this channel"
-                )
+                raise ChannelConflictError("another stream is active on this channel")
             if existing:
                 return replace(existing, active_session_id="new-session")
             return None
