@@ -13,12 +13,11 @@ import httpx
 
 from mpay.client import PaymentTransport
 from mpay.methods.tempo import StreamMethod, TempoAccount
+from mpay.methods.tempo._defaults import ALPHA_USD, ESCROW_CONTRACT, TESTNET_RPC_URL
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8000")
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY", "")
-CURRENCY = "0x20c0000000000000000000000000000000000001"
-ESCROW = "0x9d136eEa063eDE5418A6BC7bEafF009bBb6CFa70"
-RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.moderato.tempo.xyz/")
+RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 
 
 async def main() -> None:
@@ -33,8 +32,8 @@ async def main() -> None:
         account=account,
         deposit=10_000_000,
         rpc_url=RPC_URL,
-        escrow_contract=ESCROW,
-        currency=CURRENCY,
+        escrow_contract=ESCROW_CONTRACT,
+        currency=ALPHA_USD,
     )
 
     prompt = sys.argv[1] if len(sys.argv) > 1 else "Tell me something interesting"

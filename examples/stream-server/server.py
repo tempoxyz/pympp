@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from mpay import Challenge
 from mpay.methods.tempo import StreamIntent, tempo
+from mpay.methods.tempo._defaults import ALPHA_USD, ESCROW_CONTRACT, TESTNET_RPC_URL
 from mpay.methods.tempo.stream.storage import MemoryStorage
 from mpay.server import Mpay
 
@@ -26,22 +27,20 @@ DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION",
     "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
 )
-PATH_USD = "0x20c0000000000000000000000000000000000001"
-ESCROW = "0x9d136eEa063eDE5418A6BC7bEafF009bBb6CFa70"
-RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.moderato.tempo.xyz/")
+RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 PRICE_PER_TOKEN = "0.000075"
 
 storage = MemoryStorage()
 
 mpay = Mpay.create(
     method=tempo(
-        currency=PATH_USD,
+        currency=ALPHA_USD,
         recipient=DESTINATION,
         intents={
             "stream": StreamIntent(
                 storage=storage,
                 rpc_url=RPC_URL,
-                escrow_contract=ESCROW,
+                escrow_contract=ESCROW_CONTRACT,
             ),
         },
     ),
