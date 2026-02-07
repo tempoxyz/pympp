@@ -286,10 +286,13 @@ def parse_payment_receipt(header: str) -> Receipt:
 
     timestamp = _parse_timestamp(str(data["timestamp"]))
 
+    extra = data.get("extra")
+
     return Receipt(
         status=status,
         timestamp=timestamp,
         reference=str(data["reference"]),
+        extra=extra if isinstance(extra, dict) else None,
     )
 
 
@@ -301,9 +304,11 @@ def format_payment_receipt(receipt: Receipt) -> str:
     """
     timestamp_str = receipt.timestamp.isoformat().replace("+00:00", "Z")
 
-    payload = {
+    payload: dict[str, Any] = {
         "status": receipt.status,
         "timestamp": timestamp_str,
         "reference": receipt.reference,
     }
+    if receipt.extra:
+        payload["extra"] = receipt.extra
     return _b64_encode(payload)

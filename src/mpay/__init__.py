@@ -316,6 +316,7 @@ class Receipt:
     status: Literal["success"]
     timestamp: datetime
     reference: str
+    extra: dict[str, Any] | None = None
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:
