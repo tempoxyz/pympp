@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
+from mpay._units import transform_units
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -73,6 +74,7 @@ async def verify_or_challenge(
         )
     """
     method_name = method or "tempo"
+    request = transform_units(request)
 
     if authorization is None:
         return _create_challenge(method_name, intent.name, request, realm, secret_key)
