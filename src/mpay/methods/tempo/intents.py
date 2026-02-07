@@ -1071,7 +1071,7 @@ async def _handle_top_up(
 
     await storage.update_channel(
         channel_id,
-        lambda current: (replace(current, deposit=on_chain_deposit) if current else None),
+        lambda current: replace(current, deposit=on_chain_deposit) if current else None,
     )
 
     session = await storage.get_session(challenge_id)
