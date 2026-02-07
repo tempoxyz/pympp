@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
 from mpay._parsing import ParseError
+from mpay._units import transform_units
 from mpay.server.method import transform_request
 from mpay.server.verify import verify_or_challenge
 
@@ -88,7 +89,7 @@ class Mpay:
         if intent is None:
             raise ValueError(f"Method {self.method.name} does not support charge intent")
 
-        merged_request = {**self.defaults, **request}
+        merged_request = transform_units({**self.defaults, **request})
 
         credential: Credential | None = None
         if authorization and authorization.lower().startswith("payment "):
