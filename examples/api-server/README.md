@@ -64,48 +64,37 @@ curl -i http://localhost:8000/paid
 
 ## Code Walkthrough
 
-### Payment Intent
+### Payment Handler
 
 ```python
-intent = ChargeIntent(rpc_url=RPC_URL)
+from mpay.server import Mpay
+from mpay.methods.tempo import tempo
+
+mpay = Mpay.create(
+    method=tempo(currency=PATH_USD, recipient=DESTINATION),
+)
 ```
 
-The `ChargeIntent` handles payment verification. When a client submits a credential, the intent verifies the payment transaction on-chain.
+`Mpay.create()` sets up the payment handler with smart defaults:
+- **realm** auto-detected from environment (`MPAY_REALM`, `VERCEL_URL`, etc.)
+- **secret_key** auto-generated and persisted to `.env`
+- **currency** and **recipient** configured once on the method
 
-### Payment Request
+### Charging
 
 ```python
-PAYMENT_REQUEST = {
-    "amount": "1000",
-    "currency": "0x20c0000000000000000000000000000000000001",
-    "recipient": DESTINATION,
-}
+result = await mpay.charge(
+    authorization=request.headers.get("Authorization"),
+    amount="0.001",
+)
 ```
 
-This defines what payment is required:
-- `amount`: Payment amount in the asset's smallest unit
-- `asset`: The TIP-20 token address (alphaUSD on Tempo testnet)
-- `destination`: Address that receives the payment
+- `amount` is in dollars (e.g., `"0.50"` = $0.50), auto-converted to base units
+- `expires` defaults to now + 5 minutes
+- No nested request dict needed
 
-### The `@requires_payment` Decorator
+### Payment Flow
 
-```python
-@app.get("/paid")
-@requires_payment(intent=intent, request=PAYMENT_REQUEST, realm="localhost:8000")
-async def paid_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    ...
-```
-
-The decorator handles the full payment flow:
-
-1. **No Authorization header**: Returns 402 with `WWW-Authenticate` challenge
-2. **Valid credential**: Verifies payment, injects `credential` and `receipt` into handler
-3. **Invalid credential**: Returns 402 with new challenge
-
-### Handler Parameters
-
-After successful payment verification, your handler receives:
-
-- `request`: The original FastAPI Request object
-- `credential`: Contains `source` (payer's DID) and payment proof
-- `receipt`: Contains `reference` (transaction hash) and `timestamp`
+1. **No Authorization header**: Returns a `Challenge` → respond with 402
+2. **Valid credential**: Returns `(Credential, Receipt)` → return the resource
+3. **Invalid credential**: Returns a `Challenge` → respond with 402

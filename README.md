@@ -17,30 +17,24 @@ Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["
 ```python
 from mpay import Challenge
 from mpay.server import Mpay
-from mpay.methods.tempo import TempoMethod
-
-# Create handler with bound secret_key
-payment = Mpay(
-    method=TempoMethod(rpc_url="https://rpc.tempo.xyz"),
-    realm="api.example.com",
-    secret_key="my-server-secret",
+from mpay.methods.tempo import tempo
+mpay = Mpay.create(
+    method=tempo(
+        currency="0x20c0000000000000000000000000000000000001",
+        recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+    ),
 )
 
 async def handler(request):
-    result = await payment.charge(
+    result = await mpay.charge(
         authorization=request.headers.get("Authorization"),
-        request={
-            "amount": "1000000",
-            "currency": "0x20c0000000000000000000000000000000000001",
-            "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            "expires": "2030-01-20T12:00:00Z",
-        },
+        amount="0.50",
     )
 
     if isinstance(result, Challenge):
         return Response(
             status=402,
-            headers={"WWW-Authenticate": result.to_www_authenticate(payment.realm)},
+            headers={"WWW-Authenticate": result.to_www_authenticate(mpay.realm)},
         )
 
     credential, receipt = result
@@ -60,7 +54,7 @@ from mpay.methods.tempo import tempo, TempoAccount
 
 account = TempoAccount.from_key("0x...")
 
-async with Client(methods=[tempo(account=account, rpc_url="https://rpc.tempo.xyz")]) as client:
+async with Client(methods=[tempo(account=account)]) as client:
     r1 = await client.get("https://api.example.com/a")
     r2 = await client.get("https://api.example.com/b")
 ```
@@ -75,7 +69,7 @@ account = TempoAccount.from_key("0x...")
 
 response = await get(
     "https://api.example.com/resource",
-    methods=[tempo(account=account, rpc_url="https://rpc.tempo.xyz")],
+    methods=[tempo(account=account)],
 )
 ```
 
@@ -102,7 +96,7 @@ from mpay.methods.tempo import tempo, TempoAccount
 import httpx
 
 account = TempoAccount.from_key("0x...")
-method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
+method = tempo(account=account)
 
 async with httpx.AsyncClient() as client:
     res = await client.get("https://api.example.com/resource")
@@ -184,7 +178,7 @@ Simplifies payment-protected endpoints by handling the 402 challenge flow automa
 from mpay.server import requires_payment
 from mpay.methods.tempo import ChargeIntent
 
-intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
+intent = ChargeIntent(rpc_url="https://rpc.testnet.tempo.xyz")
 
 @app.get("/resource")
 @requires_payment(
@@ -270,12 +264,12 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 
 ```python
 from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
-
+method = tempo(
+    currency="0x20c0000000000000000000000000000000000001",
+    recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+)
 account = TempoAccount.from_key("0x...")
-account = TempoAccount.from_env("TEMPO_PRIVATE_KEY")
-
-method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
-intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
+client_method = tempo(account=account)
 ```
 
 ## Development

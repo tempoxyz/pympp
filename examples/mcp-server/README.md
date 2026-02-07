@@ -13,7 +13,7 @@ The server and client run in separate terminals, communicating via SSE.
 ## Prerequisites
 
 1. **Python 3.12+**
-2. **Tempo testnet account** with alphaUSD balance
+2. **Tempo testnet account** with pathUSD balance
 3. **Private key** for signing transactions
 
 ## Setup
@@ -35,7 +35,6 @@ export MCP_PORT="8000"                  # Default: 8000
 **Client:**
 ```bash
 export TEMPO_PRIVATE_KEY="0x..."        # Private key for signing (required)
-export TEMPO_RPC_URL="https://rpc.testnet.tempo.xyz/"  # Default: Tempo testnet
 export MCP_SERVER_URL="http://127.0.0.1:8000/sse"      # Default
 ```
 
@@ -96,7 +95,7 @@ Two server implementations are provided:
 
 Both implement the same tools:
 - `echo`: Free tool that echoes messages
-- `premium_echo`: Paid tool (100 alphaUSD units) with styled output
+- `premium_echo`: Paid tool (100 pathUSD units) with styled output
 
 ## Payment Flow
 

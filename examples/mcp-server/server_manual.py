@@ -35,7 +35,7 @@ from mpay.methods.tempo import ChargeIntent
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")
-ALPHA_USD_ADDRESS = "0x20c0000000000000000000000000000000000001"
+PATH_USD = "0x20c0000000000000000000000000000000000001"
 PORT = int(os.environ.get("MCP_PORT", "8000"))
 
 if not DESTINATION:
@@ -104,7 +104,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
         request = {
             "amount": "100",
-            "currency": ALPHA_USD_ADDRESS,
+            "currency": PATH_USD,
             "recipient": DESTINATION,
             "expires": expires,
             "methodDetails": {"feePayer": True},

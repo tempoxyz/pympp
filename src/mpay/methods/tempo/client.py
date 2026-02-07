@@ -47,6 +47,9 @@ class TempoMethod:
     account: TempoAccount | None = None
     root_account: str | None = None
     rpc_url: str = RPC_URL
+    currency: str | None = None
+    recipient: str | None = None
+    decimals: int = 6
     _intents: dict[str, Intent] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -241,6 +244,9 @@ def tempo(
     account: TempoAccount | None = None,
     rpc_url: str = RPC_URL,
     root_account: str | None = None,
+    currency: str | None = None,
+    recipient: str | None = None,
+    decimals: int = 6,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -248,6 +254,9 @@ def tempo(
         account: Account for signing transactions.
         rpc_url: Tempo RPC endpoint URL.
         root_account: Root account address for access key signing.
+        currency: Default currency address for charges.
+        recipient: Default recipient address for charges.
+        decimals: Token decimal places for amount conversion (default: 6 for pathUSD).
 
     Returns:
         A configured TempoMethod instance.
@@ -256,10 +265,13 @@ def tempo(
         from mpay.methods.tempo import tempo, TempoAccount
 
         account = TempoAccount.from_key("0x...")
-        method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
+        method = tempo(account=account)
     """
     return TempoMethod(
         account=account,
         rpc_url=rpc_url,
         root_account=root_account,
+        currency=currency,
+        recipient=recipient,
+        decimals=decimals,
     )

@@ -80,3 +80,36 @@ class TestTransformUnits:
         transform_units(original)
         assert "decimals" in original
         assert original["amount"] == "1"
+
+
+class TestParseUnitsEdgeCases:
+    def test_negative_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            parse_units("-1", 6)
+
+    def test_negative_fractional_raises(self) -> None:
+        with pytest.raises(ValueError, match="non-negative"):
+            parse_units("-0.01", 6)
+
+    def test_nan_raises(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            parse_units("NaN", 6)
+
+    def test_infinity_raises(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            parse_units("Infinity", 6)
+
+    def test_negative_infinity_raises(self) -> None:
+        with pytest.raises(ValueError, match="finite"):
+            parse_units("-Infinity", 6)
+
+    def test_empty_string_raises(self) -> None:
+        with pytest.raises(ValueError, match="required"):
+            parse_units("", 6)
+
+    def test_whitespace_only_raises(self) -> None:
+        with pytest.raises(ValueError, match="required"):
+            parse_units("   ", 6)
+
+    def test_whitespace_stripped(self) -> None:
+        assert parse_units(" 1.5 ", 6) == 1_500_000

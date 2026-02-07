@@ -102,6 +102,7 @@ intent = StripeChargeIntent(api_key="sk_...")
     intent=intent,
     request={"amount": "1000", "currency": "usd"},
     realm="api.example.com",
+    secret_key="my-server-secret",
 )
 async def get_resource(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "paid content"}

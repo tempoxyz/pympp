@@ -29,15 +29,20 @@ fetch -X DELETE https://api.example.com/resource/123
 Provide credentials via flags:
 
 ```bash
-fetch --key 0x... --rpc-url https://rpc.testnet.tempo.xyz/ https://api.example.com
+fetch --key 0x... https://api.example.com
 ```
 
 Or via environment variables:
 
 ```bash
 export TEMPO_PRIVATE_KEY=0x...
-export TEMPO_RPC_URL=https://rpc.testnet.tempo.xyz/  # optional, this is the default
 fetch https://api.example.com/resource
+```
+
+Optionally override the RPC URL (defaults to rpc.testnet.tempo.xyz):
+
+```bash
+fetch --key 0x... --rpc-url https://rpc.testnet.tempo.xyz/ https://api.example.com
 ```
 
 ## How It Works

@@ -15,7 +15,6 @@ Usage:
 
 Environment:
     TEMPO_PRIVATE_KEY: Private key for signing payment transactions (required)
-    TEMPO_RPC_URL: Tempo RPC endpoint (default: https://rpc.testnet.tempo.xyz/)
     MCP_SERVER_URL: Server SSE endpoint (default: http://127.0.0.1:8000/sse)
 """
 
@@ -35,7 +34,6 @@ from mpay.extensions.mcp import (
 )
 from mpay.methods.tempo import TempoAccount, tempo
 
-RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
 SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
 
 
@@ -50,7 +48,7 @@ async def run_client() -> None:
         sys.exit(1)
 
     account = TempoAccount.from_key(private_key)
-    method = tempo(account=account, rpc_url=RPC_URL)
+    method = tempo(account=account)
 
     print(f"Client address: {account.address}")
     print()

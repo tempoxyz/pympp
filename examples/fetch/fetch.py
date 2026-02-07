@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rpc-url",
-        help="Tempo RPC URL (or set TEMPO_RPC_URL, default: https://rpc.testnet.tempo.xyz/)",
+        help="Tempo RPC URL (or set TEMPO_RPC_URL, default: rpc.testnet.tempo.xyz)",
     )
     return parser.parse_args()
 
@@ -44,12 +44,10 @@ async def run(args: argparse.Namespace) -> int:
         print("Error: --key or TEMPO_PRIVATE_KEY required", file=sys.stderr)
         return 2
 
-    rpc_url = args.rpc_url or os.environ.get(
-        "TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/"
-    )
-
     account = TempoAccount.from_key(key)
-    method = tempo(account=account, rpc_url=rpc_url)
+
+    rpc_url = args.rpc_url or os.environ.get("TEMPO_RPC_URL")
+    method = tempo(account=account, rpc_url=rpc_url) if rpc_url else tempo(account=account)
 
     async with Client(methods=[method]) as client:
         response = await client.request(
