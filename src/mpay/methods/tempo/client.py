@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential
-from mpay.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, RPC_URL
+from mpay.methods.tempo._defaults import RPC_URL
 from mpay.methods.tempo.intents import ChargeIntent
 from mpay.methods.tempo.stream.chain import (
     compute_channel_id,
