@@ -27,12 +27,22 @@ def parse_units(value: str, decimals: int) -> int:
         Integer amount in base units.
 
     Raises:
-        ValueError: If value is not a valid decimal string.
+        ValueError: If value is not a valid decimal string, is negative,
+            non-finite, or produces fractional base units.
     """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("amount is required")
+
     try:
-        d = Decimal(value)
+        d = Decimal(value.strip())
     except InvalidOperation:
         raise ValueError(f"Invalid amount: {value!r}") from None
+
+    if not d.is_finite():
+        raise ValueError("amount must be finite")
+
+    if d < 0:
+        raise ValueError("amount must be non-negative")
 
     result = d * (10**decimals)
 

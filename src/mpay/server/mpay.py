@@ -2,42 +2,46 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential, Receipt
-from mpay._parsing import ParseError
-from mpay._units import transform_units
-from mpay.server.method import transform_request
+from mpay._units import parse_units
+from mpay.server._defaults import detect_realm, detect_secret_key
 from mpay.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpay.server.method import Method
+
+DEFAULT_EXPIRY_SECONDS = 300
+DEFAULT_DECIMALS = 6
 
 
 class Mpay:
     """Server-side payment handler.
 
     Binds a payment method with realm and secret_key for stateless
-    challenge verification.
+    challenge verification. Currency and recipient are configured once
+    on the method, so charge() only needs an amount.
 
     Example:
         from mpay.server import Mpay
-        from mpay.methods.tempo import TempoMethod
+        from mpay.methods.tempo import tempo
 
-        payment = Mpay(
-            method=TempoMethod(rpc_url="https://rpc.tempo.xyz"),
-            realm="api.example.com",
-            secret_key="my-server-secret",
+        mpay = Mpay.create(
+            method=tempo(
+                currency="0x20c0000000000000000000000000000000000001",
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            ),
         )
 
-        # In request handler:
-        result = await payment.charge(
+        result = await mpay.charge(
             authorization=request.headers.get("Authorization"),
-            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
+            amount="0.50",
         )
 
         if isinstance(result, Challenge):
-            headers = {"WWW-Authenticate": result.to_www_authenticate(payment.realm)}
+            headers = {"WWW-Authenticate": result.to_www_authenticate(mpay.realm)}
             return Response(status=402, headers=headers)
 
         credential, receipt = result
@@ -65,22 +69,46 @@ class Mpay:
         self.secret_key = secret_key
         self.defaults = defaults or {}
 
+    @classmethod
+    def create(
+        cls,
+        method: Method,
+        realm: str | None = None,
+        secret_key: str | None = None,
+    ) -> Mpay:
+        """Create an Mpay instance with smart defaults.
+
+        Args:
+            method: Payment method (e.g., tempo(currency=..., recipient=...)).
+            realm: Server realm. Auto-detected from environment if omitted.
+            secret_key: HMAC secret. Auto-generated and persisted to .env if omitted.
+        """
+        return cls(
+            method=method,
+            realm=detect_realm() if realm is None else realm,
+            secret_key=detect_secret_key() if secret_key is None else secret_key,
+        )
+
     async def charge(
         self,
         authorization: str | None,
-        request: dict[str, Any],
+        amount: str,
+        *,
+        currency: str | None = None,
+        recipient: str | None = None,
+        expires: str | None = None,
+        description: str | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
-        If no valid Authorization header is provided, returns a Challenge
-        that should be sent as a 402 response.
-
-        If a valid credential is provided, verifies it and returns
-        the (Credential, Receipt) tuple.
-
         Args:
             authorization: The Authorization header value (or None).
-            request: Payment request parameters (amount, currency, recipient, etc.).
+            amount: Payment amount in human units (e.g., "0.50" for $0.50).
+                Automatically converted to base units (6 decimals for pathUSD).
+            currency: Override the method's default currency.
+            recipient: Override the method's default recipient.
+            expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
+            description: Optional human-readable description.
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -89,22 +117,32 @@ class Mpay:
         if intent is None:
             raise ValueError(f"Method {self.method.name} does not support charge intent")
 
-        merged_request = transform_units({**self.defaults, **request})
+        resolved_currency = currency or getattr(self.method, "currency", None)
+        resolved_recipient = recipient or getattr(self.method, "recipient", None)
+        if not resolved_currency:
+            raise ValueError("currency must be set on the method or passed to charge()")
+        if not resolved_recipient:
+            raise ValueError("recipient must be set on the method or passed to charge()")
 
-        credential: Credential | None = None
-        if authorization and authorization.lower().startswith("payment "):
-            try:
-                credential = Credential.from_authorization(authorization)
-            except ParseError:
-                pass
+        if expires is None:
+            expires = (datetime.now(UTC) + timedelta(seconds=DEFAULT_EXPIRY_SECONDS)).isoformat()
 
-        transformed_request = transform_request(self.method, merged_request, credential)
+        decimals = getattr(self.method, "decimals", DEFAULT_DECIMALS)
+        base_amount = str(parse_units(amount, decimals))
+
+        request: dict[str, Any] = {
+            "amount": base_amount,
+            "currency": resolved_currency,
+            "recipient": resolved_recipient,
+            "expires": expires,
+        }
 
         return await verify_or_challenge(
             authorization=authorization,
             intent=intent,
-            request=transformed_request,
+            request=request,
             realm=self.realm,
             secret_key=self.secret_key,
             method=self.method.name,
+            description=description,
         )

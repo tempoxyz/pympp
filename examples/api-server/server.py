@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from mpay import Challenge, Credential, Receipt
-from mpay.methods.tempo import ChargeIntent, TempoMethod
+from mpay.methods.tempo import ChargeIntent, tempo
 from mpay.server import Mpay, requires_payment
 
 app = FastAPI(
@@ -19,25 +19,21 @@ RPC_URL = os.environ.get("TEMPO_RPC_URL", "https://rpc.testnet.tempo.xyz/")
 DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION", "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 )
-SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
-ALPHA_USD = "0x20c0000000000000000000000000000000000001"
+PATH_USD = "0x20c0000000000000000000000000000000000001"
 
-# Create payment handler with bound secret_key
-payment = Mpay(
-    method=TempoMethod(rpc_url=RPC_URL),
-    realm="localhost:8000",
-    secret_key=SECRET_KEY,
+mpay = Mpay.create(
+    method=tempo(currency=PATH_USD, recipient=DESTINATION),
 )
 
 
 def get_payment_request():
-    """Build payment request with fresh expiration."""
+    """Build payment request with fresh expiration (used by lower-level decorator API)."""
     expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
     if expires.endswith("+00:00"):
         expires = expires[:-6] + "Z"
     return {
         "amount": "1000",
-        "currency": ALPHA_USD,
+        "currency": PATH_USD,
         "recipient": DESTINATION,
         "expires": expires,
         "methodDetails": {"feePayer": True},
@@ -53,16 +49,16 @@ async def free_endpoint():
 @app.get("/paid")
 async def paid_endpoint(request: Request):
     """A paid endpoint that requires payment to access."""
-    result = await payment.charge(
+    result = await mpay.charge(
         authorization=request.headers.get("Authorization"),
-        request=get_payment_request(),
+        amount="0.001",
     )
 
     if isinstance(result, Challenge):
         return JSONResponse(
             status_code=402,
             content={"error": "Payment required"},
-            headers={"WWW-Authenticate": result.to_www_authenticate(payment.realm)},
+            headers={"WWW-Authenticate": result.to_www_authenticate(mpay.realm)},
         )
 
     credential, receipt = result
@@ -73,6 +69,9 @@ async def paid_endpoint(request: Request):
     }
 
 
+SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
+
+
 @app.get("/paid-decorator")
 @requires_payment(
     intent=ChargeIntent(rpc_url=RPC_URL),
@@ -81,7 +80,7 @@ async def paid_endpoint(request: Request):
     secret_key=SECRET_KEY,
 )
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    """A paid endpoint using the @requires_payment decorator."""
+    """A paid endpoint using the lower-level @requires_payment decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,

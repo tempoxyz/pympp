@@ -23,6 +23,7 @@ async def verify_or_challenge(
     realm: str,
     secret_key: str,
     method: str | None = None,
+    description: str | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -77,15 +78,15 @@ async def verify_or_challenge(
     request = transform_units(request)
 
     if authorization is None:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
     if not authorization.lower().startswith("payment "):
-        return _create_challenge(method_name, intent.name, request, realm, secret_key)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
     try:
         credential = Credential.from_authorization(authorization)
     except ParseError:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key)
+        return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
     receipt: Receipt = await intent.verify(credential, request)
 
@@ -98,6 +99,7 @@ def _create_challenge(
     request: dict[str, Any],
     realm: str,
     secret_key: str,
+    description: str | None = None,
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID."""
     if "expires" not in request:
@@ -110,4 +112,5 @@ def _create_challenge(
         method=method,
         intent=intent_name,
         request=request,
+        description=description,
     )

@@ -23,7 +23,7 @@ account = TempoAccount.from_key("0x...")
 
 response = await get(
     "https://api.example.com/resource",
-    methods=[tempo(account=account, rpc_url="https://rpc.testnet.tempo.xyz/")],
+    methods=[tempo(account=account)],
 )
 ```
 
@@ -37,7 +37,7 @@ from mpay.methods.tempo import tempo, TempoAccount
 
 account = TempoAccount.from_key("0x...")
 
-async with Client(methods=[tempo(account=account, rpc_url="https://rpc.testnet.tempo.xyz/")]) as client:
+async with Client(methods=[tempo(account=account)]) as client:
     r1 = await client.get("https://api.example.com/a")
     r2 = await client.get("https://api.example.com/b")
 ```
@@ -54,7 +54,7 @@ import httpx
 account = TempoAccount.from_key("0x...")
 
 transport = PaymentTransport(
-    methods=[tempo(account=account, rpc_url="https://rpc.testnet.tempo.xyz/")],
+    methods=[tempo(account=account)],
     inner=httpx.AsyncHTTPTransport(),
 )
 
@@ -72,7 +72,7 @@ from mpay.methods.tempo import tempo, TempoAccount
 import httpx
 
 account = TempoAccount.from_key("0x...")
-method = tempo(account=account, rpc_url="https://rpc.testnet.tempo.xyz/")
+method = tempo(account=account)
 
 async with httpx.AsyncClient() as client:
     # Initial request - expect 402
