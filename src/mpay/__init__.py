@@ -14,9 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from mpay._parsing import (
-    ParseError as ParseError,
-)
-from mpay._parsing import (
+    ParseError,
     format_authorization,
     format_payment_receipt,
     format_www_authenticate,

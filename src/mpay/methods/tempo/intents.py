@@ -521,6 +521,7 @@ class StreamIntent:
     chain_id: int = 42431
     min_voucher_delta: int = 0
     fee_payer: TempoAccount | None = None
+    fee_payer_url: str = ""  # Sponsor URL for fee-payer-signed transactions
     account: TempoAccount | None = None  # Server account for settle/close
 
     def __post_init__(self) -> None:
@@ -556,7 +557,9 @@ class StreamIntent:
         challenge = credential.challenge
         method_details = _get_method_details(challenge, self)
 
-        resolved_fee_payer = self.fee_payer if method_details.get("feePayer") else None
+        resolved_fee_payer_url: str | None = None
+        if method_details.get("feePayer") and (self.fee_payer is not None or self.fee_payer_url):
+            resolved_fee_payer_url = self.fee_payer_url or DEFAULT_FEE_PAYER_URL
         effective_min_delta = (
             int(method_details["minVoucherDelta"])
             if method_details.get("minVoucherDelta")
@@ -570,7 +573,7 @@ class StreamIntent:
                 challenge,
                 payload,
                 method_details,
-                resolved_fee_payer,
+                resolved_fee_payer_url,
                 request,
             )
         elif action == "topUp":
@@ -580,7 +583,7 @@ class StreamIntent:
                 challenge,
                 payload,
                 method_details,
-                resolved_fee_payer,
+                resolved_fee_payer_url,
             )
         elif action == "voucher":
             stream_receipt = await _handle_voucher(
@@ -900,7 +903,7 @@ async def _handle_open(
     challenge: Any,
     payload: dict[str, Any],
     method_details: dict[str, Any],
-    fee_payer: TempoAccount | None,
+    fee_payer_url: str | None,
     request: dict[str, Any],
 ) -> StreamReceipt:
     """Handle 'open' action: broadcast open tx, verify voucher, create channel."""
@@ -935,7 +938,7 @@ async def _handle_open(
         channel_id=channel_id,
         recipient=recipient,
         currency=currency,
-        fee_payer=fee_payer,
+        fee_payer_url=fee_payer_url,
     )
     on_chain = result.on_chain
 
@@ -1043,7 +1046,7 @@ async def _handle_top_up(
     challenge: Any,
     payload: dict[str, Any],
     method_details: dict[str, Any],
-    fee_payer: TempoAccount | None,
+    fee_payer_url: str | None,
 ) -> StreamReceipt:
     """Handle 'topUp' action: broadcast topUp tx, update deposit.
 
@@ -1066,7 +1069,7 @@ async def _handle_top_up(
         channel_id=channel_id,
         declared_deposit=declared_deposit,
         previous_deposit=channel.deposit,
-        fee_payer=fee_payer,
+        fee_payer_url=fee_payer_url,
     )
 
     await storage.update_channel(

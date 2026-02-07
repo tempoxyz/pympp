@@ -17,17 +17,8 @@ Example:
         return Response({"data": "..."}, headers={"Payment-Receipt": ...})
 """
 
-from mpay.server.decorator import requires_payment as requires_payment
-from mpay.server.intent import (
-    Intent as Intent,
-)
-from mpay.server.intent import (
-    VerificationError as VerificationError,
-)
-from mpay.server.intent import (
-    intent as intent,
-)
-from mpay.server.method import Method as Method
-from mpay.server.method import transform_request as transform_request
-from mpay.server.mpay import Mpay as Mpay
-from mpay.server.verify import verify_or_challenge as verify_or_challenge
+from mpay.server.decorator import requires_payment
+from mpay.server.intent import Intent, VerificationError, intent
+from mpay.server.method import Method, transform_request
+from mpay.server.mpay import Mpay
+from mpay.server.verify import verify_or_challenge

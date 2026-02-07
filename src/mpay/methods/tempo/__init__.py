@@ -25,22 +25,6 @@ Example:
     )
 """
 
-from mpay.methods.tempo.account import TempoAccount as TempoAccount
-from mpay.methods.tempo.client import (
-    StreamMethod as StreamMethod,
-)
-from mpay.methods.tempo.client import (
-    TempoMethod as TempoMethod,
-)
-from mpay.methods.tempo.client import (
-    TransactionError as TransactionError,
-)
-from mpay.methods.tempo.client import (
-    tempo as tempo,
-)
-from mpay.methods.tempo.intents import (
-    ChargeIntent as ChargeIntent,
-)
-from mpay.methods.tempo.intents import (
-    StreamIntent as StreamIntent,
-)
+from mpay.methods.tempo.account import TempoAccount
+from mpay.methods.tempo.client import StreamMethod, TempoMethod, TransactionError, tempo
+from mpay.methods.tempo.intents import ChargeIntent, StreamIntent

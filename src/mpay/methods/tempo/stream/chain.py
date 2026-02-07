@@ -234,6 +234,159 @@ def assert_uint128(amount: int) -> None:
         raise StreamError("cumulativeAmount exceeds uint128 range")
 
 
+# ──────────────────────────────────────────────────────────────
+# Pre-broadcast transaction validation
+# ──────────────────────────────────────────────────────────────
+
+
+def _decode_tempo_tx_calls(serialized_transaction: str) -> list:
+    """Decode calls from a Tempo type 0x76 transaction.
+
+    Returns the list of call items from the RLP-encoded transaction,
+    or an empty list if ``rlp`` is not installed or decoding fails.
+    """
+    try:
+        import rlp
+    except ImportError:
+        return []
+
+    try:
+        tx_bytes = bytes.fromhex(
+            serialized_transaction[2:]
+            if serialized_transaction.startswith("0x")
+            else serialized_transaction
+        )
+    except ValueError:
+        return []
+
+    if not tx_bytes or tx_bytes[0] != 0x76:
+        return []
+
+    try:
+        decoded = rlp.decode(tx_bytes[1:])
+    except Exception:
+        return []
+
+    if not isinstance(decoded, list) or len(decoded) < 5:
+        return []
+
+    return decoded[4] if len(decoded) > 4 else []
+
+
+def _find_call_data(
+    calls: list,
+    target_contract: str,
+    selector: bytes,
+) -> bytes | None:
+    """Find a call matching the target contract and function selector.
+
+    Returns the ABI-encoded argument bytes (after the 4-byte selector)
+    if found, or ``None``.
+    """
+    selector_hex = selector.hex()
+    for call_item in calls:
+        if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
+            continue
+        call_to_bytes = call_item[0]
+        call_data_bytes = call_item[2]
+        if not call_to_bytes or not call_data_bytes:
+            continue
+
+        call_to = (
+            "0x" + call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
+        )
+        call_data = (
+            call_data_bytes.hex() if isinstance(call_data_bytes, bytes) else str(call_data_bytes)
+        )
+
+        if call_to.lower() != target_contract.lower():
+            continue
+        if len(call_data) >= 8 and call_data[:8].lower() == selector_hex:
+            return bytes.fromhex(call_data[8:]) if len(call_data) > 8 else b""
+
+    return None
+
+
+def _validate_open_transaction(
+    serialized_transaction: str,
+    escrow_contract: str,
+    recipient: str,
+    currency: str,
+) -> None:
+    """Validate that a serialized transaction contains a valid open() call.
+
+    Decodes the Tempo type 0x76 transaction, finds the open() call
+    targeting the escrow contract, and validates that the payee and
+    token match the server's expected values.
+
+    Skipped silently if the ``rlp`` package is not installed.
+
+    Raises:
+        StreamError: If the transaction decodes successfully but
+            doesn't contain a matching open() call.
+    """
+    calls = _decode_tempo_tx_calls(serialized_transaction)
+    if not calls:
+        return
+
+    args_data = _find_call_data(calls, escrow_contract, _OPEN_SELECTOR)
+    if args_data is None:
+        raise StreamError("transaction does not contain a valid escrow open call")
+
+    try:
+        payee, token, _deposit, _salt, _auth = decode(
+            ["address", "address", "uint128", "bytes32", "address"],
+            args_data,
+        )
+    except Exception as exc:
+        raise StreamError("failed to decode open() arguments") from exc
+
+    if payee.lower() != recipient.lower():
+        raise StreamError("open transaction payee does not match server recipient")
+    if token.lower() != currency.lower():
+        raise StreamError("open transaction token does not match server currency")
+
+
+def _validate_top_up_transaction(
+    serialized_transaction: str,
+    escrow_contract: str,
+    channel_id: str,
+    declared_deposit: int,
+) -> None:
+    """Validate that a serialized transaction contains a valid topUp() call.
+
+    Skipped silently if the ``rlp`` package is not installed.
+
+    Raises:
+        StreamError: If the transaction decodes successfully but
+            doesn't contain a matching topUp() call.
+    """
+    calls = _decode_tempo_tx_calls(serialized_transaction)
+    if not calls:
+        return
+
+    args_data = _find_call_data(calls, escrow_contract, _TOP_UP_SELECTOR)
+    if args_data is None:
+        raise StreamError("transaction does not contain a valid escrow topUp call")
+
+    try:
+        tx_channel_id_bytes, tx_amount = decode(
+            ["bytes32", "uint128"],
+            args_data,
+        )
+    except Exception as exc:
+        raise StreamError("failed to decode topUp() arguments") from exc
+
+    tx_channel_id = "0x" + tx_channel_id_bytes.hex()
+    if tx_channel_id.lower() != channel_id.lower():
+        raise StreamError("topUp transaction channelId does not match payload channelId")
+    if tx_amount != declared_deposit:
+        raise StreamError(
+            f"topUp transaction amount ({tx_amount}) does not match "
+            f"declared additionalDeposit ({declared_deposit})"
+        )
+
+
 async def broadcast_open_transaction(
     rpc_url: str,
     serialized_transaction: str,
@@ -242,18 +395,27 @@ async def broadcast_open_transaction(
     recipient: str,
     currency: str,
     *,
-    fee_payer: TempoAccount | None = None,
+    fee_payer_url: str | None = None,
     client: Any | None = None,
 ) -> BroadcastResult:
     """Broadcast an open transaction and verify on-chain state.
 
-    Broadcasts the client's signed transaction, then reads the resulting
-    channel state from the escrow contract to validate correctness.
+    Validates the transaction before broadcasting:
+
+    - Decodes the 0x76 transaction and verifies it contains an open() call
+    - Checks that the payee and token match the server's expected values
+
+    If ``fee_payer_url`` is set, broadcasts via the fee payer sponsor
+    service (which adds its fee payer signature before relaying).
     """
+    _validate_open_transaction(serialized_transaction, escrow_contract, recipient, currency)
+
+    broadcast_url = fee_payer_url or rpc_url
+
     tx_hash: str | None = None
     try:
         result = await _rpc_call(
-            rpc_url,
+            broadcast_url,
             "eth_sendRawTransaction",
             [serialized_transaction],
             client=client,
@@ -283,16 +445,27 @@ async def broadcast_top_up_transaction(
     declared_deposit: int,
     previous_deposit: int,
     *,
-    fee_payer: TempoAccount | None = None,
+    fee_payer_url: str | None = None,
     client: Any | None = None,
 ) -> tuple[str, int]:
     """Broadcast a topUp transaction and return (txHash, newDeposit).
 
-    Broadcasts the transaction, then verifies the deposit increased
-    by reading on-chain state.
+    Validates the transaction before broadcasting:
+
+    - Decodes the 0x76 transaction and verifies it contains a topUp() call
+    - Checks that the channelId and amount match the payload values
+
+    If ``fee_payer_url`` is set, broadcasts via the fee payer sponsor
+    service.
     """
+    _validate_top_up_transaction(
+        serialized_transaction, escrow_contract, channel_id, declared_deposit
+    )
+
+    broadcast_url = fee_payer_url or rpc_url
+
     result = await _rpc_call(
-        rpc_url,
+        broadcast_url,
         "eth_sendRawTransaction",
         [serialized_transaction],
         client=client,

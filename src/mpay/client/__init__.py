@@ -16,18 +16,4 @@ Example:
         r2 = await client.get("https://api.example.com/b")
 """
 
-from mpay.client.transport import (
-    Client as Client,
-)
-from mpay.client.transport import (
-    PaymentTransport as PaymentTransport,
-)
-from mpay.client.transport import (
-    get as get,
-)
-from mpay.client.transport import (
-    post as post,
-)
-from mpay.client.transport import (
-    request as request,
-)
+from mpay.client.transport import Client, PaymentTransport, get, post, request
