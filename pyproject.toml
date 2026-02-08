@@ -11,6 +11,10 @@ authors = [
     {name = "Tempo"}
 ]
 license = {text = "MIT OR Apache-2.0"}
+
+[project.urls]
+Homepage = "https://github.com/tempoxyz/pympay"
+Documentation = "https://github.com/tempoxyz/pympay#readme"
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
