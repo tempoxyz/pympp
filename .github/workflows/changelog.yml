@@ -1,0 +1,21 @@
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: npm install -g @sourcegraph/amp
+
+      - uses: wevm/changelogs/check@master
+        with:
+          ai: 'amp -x'
+        env:
+          AMP_API_KEY: ${{ secrets.AMP_API_KEY }}
