@@ -4,19 +4,19 @@ on:
   push:
     branches: [main]
 
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   release:
+    name: Version
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - uses: wevm/changelogs@master
+      - uses: wevm/changelogs-rs@changelogs@0.6.0
         with:
+          ecosystem: python
           pypi-token: ${{ secrets.PYPI_TOKEN }}
+          conventional-commit: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
