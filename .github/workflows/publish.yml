@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: wevm/changelogs-rs@changelogs@0.6.0
+      - uses: wevm/changelogs@master
         with:
           ecosystem: python
           pypi-token: ${{ secrets.PYPI_TOKEN }}
