@@ -502,7 +502,7 @@ class StreamIntent:
 
     Example::
 
-        from mpay.methods.tempo.stream import MemoryStorage
+        from mpay.methods.tempo.stream.storage import MemoryStorage
         from mpay.methods.tempo import StreamIntent
 
         storage = MemoryStorage()
