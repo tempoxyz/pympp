@@ -17,9 +17,10 @@ Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["
 ```python
 from mpay import Challenge
 from mpay.server import Mpay
-from mpay.methods.tempo import tempo
+from mpay.methods.tempo import tempo, ChargeIntent
 mpay = Mpay.create(
     method=tempo(
+        intents={"charge": ChargeIntent()},
         currency="0x20c0000000000000000000000000000000000001",
         recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
     ),
@@ -50,11 +51,11 @@ async def handler(request):
 
 ```python
 from mpay.client import Client
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
-async with Client(methods=[tempo(account=account)]) as client:
+async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
     r1 = await client.get("https://api.example.com/a")
     r2 = await client.get("https://api.example.com/b")
 ```
@@ -63,13 +64,13 @@ async with Client(methods=[tempo(account=account)]) as client:
 
 ```python
 from mpay.client import get
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
 response = await get(
     "https://api.example.com/resource",
-    methods=[tempo(account=account)],
+    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
 )
 ```
 
@@ -80,7 +81,7 @@ from mpay.client import PaymentTransport
 import httpx
 
 transport = PaymentTransport(
-    methods=[tempo(...)],
+    methods=[tempo(intents={"charge": ChargeIntent()}, ...)],
     inner=httpx.AsyncHTTPTransport(),
 )
 
@@ -92,11 +93,11 @@ async with httpx.AsyncClient(transport=transport) as client:
 
 ```python
 from mpay import Challenge, Credential
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")
-method = tempo(account=account)
+method = tempo(account=account, intents={"charge": ChargeIntent()})
 
 async with httpx.AsyncClient() as client:
     res = await client.get("https://api.example.com/resource")
@@ -264,12 +265,15 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 
 ```python
 from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+
 method = tempo(
+    intents={"charge": ChargeIntent()},
     currency="0x20c0000000000000000000000000000000000001",
     recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
 )
+
 account = TempoAccount.from_key("0x...")
-client_method = tempo(account=account)
+client_method = tempo(account=account, intents={"charge": ChargeIntent()})
 ```
 
 ## Code Style

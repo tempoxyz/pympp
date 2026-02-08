@@ -22,7 +22,11 @@ DESTINATION = os.environ.get(
 )
 
 mpay = Mpay.create(
-    method=tempo(currency=ALPHA_USD, recipient=DESTINATION),
+    method=tempo(
+        currency=ALPHA_USD,
+        recipient=DESTINATION,
+        intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
+    ),
 )
 
 

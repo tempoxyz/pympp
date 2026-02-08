@@ -11,6 +11,7 @@ import pytest
 
 from mpay import Challenge, Credential, Receipt
 from mpay.methods.tempo import tempo
+from mpay.methods.tempo.intents import ChargeIntent
 from mpay.server import Mpay
 
 
@@ -30,6 +31,7 @@ class TestMpayCreate:
         method = tempo(
             currency="0x20c0000000000000000000000000000000000001",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            intents={"charge": ChargeIntent()},
         )
         mpay = Mpay.create(
             method=method,
@@ -44,7 +46,7 @@ class TestMpayCreate:
     def test_create_auto_realm(self) -> None:
         with patch.dict(os.environ, {"MPAY_REALM": "auto.example.com"}):
             mpay = Mpay.create(
-                method=tempo(),
+                method=tempo(intents={"charge": ChargeIntent()}),
                 secret_key="test-secret",
             )
             assert mpay.realm == "auto.example.com"
@@ -55,7 +57,7 @@ class TestMpayCreate:
             os.environ.pop("HOST", None)
             os.environ.pop("HOSTNAME", None)
             mpay = Mpay.create(
-                method=tempo(),
+                method=tempo(intents={"charge": ChargeIntent()}),
                 secret_key="test-secret",
             )
             assert mpay.realm == "my-app.vercel.app"
@@ -63,7 +65,7 @@ class TestMpayCreate:
     def test_create_auto_realm_fallback(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             mpay = Mpay.create(
-                method=tempo(),
+                method=tempo(intents={"charge": ChargeIntent()}),
                 secret_key="test-secret",
             )
             assert mpay.realm == "localhost"
@@ -75,7 +77,7 @@ class TestMpayCreate:
             patch("mpay.server._defaults._ENV_FILE", env_file),
         ):
             mpay = Mpay.create(
-                method=tempo(),
+                method=tempo(intents={"charge": ChargeIntent()}),
                 realm="test.com",
             )
             assert len(mpay.secret_key) == 36  # UUID format
@@ -85,7 +87,7 @@ class TestMpayCreate:
     def test_create_auto_secret_key_from_env(self) -> None:
         with patch.dict(os.environ, {"MPAY_SECRET_KEY": "env-secret"}):
             mpay = Mpay.create(
-                method=tempo(),
+                method=tempo(intents={"charge": ChargeIntent()}),
                 realm="test.com",
             )
             assert mpay.secret_key == "env-secret"
@@ -96,8 +98,8 @@ class TestMpayCreate:
             patch.dict(os.environ, {}, clear=True),
             patch("mpay.server._defaults._ENV_FILE", env_file),
         ):
-            mpay1 = Mpay.create(method=tempo(), realm="test.com")
-            mpay2 = Mpay.create(method=tempo(), realm="test.com")
+            mpay1 = Mpay.create(method=tempo(intents={"charge": ChargeIntent()}), realm="test.com")
+            mpay2 = Mpay.create(method=tempo(intents={"charge": ChargeIntent()}), realm="test.com")
             assert mpay1.secret_key == mpay2.secret_key
 
 
@@ -108,6 +110,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -127,6 +130,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -146,6 +150,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -161,6 +166,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -175,6 +181,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -189,6 +196,7 @@ class TestMpayCharge:
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000001",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
             ),
             realm="test.com",
             secret_key="test-secret",
@@ -206,7 +214,7 @@ class TestMpayCharge:
     @pytest.mark.asyncio
     async def test_charge_missing_currency_raises(self) -> None:
         mpay = Mpay.create(
-            method=tempo(),
+            method=tempo(intents={"charge": ChargeIntent()}),
             realm="test.com",
             secret_key="test-secret",
         )
@@ -216,7 +224,7 @@ class TestMpayCharge:
     @pytest.mark.asyncio
     async def test_charge_missing_recipient_raises(self) -> None:
         mpay = Mpay.create(
-            method=tempo(currency="0xabc"),
+            method=tempo(currency="0xabc", intents={"charge": ChargeIntent()}),
             realm="test.com",
             secret_key="test-secret",
         )

@@ -3,20 +3,22 @@
 Example:
     # Client-side
     from mpay.client import get
-    from mpay.methods.tempo import tempo, TempoAccount
+    from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
     account = TempoAccount.from_key("0x...")
     response = await get(
         "https://api.example.com/resource",
-        methods=[tempo(account=account, rpc_url="https://rpc.tempo.xyz")],
+        methods=[tempo(
+            account=account,
+            intents={"charge": ChargeIntent()},
+        )],
     )
 
     # Server-side
     from mpay.server import verify_or_challenge
     from mpay.methods.tempo import ChargeIntent
 
-    client = create_client(...)
-    intent = ChargeIntent(client)
+    intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
     result = await verify_or_challenge(
         authorization=request.headers.get("Authorization"),
         intent=intent,

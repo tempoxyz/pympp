@@ -17,13 +17,13 @@ The simplest way to make paid requests:
 
 ```python
 from mpay.client import get
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
 response = await get(
     "https://api.example.com/resource",
-    methods=[tempo(account=account)],
+    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
 )
 ```
 
@@ -33,11 +33,11 @@ For multiple requests, use the `Client` wrapper:
 
 ```python
 from mpay.client import Client
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
-async with Client(methods=[tempo(account=account)]) as client:
+async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
     r1 = await client.get("https://api.example.com/a")
     r2 = await client.get("https://api.example.com/b")
 ```
@@ -48,13 +48,13 @@ For full control, use `PaymentTransport` with a custom httpx client:
 
 ```python
 from mpay.client import PaymentTransport
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")
 
 transport = PaymentTransport(
-    methods=[tempo(account=account)],
+    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
     inner=httpx.AsyncHTTPTransport(),
 )
 
@@ -68,11 +68,11 @@ For complete control over the payment flow:
 
 ```python
 from mpay import Challenge, Credential
-from mpay.methods.tempo import tempo, TempoAccount
+from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")
-method = tempo(account=account)
+method = tempo(account=account, intents={"charge": ChargeIntent()})
 
 async with httpx.AsyncClient() as client:
     # Initial request - expect 402
