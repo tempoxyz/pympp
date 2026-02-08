@@ -1,4 +1,4 @@
-.PHONY: install lint fix format format-check test check all
+.PHONY: install lint fix format format-check test test-integration test-integration-testnet check all
 
 install:
 	uv sync --all-extras --dev
@@ -18,6 +18,12 @@ format-check:
 
 test:
 	uv run pytest -v
+
+test-integration:
+	TEMPO_RPC_URL=http://localhost:8545 uv run pytest -m integration -v
+
+test-integration-testnet:
+	TEMPO_RPC_URL=https://rpc.testnet.tempo.xyz uv run pytest -m integration -v
 
 check: lint format-check test
 
