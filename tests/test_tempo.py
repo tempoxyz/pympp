@@ -74,7 +74,11 @@ class TestTempoMethod:
         """tempo() should accept account and rpc_url."""
         key = "0x" + "d" * 64
         account = TempoAccount.from_key(key)
-        method = tempo(account=account, rpc_url="https://custom.rpc", intents={"charge": ChargeIntent(rpc_url="https://custom.rpc")})
+        method = tempo(
+            account=account,
+            rpc_url="https://custom.rpc",
+            intents={"charge": ChargeIntent(rpc_url="https://custom.rpc")},
+        )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
 
@@ -401,7 +405,11 @@ class TestSponsoredTransfer:
     async def test_client_builds_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
         """Client should build and return raw tx when fee_payer=True."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(account=account, rpc_url="https://rpc.test", intents={"charge": ChargeIntent(rpc_url="https://rpc.test")})
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+        )
 
         httpx_mock.add_response(
             url="https://rpc.test",
