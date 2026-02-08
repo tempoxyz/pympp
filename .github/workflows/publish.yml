@@ -1,0 +1,22 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: wevm/changelogs-rs@changelogs@0.6.0
+        with:
+          ecosystem: python
+          pypi-token: ${{ secrets.PYPI_TOKEN }}
+          conventional-commit: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

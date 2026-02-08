@@ -18,6 +18,10 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
 ]
 
+[project.urls]
+Homepage = "https://github.com/tempoxyz/pympay"
+Documentation = "https://github.com/tempoxyz/pympay#readme"
+
 [project.optional-dependencies]
 tempo = [
     "pytempo @ git+https://github.com/tempoxyz/pytempo.git@main",
