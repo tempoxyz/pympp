@@ -32,7 +32,7 @@ from mpay.extensions.mcp import (
     MCPChallenge,
     MCPCredential,
 )
-from mpay.methods.tempo import TempoAccount, tempo
+from mpay.methods.tempo import ChargeIntent, TempoAccount, tempo
 
 SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
 
@@ -48,7 +48,7 @@ async def run_client() -> None:
         sys.exit(1)
 
     account = TempoAccount.from_key(private_key)
-    method = tempo(account=account)
+    method = tempo(account=account, intents={"charge": ChargeIntent()})
 
     print(f"Client address: {account.address}")
     print()

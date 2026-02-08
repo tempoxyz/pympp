@@ -7,7 +7,7 @@ import os
 import sys
 
 from mpay.client import Client
-from mpay.methods.tempo import TempoAccount, tempo
+from mpay.methods.tempo import ChargeIntent, TempoAccount, tempo
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +47,7 @@ async def run(args: argparse.Namespace) -> int:
     account = TempoAccount.from_key(key)
 
     rpc_url = args.rpc_url or os.environ.get("TEMPO_RPC_URL")
-    method = tempo(account=account, rpc_url=rpc_url) if rpc_url else tempo(account=account)
+    method = tempo(account=account, rpc_url=rpc_url or "https://rpc.tempo.xyz", intents={"charge": ChargeIntent()})
 
     async with Client(methods=[method]) as client:
         response = await client.request(

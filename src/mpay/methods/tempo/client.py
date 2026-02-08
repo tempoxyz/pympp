@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 from mpay import Challenge, Credential
 from mpay.methods.tempo._defaults import RPC_URL
-from mpay.methods.tempo.intents import ChargeIntent
 from mpay.methods.tempo.stream.chain import (
     compute_channel_id,
     encode_approve_call,
@@ -67,12 +66,6 @@ class TempoMethod:
     recipient: str | None = None
     decimals: int = 6
     _intents: dict[str, Intent] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        if not self._intents:
-            self._intents = {
-                "charge": ChargeIntent(rpc_url=self.rpc_url),
-            }
 
     @property
     def intents(self) -> dict[str, Intent]:
@@ -629,33 +622,34 @@ class StreamMethod:
 
 
 def tempo(
+    intents: dict[str, Intent],
     account: TempoAccount | None = None,
     rpc_url: str = RPC_URL,
     root_account: str | None = None,
     currency: str | None = None,
     recipient: str | None = None,
     decimals: int = 6,
-    intents: dict[str, Intent] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
     Args:
+        intents: Intents to register (e.g. charge, stream).
         account: Account for signing transactions.
         rpc_url: Tempo RPC endpoint URL.
         root_account: Root account address for access key signing.
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
         decimals: Token decimal places for amount conversion (default: 6).
-        intents: Additional intents to register (merged with default charge).
 
     Returns:
         A configured TempoMethod instance.
 
     Example:
-        from mpay.methods.tempo import tempo, TempoAccount
+        from mpay.methods.tempo import ChargeIntent
 
-        account = TempoAccount.from_key("0x...")
-        method = tempo(account=account)
+        method = tempo(
+            intents={"charge": ChargeIntent()},
+        )
     """
     method = TempoMethod(
         account=account,
@@ -665,6 +659,5 @@ def tempo(
         recipient=recipient,
         decimals=decimals,
     )
-    if intents:
-        method._intents.update(intents)
+    method._intents = dict(intents)
     return method

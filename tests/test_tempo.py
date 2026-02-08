@@ -66,7 +66,7 @@ class TestTempoAccount:
 class TestTempoMethod:
     def test_tempo_factory(self) -> None:
         """tempo() should create a TempoMethod."""
-        method = tempo()
+        method = tempo(intents={"charge": ChargeIntent()})
         assert isinstance(method, TempoMethod)
         assert method.name == "tempo"
 
@@ -74,20 +74,24 @@ class TestTempoMethod:
         """tempo() should accept account and rpc_url."""
         key = "0x" + "d" * 64
         account = TempoAccount.from_key(key)
-        method = tempo(account=account, rpc_url="https://custom.rpc")
+        method = tempo(
+            account=account,
+            rpc_url="https://custom.rpc",
+            intents={"charge": ChargeIntent(rpc_url="https://custom.rpc")},
+        )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
 
     def test_intents_property(self) -> None:
-        """Should have charge intent by default."""
-        method = tempo()
+        """Should have only the intents explicitly provided."""
+        method = tempo(intents={"charge": ChargeIntent()})
         assert "charge" in method.intents
         assert isinstance(method.intents["charge"], ChargeIntent)
 
     @pytest.mark.asyncio
     async def test_create_credential_no_account(self) -> None:
         """Should raise if no account configured."""
-        method = tempo()
+        method = tempo(intents={"charge": ChargeIntent()})
         challenge = Challenge(
             id="test",
             method="tempo",
@@ -102,7 +106,7 @@ class TestTempoMethod:
         """Should raise for unsupported intent."""
         key = "0x" + "e" * 64
         account = TempoAccount.from_key(key)
-        method = tempo(account=account)
+        method = tempo(account=account, intents={"charge": ChargeIntent()})
         challenge = Challenge(
             id="test",
             method="tempo",
@@ -114,7 +118,7 @@ class TestTempoMethod:
 
     def test_encode_transfer(self) -> None:
         """Should encode TIP-20 transfer correctly."""
-        method = tempo()
+        method = tempo(intents={"charge": ChargeIntent()})
         data = method._encode_transfer("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000)
         assert data.startswith("0xa9059cbb")
         assert len(data) == 138
@@ -401,7 +405,11 @@ class TestSponsoredTransfer:
     async def test_client_builds_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
         """Client should build and return raw tx when fee_payer=True."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(account=account, rpc_url="https://rpc.test")
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+        )
 
         httpx_mock.add_response(
             url="https://rpc.test",
