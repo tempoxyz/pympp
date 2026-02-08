@@ -1,0 +1,14 @@
+[project]
+name = "stream-server-example"
+version = "0.1.0"
+description = "Streaming payment server example using payment channels"
+requires-python = ">=3.12"
+dependencies = [
+    "mpay[tempo,server]",
+    "fastapi",
+    "uvicorn",
+    "sse-starlette",
+]
+
+[tool.uv.sources]
+mpay = { path = "../.." }

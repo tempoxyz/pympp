@@ -23,15 +23,6 @@ from mpay._parsing import (
     parse_www_authenticate,
 )
 
-__all__ = [
-    "Challenge",
-    "ChallengeEcho",
-    "Credential",
-    "ParseError",
-    "Receipt",
-    "generate_challenge_id",
-]
-
 
 def _b64url_encode(data: str) -> str:
     """Encode a string to base64url without padding."""
@@ -316,6 +307,7 @@ class Receipt:
     status: Literal["success"]
     timestamp: datetime
     reference: str
+    extra: dict[str, Any] | None = None
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:

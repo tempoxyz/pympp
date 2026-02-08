@@ -26,7 +26,5 @@ Example:
 """
 
 from mpay.methods.tempo.account import TempoAccount
-from mpay.methods.tempo.client import TempoMethod, TransactionError, tempo
-from mpay.methods.tempo.intents import ChargeIntent
-
-__all__ = ["ChargeIntent", "TempoAccount", "TempoMethod", "TransactionError", "tempo"]
+from mpay.methods.tempo.client import StreamMethod, TempoMethod, TransactionError, tempo
+from mpay.methods.tempo.intents import ChargeIntent, StreamIntent

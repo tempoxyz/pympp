@@ -272,6 +272,10 @@ account = TempoAccount.from_key("0x...")
 client_method = tempo(account=account)
 ```
 
+## Code Style
+
+- **No `__all__`** — Do not add `__all__` to `__init__.py` files. We use explicit imports everywhere; wildcard imports (`from x import *`) are not used.
+
 ## Development
 
 ```bash

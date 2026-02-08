@@ -415,10 +415,6 @@ class TestSponsoredTransfer:
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
-        httpx_mock.add_response(
-            url="https://rpc.test",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
 
         challenge = Challenge(
             id="test-sponsored",
