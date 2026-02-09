@@ -24,7 +24,7 @@ Documentation = "https://github.com/tempoxyz/pympay#readme"
 
 [project.optional-dependencies]
 tempo = [
-    "pytempo @ git+https://github.com/tempoxyz/pytempo.git@main",
+    "pytempo>=0.2.1",
     "pydantic>=2.0",
 ]
 server = ["pydantic>=2.0", "python-dotenv>=1.0"]
@@ -52,9 +52,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mpay"]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.ruff]
 line-length = 100
