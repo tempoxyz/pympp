@@ -29,7 +29,7 @@ def test_intent():
 class TestMpayCreate:
     def test_create_with_explicit_args(self) -> None:
         method = tempo(
-            currency="0x20c0000000000000000000000000000000000001",
+            currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             intents={"charge": ChargeIntent()},
         )
@@ -40,7 +40,7 @@ class TestMpayCreate:
         )
         assert mpay.realm == "api.example.com"
         assert mpay.secret_key == "test-secret"
-        assert mpay.method.currency == "0x20c0000000000000000000000000000000000001"
+        assert mpay.method.currency == "0x20c0000000000000000000000000000000000000"
         assert mpay.method.recipient == "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 
     def test_create_auto_realm(self) -> None:
@@ -108,7 +108,7 @@ class TestMpayCharge:
     async def test_charge_returns_challenge(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),
@@ -120,7 +120,7 @@ class TestMpayCharge:
         assert result.method == "tempo"
         assert result.intent == "charge"
         assert result.request["amount"] == "500000"
-        assert result.request["currency"] == "0x20c0000000000000000000000000000000000001"
+        assert result.request["currency"] == "0x20c0000000000000000000000000000000000000"
         assert result.request["recipient"] == "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
         assert "expires" in result.request
 
@@ -128,7 +128,7 @@ class TestMpayCharge:
     async def test_charge_auto_expires_5_minutes(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),
@@ -148,7 +148,7 @@ class TestMpayCharge:
     async def test_charge_explicit_expires(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),
@@ -164,7 +164,7 @@ class TestMpayCharge:
     async def test_charge_amount_conversion(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),
@@ -179,7 +179,7 @@ class TestMpayCharge:
     async def test_charge_whole_dollar_amount(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),
@@ -194,7 +194,7 @@ class TestMpayCharge:
     async def test_charge_override_currency_recipient(self) -> None:
         mpay = Mpay.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000001",
+                currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": ChargeIntent()},
             ),

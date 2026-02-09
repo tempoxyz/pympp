@@ -21,7 +21,7 @@ from mpay.methods.tempo import tempo, ChargeIntent
 mpay = Mpay.create(
     method=tempo(
         intents={"charge": ChargeIntent()},
-        currency="0x20c0000000000000000000000000000000000001",
+        currency="0x20c0000000000000000000000000000000000000",
         recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
     ),
 )
@@ -268,7 +268,7 @@ from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 method = tempo(
     intents={"charge": ChargeIntent()},
-    currency="0x20c0000000000000000000000000000000000001",
+    currency="0x20c0000000000000000000000000000000000000",
     recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
 )
 

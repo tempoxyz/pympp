@@ -210,7 +210,7 @@ class TestChargeIntent:
                         "status": "0x1",
                         "logs": [
                             {
-                                "address": "0x20c0000000000000000000000000000000000001",
+                                "address": "0x20c0000000000000000000000000000000000000",
                                 "topics": [
                                     transfer_topic,
                                     "0x0000000000000000000000001234567890123456789012345678901234567890",
@@ -233,7 +233,7 @@ class TestChargeIntent:
             credential,
             {
                 "amount": "1000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 "expires": future,
             },
@@ -430,7 +430,7 @@ class TestSponsoredTransfer:
             intent="charge",
             request={
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 "methodDetails": {
                     "feePayer": True,
@@ -465,7 +465,7 @@ class TestSponsoredTransfer:
                     "status": "0x1",
                     "logs": [
                         {
-                            "address": "0x20c0000000000000000000000000000000000001",
+                            "address": "0x20c0000000000000000000000000000000000000",
                             "topics": [
                                 "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
                                 "0x000000000000000000000000sender00000000000000000000000000000000",
@@ -491,7 +491,7 @@ class TestSponsoredTransfer:
             credential,
             {
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 "expires": future,
                 "methodDetails": {
@@ -528,7 +528,7 @@ class TestSponsoredTransfer:
                 credential,
                 {
                     "amount": "1000000",
-                    "currency": "0x20c0000000000000000000000000000000000001",
+                    "currency": "0x20c0000000000000000000000000000000000000",
                     "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                     "expires": future,
                     "methodDetails": {
@@ -544,7 +544,7 @@ class TestSchemas:
         """Should validate charge request with default methodDetails."""
         req = ChargeRequest(
             amount="1000",
-            currency="0x20c0000000000000000000000000000000000001",
+            currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             expires="2030-01-20T12:00:00Z",
         )
@@ -556,7 +556,7 @@ class TestSchemas:
         """Should accept methodDetails with feePayer and feePayerUrl."""
         req = ChargeRequest(
             amount="1000",
-            currency="0x20c0000000000000000000000000000000000001",
+            currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             expires="2030-01-20T12:00:00Z",
             methodDetails=MethodDetails(

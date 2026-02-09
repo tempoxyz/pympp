@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from mpay import Challenge, Credential, Receipt
 from mpay.methods.tempo import ChargeIntent, tempo
-from mpay.methods.tempo._defaults import ALPHA_USD, TESTNET_RPC_URL
+from mpay.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
 from mpay.server import Mpay, requires_payment
 
 app = FastAPI(
@@ -23,7 +23,7 @@ DESTINATION = os.environ.get(
 
 mpay = Mpay.create(
     method=tempo(
-        currency=ALPHA_USD,
+        currency=PATH_USD,
         recipient=DESTINATION,
         intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
     ),
@@ -37,7 +37,7 @@ def get_payment_request():
         expires = expires[:-6] + "Z"
     return {
         "amount": "1000",
-        "currency": ALPHA_USD,
+        "currency": PATH_USD,
         "recipient": DESTINATION,
         "expires": expires,
         "methodDetails": {"feePayer": True},

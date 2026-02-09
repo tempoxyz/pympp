@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from mpay import Challenge
 from mpay.methods.tempo import StreamIntent, tempo
-from mpay.methods.tempo._defaults import ALPHA_USD, ESCROW_CONTRACT, TESTNET_RPC_URL
+from mpay.methods.tempo._defaults import ESCROW_CONTRACT, PATH_USD, TESTNET_RPC_URL
 from mpay.methods.tempo.stream.storage import MemoryStorage
 from mpay.server import Mpay
 
@@ -34,7 +34,7 @@ storage = MemoryStorage()
 
 mpay = Mpay.create(
     method=tempo(
-        currency=ALPHA_USD,
+        currency=PATH_USD,
         recipient=DESTINATION,
         intents={
             "stream": StreamIntent(
