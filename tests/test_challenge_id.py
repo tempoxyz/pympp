@@ -19,11 +19,11 @@ class TestGenerateChallengeId:
             intent="charge",
             request={
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "4Y_7cCtNrnPq0ujXFLOPsk4DRMctIFYxijKxrY5uob0"
+        assert result == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
 
     def test_with_expires(self) -> None:
         """Challenge ID with expires field included in HMAC."""
@@ -34,12 +34,12 @@ class TestGenerateChallengeId:
             intent="charge",
             request={
                 "amount": "5000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0xabcdef1234567890abcdef1234567890abcdef12",
             },
             expires="2026-01-29T12:00:00Z",
         )
-        assert result == "02h24ab0XjVsKFwbyhz8HU9FacoT-21zV4FokI2U4YI"
+        assert result == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
 
     def test_with_digest(self) -> None:
         """Challenge ID with digest field included in HMAC."""
@@ -66,7 +66,7 @@ class TestGenerateChallengeId:
             intent="charge",
             request={
                 "amount": "10000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634C0532925a3b844Bc9e7595f1B0F2",
                 "description": "API access fee",
                 "externalId": "order-12345",
@@ -74,7 +74,7 @@ class TestGenerateChallengeId:
             expires="2026-02-01T00:00:00Z",
             digest="sha-256=abc123def456",
         )
-        assert result == "9uqa-bDFwDBiMIgJF-hytstRW_YgjpBUDCo5_SMSqG4"
+        assert result == "96xfZu2wzXD-f-l-hClS9OgODVgIoPWSCWhUw6a4I1Q"
 
     def test_different_secret_different_id(self) -> None:
         """Same parameters with different secret produces different ID."""
@@ -85,11 +85,11 @@ class TestGenerateChallengeId:
             intent="charge",
             request={
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "GaC7Gn_Fbbq98Tw-Eb7z4FadriU7GzNrAyC7ZcY3VRI"
+        assert result == "UMEn_1WPt2vz3XK8rrkbHET6RwqfwtK8VVNz0Xc2x4A"
 
     def test_empty_request(self) -> None:
         """Challenge ID with empty request object."""
@@ -127,12 +127,12 @@ class TestGenerateChallengeId:
             intent="charge",
             request={
                 "amount": "5000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x2222222222222222222222222222222222222222",
                 "methodDetails": {"chainId": 42431, "feePayer": True},
             },
         )
-        assert result == "dyItTtUU31Gp2ckWrYXoeB2wZtS1OTVpXw81D_blwuk"
+        assert result == "xPIM2fN55BNq6ADKIFvGCR5zB7DhH6YbwDtAqtExwI0"
 
 
 class TestChallengeCreate:
@@ -147,11 +147,11 @@ class TestChallengeCreate:
             intent="charge",
             request={
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert challenge.id == "4Y_7cCtNrnPq0ujXFLOPsk4DRMctIFYxijKxrY5uob0"
+        assert challenge.id == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
         assert challenge.method == "tempo"
         assert challenge.intent == "charge"
 
@@ -164,13 +164,13 @@ class TestChallengeCreate:
             intent="charge",
             request={
                 "amount": "5000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0xabcdef1234567890abcdef1234567890abcdef12",
             },
             expires="2026-01-29T12:00:00Z",
             description="Test payment",
         )
-        assert challenge.id == "02h24ab0XjVsKFwbyhz8HU9FacoT-21zV4FokI2U4YI"
+        assert challenge.id == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
         assert challenge.expires == "2026-01-29T12:00:00Z"
         assert challenge.description == "Test payment"
 
@@ -187,7 +187,7 @@ class TestChallengeVerify:
             intent="charge",
             request={
                 "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000001",
+                "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )

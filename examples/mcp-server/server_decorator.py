@@ -31,7 +31,7 @@ from mpay.extensions.mcp import (
     verify_or_challenge,
 )
 from mpay.methods.tempo import ChargeIntent
-from mpay.methods.tempo._defaults import ALPHA_USD, TESTNET_RPC_URL
+from mpay.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")
@@ -53,7 +53,7 @@ def get_payment_request() -> dict:
 
     return {
         "amount": "100",
-        "currency": ALPHA_USD,
+        "currency": PATH_USD,
         "recipient": DESTINATION,
         "expires": expires,
         "methodDetails": {"feePayer": True},
