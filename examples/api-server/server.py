@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
-from mpp.server import Mpp, requires_payment
+from mpp.server import Mpp, pay
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -77,14 +77,14 @@ SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
 
 
 @app.get("/paid-decorator")
-@requires_payment(
+@pay(
     intent=ChargeIntent(rpc_url=RPC_URL),
     request=get_payment_request,
     realm="localhost:8000",
     secret_key=SECRET_KEY,
 )
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    """A paid endpoint using the lower-level @requires_payment decorator."""
+    """A paid endpoint using the @pay decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,

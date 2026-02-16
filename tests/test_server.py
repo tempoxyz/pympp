@@ -3,7 +3,7 @@
 import pytest
 
 from mpp import Challenge, Credential, Receipt
-from mpp.server import intent, requires_payment, verify_or_challenge
+from mpp.server import intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
 from tests import make_credential
 
@@ -217,7 +217,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
@@ -248,7 +248,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
@@ -278,7 +278,7 @@ class TestRequiresPayment:
             assert request["amount"] == "2000"
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request=lambda req: {"amount": req.query_amount},
             realm="api.example.com",
@@ -304,7 +304,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
@@ -329,7 +329,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
@@ -356,7 +356,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
@@ -377,7 +377,7 @@ class TestRequiresPayment:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @requires_payment(
+        @pay(
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",

@@ -19,7 +19,7 @@ from mpp.extensions.mcp import (
     PaymentVerificationError,
     create_challenge,
     payment_capabilities,
-    requires_payment,
+    pay,
     verify_or_challenge,
 )
 
@@ -325,7 +325,7 @@ class TestCapabilities:
 
 
 class TestRequiresPaymentDecorator:
-    """Tests for the @requires_payment decorator."""
+    """Tests for the @pay decorator."""
 
     async def test_raises_payment_required_when_no_credential(self) -> None:
         class MockIntent:
@@ -334,7 +334,7 @@ class TestRequiresPaymentDecorator:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        @requires_payment(
+        @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -359,7 +359,7 @@ class TestRequiresPaymentDecorator:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        @requires_payment(
+        @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000", "currency": "usd"},
             realm="api.example.com",
@@ -390,7 +390,7 @@ class TestRequiresPaymentDecorator:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        @requires_payment(
+        @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -413,7 +413,7 @@ class TestRequiresPaymentDecorator:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 raise VerificationError("Payment failed")
 
-        @requires_payment(
+        @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -447,7 +447,7 @@ class TestRequiresPaymentDecorator:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        @requires_payment(
+        @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request=lambda query, **kw: {"amount": str(len(query) * 10)},
             realm="api.example.com",

@@ -45,7 +45,7 @@ def _make_challenge_response(challenge: Challenge, realm: str) -> Any:
         }
 
 
-def requires_payment(
+def pay(
     *,
     intent: Intent,
     request: RequestParamsType,
@@ -75,7 +75,7 @@ def requires_payment(
 
     Example:
         @app.get("/resource")
-        @requires_payment(
+        @pay(
             intent=ChargeIntent(rpc_url="..."),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
@@ -85,7 +85,7 @@ def requires_payment(
             return {"data": "paid content", "payer": credential.source}
 
         # With dynamic request params:
-        @requires_payment(
+        @pay(
             intent=ChargeIntent(rpc_url="..."),
             request=lambda req: {"amount": req.query_params.get("price"), ...},
             realm="api.example.com",

@@ -1,6 +1,6 @@
 """Decorator for payment-protected MCP tools.
 
-The @requires_payment decorator is a convenience wrapper for FastMCP-style
+The @pay decorator is a convenience wrapper for FastMCP-style
 frameworks where tool params are unpacked as **kwargs.
 
 For other MCP server implementations, use verify_or_challenge() directly:
@@ -49,7 +49,7 @@ R = TypeVar("R")
 RequestParamsType = dict[str, Any] | Callable[..., dict[str, Any]]
 
 
-def requires_payment(
+def pay(
     *,
     intent: Intent,
     request: RequestParamsType,
@@ -85,7 +85,7 @@ def requires_payment(
 
     Example:
         @mcp.tool()
-        @requires_payment(
+        @pay(
             intent=ChargeIntent(rpc_url="..."),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
@@ -95,7 +95,7 @@ def requires_payment(
 
         # With dynamic request params:
         @mcp.tool()
-        @requires_payment(
+        @pay(
             intent=ChargeIntent(rpc_url="..."),
             request=lambda query, **kw: {"amount": str(len(query) * 10), ...},
             realm="api.example.com",
