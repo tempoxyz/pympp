@@ -7,7 +7,10 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
+import json as _json
+
 from mpp import Challenge, Credential, Receipt
+from mpp.errors import PaymentRequiredError
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
@@ -15,7 +18,6 @@ if TYPE_CHECKING:
     from mpp.server.intent import Intent
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
-
 
 def get_authorization(request: Any) -> str | None:
     """Extract Authorization header from various request types.
@@ -29,34 +31,35 @@ def get_authorization(request: Any) -> str | None:
         return request.META.get("HTTP_AUTHORIZATION")
     return None
 
-
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
-    """Build a 402 response for a payment challenge.
+    """Build a 402 response for a payment challenge with RFC 9457 problem details body.
 
     Returns a Starlette ``Response`` when starlette is installed,
     otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
     """
+    error = PaymentRequiredError(realm=realm, description=challenge.description)
+    body = _json.dumps(error.to_problem_details(challenge.id))
+    headers = {
+        "WWW-Authenticate": challenge.to_www_authenticate(realm),
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json",
+    }
     try:
         from starlette.responses import Response
 
         return Response(
-            content=None,
+            content=body,
             status_code=402,
-            headers={
-                "WWW-Authenticate": challenge.to_www_authenticate(realm),
-                "Cache-Control": "no-store",
-            },
+            headers=headers,
+            media_type="application/problem+json",
         )
     except ImportError:
         return {
             "_mpp_challenge": True,
             "status": 402,
-            "headers": {
-                "WWW-Authenticate": challenge.to_www_authenticate(realm),
-                "Cache-Control": "no-store",
-            },
+            "headers": headers,
+            "body": body,
         }
-
 
 def wrap_payment_handler[R](
     handler: Callable[..., Awaitable[R]],
@@ -111,7 +114,6 @@ def wrap_payment_handler[R](
     del wrapper.__wrapped__
 
     return wrapper
-
 
 def pay[R](
     *,

@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from mpp import Challenge, Credential, Receipt
-from mpp._parsing import ParseError
+from mpp import Challenge, Credential, Receipt, generate_challenge_id, _constant_time_equal
+from mpp._parsing import ParseError, _b64_decode
 from mpp._units import transform_units
+from mpp.errors import InvalidChallengeError, MalformedCredentialError, PaymentRequiredError
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -80,12 +81,29 @@ async def verify_or_challenge(
     if authorization is None:
         return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
-    if not authorization.lower().startswith("payment "):
+    payment_scheme = _extract_payment_scheme(authorization)
+    if payment_scheme is None:
         return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
     try:
-        credential = Credential.from_authorization(authorization)
+        credential = Credential.from_authorization(payment_scheme)
     except ParseError:
+        return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
+
+    # Stateless challenge verification: recompute expected challenge ID from
+    # echoed parameters and compare to the credential's challenge ID.
+    echo = credential.challenge
+    echo_request = _b64_decode(echo.request) if echo.request else {}
+    expected_id = generate_challenge_id(
+        secret_key=secret_key,
+        realm=echo.realm,
+        method=echo.method,
+        intent=echo.intent,
+        request=echo_request,
+        expires=echo.expires,
+        digest=echo.digest,
+    )
+    if not _constant_time_equal(echo.id, expected_id):
         return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
 
     receipt: Receipt = await intent.verify(credential, request)
@@ -123,3 +141,16 @@ def _create_challenge(
         request=request,
         description=description,
     )
+
+
+def _extract_payment_scheme(header: str) -> str | None:
+    """Extract the Payment scheme from an Authorization header.
+
+    Supports comma-separated multiple schemes per RFC 9110.
+    Returns the full ``Payment ...`` string, or None if not found.
+    """
+    for scheme in header.split(","):
+        scheme = scheme.strip()
+        if scheme.lower().startswith("payment "):
+            return scheme
+    return None

@@ -5,7 +5,7 @@ import pytest
 from mpp import Challenge, Credential, Receipt
 from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
-from tests import make_credential
+from tests import make_bound_credential, make_credential
 
 try:
     from starlette.responses import Response as StarletteResponse
@@ -63,11 +63,15 @@ class TestVerifyOrChallenge:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            assert credential.challenge.id == "test-id"
             assert credential.payload == {"hash": "0xabc"}
             return Receipt.success("0x123")
 
-        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-id")
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -79,8 +83,7 @@ class TestVerifyOrChallenge:
         )
 
         assert isinstance(result, tuple)
-        cred, receipt = result
-        assert cred.challenge.id == "test-id"
+        _, receipt = result
         assert receipt.status == "success"
 
 
@@ -113,7 +116,14 @@ class TestClassBasedIntent:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success("custom-ref")
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="test",
+            secret_key="test-secret",
+            method="custom-method",
+            intent="custom",
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -139,7 +149,12 @@ class TestFailedReceiptHandling:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.failed("tx-failed-123")
 
-        credential = make_credential(payload={"token": "valid"}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={"token": "valid"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -160,7 +175,12 @@ class TestFailedReceiptHandling:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-success-456")
 
-        credential = make_credential(payload={"token": "valid"}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={"token": "valid"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -203,7 +223,12 @@ class TestVerificationError:
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
             raise VerificationError("Payment verification failed")
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         auth_header = credential.to_authorization()
 
         with pytest.raises(VerificationError, match="Payment verification failed"):
@@ -223,7 +248,12 @@ class TestVerificationError:
         async def success_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-success-456")
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         auth_header = credential.to_authorization()
 
         result = await verify_or_challenge(
@@ -235,7 +265,7 @@ class TestVerificationError:
         )
 
         assert isinstance(result, tuple)
-        cred, receipt = result
+        _, receipt = result
         assert receipt.status == "success"
         assert receipt.reference == "tx-success-456"
 
@@ -323,16 +353,19 @@ class TestPay:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
-                "credential_id": credential.challenge.id,
                 "receipt_ref": receipt.reference,
             }
 
-        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-cred-id")
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
         assert result["data"] == "paid content"
-        assert result["credential_id"] == "test-cred-id"
         assert result["receipt_ref"] == "tx-ref-123"
 
     @pytest.mark.asyncio
@@ -356,7 +389,12 @@ class TestPay:
         class RequestWithQuery(MockRequest):
             query_amount = "2000"
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "2000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = RequestWithQuery(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -379,13 +417,18 @@ class TestPay:
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
-            return {"credential_id": credential.challenge.id}
+            return {"paid": True}
 
-        credential = make_credential(payload={}, challenge_id="django-cred")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
-        assert result["credential_id"] == "django-cred"
+        assert result["paid"] is True
 
     @pytest.mark.asyncio
     async def test_returns_402_for_invalid_scheme(self) -> None:

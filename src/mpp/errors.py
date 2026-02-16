@@ -58,6 +58,8 @@ class PaymentRequiredError(PaymentError):
 class MalformedCredentialError(PaymentError):
     """Credential is malformed (invalid base64url, bad JSON structure)."""
 
+    status = 400
+
     def __init__(self, reason: str | None = None) -> None:
         msg = f"Credential is malformed: {reason}." if reason else "Credential is malformed."
         super().__init__(msg)
@@ -65,6 +67,8 @@ class MalformedCredentialError(PaymentError):
 
 class InvalidChallengeError(PaymentError):
     """Challenge ID is unknown, expired, or already used."""
+
+    status = 400
 
     def __init__(self, challenge_id: str | None = None, reason: str | None = None) -> None:
         id_part = f' "{challenge_id}"' if challenge_id else ""

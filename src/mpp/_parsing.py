@@ -210,6 +210,7 @@ def parse_authorization(header: str) -> Credential:
         intent=str(challenge_data.get("intent", "")),
         request=str(challenge_data.get("request", "")),
         expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
+        digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
     )
 
     return Credential(
@@ -239,6 +240,8 @@ def format_authorization(credential: Credential) -> str:
     }
     if credential.challenge.expires:
         challenge_dict["expires"] = credential.challenge.expires
+    if credential.challenge.digest:
+        challenge_dict["digest"] = credential.challenge.digest
 
     payload: dict[str, Any] = {
         "challenge": challenge_dict,
@@ -292,6 +295,8 @@ def parse_payment_receipt(header: str) -> Receipt:
         status=status,
         timestamp=timestamp,
         reference=str(data["reference"]),
+        method=str(data.get("method", "")),
+        external_id=str(data["externalId"]) if data.get("externalId") else None,
         extra=extra if isinstance(extra, dict) else None,
     )
 
@@ -309,6 +314,10 @@ def format_payment_receipt(receipt: Receipt) -> str:
         "timestamp": timestamp_str,
         "reference": receipt.reference,
     }
+    if receipt.method:
+        payload["method"] = receipt.method
+    if receipt.external_id:
+        payload["externalId"] = receipt.external_id
     if receipt.extra:
         payload["extra"] = receipt.extra
     return _b64_encode(payload)
