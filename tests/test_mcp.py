@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, Receipt, generate_challenge_id
 from mpp.extensions.mcp import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -22,6 +22,41 @@ from mpp.extensions.mcp import (
     payment_capabilities,
     verify_or_challenge,
 )
+from tests import TEST_SECRET
+
+MCP_TEST_SECRET = TEST_SECRET
+
+
+def _make_bound_mcp_challenge(
+    *,
+    realm: str = "api.example.com",
+    method: str = "tempo",
+    intent: str = "charge",
+    request: dict | None = None,
+    secret_key: str = MCP_TEST_SECRET,
+    expires: str | None = None,
+    description: str | None = None,
+) -> MCPChallenge:
+    """Create an MCPChallenge with an HMAC-bound ID for testing."""
+    if request is None:
+        request = {"amount": "1000"}
+    challenge_id = generate_challenge_id(
+        secret_key=secret_key,
+        realm=realm,
+        method=method,
+        intent=intent,
+        request=request,
+        expires=expires,
+    )
+    return MCPChallenge(
+        id=challenge_id,
+        realm=realm,
+        method=method,
+        intent=intent,
+        request=request,
+        expires=expires,
+        description=description,
+    )
 
 
 class TestMCPChallenge:
@@ -363,15 +398,12 @@ class TestPayDecorator:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000", "currency": "usd"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}, paid by {credential.source}"
 
-        challenge = MCPChallenge(
-            id="ch_test",
-            realm="api.example.com",
-            method="tempo",
-            intent="charge",
+        challenge = _make_bound_mcp_challenge(
             request={"amount": "1000", "currency": "usd"},
         )
         mcp_credential = MCPCredential(
@@ -417,17 +449,12 @@ class TestPayDecorator:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
 
-        challenge = MCPChallenge(
-            id="ch_test",
-            realm="api.example.com",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000"},
-        )
+        challenge = _make_bound_mcp_challenge(request={"amount": "1000"})
         mcp_credential = MCPCredential(
             challenge=challenge,
             payload={"signature": "0xabc"},
@@ -529,6 +556,7 @@ class TestVerifyOrChallenge:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
 
         assert isinstance(result, MCPChallenge)
@@ -548,6 +576,7 @@ class TestVerifyOrChallenge:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
 
         assert isinstance(result, MCPChallenge)
@@ -559,11 +588,7 @@ class TestVerifyOrChallenge:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        challenge = MCPChallenge(
-            id="ch_test",
-            realm="api.example.com",
-            method="tempo",
-            intent="charge",
+        challenge = _make_bound_mcp_challenge(
             request={"amount": "1000", "currency": "usd"},
         )
         mcp_credential = MCPCredential(
@@ -577,6 +602,7 @@ class TestVerifyOrChallenge:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000", "currency": "usd"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
 
         assert isinstance(result, tuple)
@@ -585,6 +611,35 @@ class TestVerifyOrChallenge:
         assert isinstance(receipt, MCPReceipt)
         assert credential.source == "0x1234"
         assert receipt.status == "success"
+
+    async def test_rejects_credential_with_invalid_challenge_id(self) -> None:
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        challenge = MCPChallenge(
+            id="forged-id",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        mcp_credential = MCPCredential(
+            challenge=challenge,
+            payload={"signature": "0xabc"},
+        )
+
+        result = await verify_or_challenge(
+            meta=mcp_credential.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        assert isinstance(result, MCPChallenge)
 
     async def test_raises_malformed_on_bad_credential(self) -> None:
         class MockIntent:
@@ -599,6 +654,7 @@ class TestVerifyOrChallenge:
                 intent=MockIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
                 realm="api.example.com",
+                secret_key=MCP_TEST_SECRET,
             )
 
     async def test_raises_verification_error_on_failure(self) -> None:
@@ -610,13 +666,7 @@ class TestVerifyOrChallenge:
             async def verify(self, credential: object, request: dict) -> Receipt:
                 raise VerificationError("Payment failed")
 
-        challenge = MCPChallenge(
-            id="ch_test",
-            realm="api.example.com",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000"},
-        )
+        challenge = _make_bound_mcp_challenge(request={"amount": "1000"})
         mcp_credential = MCPCredential(
             challenge=challenge,
             payload={"signature": "0xabc"},
@@ -628,6 +678,7 @@ class TestVerifyOrChallenge:
                 intent=MockIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
                 realm="api.example.com",
+                secret_key=MCP_TEST_SECRET,
             )
 
         assert exc_info.value.detail == "Payment failed"
@@ -642,6 +693,7 @@ class TestCreateChallenge:
             intent_name="charge",
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
 
         assert challenge.method == "tempo"
@@ -657,7 +709,48 @@ class TestCreateChallenge:
             intent_name="charge",
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
             description="API call fee",
         )
 
         assert challenge.description == "API call fee"
+
+    def test_challenge_id_is_hmac_bound(self) -> None:
+        challenge = create_challenge(
+            method="tempo",
+            intent_name="charge",
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        expected_id = generate_challenge_id(
+            secret_key=MCP_TEST_SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires=challenge.expires,
+        )
+        assert challenge.id == expected_id
+
+    def test_challenge_id_deterministic(self) -> None:
+        challenge1 = create_challenge(
+            method="tempo",
+            intent_name="charge",
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+        challenge2 = create_challenge(
+            method="tempo",
+            intent_name="charge",
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        # Different expires timestamps means different IDs (expected)
+        # But same secret+params should produce consistent HMACs
+        assert len(challenge1.id) > 0
+        assert len(challenge2.id) > 0

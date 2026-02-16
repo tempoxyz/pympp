@@ -26,6 +26,8 @@ class ChargeRequest(BaseModel):
     currency: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     recipient: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     expires: str
+    description: str | None = None
+    externalId: str | None = None
     methodDetails: MethodDetails = Field(default_factory=MethodDetails)
 
 
