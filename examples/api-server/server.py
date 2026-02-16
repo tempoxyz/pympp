@@ -1,7 +1,6 @@
 """Payment-protected API server using FastAPI and the Machine Payments Protocol."""
 
 import os
-from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -9,7 +8,7 @@ from fastapi.responses import JSONResponse
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
-from mpp.server import Mpp, requires_payment
+from mpp.server import Mpp
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -28,20 +27,6 @@ server = Mpp.create(
         intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
     ),
 )
-
-
-def get_payment_request():
-    """Build payment request with fresh expiration (used by lower-level decorator API)."""
-    expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    if expires.endswith("+00:00"):
-        expires = expires[:-6] + "Z"
-    return {
-        "amount": "1000",
-        "currency": PATH_USD,
-        "recipient": DESTINATION,
-        "expires": expires,
-        "methodDetails": {"feePayer": True},
-    }
 
 
 @app.get("/free")
@@ -73,18 +58,10 @@ async def paid_endpoint(request: Request):
     }
 
 
-SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
-
-
 @app.get("/paid-decorator")
-@requires_payment(
-    intent=ChargeIntent(rpc_url=RPC_URL),
-    request=get_payment_request,
-    realm="localhost:8000",
-    secret_key=SECRET_KEY,
-)
+@server.pay(amount="0.001")
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    """A paid endpoint using the lower-level @requires_payment decorator."""
+    """A paid endpoint using the server.pay() decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,

@@ -15,7 +15,6 @@ Environment:
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import uvicorn
@@ -45,19 +44,12 @@ server = Server("paid-echo-server")
 sse = SseServerTransport("/messages/")
 
 
-def get_payment_request() -> dict:
-    """Build the payment request with fresh expiration."""
-    expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    if expires.endswith("+00:00"):
-        expires = expires[:-6] + "Z"
-
-    return {
-        "amount": "100",
-        "currency": PATH_USD,
-        "recipient": DESTINATION,
-        "expires": expires,
-        "methodDetails": {"feePayer": True},
-    }
+PAYMENT_REQUEST = {
+    "amount": "100",
+    "currency": PATH_USD,
+    "recipient": DESTINATION,
+    "methodDetails": {"feePayer": True},
+}
 
 
 @server.list_tools()
@@ -115,7 +107,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         result = await verify_or_challenge(
             meta=meta_dict,
             intent=intent,
-            request=get_payment_request(),
+            request=PAYMENT_REQUEST,
             realm="echo.example.com",
             description="Premium echo service",
         )

@@ -5,7 +5,7 @@ A FastAPI server with payment-protected endpoints using the Machine Payments Pro
 ## What This Demonstrates
 
 - Free endpoints that anyone can access
-- Paid endpoints protected by the `@requires_payment` decorator
+- Paid endpoints protected by the `@pay` decorator
 - Automatic 402 challenge/response flow for the Payment HTTP Authentication Scheme
 
 ## Prerequisites

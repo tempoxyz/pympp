@@ -92,13 +92,13 @@ class StripeChargeIntent:
 ```python
 from fastapi import FastAPI, Request
 from mpp import Credential, Receipt
-from mpp.server import requires_payment
+from mpp.server import pay
 
 app = FastAPI()
 intent = StripeChargeIntent(api_key="sk_...")
 
 @app.get("/resource")
-@requires_payment(
+@pay(
     intent=intent,
     request={"amount": "1000", "currency": "usd"},
     realm="api.example.com",

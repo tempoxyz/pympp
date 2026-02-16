@@ -20,7 +20,7 @@ pip install pympp
 ### Server
 
 ```python
-from mpp import Challenge
+from mpp import Credential, Receipt
 from mpp.server import Mpp
 from mpp.methods.tempo import tempo, ChargeIntent
 
@@ -32,23 +32,10 @@ server = Mpp.create(
     ),
 )
 
-async def handler(request):
-    result = await server.charge(
-        authorization=request.headers.get("Authorization"),
-        amount="0.50",
-    )
-
-    if isinstance(result, Challenge):
-        return Response(
-            status=402,
-            headers={"WWW-Authenticate": result.to_www_authenticate(server.realm)},
-        )
-
-    credential, receipt = result
-    return Response(
-        {"data": "..."},
-        headers={"Payment-Receipt": receipt.to_payment_receipt()},
-    )
+@app.get("/paid")
+@server.pay(amount="0.50")
+async def handler(request, credential: Credential, receipt: Receipt):
+    return {"data": "...", "payer": credential.source}
 ```
 
 ### Client

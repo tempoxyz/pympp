@@ -1,6 +1,6 @@
 """Decorator for payment-protected MCP tools.
 
-The @requires_payment decorator is a convenience wrapper for FastMCP-style
+The @pay decorator is a convenience wrapper for FastMCP-style
 frameworks where tool params are unpacked as **kwargs.
 
 For other MCP server implementations, use verify_or_challenge() directly:
@@ -16,7 +16,6 @@ For other MCP server implementations, use verify_or_challenge() directly:
             meta=params.get("_meta"),
             intent=intent,
             request={"amount": "1000"},
-            realm="api.example.com",
         )
         if isinstance(result, MCPChallenge):
             raise PaymentRequiredError(challenges=[result])
@@ -39,6 +38,7 @@ from mpp.extensions.mcp.verify import (
 from mpp.extensions.mcp.verify import (
     verify_or_challenge as mcp_verify_or_challenge,
 )
+from mpp.server._defaults import detect_realm
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent
@@ -49,11 +49,11 @@ R = TypeVar("R")
 RequestParamsType = dict[str, Any] | Callable[..., dict[str, Any]]
 
 
-def requires_payment(
+def pay(
     *,
     intent: Intent,
     request: RequestParamsType,
-    realm: str,
+    realm: str | None = None,
     method: str | None = None,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
@@ -79,26 +79,25 @@ def requires_payment(
         request: Payment request params - either a static dict or a callable
             that takes **kwargs and returns the params.
         realm: Protection space identifier for the challenge.
+            Auto-detected from environment if omitted.
         method: Payment method name (defaults to "tempo").
         expires_in: Challenge validity duration (default: 5 minutes).
         description: Human-readable description of what the payment is for.
 
     Example:
         @mcp.tool()
-        @requires_payment(
-            intent=ChargeIntent(rpc_url="..."),
+        @pay(
+            intent=ChargeIntent(),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
-            realm="api.example.com",
         )
         async def expensive_tool(query: str, *, credential, receipt) -> str:
             return f"Result for {query}, paid by {credential.source}"
 
         # With dynamic request params:
         @mcp.tool()
-        @requires_payment(
-            intent=ChargeIntent(rpc_url="..."),
+        @pay(
+            intent=ChargeIntent(),
             request=lambda query, **kw: {"amount": str(len(query) * 10), ...},
-            realm="api.example.com",
         )
         async def dynamic_pricing(query: str, *, credential, receipt) -> str:
             return f"Result for {query}"
@@ -108,6 +107,7 @@ def requires_payment(
         PaymentVerificationError: When credential verification fails (-32043).
         MalformedCredentialError: When credential structure is invalid (-32602).
     """
+    resolved_realm = realm if realm is not None else detect_realm()
     method_name = method or "tempo"
 
     def decorator(
@@ -126,7 +126,7 @@ def requires_payment(
                 meta=meta,
                 intent=intent,
                 request=request_params,
-                realm=realm,
+                realm=resolved_realm,
                 method=method_name,
                 expires_in=expires_in,
                 description=description,

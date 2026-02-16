@@ -17,7 +17,7 @@ Example:
         return Response({"data": "..."}, headers={"Payment-Receipt": ...})
 """
 
-from mpp.server.decorator import requires_payment
+from mpp.server.decorator import pay
 from mpp.server.intent import Intent, VerificationError, intent
 from mpp.server.method import Method, transform_request
 from mpp.server.mpp import Mpp

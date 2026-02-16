@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
+from mpp.server.decorator import wrap_payment_handler
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpp.server.method import Method
+
+R = TypeVar("R")
 
 DEFAULT_EXPIRY_SECONDS = 300
 DEFAULT_DECIMALS = 6
@@ -146,3 +150,91 @@ class Mpp:
             method=self.method.name,
             description=description,
         )
+
+    def pay(
+        self,
+        amount: str,
+        *,
+        intent: str = "charge",
+        currency: str | None = None,
+        recipient: str | None = None,
+        description: str | None = None,
+        expires_in: timedelta | None = None,
+    ) -> Callable[  # noqa: UP047
+        [Callable[[Any, Credential, Receipt], Awaitable[R]]],
+        Callable[[Any], Awaitable[R | Any]],
+    ]:
+        """Decorator that wraps payment verification for protected endpoints.
+
+        Uses the server's configured method, realm, secret_key, currency,
+        and recipient as defaults. Only ``amount`` is required per-endpoint.
+
+        The handler **must** use parameter names ``credential`` and ``receipt``
+        for the injected payment objects.
+
+        Args:
+            amount: Payment amount in human units (e.g., "0.50").
+            intent: Intent name to look up on the method (default: "charge").
+            currency: Override the method's default currency.
+            recipient: Override the method's default recipient.
+            description: Optional human-readable description.
+            expires_in: Challenge validity duration. Defaults to 5 minutes.
+
+        Example:
+            server = Mpp.create(method=tempo(currency=..., recipient=...))
+
+            @app.get("/paid")
+            @server.pay(amount="0.50")
+            async def handler(request, credential, receipt):
+                return {"data": "paid content"}
+
+            @app.get("/session")
+            @server.pay(amount="0.000075", intent="session")
+            async def session_handler(request, credential, receipt):
+                return {"data": "session content"}
+        """
+        intent_obj = self.method.intents.get(intent)
+        if intent_obj is None:
+            raise ValueError(f"Method {self.method.name} does not support {intent} intent")
+
+        def decorator(
+            handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
+        ) -> Callable[[Any], Awaitable[R | Any]]:
+            async def _verify(
+                authorization: str | None, _request_obj: Any
+            ) -> Challenge | tuple[Credential, Receipt]:
+                resolved_currency = currency or getattr(self.method, "currency", None)
+                resolved_recipient = recipient or getattr(self.method, "recipient", None)
+                if not resolved_currency:
+                    raise ValueError("currency must be set on the method or passed to pay()")
+                if not resolved_recipient:
+                    raise ValueError("recipient must be set on the method or passed to pay()")
+
+                decimals = getattr(self.method, "decimals", DEFAULT_DECIMALS)
+                base_amount = str(parse_units(amount, decimals))
+
+                expires: str | None = None
+                if expires_in is not None:
+                    expires = (datetime.now(UTC) + expires_in).isoformat()
+
+                request: dict[str, Any] = {
+                    "amount": base_amount,
+                    "currency": resolved_currency,
+                    "recipient": resolved_recipient,
+                }
+                if expires is not None:
+                    request["expires"] = expires
+
+                return await verify_or_challenge(
+                    authorization=authorization,
+                    intent=intent_obj,
+                    request=request,
+                    realm=self.realm,
+                    secret_key=self.secret_key,
+                    method=self.method.name,
+                    description=description,
+                )
+
+            return wrap_payment_handler(handler, _verify, lambda: self.realm)
+
+        return decorator

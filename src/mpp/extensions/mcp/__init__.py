@@ -38,10 +38,10 @@ For any MCP server, use verify_or_challenge() directly:
 
 ## FastMCP Decorator
 
-For FastMCP-style frameworks, use the @requires_payment decorator:
+For FastMCP-style frameworks, use the @pay decorator:
 
     from mcp.server.fastmcp import FastMCP
-    from mpp.extensions.mcp import requires_payment, payment_capabilities
+    from mpp.extensions.mcp import pay, payment_capabilities
 
     mcp = FastMCP(
         "paid-api",
@@ -49,7 +49,7 @@ For FastMCP-style frameworks, use the @requires_payment decorator:
     )
 
     @mcp.tool()
-    @requires_payment(
+    @pay(
         intent=intent,
         request={"amount": "1000", ...},
         realm="api.example.com",
@@ -66,7 +66,7 @@ from mpp.extensions.mcp.constants import (
     META_CREDENTIAL,
     META_RECEIPT,
 )
-from mpp.extensions.mcp.decorator import requires_payment
+from mpp.extensions.mcp.decorator import pay
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
     PaymentRequiredError,
