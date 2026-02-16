@@ -554,3 +554,72 @@ class TestMppPay:
         result = await handler(request)
 
         assert result["credential_id"] == "django-cred"
+
+    @pytest.mark.asyncio
+    async def test_supports_recipient_override(self) -> None:
+        """server.pay() should allow overriding recipient per-endpoint."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            assert request["recipient"] == "0xOverrideRecipient"
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="1.00", recipient="0xOverrideRecipient")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_credential(payload={}, challenge_id="test")
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid"
+
+    @pytest.mark.asyncio
+    async def test_returns_402_for_invalid_scheme(self) -> None:
+        """server.pay() should return 402 for non-Payment authorization."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        request = MockRequest(authorization="Bearer some-token")
+        result = await handler(request)
+
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+        else:
+            assert result["_mpp_challenge"] is True
+            assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    async def test_passes_description(self) -> None:
+        """server.pay() should pass description through to charge()."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50", description="Premium access")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(MockRequest())
+
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            www_auth = result["headers"]["WWW-Authenticate"]
+        assert 'description="Premium access"' in www_auth
