@@ -78,8 +78,8 @@ def pay(
     Example:
         @app.get("/resource")
         @pay(
-            intent=ChargeIntent(rpc_url="..."),
-            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
+            intent=ChargeIntent(),
+            request={"amount": "1000"},
         )
         async def get_resource(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "paid content", "payer": credential.source}
