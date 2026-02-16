@@ -2,7 +2,7 @@
 
 import pytest
 
-from mpay._units import parse_units, transform_units
+from mpp._units import parse_units, transform_units
 
 
 class TestParseUnits:

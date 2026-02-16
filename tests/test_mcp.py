@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from mpay import Challenge, Credential, Receipt
-from mpay.extensions.mcp import (
+from mpp import Challenge, Credential, Receipt
+from mpp.extensions.mcp import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,
@@ -405,7 +405,7 @@ class TestRequiresPaymentDecorator:
         assert error["code"] == CODE_MALFORMED_CREDENTIAL
 
     async def test_raises_verification_error_on_failure(self) -> None:
-        from mpay.server.intent import VerificationError
+        from mpp.server.intent import VerificationError
 
         class MockIntent:
             name = "charge"
@@ -550,7 +550,7 @@ class TestVerifyOrChallenge:
             )
 
     async def test_raises_verification_error_on_failure(self) -> None:
-        from mpay.server.intent import VerificationError
+        from mpp.server.intent import VerificationError
 
         class MockIntent:
             name = "charge"

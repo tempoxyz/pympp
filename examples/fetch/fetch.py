@@ -6,8 +6,8 @@ import asyncio
 import os
 import sys
 
-from mpay.client import Client
-from mpay.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.client import Client
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 
 
 def parse_args() -> argparse.Namespace:

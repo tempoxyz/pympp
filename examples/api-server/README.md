@@ -67,23 +67,23 @@ curl -i http://localhost:8000/paid
 ### Payment Handler
 
 ```python
-from mpay.server import Mpay
-from mpay.methods.tempo import tempo
+from mpp.server import Mpp
+from mpp.methods.tempo import tempo
 
-mpay = Mpay.create(
+server = Mpp.create(
     method=tempo(currency=PATH_USD, recipient=DESTINATION),
 )
 ```
 
-`Mpay.create()` sets up the payment handler with smart defaults:
-- **realm** auto-detected from environment (`MPAY_REALM`, `VERCEL_URL`, etc.)
+`Mpp.create()` sets up the payment handler with smart defaults:
+- **realm** auto-detected from environment (`MPP_REALM`, `VERCEL_URL`, etc.)
 - **secret_key** auto-generated and persisted to `.env`
 - **currency** and **recipient** configured once on the method
 
 ### Charging
 
 ```python
-result = await mpay.charge(
+result = await server.charge(
     authorization=request.headers.get("Authorization"),
     amount="0.001",
 )

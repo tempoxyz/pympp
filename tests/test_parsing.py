@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from mpay import Challenge, Credential, Receipt
-from mpay._parsing import ParseError
+from mpp import Challenge, Credential, Receipt
+from mpp._parsing import ParseError
 from tests import make_credential
 
 

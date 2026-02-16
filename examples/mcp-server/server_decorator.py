@@ -25,13 +25,13 @@ from mcp.types import TextContent, Tool
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from mpay.extensions.mcp import (
+from mpp.extensions.mcp import (
     MCPChallenge,
     PaymentRequiredError,
     verify_or_challenge,
 )
-from mpay.methods.tempo import ChargeIntent
-from mpay.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
+from mpp.methods.tempo import ChargeIntent
+from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")

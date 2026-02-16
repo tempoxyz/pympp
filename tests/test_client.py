@@ -6,8 +6,8 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpay import Challenge
-from mpay.client import Client, PaymentTransport, get, post, request
+from mpp import Challenge
+from mpp.client import Client, PaymentTransport, get, post, request
 from tests import make_credential
 
 

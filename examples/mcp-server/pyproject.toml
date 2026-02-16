@@ -5,7 +5,7 @@ description = "MCP server with payment-protected tools"
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.1.0",
-    "mpay[tempo,mcp]",
+    "pympp[tempo,mcp]",
     "starlette",
     "uvicorn",
 ]
@@ -15,4 +15,4 @@ mcp-server-decorator = "server_decorator:main"
 mcp-server-manual = "server_manual:main"
 
 [tool.uv.sources]
-mpay = { path = "../.." }
+pympp = { path = "../.." }

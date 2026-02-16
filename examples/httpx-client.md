@@ -7,7 +7,7 @@ Payment-enabled HTTP client using httpx.
 ```toml
 [project]
 dependencies = [
-    "mpay[tempo]",
+    "pympp[tempo]",
 ]
 ```
 
@@ -16,8 +16,8 @@ dependencies = [
 The simplest way to make paid requests:
 
 ```python
-from mpay.client import get
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import get
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
@@ -32,8 +32,8 @@ response = await get(
 For multiple requests, use the `Client` wrapper:
 
 ```python
-from mpay.client import Client
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import Client
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
@@ -47,8 +47,8 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
 For full control, use `PaymentTransport` with a custom httpx client:
 
 ```python
-from mpay.client import PaymentTransport
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import PaymentTransport
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")
@@ -67,8 +67,8 @@ async with httpx.AsyncClient(transport=transport) as client:
 For complete control over the payment flow:
 
 ```python
-from mpay import Challenge, Credential
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp import Challenge, Credential
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")

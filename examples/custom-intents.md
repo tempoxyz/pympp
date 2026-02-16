@@ -7,7 +7,7 @@ Creating custom payment intents for different payment methods.
 ```toml
 [project]
 dependencies = [
-    "mpay[server]",
+    "pympp[server]",
 ]
 ```
 
@@ -16,8 +16,8 @@ dependencies = [
 Intents verify credentials and return receipts. Any class implementing this protocol works:
 
 ```python
-from mpay import Credential, Receipt
-from mpay.server import VerificationError
+from mpp import Credential, Receipt
+from mpp.server import VerificationError
 
 class MyIntent:
     name = "charge"
@@ -43,8 +43,8 @@ class MyIntent:
 Use the `@intent` decorator for simpler cases:
 
 ```python
-from mpay import Credential, Receipt
-from mpay.server import intent
+from mpp import Credential, Receipt
+from mpp.server import intent
 
 @intent(name="charge")
 async def my_charge(credential: Credential, request: dict) -> Receipt:
@@ -56,8 +56,8 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 
 ```python
 import stripe
-from mpay import Credential, Receipt
-from mpay.server import VerificationError
+from mpp import Credential, Receipt
+from mpp.server import VerificationError
 
 class StripeChargeIntent:
     name = "charge"
@@ -91,8 +91,8 @@ class StripeChargeIntent:
 
 ```python
 from fastapi import FastAPI, Request
-from mpay import Credential, Receipt
-from mpay.server import requires_payment
+from mpp import Credential, Receipt
+from mpp.server import requires_payment
 
 app = FastAPI()
 intent = StripeChargeIntent(api_key="sk_...")
@@ -113,8 +113,8 @@ async def get_resource(request: Request, credential: Credential, receipt: Receip
 Support multiple payment methods by checking the credential:
 
 ```python
-from mpay import Credential, Receipt
-from mpay.server import VerificationError
+from mpp import Credential, Receipt
+from mpp.server import VerificationError
 
 class MultiMethodIntent:
     name = "charge"
