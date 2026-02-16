@@ -6,16 +6,29 @@ for structured error responses.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _BASE_URI = "https://paymentauth.org/problems"
 
 
+def _to_slug(name: str) -> str:
+    """CamelCaseError → kebab-case slug (e.g. InvalidPayloadError → invalid-payload)."""
+    name = name.removesuffix("Error")
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", name).lower()
+
+
 class PaymentError(Exception):
     """Base class for all payment-related errors."""
 
-    type: str = f"{_BASE_URI}/payment-error"
     status: int = 402
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "type" not in cls.__dict__:
+            cls.type = f"{_BASE_URI}/{_to_slug(cls.__name__)}"
+
+    type: str = f"{_BASE_URI}/payment-error"
 
     def to_problem_details(self, challenge_id: str | None = None) -> dict[str, Any]:
         """Convert to RFC 9457 Problem Details format."""
@@ -33,8 +46,6 @@ class PaymentError(Exception):
 class PaymentRequiredError(PaymentError):
     """No credential was provided but payment is required."""
 
-    type = f"{_BASE_URI}/payment-required"
-
     def __init__(self, realm: str | None = None, description: str | None = None) -> None:
         parts = ["Payment is required"]
         if realm:
@@ -47,8 +58,6 @@ class PaymentRequiredError(PaymentError):
 class MalformedCredentialError(PaymentError):
     """Credential is malformed (invalid base64url, bad JSON structure)."""
 
-    type = f"{_BASE_URI}/malformed-credential"
-
     def __init__(self, reason: str | None = None) -> None:
         msg = f"Credential is malformed: {reason}." if reason else "Credential is malformed."
         super().__init__(msg)
@@ -56,8 +65,6 @@ class MalformedCredentialError(PaymentError):
 
 class InvalidChallengeError(PaymentError):
     """Challenge ID is unknown, expired, or already used."""
-
-    type = f"{_BASE_URI}/invalid-challenge"
 
     def __init__(self, id: str | None = None, reason: str | None = None) -> None:
         id_part = f' "{id}"' if id else ""
@@ -67,8 +74,6 @@ class InvalidChallengeError(PaymentError):
 
 class VerificationFailedError(PaymentError):
     """Payment proof is invalid or verification failed."""
-
-    type = f"{_BASE_URI}/verification-failed"
 
     def __init__(self, reason: str | None = None) -> None:
         msg = (
@@ -80,8 +85,6 @@ class VerificationFailedError(PaymentError):
 class PaymentExpiredError(PaymentError):
     """Payment has expired."""
 
-    type = f"{_BASE_URI}/payment-expired"
-
     def __init__(self, expires: str | None = None) -> None:
         msg = f"Payment expired at {expires}." if expires else "Payment has expired."
         super().__init__(msg)
@@ -89,8 +92,6 @@ class PaymentExpiredError(PaymentError):
 
 class InvalidPayloadError(PaymentError):
     """Credential payload does not match the expected schema."""
-
-    type = f"{_BASE_URI}/invalid-payload"
 
     def __init__(self, reason: str | None = None) -> None:
         msg = (
