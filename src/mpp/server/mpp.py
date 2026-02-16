@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.decorator import _get_authorization, _make_challenge_response
+from mpp.server.decorator import wrap_payment_handler
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
@@ -160,7 +158,8 @@ class Mpp:
         currency: str | None = None,
         recipient: str | None = None,
         description: str | None = None,
-    ) -> Callable[
+        expires_in: timedelta | None = None,
+    ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
         Callable[[Any], Awaitable[R | Any]],
     ]:
@@ -169,11 +168,15 @@ class Mpp:
         Uses the server's configured method, realm, secret_key, currency,
         and recipient as defaults. Only ``amount`` is required per-endpoint.
 
+        The handler **must** use parameter names ``credential`` and ``receipt``
+        for the injected payment objects.
+
         Args:
             amount: Payment amount in human units (e.g., "0.50").
             currency: Override the method's default currency.
             recipient: Override the method's default recipient.
             description: Optional human-readable description.
+            expires_in: Challenge validity duration. Defaults to 5 minutes.
 
         Example:
             server = Mpp.create(method=tempo(currency=..., recipient=...))
@@ -183,44 +186,25 @@ class Mpp:
             async def handler(request, credential, receipt):
                 return {"data": "paid content"}
         """
+        expires_iso: str | None = None
+        if expires_in is not None:
+            expires_iso = (datetime.now(UTC) + expires_in).isoformat()
 
         def decorator(
             handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
         ) -> Callable[[Any], Awaitable[R | Any]]:
-            sig = inspect.signature(handler)
-            params = [
-                p for name, p in sig.parameters.items() if name not in ("credential", "receipt")
-            ]
-            new_sig = sig.replace(parameters=params)
-
-            request_param_name = params[0].name if params else "request"
-
-            @wraps(handler)
-            async def wrapper(*args: Any, **kwargs: Any) -> R | Any:
-                if args:
-                    request_obj = args[0]
-                else:
-                    request_obj = kwargs.get(request_param_name)
-
-                authorization = _get_authorization(request_obj)
-
-                result = await self.charge(
+            async def _verify(
+                authorization: str | None, _request_obj: Any
+            ) -> Challenge | tuple[Credential, Receipt]:
+                return await self.charge(
                     authorization=authorization,
                     amount=amount,
                     currency=currency,
                     recipient=recipient,
                     description=description,
+                    expires=expires_iso,
                 )
 
-                if isinstance(result, Challenge):
-                    return _make_challenge_response(result, self.realm)
-
-                credential, receipt = result
-                return await handler(request_obj, credential, receipt)
-
-            wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
-            del wrapper.__wrapped__
-
-            return wrapper
+            return wrap_payment_handler(handler, _verify, lambda: self.realm)
 
         return decorator
