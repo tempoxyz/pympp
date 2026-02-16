@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_BASE_URI = "https://tempoxyz.github.io/payment-auth-spec/problems"
+_BASE_URI = "https://paymentauth.org/problems"
 
 
 class PaymentError(Exception):
