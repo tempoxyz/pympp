@@ -3,7 +3,7 @@
 import pytest
 
 from mpp import Challenge, Credential, Receipt
-from mpp.server import intent, pay, verify_or_challenge
+from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
 from tests import make_credential
 
@@ -398,3 +398,159 @@ class TestRequiresPayment:
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.method == "custom-method"
+
+
+def _make_server(test_intent):
+    """Create an Mpp instance with a mock method for testing."""
+
+    class MockMethod:
+        name = "tempo"
+        currency = "0xUSD"
+        recipient = "0xRecipient"
+        decimals = 6
+        intents = {"charge": test_intent}
+
+        async def create_credential(self, challenge):
+            return make_credential(payload={}, challenge_id="test")
+
+    return Mpp(
+        method=MockMethod(),
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+
+
+class TestMppPay:
+    @pytest.mark.asyncio
+    async def test_returns_402_when_no_authorization(self) -> None:
+        """server.pay() should return 402 when no Authorization header."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid content"}
+
+        result = await handler(MockRequest())
+
+        if HAS_STARLETTE:
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+            assert "WWW-Authenticate" in result.headers
+            assert "Payment" in result.headers["WWW-Authenticate"]
+        else:
+            assert isinstance(result, dict)
+            assert result["_mpp_challenge"] is True
+            assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    async def test_calls_handler_with_valid_credential(self) -> None:
+        """server.pay() should call handler with credential and receipt."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {
+                "data": "paid content",
+                "credential_id": credential.challenge.id,
+                "receipt_ref": receipt.reference,
+            }
+
+        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-cred-id")
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid content"
+        assert result["credential_id"] == "test-cred-id"
+        assert result["receipt_ref"] == "tx-ref-456"
+
+    @pytest.mark.asyncio
+    async def test_converts_human_amount_to_base_units(self) -> None:
+        """server.pay() should convert human-readable amount via charge()."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            assert request["amount"] == "500000"  # 0.50 * 10^6
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_credential(payload={}, challenge_id="test")
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid"
+
+    @pytest.mark.asyncio
+    async def test_preserves_function_metadata(self) -> None:
+        """server.pay() should preserve function name and docstring."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def my_handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            """My handler docstring."""
+            return {"data": "paid"}
+
+        assert my_handler.__name__ == "my_handler"
+        assert my_handler.__doc__ == "My handler docstring."
+
+    @pytest.mark.asyncio
+    async def test_supports_currency_override(self) -> None:
+        """server.pay() should allow overriding currency per-endpoint."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            assert request["currency"] == "0xOverride"
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="1.00", currency="0xOverride")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_credential(payload={}, challenge_id="test")
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "paid"
+
+    @pytest.mark.asyncio
+    async def test_supports_django_style_requests(self) -> None:
+        """server.pay() should extract authorization from Django META."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(
+            req: DjangoStyleRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"credential_id": credential.challenge.id}
+
+        credential = make_credential(payload={}, challenge_id="django-cred")
+        request = DjangoStyleRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["credential_id"] == "django-cred"

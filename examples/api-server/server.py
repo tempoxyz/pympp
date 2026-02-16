@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
-from mpp.server import Mpp, pay
+from mpp.server import Mpp
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -27,14 +27,6 @@ server = Mpp.create(
         intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
     ),
 )
-
-
-PAYMENT_REQUEST = {
-    "amount": "1000",
-    "currency": PATH_USD,
-    "recipient": DESTINATION,
-    "methodDetails": {"feePayer": True},
-}
 
 
 @app.get("/free")
@@ -67,12 +59,9 @@ async def paid_endpoint(request: Request):
 
 
 @app.get("/paid-decorator")
-@pay(
-    intent=ChargeIntent(rpc_url=RPC_URL),
-    request=PAYMENT_REQUEST,
-)
+@server.pay(amount="0.001")
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    """A paid endpoint using the @pay decorator."""
+    """A paid endpoint using the server.pay() decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,

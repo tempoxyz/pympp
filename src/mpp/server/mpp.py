@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from functools import wraps
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
+from mpp.server.decorator import _get_authorization, _make_challenge_response
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpp.server.method import Method
+
+R = TypeVar("R")
 
 DEFAULT_EXPIRY_SECONDS = 300
 DEFAULT_DECIMALS = 6
@@ -146,3 +152,75 @@ class Mpp:
             method=self.method.name,
             description=description,
         )
+
+    def pay(
+        self,
+        amount: str,
+        *,
+        currency: str | None = None,
+        recipient: str | None = None,
+        description: str | None = None,
+    ) -> Callable[
+        [Callable[[Any, Credential, Receipt], Awaitable[R]]],
+        Callable[[Any], Awaitable[R | Any]],
+    ]:
+        """Decorator that wraps charge() for payment-protected endpoints.
+
+        Uses the server's configured method, realm, secret_key, currency,
+        and recipient as defaults. Only ``amount`` is required per-endpoint.
+
+        Args:
+            amount: Payment amount in human units (e.g., "0.50").
+            currency: Override the method's default currency.
+            recipient: Override the method's default recipient.
+            description: Optional human-readable description.
+
+        Example:
+            server = Mpp.create(method=tempo(currency=..., recipient=...))
+
+            @app.get("/paid")
+            @server.pay(amount="0.50")
+            async def handler(request, credential, receipt):
+                return {"data": "paid content"}
+        """
+
+        def decorator(
+            handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
+        ) -> Callable[[Any], Awaitable[R | Any]]:
+            sig = inspect.signature(handler)
+            params = [
+                p for name, p in sig.parameters.items() if name not in ("credential", "receipt")
+            ]
+            new_sig = sig.replace(parameters=params)
+
+            request_param_name = params[0].name if params else "request"
+
+            @wraps(handler)
+            async def wrapper(*args: Any, **kwargs: Any) -> R | Any:
+                if args:
+                    request_obj = args[0]
+                else:
+                    request_obj = kwargs.get(request_param_name)
+
+                authorization = _get_authorization(request_obj)
+
+                result = await self.charge(
+                    authorization=authorization,
+                    amount=amount,
+                    currency=currency,
+                    recipient=recipient,
+                    description=description,
+                )
+
+                if isinstance(result, Challenge):
+                    return _make_challenge_response(result, self.realm)
+
+                credential, receipt = result
+                return await handler(request_obj, credential, receipt)
+
+            wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
+            del wrapper.__wrapped__
+
+            return wrapper
+
+        return decorator
