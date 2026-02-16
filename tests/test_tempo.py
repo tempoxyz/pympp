@@ -578,3 +578,50 @@ class TestSchemas:
         payload = TransactionCredentialPayload(type="transaction", signature="0xdef456")
         assert payload.type == "transaction"
         assert payload.signature == "0xdef456"
+
+    def test_charge_request_with_description(self) -> None:
+        """Should accept optional description field."""
+        req = ChargeRequest(
+            amount="1000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+            description="Payment for API access",
+        )
+        assert req.description == "Payment for API access"
+
+    def test_charge_request_with_external_id(self) -> None:
+        """Should accept optional externalId field."""
+        req = ChargeRequest(
+            amount="1000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+            externalId="order-12345",
+        )
+        assert req.externalId == "order-12345"
+
+    def test_charge_request_description_and_external_id_default_none(self) -> None:
+        """description and externalId should default to None."""
+        req = ChargeRequest(
+            amount="1000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        assert req.description is None
+        assert req.externalId is None
+
+    def test_charge_request_serializes_optional_fields(self) -> None:
+        """Optional fields should appear in model_dump when set."""
+        req = ChargeRequest(
+            amount="1000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+            description="Test payment",
+            externalId="ext-001",
+        )
+        data = req.model_dump()
+        assert data["description"] == "Test payment"
+        assert data["externalId"] == "ext-001"

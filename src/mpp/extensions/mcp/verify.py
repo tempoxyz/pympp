@@ -35,10 +35,10 @@ Example with raw JSON-RPC handling:
 
 from __future__ import annotations
 
-import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from mpp import _constant_time_equal, generate_challenge_id
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
@@ -58,6 +58,7 @@ async def verify_or_challenge(
     intent: Intent,
     request: dict[str, Any],
     realm: str,
+    secret_key: str,
     method: str | None = None,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
@@ -72,6 +73,9 @@ async def verify_or_challenge(
         intent: The payment intent to verify against.
         request: The payment request parameters.
         realm: Protection space identifier for the challenge.
+        secret_key: Server secret for HMAC-bound challenge IDs. Required.
+            Enables stateless challenge verification by computing challenge IDs
+            as HMAC-SHA256 over the challenge parameters.
         method: Payment method name (defaults to "tempo").
         expires_in: Challenge validity duration (default: 5 minutes).
         description: Human-readable description of what the payment is for.
@@ -94,6 +98,7 @@ async def verify_or_challenge(
             intent=ChargeIntent(rpc_url="..."),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
+            secret_key="my-server-secret",
         )
 
         if isinstance(result, MCPChallenge):
@@ -122,6 +127,7 @@ async def verify_or_challenge(
             intent_name=intent.name,
             request=request,
             realm=realm,
+            secret_key=secret_key,
             expires_in=expires_in,
             description=description,
         )
@@ -130,6 +136,28 @@ async def verify_or_challenge(
         mcp_credential = MCPCredential.from_dict(credential_data)
     except (KeyError, TypeError) as e:
         raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
+
+    # Stateless challenge verification: recompute expected challenge ID from
+    # echoed parameters and compare to the credential's challenge ID.
+    echoed = mcp_credential.challenge
+    expected_id = generate_challenge_id(
+        secret_key=secret_key,
+        realm=echoed.realm,
+        method=echoed.method,
+        intent=echoed.intent,
+        request=echoed.request,
+        expires=echoed.expires,
+    )
+    if not _constant_time_equal(echoed.id, expected_id):
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
 
     from mpp.server.intent import VerificationError
 
@@ -143,6 +171,7 @@ async def verify_or_challenge(
             intent_name=intent.name,
             request=request,
             realm=realm,
+            secret_key=secret_key,
             expires_in=expires_in,
             description=description,
         )
@@ -168,10 +197,11 @@ def create_challenge(
     intent_name: str,
     request: dict[str, Any],
     realm: str,
+    secret_key: str,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
 ) -> MCPChallenge:
-    """Create a new MCP payment challenge.
+    """Create a new MCP payment challenge with HMAC-bound ID.
 
     Use this to generate challenges for custom MCP server implementations.
 
@@ -180,6 +210,7 @@ def create_challenge(
         intent_name: Payment intent type (e.g., "charge").
         request: Payment request parameters.
         realm: Protection space identifier.
+        secret_key: Server secret for HMAC-bound challenge IDs.
         expires_in: Challenge validity duration.
         description: Human-readable description.
 
@@ -190,8 +221,17 @@ def create_challenge(
     if expires.endswith("+00:00"):
         expires = expires[:-6] + "Z"
 
+    challenge_id = generate_challenge_id(
+        secret_key=secret_key,
+        realm=realm,
+        method=method,
+        intent=intent_name,
+        request=request,
+        expires=expires,
+    )
+
     return MCPChallenge(
-        id=secrets.token_urlsafe(16),
+        id=challenge_id,
         realm=realm,
         method=method,
         intent=intent_name,

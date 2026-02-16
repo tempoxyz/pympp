@@ -38,7 +38,7 @@ from mpp.extensions.mcp.verify import (
 from mpp.extensions.mcp.verify import (
     verify_or_challenge as mcp_verify_or_challenge,
 )
-from mpp.server._defaults import detect_realm
+from mpp.server._defaults import detect_realm, detect_secret_key
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent
@@ -54,6 +54,7 @@ def pay(
     intent: Intent,
     request: RequestParamsType,
     realm: str | None = None,
+    secret_key: str | None = None,
     method: str | None = None,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
@@ -80,6 +81,8 @@ def pay(
             that takes **kwargs and returns the params.
         realm: Protection space identifier for the challenge.
             Auto-detected from environment if omitted.
+        secret_key: Server secret for HMAC-bound challenge IDs.
+            Auto-detected from MPP_SECRET_KEY env var if omitted.
         method: Payment method name (defaults to "tempo").
         expires_in: Challenge validity duration (default: 5 minutes).
         description: Human-readable description of what the payment is for.
@@ -108,6 +111,7 @@ def pay(
         MalformedCredentialError: When credential structure is invalid (-32602).
     """
     resolved_realm = realm if realm is not None else detect_realm()
+    resolved_secret_key = secret_key if secret_key is not None else detect_secret_key()
     method_name = method or "tempo"
 
     def decorator(
@@ -127,6 +131,7 @@ def pay(
                 intent=intent,
                 request=request_params,
                 realm=resolved_realm,
+                secret_key=resolved_secret_key,
                 method=method_name,
                 expires_in=expires_in,
                 description=description,
