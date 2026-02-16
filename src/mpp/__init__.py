@@ -339,7 +339,13 @@ class Receipt:
         return format_payment_receipt(self)
 
     @classmethod
-    def success(cls, reference: str, timestamp: datetime | None = None, method: str = "tempo", external_id: str | None = None) -> Receipt:
+    def success(
+        cls,
+        reference: str,
+        timestamp: datetime | None = None,
+        method: str = "tempo",
+        external_id: str | None = None,
+    ) -> Receipt:
         """Create a success receipt with current timestamp."""
         return cls(
             status="success",
@@ -350,7 +356,13 @@ class Receipt:
         )
 
     @classmethod
-    def failed(cls, reference: str, timestamp: datetime | None = None, method: str = "tempo", external_id: str | None = None) -> Receipt:
+    def failed(
+        cls,
+        reference: str,
+        timestamp: datetime | None = None,
+        method: str = "tempo",
+        external_id: str | None = None,
+    ) -> Receipt:
         """Create a failed receipt (e.g., on-chain tx reverted)."""
         return cls(
             status="failed",

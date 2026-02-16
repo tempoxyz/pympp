@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import json as _json
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
-
-import json as _json
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import PaymentRequiredError
