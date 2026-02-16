@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mpay import Challenge, Credential
+from mpay.methods.tempo._attribution import encode as encode_attribution
 from mpay.methods.tempo._defaults import RPC_URL
 from mpay.methods.tempo._rpc import get_tx_params
 
@@ -56,6 +57,7 @@ class TempoMethod:
     currency: str | None = None
     recipient: str | None = None
     decimals: int = 6
+    client_id: str | None = None
     _intents: dict[str, Intent] = field(default_factory=dict)
 
     @property
@@ -96,6 +98,8 @@ class TempoMethod:
 
         method_details = request.get("methodDetails", {})
         memo = method_details.get("memo") if isinstance(method_details, dict) else None
+        if memo is None:
+            memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
 
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
@@ -181,8 +185,9 @@ class TempoMethod:
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         memo_clean = memo[2:] if memo.startswith("0x") else memo
-        memo_padded = memo_clean.lower().zfill(64)
-        return f"0x{selector}{to_padded}{amount_padded}{memo_padded}"
+        if len(memo_clean) != 64:
+            raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
+        return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -198,6 +203,7 @@ def tempo(
     currency: str | None = None,
     recipient: str | None = None,
     decimals: int = 6,
+    client_id: str | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -209,6 +215,7 @@ def tempo(
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
         decimals: Token decimal places for amount conversion (default: 6).
+        client_id: Optional client identity for attribution memos.
 
     Returns:
         A configured TempoMethod instance.
@@ -227,6 +234,7 @@ def tempo(
         currency=currency,
         recipient=recipient,
         decimals=decimals,
+        client_id=client_id,
     )
     method._intents = dict(intents)
     return method
