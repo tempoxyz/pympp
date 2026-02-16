@@ -18,8 +18,8 @@ from mpp.extensions.mcp import (
     PaymentRequiredError,
     PaymentVerificationError,
     create_challenge,
-    payment_capabilities,
     pay,
+    payment_capabilities,
     verify_or_challenge,
 )
 
