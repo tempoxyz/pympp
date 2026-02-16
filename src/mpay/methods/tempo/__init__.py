@@ -28,5 +28,5 @@ Example:
 """
 
 from mpay.methods.tempo.account import TempoAccount
-from mpay.methods.tempo.client import StreamMethod, TempoMethod, TransactionError, tempo
-from mpay.methods.tempo.intents import ChargeIntent, StreamIntent
+from mpay.methods.tempo.client import TempoMethod, TransactionError, tempo
+from mpay.methods.tempo.intents import ChargeIntent
