@@ -1,6 +1,6 @@
 """Tests for MPP attribution memo encoding."""
 
-from mpay.methods.tempo._attribution import (
+from mpp.methods.tempo._attribution import (
     TAG,
     DecodedMemo,
     decode,

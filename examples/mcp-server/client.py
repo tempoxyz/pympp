@@ -27,12 +27,12 @@ import sys
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-from mpay.extensions.mcp import (
+from mpp.extensions.mcp import (
     CODE_PAYMENT_REQUIRED,
     MCPChallenge,
     MCPCredential,
 )
-from mpay.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 
 SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
 

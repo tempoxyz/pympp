@@ -2,9 +2,9 @@
 
 import pytest
 
-from mpay import Challenge, Credential, Receipt
-from mpay.server import intent, requires_payment, verify_or_challenge
-from mpay.server.intent import VerificationError
+from mpp import Challenge, Credential, Receipt
+from mpp.server import intent, requires_payment, verify_or_challenge
+from mpp.server.intent import VerificationError
 from tests import make_credential
 
 try:
@@ -235,7 +235,7 @@ class TestRequiresPayment:
             assert "Payment" in result.headers["WWW-Authenticate"]
         else:
             assert isinstance(result, dict)
-            assert result["_mpay_challenge"] is True
+            assert result["_mpp_challenge"] is True
             assert result["status"] == 402
             assert "WWW-Authenticate" in result["headers"]
             assert "Payment" in result["headers"]["WWW-Authenticate"]
@@ -345,7 +345,7 @@ class TestRequiresPayment:
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
         else:
-            assert result["_mpay_challenge"] is True
+            assert result["_mpp_challenge"] is True
             assert result["status"] == 402
 
     @pytest.mark.asyncio
@@ -394,7 +394,7 @@ class TestRequiresPayment:
             assert result.status_code == 402
             www_auth = result.headers["WWW-Authenticate"]
         else:
-            assert result["_mpay_challenge"] is True
+            assert result["_mpp_challenge"] is True
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.method == "custom-method"

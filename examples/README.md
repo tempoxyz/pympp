@@ -1,6 +1,6 @@
 # Examples
 
-Code examples for using the Machine Payments Protocol (mpay-python).
+Code examples for using the Machine Payments Protocol (pympp).
 
 ## Runnable Examples
 

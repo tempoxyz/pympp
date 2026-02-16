@@ -4,7 +4,7 @@ These tests use the cross-SDK conformance test vectors to ensure
 Python SDK produces identical challenge IDs to TypeScript and Rust SDKs.
 """
 
-from mpay import Challenge, generate_challenge_id
+from mpp import Challenge, generate_challenge_id
 
 
 class TestGenerateChallengeId:

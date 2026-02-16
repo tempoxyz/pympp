@@ -1,4 +1,4 @@
-# mpay-python
+# pympp
 
 Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/).
 
@@ -15,10 +15,10 @@ Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["
 ### Server
 
 ```python
-from mpay import Challenge
-from mpay.server import Mpay
-from mpay.methods.tempo import tempo, ChargeIntent
-mpay = Mpay.create(
+from mpp import Challenge
+from mpp.server import Mpp
+from mpp.methods.tempo import tempo, ChargeIntent
+server = Mpp.create(
     method=tempo(
         intents={"charge": ChargeIntent()},
         currency="0x20c0000000000000000000000000000000000000",
@@ -27,7 +27,7 @@ mpay = Mpay.create(
 )
 
 async def handler(request):
-    result = await mpay.charge(
+    result = await server.charge(
         authorization=request.headers.get("Authorization"),
         amount="0.50",
     )
@@ -35,7 +35,7 @@ async def handler(request):
     if isinstance(result, Challenge):
         return Response(
             status=402,
-            headers={"WWW-Authenticate": result.to_www_authenticate(mpay.realm)},
+            headers={"WWW-Authenticate": result.to_www_authenticate(server.realm)},
         )
 
     credential, receipt = result
@@ -50,8 +50,8 @@ async def handler(request):
 #### Automatic: Client Wrapper
 
 ```python
-from mpay.client import Client
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import Client
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
@@ -63,8 +63,8 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
 #### Automatic: One-liner
 
 ```python
-from mpay.client import get
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import get
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 account = TempoAccount.from_key("0x...")
 
@@ -77,7 +77,7 @@ response = await get(
 #### Automatic: Custom httpx Transport
 
 ```python
-from mpay.client import PaymentTransport
+from mpp.client import PaymentTransport
 import httpx
 
 transport = PaymentTransport(
@@ -92,8 +92,8 @@ async with httpx.AsyncClient(transport=transport) as client:
 #### Manual
 
 ```python
-from mpay import Challenge, Credential
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp import Challenge, Credential
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
 account = TempoAccount.from_key("0x...")
@@ -122,7 +122,7 @@ async with httpx.AsyncClient() as client:
 A parsed payment challenge from a `WWW-Authenticate` header.
 
 ```python
-from mpay import Challenge
+from mpp import Challenge
 
 challenge = Challenge(
     id="challenge-id",
@@ -140,7 +140,7 @@ parsed = Challenge.from_www_authenticate(header)
 The credential passed to the `verify` function.
 
 ```python
-from mpay import Credential
+from mpp import Credential
 
 credential = Credential(
     id="challenge-id",
@@ -157,7 +157,7 @@ parsed = Credential.from_authorization(header)
 Payment receipt returned after successful verification.
 
 ```python
-from mpay import Receipt
+from mpp import Receipt
 
 receipt = Receipt(
     status="success",
@@ -176,8 +176,8 @@ parsed = Receipt.from_payment_receipt(header)
 Simplifies payment-protected endpoints by handling the 402 challenge flow automatically:
 
 ```python
-from mpay.server import requires_payment
-from mpay.methods.tempo import ChargeIntent
+from mpp.server import requires_payment
+from mpp.methods.tempo import ChargeIntent
 
 intent = ChargeIntent(rpc_url="https://rpc.testnet.tempo.xyz")
 
@@ -217,7 +217,7 @@ The decorator:
 For more control, use `verify_or_challenge` directly:
 
 ```python
-from mpay.server import verify_or_challenge
+from mpp.server import verify_or_challenge
 
 result = await verify_or_challenge(
     authorization=request.headers.get("Authorization"),
@@ -237,8 +237,8 @@ else:
 #### Custom Intents
 
 ```python
-from mpay import Credential, Receipt
-from mpay.server import VerificationError
+from mpp import Credential, Receipt
+from mpp.server import VerificationError
 
 class MyChargeIntent:
     name = "charge"
@@ -254,7 +254,7 @@ class MyChargeIntent:
 ```
 
 ```python
-from mpay.server import intent
+from mpp.server import intent
 
 @intent(name="charge")
 async def my_charge(credential: Credential, request: dict) -> Receipt:
@@ -264,7 +264,7 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 ### Tempo Method
 
 ```python
-from mpay.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 
 method = tempo(
     intents={"charge": ChargeIntent()},
@@ -283,9 +283,9 @@ client_method = tempo(account=account, intents={"charge": ChargeIntent()})
 ## Development
 
 ```bash
-pip install mpay                      # Core only
-pip install mpay[tempo]               # With Tempo support
-pip install mpay[server]              # With server support (Pydantic)
+pip install pympp                      # Core only
+pip install pympp[tempo]               # With Tempo support
+pip install pympp[server]              # With server support (Pydantic)
 pip install -e ".[dev,tempo,server]"  # Development install
 ```
 

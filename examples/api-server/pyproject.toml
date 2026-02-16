@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Payment-protected API server example using the Machine Payments Protocol"
 requires-python = ">=3.12"
 dependencies = [
-    "mpay[tempo,server]",
+    "pympp[tempo,server]",
     "fastapi",
     "uvicorn",
 ]
 
 [tool.uv.sources]
-mpay = { path = "../.." }
+pympp = { path = "../.." }

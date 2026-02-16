@@ -8,17 +8,17 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpay import Challenge
-from mpay.methods.tempo import TempoAccount, tempo
-from mpay.methods.tempo.client import TempoMethod
-from mpay.methods.tempo.intents import ChargeIntent
-from mpay.methods.tempo.schemas import (
+from mpp import Challenge
+from mpp.methods.tempo import TempoAccount, tempo
+from mpp.methods.tempo.client import TempoMethod
+from mpp.methods.tempo.intents import ChargeIntent
+from mpp.methods.tempo.schemas import (
     ChargeRequest,
     HashCredentialPayload,
     MethodDetails,
     TransactionCredentialPayload,
 )
-from mpay.server.intent import VerificationError
+from mpp.server.intent import VerificationError
 from tests import make_credential
 
 # Valid test private key (must be < secp256k1 order)

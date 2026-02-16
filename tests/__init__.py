@@ -1,8 +1,8 @@
-"""mpay test suite."""
+"""mpp test suite."""
 
 from typing import Any
 
-from mpay import ChallengeEcho, Credential
+from mpp import ChallengeEcho, Credential
 
 
 def make_credential(
