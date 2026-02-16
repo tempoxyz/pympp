@@ -574,12 +574,16 @@ class TestMppPay:
                 "receipt_ref": receipt.reference,
             }
 
-        credential = make_credential(payload={"hash": "0xabc"}, challenge_id="test-cred-id")
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
         assert result["data"] == "paid content"
-        assert result["credential_id"] == "test-cred-id"
         assert result["receipt_ref"] == "tx-ref-456"
 
     @pytest.mark.asyncio
@@ -597,7 +601,12 @@ class TestMppPay:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -636,7 +645,12 @@ class TestMppPay:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000000", "currency": "0xOverride", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -656,13 +670,18 @@ class TestMppPay:
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
-            return {"credential_id": credential.challenge.id}
+            return {"paid": True}
 
-        credential = make_credential(payload={}, challenge_id="django-cred")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
-        assert result["credential_id"] == "django-cred"
+        assert result["paid"] is True
 
     @pytest.mark.asyncio
     async def test_supports_recipient_override(self) -> None:
@@ -679,7 +698,12 @@ class TestMppPay:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_credential(payload={}, challenge_id="test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000000", "currency": "0xUSD", "recipient": "0xOverrideRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -758,7 +782,13 @@ class TestMppPay:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "session", "receipt_ref": receipt.reference}
 
-        credential = make_credential(payload={}, challenge_id="session-test")
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "75", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            intent="session",
+        )
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
