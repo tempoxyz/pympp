@@ -58,6 +58,16 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
 
+## Development
+
+Always run formatting and lint checks before committing:
+
+```bash
+uv run ruff format .
+uv run ruff check .
+uv run python -m pytest tests/ -x -q
+```
+
 ## Protocol
 
 Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/). See [payment-auth-spec](https://github.com/tempoxyz/payment-auth-spec) for the full specification.

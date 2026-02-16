@@ -22,6 +22,19 @@ from mpp._parsing import (
     parse_payment_receipt,
     parse_www_authenticate,
 )
+from mpp.errors import (
+    BadRequestError,
+    InvalidChallengeError,
+    InvalidPayloadError,
+    MalformedCredentialError,
+    PaymentActionRequiredError,
+    PaymentError,
+    PaymentExpiredError,
+    PaymentInsufficientError,
+    PaymentMethodUnsupportedError,
+    PaymentRequiredError,
+    VerificationFailedError,
+)
 
 
 def _b64url_encode(data: str) -> str:
@@ -53,7 +66,9 @@ def generate_challenge_id(
     verification - the server can verify a challenge was issued by it without
     storing state.
 
-    HMAC input format: realm|method|intent|request_b64|expires|digest (pipe-delimited)
+    HMAC input format: pipe-delimited non-empty segments from
+    [realm, method, intent, request_b64, expires, digest]. Empty/falsy
+    segments are filtered out before joining (matches mppx behavior).
     Output: base64url(HMAC-SHA256(secret_key, input))
 
     Args:
@@ -80,7 +95,8 @@ def generate_challenge_id(
     request_json = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
     request_b64 = _b64url_encode(request_json)
 
-    hmac_input = f"{realm}|{method}|{intent}|{request_b64}|{expires or ''}|{digest or ''}"
+    segments = [realm, method, intent, request_b64, expires or "", digest or ""]
+    hmac_input = "|".join(s for s in segments if s)
 
     mac = hmac.new(
         secret_key.encode("utf-8"),
@@ -170,11 +186,15 @@ class Challenge:
             expires=expires,
             digest=digest,
         )
+        request_json = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+        request_b64 = _b64url_encode(request_json)
         return cls(
             id=challenge_id,
             method=method,
             intent=intent,
             request=request,
+            realm=realm,
+            request_b64=request_b64,
             digest=digest,
             expires=expires,
             description=description,
@@ -228,6 +248,7 @@ class Challenge:
             intent=self.intent,
             request=self.request_b64,
             expires=self.expires,
+            digest=self.digest,
         )
 
 
@@ -254,6 +275,7 @@ class ChallengeEcho:
     intent: str
     request: str
     expires: str | None = None
+    digest: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +329,8 @@ class Receipt:
     status: Literal["success"]
     timestamp: datetime
     reference: str
+    method: str = ""
+    external_id: str | None = None
     extra: dict[str, Any] | None = None
 
     @classmethod
@@ -319,10 +343,22 @@ class Receipt:
         return format_payment_receipt(self)
 
     @classmethod
-    def success(cls, reference: str, timestamp: datetime | None = None) -> Receipt:
+    def success(
+        cls,
+        reference: str,
+        timestamp: datetime | None = None,
+        method: str = "tempo",
+        external_id: str | None = None,
+    ) -> Receipt:
         """Create a success receipt with current timestamp."""
         return cls(
             status="success",
             timestamp=timestamp or datetime.now(UTC),
             reference=reference,
+            method=method,
+            external_id=external_id,
         )
+
+
+from . import _body_digest as BodyDigest  # noqa: E402
+from . import _expires as Expires  # noqa: E402

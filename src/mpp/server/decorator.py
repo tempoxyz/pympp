@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import inspect
+import json as _json
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 from mpp import Challenge, Credential, Receipt
+from mpp.errors import PaymentRequiredError
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
@@ -31,24 +33,33 @@ def get_authorization(request: Any) -> str | None:
 
 
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
-    """Build a 402 response for a payment challenge.
+    """Build a 402 response for a payment challenge with RFC 9457 problem details body.
 
     Returns a Starlette ``Response`` when starlette is installed,
     otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
     """
+    error = PaymentRequiredError(realm=realm, description=challenge.description)
+    body = _json.dumps(error.to_problem_details(challenge.id))
+    headers = {
+        "WWW-Authenticate": challenge.to_www_authenticate(realm),
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json",
+    }
     try:
         from starlette.responses import Response
 
         return Response(
-            content=None,
+            content=body,
             status_code=402,
-            headers={"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            headers=headers,
+            media_type="application/problem+json",
         )
     except ImportError:
         return {
             "_mpp_challenge": True,
             "status": 402,
-            "headers": {"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            "headers": headers,
+            "body": body,
         }
 
 

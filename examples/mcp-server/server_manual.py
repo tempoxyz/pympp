@@ -32,7 +32,7 @@ from mpp.extensions.mcp import (
     verify_or_challenge,
 )
 from mpp.methods.tempo import ChargeIntent
-from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
+from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")
@@ -107,7 +107,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             "currency": PATH_USD,
             "recipient": DESTINATION,
             "expires": expires,
-            "methodDetails": {"feePayer": True},
+            "methodDetails": {"chainId": TESTNET_CHAIN_ID, "feePayer": True},
         }
 
         result = await verify_or_challenge(

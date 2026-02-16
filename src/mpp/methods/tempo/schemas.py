@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class MethodDetails(BaseModel):
     """Method-specific details for Tempo charge requests."""
 
-    chainId: int = 42431
+    chainId: int = 4217
     feePayer: bool = False
     feePayerUrl: str | None = None
     memo: str | None = None
