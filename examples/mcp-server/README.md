@@ -123,7 +123,7 @@ The server requires this payment for `premium_echo`:
   "currency": "0x20c0000000000000000000000000000000000000",
   "recipient": "<DESTINATION_ADDRESS>",
   "expires": "<5 minutes from now>",
-  "methodDetails": {"feePayer": true}
+  "methodDetails": {"chainId": 42431, "feePayer": true}
 }
 ```
 

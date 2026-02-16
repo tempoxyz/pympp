@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, tempo
-from mpp.methods.tempo._defaults import PATH_USD, TESTNET_RPC_URL
+from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
 from mpp.server import Mpp
 
 app = FastAPI(
@@ -41,6 +41,7 @@ async def paid_endpoint(request: Request):
     result = await server.charge(
         authorization=request.headers.get("Authorization"),
         amount="0.001",
+        chain_id=TESTNET_CHAIN_ID,
     )
 
     if isinstance(result, Challenge):
@@ -59,7 +60,7 @@ async def paid_endpoint(request: Request):
 
 
 @app.get("/paid-decorator")
-@server.pay(amount="0.001")
+@server.pay(amount="0.001", chain_id=TESTNET_CHAIN_ID)
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
     """A paid endpoint using the server.pay() decorator."""
     return {

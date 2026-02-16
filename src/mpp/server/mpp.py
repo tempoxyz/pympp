@@ -104,6 +104,7 @@ class Mpp:
         description: str | None = None,
         memo: str | None = None,
         fee_payer: bool = False,
+        chain_id: int | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
@@ -117,6 +118,7 @@ class Mpp:
             description: Optional human-readable description.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             fee_payer: Whether to use a fee payer for gas sponsorship.
+            chain_id: Override the default chain ID (e.g., 42431 for moderato).
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -145,8 +147,10 @@ class Mpp:
             "expires": expires,
         }
 
-        if memo or fee_payer:
+        if memo or fee_payer or chain_id is not None:
             method_details: dict[str, Any] = {}
+            if chain_id is not None:
+                method_details["chainId"] = chain_id
             if memo:
                 method_details["memo"] = memo
             if fee_payer:
@@ -172,6 +176,7 @@ class Mpp:
         recipient: str | None = None,
         description: str | None = None,
         expires_in: timedelta | None = None,
+        chain_id: int | None = None,
     ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
         Callable[[Any], Awaitable[R | Any]],
@@ -191,6 +196,7 @@ class Mpp:
             recipient: Override the method's default recipient.
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
+            chain_id: Override the default chain ID (e.g., 42431 for moderato).
 
         Example:
             server = Mpp.create(method=tempo(currency=..., recipient=...))
@@ -236,6 +242,8 @@ class Mpp:
                 }
                 if expires is not None:
                     request["expires"] = expires
+                if chain_id is not None:
+                    request["methodDetails"] = {"chainId": chain_id}
 
                 return await verify_or_challenge(
                     authorization=authorization,
