@@ -461,6 +461,52 @@ class TestRequiresPaymentDecorator:
         challenge = exc_info.value.challenges[0]
         assert challenge.request == {"amount": "50"}
 
+    async def test_realm_defaults_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MPP_REALM", "mcp.example.com")
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        @pay(
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+        )
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
+            return f"Result: {query}"
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            await my_tool("test")
+
+        challenge = exc_info.value.challenges[0]
+        assert challenge.realm == "mcp.example.com"
+
+    async def test_realm_defaults_to_localhost(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ["MPP_REALM", "VERCEL_URL", "RAILWAY_PUBLIC_DOMAIN",
+                     "RENDER_EXTERNAL_HOSTNAME", "HOST", "HOSTNAME"]:
+            monkeypatch.delenv(var, raising=False)
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        @pay(
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+        )
+        async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
+            return f"Result: {query}"
+
+        with pytest.raises(PaymentRequiredError) as exc_info:
+            await my_tool("test")
+
+        challenge = exc_info.value.challenges[0]
+        assert challenge.realm == "localhost"
+
 
 class TestVerifyOrChallenge:
     """Tests for the generic verify_or_challenge function."""

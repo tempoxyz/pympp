@@ -1,7 +1,6 @@
 """Payment-protected API server using FastAPI and the Machine Payments Protocol."""
 
 import os
-from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -30,18 +29,12 @@ server = Mpp.create(
 )
 
 
-def get_payment_request():
-    """Build payment request with fresh expiration (used by lower-level decorator API)."""
-    expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-    if expires.endswith("+00:00"):
-        expires = expires[:-6] + "Z"
-    return {
-        "amount": "1000",
-        "currency": PATH_USD,
-        "recipient": DESTINATION,
-        "expires": expires,
-        "methodDetails": {"feePayer": True},
-    }
+PAYMENT_REQUEST = {
+    "amount": "1000",
+    "currency": PATH_USD,
+    "recipient": DESTINATION,
+    "methodDetails": {"feePayer": True},
+}
 
 
 @app.get("/free")
@@ -73,15 +66,10 @@ async def paid_endpoint(request: Request):
     }
 
 
-SECRET_KEY = os.environ.get("PAYMENT_SECRET_KEY", "example-server-secret-key")
-
-
 @app.get("/paid-decorator")
 @pay(
     intent=ChargeIntent(rpc_url=RPC_URL),
-    request=get_payment_request,
-    realm="localhost:8000",
-    secret_key=SECRET_KEY,
+    request=PAYMENT_REQUEST,
 )
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
     """A paid endpoint using the @pay decorator."""
