@@ -185,8 +185,9 @@ class TempoMethod:
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         memo_clean = memo[2:] if memo.startswith("0x") else memo
-        memo_padded = memo_clean.lower().zfill(64)
-        return f"0x{selector}{to_padded}{amount_padded}{memo_padded}"
+        if len(memo_clean) != 64:
+            raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
+        return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
 
 
 # ──────────────────────────────────────────────────────────────────

@@ -56,6 +56,9 @@ class TestIsMppMemo:
         bad = memo[:10] + "ff" + memo[12:]
         assert is_mpp_memo(bad) is False
 
+    def test_false_for_non_hex(self) -> None:
+        assert is_mpp_memo("0x" + "zz" * 32) is False
+
 
 class TestVerifyServer:
     def test_correct_server(self) -> None:
@@ -85,6 +88,9 @@ class TestDecode:
 
     def test_returns_none_for_non_mpp(self) -> None:
         assert decode("0x" + "00" * 32) is None
+
+    def test_returns_none_for_non_hex(self) -> None:
+        assert decode("0x" + "zz" * 32) is None
 
     def test_anonymous_client(self) -> None:
         memo = encode(server_id="api.example.com")
