@@ -23,11 +23,15 @@ from mpp._parsing import (
     parse_www_authenticate,
 )
 from mpp.errors import (
+    BadRequestError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
+    PaymentActionRequiredError,
     PaymentError,
     PaymentExpiredError,
+    PaymentInsufficientError,
+    PaymentMethodUnsupportedError,
     PaymentRequiredError,
     VerificationFailedError,
 )
@@ -322,7 +326,7 @@ class Receipt:
         )
     """
 
-    status: Literal["success", "failed"]
+    status: Literal["success"]
     timestamp: datetime
     reference: str
     method: str = ""
@@ -354,24 +358,6 @@ class Receipt:
             method=method,
             external_id=external_id,
         )
-
-    @classmethod
-    def failed(
-        cls,
-        reference: str,
-        timestamp: datetime | None = None,
-        method: str = "tempo",
-        external_id: str | None = None,
-    ) -> Receipt:
-        """Create a failed receipt (e.g., on-chain tx reverted)."""
-        return cls(
-            status="failed",
-            timestamp=timestamp or datetime.now(UTC),
-            reference=reference,
-            method=method,
-            external_id=external_id,
-        )
-
 
 from . import _body_digest as BodyDigest  # noqa: E402
 from . import _expires as Expires  # noqa: E402

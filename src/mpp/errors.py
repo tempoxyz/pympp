@@ -18,15 +18,24 @@ def _to_slug(name: str) -> str:
     return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "-", name).lower()
 
 
+def _to_title(name: str) -> str:
+    """CamelCaseError → human-readable title (e.g. InvalidPayloadError → Invalid Payload)."""
+    name = name.removesuffix("Error")
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
+
+
 class PaymentError(Exception):
     """Base class for all payment-related errors."""
 
     status: int = 402
+    title: str = "Payment Error"
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if "type" not in cls.__dict__:
             cls.type = f"{_BASE_URI}/{_to_slug(cls.__name__)}"
+        if "title" not in cls.__dict__:
+            cls.title = _to_title(cls.__name__)
 
     type: str = f"{_BASE_URI}/payment-error"
 
@@ -34,7 +43,7 @@ class PaymentError(Exception):
         """Convert to RFC 9457 Problem Details format."""
         details: dict[str, Any] = {
             "type": self.type,
-            "title": type(self).__name__,
+            "title": self.title,
             "status": self.status,
             "detail": str(self),
         }
@@ -58,8 +67,6 @@ class PaymentRequiredError(PaymentError):
 class MalformedCredentialError(PaymentError):
     """Credential is malformed (invalid base64url, bad JSON structure)."""
 
-    status = 400
-
     def __init__(self, reason: str | None = None) -> None:
         msg = f"Credential is malformed: {reason}." if reason else "Credential is malformed."
         super().__init__(msg)
@@ -67,8 +74,6 @@ class MalformedCredentialError(PaymentError):
 
 class InvalidChallengeError(PaymentError):
     """Challenge ID is unknown, expired, or already used."""
-
-    status = 400
 
     def __init__(self, challenge_id: str | None = None, reason: str | None = None) -> None:
         id_part = f' "{challenge_id}"' if challenge_id else ""
@@ -102,5 +107,51 @@ class InvalidPayloadError(PaymentError):
             f"Credential payload is invalid: {reason}."
             if reason
             else "Credential payload is invalid."
+        )
+        super().__init__(msg)
+
+
+class BadRequestError(PaymentError):
+    """Request is malformed or contains invalid parameters."""
+
+    status = 400
+
+    def __init__(self, reason: str | None = None) -> None:
+        msg = f"Bad request: {reason}." if reason else "Bad request."
+        super().__init__(msg)
+
+
+class PaymentInsufficientError(PaymentError):
+    """Payment amount is insufficient (too low)."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        msg = (
+            f"Payment insufficient: {reason}." if reason else "Payment amount is insufficient."
+        )
+        super().__init__(msg)
+
+
+class PaymentMethodUnsupportedError(PaymentError):
+    """Payment method is not supported by the server."""
+
+    status = 400
+    type = f"{_BASE_URI}/method-unsupported"
+    title = "Method Unsupported"
+
+    def __init__(self, method: str | None = None) -> None:
+        msg = (
+            f'Payment method "{method}" is not supported.'
+            if method
+            else "Payment method is not supported."
+        )
+        super().__init__(msg)
+
+
+class PaymentActionRequiredError(PaymentError):
+    """Payment requires additional action (e.g., 3DS authentication)."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        msg = (
+            f"Payment requires action: {reason}." if reason else "Payment requires action."
         )
         super().__init__(msg)

@@ -140,62 +140,6 @@ class TestClassBasedIntent:
         assert receipt.reference == "custom-ref"
 
 
-class TestFailedReceiptHandling:
-    @pytest.mark.asyncio
-    async def test_returns_challenge_when_receipt_failed(self) -> None:
-        """Should return 402 challenge when verify returns a failed receipt."""
-
-        @intent(name="charge")
-        async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.failed("tx-failed-123")
-
-        credential = make_bound_credential(
-            payload={"token": "valid"},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-        auth_header = credential.to_authorization()
-
-        result = await verify_or_challenge(
-            authorization=auth_header,
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        assert isinstance(result, Challenge)
-
-    @pytest.mark.asyncio
-    async def test_returns_receipt_when_success(self) -> None:
-        """Should return (credential, receipt) when verify returns success."""
-
-        @intent(name="charge")
-        async def test_intent(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success("tx-success-456")
-
-        credential = make_bound_credential(
-            payload={"token": "valid"},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-        auth_header = credential.to_authorization()
-
-        result = await verify_or_challenge(
-            authorization=auth_header,
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        assert isinstance(result, tuple)
-        _, receipt = result
-        assert receipt.status == "success"
-
-
 class TestVerificationError:
     @pytest.mark.asyncio
     async def test_returns_challenge_on_parse_error(self) -> None:
