@@ -1,14 +1,19 @@
 # pympp
 
-Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/).
+Python SDK for the [**Machine Payments Protocol**](https://machinepayments.dev)
 
-## Design Principles
+[![PyPI](https://img.shields.io/pypi/v/pympp.svg)](https://pypi.org/project/pympp/)
+[![License](https://img.shields.io/pypi/l/pympp.svg)](LICENSE)
 
-- **Protocol-first** — Core types (`Challenge`, `Credential`, `Receipt`) map directly to HTTP headers
-- **Async-native** — Built on httpx for modern async Python
-- **Pluggable methods** — Payment networks (Tempo, Stripe, Ethereum) are independently packaged
-- **Minimal dependencies** — Core has no dependencies; extras add what you need
-- **Designed for extension** — `Method` and `Intent` are `typing.Protocol` definitions. Bring your own classes or functions—if they match the interface, they work. No base classes, no registration.
+## Documentation
+
+Full documentation, API reference, and guides are available at **[machinepayments.dev/sdk/python](https://machinepayments.dev/sdk/python)**.
+
+## Install
+
+```bash
+pip install pympp
+```
 
 ## Quick Start
 
@@ -18,6 +23,7 @@ Python SDK for the Machine Payments Protocol (MPP) - an implementation of the ["
 from mpp import Challenge
 from mpp.server import Mpp
 from mpp.methods.tempo import tempo, ChargeIntent
+
 server = Mpp.create(
     method=tempo(
         intents={"charge": ChargeIntent()},
@@ -47,8 +53,6 @@ async def handler(request):
 
 ### Client
 
-#### Automatic: Client Wrapper
-
 ```python
 from mpp.client import Client
 from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
@@ -56,246 +60,20 @@ from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 account = TempoAccount.from_key("0x...")
 
 async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
-    r1 = await client.get("https://api.example.com/a")
-    r2 = await client.get("https://api.example.com/b")
-```
-
-#### Automatic: One-liner
-
-```python
-from mpp.client import get
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
-
-account = TempoAccount.from_key("0x...")
-
-response = await get(
-    "https://api.example.com/resource",
-    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
-)
-```
-
-#### Automatic: Custom httpx Transport
-
-```python
-from mpp.client import PaymentTransport
-import httpx
-
-transport = PaymentTransport(
-    methods=[tempo(intents={"charge": ChargeIntent()}, ...)],
-    inner=httpx.AsyncHTTPTransport(),
-)
-
-async with httpx.AsyncClient(transport=transport) as client:
     response = await client.get("https://api.example.com/resource")
 ```
 
-#### Manual
+## Examples
 
-```python
-from mpp import Challenge, Credential
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
-import httpx
+| Example | Description |
+|---------|-------------|
+| [api-server](./examples/api-server/) | Payment-gated API server |
+| [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
+| [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
 
-account = TempoAccount.from_key("0x...")
-method = tempo(account=account, intents={"charge": ChargeIntent()})
+## Protocol
 
-async with httpx.AsyncClient() as client:
-    res = await client.get("https://api.example.com/resource")
-    if res.status_code != 402:
-        return
-
-    challenge = Challenge.from_www_authenticate(res.headers["www-authenticate"])
-    credential = await method.create_credential(challenge)
-
-    res2 = await client.get(
-        "https://api.example.com/resource",
-        headers={"Authorization": credential.to_authorization()},
-    )
-```
-
-## API Reference
-
-### Core
-
-#### `Challenge`
-
-A parsed payment challenge from a `WWW-Authenticate` header.
-
-```python
-from mpp import Challenge
-
-challenge = Challenge(
-    id="challenge-id",
-    method="tempo",
-    intent="charge",
-    request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
-)
-
-header = challenge.to_www_authenticate("api.example.com")
-parsed = Challenge.from_www_authenticate(header)
-```
-
-#### `Credential`
-
-The credential passed to the `verify` function.
-
-```python
-from mpp import Credential
-
-credential = Credential(
-    id="challenge-id",
-    payload={"hash": "0x..."},
-    source="did:pkh:eip155:1:0x...",
-)
-
-header = credential.to_authorization()
-parsed = Credential.from_authorization(header)
-```
-
-#### `Receipt`
-
-Payment receipt returned after successful verification.
-
-```python
-from mpp import Receipt
-
-receipt = Receipt(
-    status="success",
-    timestamp="2024-01-20T12:00:00Z",
-    reference="0x...",
-)
-
-header = receipt.to_payment_receipt()
-parsed = Receipt.from_payment_receipt(header)
-```
-
-### Server
-
-#### `@requires_payment` Decorator
-
-Simplifies payment-protected endpoints by handling the 402 challenge flow automatically:
-
-```python
-from mpp.server import requires_payment
-from mpp.methods.tempo import ChargeIntent
-
-intent = ChargeIntent(rpc_url="https://rpc.testnet.tempo.xyz")
-
-@app.get("/resource")
-@requires_payment(
-    intent=intent,
-    request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
-    realm="api.example.com",
-    secret_key="my-server-secret",
-)
-async def get_resource(request: Request, credential: Credential, receipt: Receipt):
-    return {"data": "paid content", "payer": credential.source}
-```
-
-With dynamic request params:
-
-```python
-@requires_payment(
-    intent=intent,
-    request=lambda req: {"amount": req.query_params.get("price", "1000"), ...},
-    realm="api.example.com",
-    secret_key="my-server-secret",
-)
-async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
-    return {"data": "..."}
-```
-
-The decorator:
-
-- Extracts Authorization header from the request (supports Starlette/FastAPI and Django)
-- Calls `verify_or_challenge` internally
-- Returns 402 with `WWW-Authenticate` header if payment required
-- Calls handler with `(request, credential, receipt)` if verified
-
-#### `verify_or_challenge`
-
-For more control, use `verify_or_challenge` directly:
-
-```python
-from mpp.server import verify_or_challenge
-
-result = await verify_or_challenge(
-    authorization=request.headers.get("Authorization"),
-    intent=intent,
-    request={"amount": "1000", ...},
-    realm="api.example.com",
-    secret_key="my-server-secret",
-)
-
-if isinstance(result, Challenge):
-    ...  # Return 402
-else:
-    credential, receipt = result
-    ...  # Return resource
-```
-
-#### Custom Intents
-
-```python
-from mpp import Credential, Receipt
-from mpp.server import VerificationError
-
-class MyChargeIntent:
-    name = "charge"
-
-    async def verify(self, credential: Credential, request: dict) -> Receipt:
-        if not await self.validate_payment(credential):
-            raise VerificationError("Payment invalid")
-        return Receipt(
-            status="success",
-            timestamp=datetime.now().isoformat(),
-            reference="...",
-        )
-```
-
-```python
-from mpp.server import intent
-
-@intent(name="charge")
-async def my_charge(credential: Credential, request: dict) -> Receipt:
-    return Receipt(status="success", ...)
-```
-
-### Tempo Method
-
-```python
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
-
-method = tempo(
-    intents={"charge": ChargeIntent()},
-    currency="0x20c0000000000000000000000000000000000000",
-    recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-)
-
-account = TempoAccount.from_key("0x...")
-client_method = tempo(account=account, intents={"charge": ChargeIntent()})
-```
-
-## Code Style
-
-- **No `__all__`** — Do not add `__all__` to `__init__.py` files. We use explicit imports everywhere; wildcard imports (`from x import *`) are not used.
-
-## Development
-
-```bash
-pip install pympp                      # Core only
-pip install pympp[tempo]               # With Tempo support
-pip install pympp[server]              # With server support (Pydantic)
-pip install -e ".[dev,tempo,server]"  # Development install
-```
-
-```bash
-make install  # Install dependencies
-make test     # Run tests
-make lint     # Lint
-make format   # Format code
-make check    # Run all checks
-```
+Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ietf-httpauth-payment/). See [payment-auth-spec](https://github.com/tempoxyz/payment-auth-spec) for the full specification.
 
 ## License
 
