@@ -208,7 +208,27 @@ class DjangoStyleRequest:
         self.META = {"HTTP_AUTHORIZATION": authorization} if authorization else {}
 
 
-class TestRequiresPayment:
+class TestWrapPaymentHandler:
+    @pytest.mark.asyncio
+    async def test_raises_type_error_when_request_is_none(self) -> None:
+        """wrap_payment_handler should raise TypeError when request arg is missing."""
+        from mpp.server.decorator import wrap_payment_handler
+
+        async def verify_fn(auth, req):
+            return Challenge.create(
+                secret_key="s", realm="r", method="tempo", intent="charge", request={}
+            )
+
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {}
+
+        wrapped = wrap_payment_handler(handler, verify_fn, lambda: "r")
+
+        with pytest.raises(TypeError, match="Missing request argument 'req'"):
+            await wrapped()
+
+
+class TestPay:
     @pytest.mark.asyncio
     async def test_returns_402_when_no_authorization(self) -> None:
         """Should return 402 dict when no Authorization header."""
@@ -623,3 +643,48 @@ class TestMppPay:
         else:
             www_auth = result["headers"]["WWW-Authenticate"]
         assert 'description="Premium access"' in www_auth
+
+    @pytest.mark.asyncio
+    async def test_supports_custom_intent(self) -> None:
+        """server.pay() should support intents other than charge."""
+
+        @intent(name="session")
+        async def session_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("session-ref")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": session_intent, "session": session_intent}
+
+        server = Mpp(
+            method=MockMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.000075", intent="session")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "session", "receipt_ref": receipt.reference}
+
+        credential = make_credential(payload={}, challenge_id="session-test")
+        request = MockRequest(authorization=credential.to_authorization())
+        result = await handler(request)
+
+        assert result["data"] == "session"
+        assert result["receipt_ref"] == "session-ref"
+
+    @pytest.mark.asyncio
+    async def test_raises_for_unknown_intent(self) -> None:
+        """server.pay() should raise ValueError for unsupported intent."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        with pytest.raises(ValueError, match="does not support nonexistent intent"):
+            server.pay(amount="0.50", intent="nonexistent")

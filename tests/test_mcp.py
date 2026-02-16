@@ -324,7 +324,7 @@ class TestCapabilities:
         }
 
 
-class TestRequiresPaymentDecorator:
+class TestPayDecorator:
     """Tests for the @pay decorator."""
 
     async def test_raises_payment_required_when_no_credential(self) -> None:
