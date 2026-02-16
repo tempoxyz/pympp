@@ -22,7 +22,7 @@ from mpp._parsing import (
     parse_payment_receipt,
     parse_www_authenticate,
 )
-from mpay.errors import (
+from mpp.errors import (
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
@@ -346,5 +346,5 @@ class Receipt:
         )
 
 
-from mpay import _body_digest as BodyDigest  # noqa: E402
-from mpay import _expires as Expires  # noqa: E402
+from . import _body_digest as BodyDigest  # noqa: E402
+from . import _expires as Expires  # noqa: E402

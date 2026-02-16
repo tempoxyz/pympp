@@ -6,6 +6,7 @@ specific HTTP request content.
 
 import base64
 import hashlib
+import hmac
 import json
 from typing import Any
 
@@ -38,4 +39,4 @@ def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
     Returns:
         True if the digest matches, False otherwise.
     """
-    return compute(body) == digest
+    return hmac.compare_digest(compute(body), digest)

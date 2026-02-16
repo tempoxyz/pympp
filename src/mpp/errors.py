@@ -38,7 +38,7 @@ class PaymentError(Exception):
             "status": self.status,
             "detail": str(self),
         }
-        if challenge_id:
+        if challenge_id is not None:
             details["challengeId"] = challenge_id
         return details
 
@@ -66,8 +66,8 @@ class MalformedCredentialError(PaymentError):
 class InvalidChallengeError(PaymentError):
     """Challenge ID is unknown, expired, or already used."""
 
-    def __init__(self, id: str | None = None, reason: str | None = None) -> None:
-        id_part = f' "{id}"' if id else ""
+    def __init__(self, challenge_id: str | None = None, reason: str | None = None) -> None:
+        id_part = f' "{challenge_id}"' if challenge_id else ""
         reason_part = f": {reason}" if reason else ""
         super().__init__(f"Challenge{id_part} is invalid{reason_part}.")
 
