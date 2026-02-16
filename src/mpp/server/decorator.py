@@ -8,6 +8,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
+from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
@@ -49,8 +50,8 @@ def pay(
     *,
     intent: Intent,
     request: RequestParamsType,
-    realm: str,
-    secret_key: str,
+    realm: str | None = None,
+    secret_key: str | None = None,
     method: str | None = None,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
@@ -69,8 +70,9 @@ def pay(
         request: Payment request params - either a static dict or a callable
             that takes the request and returns the params.
         realm: The realm for the WWW-Authenticate header.
-        secret_key: Server secret for HMAC-bound challenge IDs. Required.
-            Enables stateless challenge verification.
+            Auto-detected from environment if omitted.
+        secret_key: Server secret for HMAC-bound challenge IDs.
+            Auto-generated and persisted to .env if omitted.
         method: The payment method name (defaults to "tempo").
 
     Example:
@@ -78,22 +80,13 @@ def pay(
         @pay(
             intent=ChargeIntent(rpc_url="..."),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
-            realm="api.example.com",
-            secret_key="my-server-secret",  # Enables HMAC-bound IDs
         )
         async def get_resource(request: Request, credential: Credential, receipt: Receipt):
             return {"data": "paid content", "payer": credential.source}
-
-        # With dynamic request params:
-        @pay(
-            intent=ChargeIntent(rpc_url="..."),
-            request=lambda req: {"amount": req.query_params.get("price"), ...},
-            realm="api.example.com",
-            secret_key="my-server-secret",
-        )
-        async def dynamic_pricing(request: Request, credential: Credential, receipt: Receipt):
-            return {"data": "..."}
     """
+
+    resolved_realm = realm if realm is not None else detect_realm()
+    resolved_secret_key = secret_key if secret_key is not None else detect_secret_key()
 
     def decorator(
         handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
@@ -121,13 +114,13 @@ def pay(
                 authorization=authorization,
                 intent=intent,
                 request=request_params,
-                realm=realm,
-                secret_key=secret_key,
+                realm=resolved_realm,
+                secret_key=resolved_secret_key,
                 method=method,
             )
 
             if isinstance(result, Challenge):
-                return _make_challenge_response(result, realm)
+                return _make_challenge_response(result, resolved_realm)
 
             credential, receipt_obj = result
             return await handler(request_obj, credential, receipt_obj)
