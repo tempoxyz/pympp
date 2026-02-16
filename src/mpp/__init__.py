@@ -359,5 +359,6 @@ class Receipt:
             external_id=external_id,
         )
 
+
 from . import _body_digest as BodyDigest  # noqa: E402
 from . import _expires as Expires  # noqa: E402

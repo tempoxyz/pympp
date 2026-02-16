@@ -125,9 +125,7 @@ class PaymentInsufficientError(PaymentError):
     """Payment amount is insufficient (too low)."""
 
     def __init__(self, reason: str | None = None) -> None:
-        msg = (
-            f"Payment insufficient: {reason}." if reason else "Payment amount is insufficient."
-        )
+        msg = f"Payment insufficient: {reason}." if reason else "Payment amount is insufficient."
         super().__init__(msg)
 
 
@@ -151,7 +149,5 @@ class PaymentActionRequiredError(PaymentError):
     """Payment requires additional action (e.g., 3DS authentication)."""
 
     def __init__(self, reason: str | None = None) -> None:
-        msg = (
-            f"Payment requires action: {reason}." if reason else "Payment requires action."
-        )
+        msg = f"Payment requires action: {reason}." if reason else "Payment requires action."
         super().__init__(msg)

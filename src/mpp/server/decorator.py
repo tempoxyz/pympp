@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 
+
 def get_authorization(request: Any) -> str | None:
     """Extract Authorization header from various request types.
 
@@ -29,6 +30,7 @@ def get_authorization(request: Any) -> str | None:
     if hasattr(request, "META"):
         return request.META.get("HTTP_AUTHORIZATION")
     return None
+
 
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
     """Build a 402 response for a payment challenge with RFC 9457 problem details body.
@@ -59,6 +61,7 @@ def make_challenge_response(challenge: Challenge, realm: str) -> Any:
             "headers": headers,
             "body": body,
         }
+
 
 def wrap_payment_handler[R](
     handler: Callable[..., Awaitable[R]],
@@ -113,6 +116,7 @@ def wrap_payment_handler[R](
     del wrapper.__wrapped__
 
     return wrapper
+
 
 def pay[R](
     *,
