@@ -102,6 +102,8 @@ class Mpp:
         recipient: str | None = None,
         expires: str | None = None,
         description: str | None = None,
+        memo: str | None = None,
+        fee_payer: bool = False,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
@@ -113,6 +115,8 @@ class Mpp:
             recipient: Override the method's default recipient.
             expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
             description: Optional human-readable description.
+            memo: Optional 32-byte memo (hex string) for transferWithMemo.
+            fee_payer: Whether to use a fee payer for gas sponsorship.
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -140,6 +144,14 @@ class Mpp:
             "recipient": resolved_recipient,
             "expires": expires,
         }
+
+        if memo or fee_payer:
+            method_details: dict[str, Any] = {}
+            if memo:
+                method_details["memo"] = memo
+            if fee_payer:
+                method_details["feePayer"] = True
+            request["methodDetails"] = method_details
 
         return await verify_or_challenge(
             authorization=authorization,

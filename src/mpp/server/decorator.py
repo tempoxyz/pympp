@@ -42,13 +42,19 @@ def make_challenge_response(challenge: Challenge, realm: str) -> Any:
         return Response(
             content=None,
             status_code=402,
-            headers={"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            headers={
+                "WWW-Authenticate": challenge.to_www_authenticate(realm),
+                "Cache-Control": "no-store",
+            },
         )
     except ImportError:
         return {
             "_mpp_challenge": True,
             "status": 402,
-            "headers": {"WWW-Authenticate": challenge.to_www_authenticate(realm)},
+            "headers": {
+                "WWW-Authenticate": challenge.to_www_authenticate(realm),
+                "Cache-Control": "no-store",
+            },
         }
 
 

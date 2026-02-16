@@ -90,6 +90,11 @@ async def verify_or_challenge(
 
     receipt: Receipt = await intent.verify(credential, request)
 
+    # Per spec, synchronous flows MUST NOT return 200 with a failed receipt.
+    # If payment failed (e.g., tx reverted on-chain), return 402.
+    if receipt.status == "failed":
+        return _create_challenge(method_name, intent.name, request, realm, secret_key, description)
+
     return (credential, receipt)
 
 

@@ -550,7 +550,7 @@ class TestSchemas:
         )
         assert req.amount == "1000"
         assert req.methodDetails.feePayer is False
-        assert req.methodDetails.chainId == 42431
+        assert req.methodDetails.chainId == 4217
 
     def test_charge_request_with_fee_payer(self) -> None:
         """Should accept methodDetails with feePayer and feePayerUrl."""

@@ -22,6 +22,15 @@ from mpp._parsing import (
     parse_payment_receipt,
     parse_www_authenticate,
 )
+from mpay.errors import (
+    InvalidChallengeError,
+    InvalidPayloadError,
+    MalformedCredentialError,
+    PaymentError,
+    PaymentExpiredError,
+    PaymentRequiredError,
+    VerificationFailedError,
+)
 
 
 def _b64url_encode(data: str) -> str:
@@ -304,7 +313,7 @@ class Receipt:
         )
     """
 
-    status: Literal["success"]
+    status: Literal["success", "failed"]
     timestamp: datetime
     reference: str
     extra: dict[str, Any] | None = None
@@ -326,3 +335,16 @@ class Receipt:
             timestamp=timestamp or datetime.now(UTC),
             reference=reference,
         )
+
+    @classmethod
+    def failed(cls, reference: str, timestamp: datetime | None = None) -> Receipt:
+        """Create a failed receipt (e.g., on-chain tx reverted)."""
+        return cls(
+            status="failed",
+            timestamp=timestamp or datetime.now(UTC),
+            reference=reference,
+        )
+
+
+from mpay import _body_digest as BodyDigest  # noqa: E402
+from mpay import _expires as Expires  # noqa: E402
