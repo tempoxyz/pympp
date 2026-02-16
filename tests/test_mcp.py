@@ -484,8 +484,14 @@ class TestRequiresPaymentDecorator:
         assert challenge.realm == "mcp.example.com"
 
     async def test_realm_defaults_to_localhost(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        for var in ["MPP_REALM", "VERCEL_URL", "RAILWAY_PUBLIC_DOMAIN",
-                     "RENDER_EXTERNAL_HOSTNAME", "HOST", "HOSTNAME"]:
+        for var in [
+            "MPP_REALM",
+            "VERCEL_URL",
+            "RAILWAY_PUBLIC_DOMAIN",
+            "RENDER_EXTERNAL_HOSTNAME",
+            "HOST",
+            "HOSTNAME",
+        ]:
             monkeypatch.delenv(var, raising=False)
 
         class MockIntent:
