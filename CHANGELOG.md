@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (2026-02-17)
+
+### Patch Changes
+
+- Test publish to verify end-to-end PyPI release pipeline. (by @BrendanRyan, [#44](https://github.com/tempoxyz/pympp/pull/44))
+
 ## 0.1.0 (2026-02-17)
 
 ### Minor Changes
