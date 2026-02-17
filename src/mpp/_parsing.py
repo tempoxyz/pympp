@@ -80,6 +80,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     params: dict[str, str] = {}
     for match in _AUTH_PARAM_RE.finditer(params_str):
         key = match.group(1)
+        if key in params:
+            raise ParseError(f"Duplicate parameter: {key}")
         # Group 2 is quoted value, group 3 is unquoted token
         value = match.group(2) if match.group(2) is not None else match.group(3)
         params[key] = _unescape_quoted(value) if match.group(2) is not None else value
@@ -278,7 +280,7 @@ def parse_payment_receipt(header: str) -> Receipt:
     header = header.strip()
     data = _b64_decode(header)
 
-    required = {"status", "timestamp", "reference"}
+    required = {"status", "timestamp", "reference", "method"}
     missing = required - set(data.keys())
     if missing:
         raise ParseError(f"Receipt missing required fields: {missing}")
@@ -314,8 +316,7 @@ def format_payment_receipt(receipt: Receipt) -> str:
         "timestamp": timestamp_str,
         "reference": receipt.reference,
     }
-    if receipt.method:
-        payload["method"] = receipt.method
+    payload["method"] = receipt.method
     if receipt.external_id:
         payload["externalId"] = receipt.external_id
     if receipt.extra:
