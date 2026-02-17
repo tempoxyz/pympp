@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
-from mpp.methods.tempo._defaults import RPC_URL
+from mpp.methods.tempo._defaults import CHAIN_ID, rpc_url_for_chain
 from mpp.methods.tempo._rpc import get_tx_params
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ class TempoMethod:
         from mpp.methods.tempo import tempo, TempoAccount
 
         account = TempoAccount.from_key("0x...")
-        method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
+        method = tempo(account=account, chain_id=42431)
 
         # Use with client
         from mpp.client import get
@@ -53,7 +53,8 @@ class TempoMethod:
     name: str = "tempo"
     account: TempoAccount | None = None
     root_account: str | None = None
-    rpc_url: str = RPC_URL
+    chain_id: int = CHAIN_ID
+    rpc_url: str | None = None
     currency: str | None = None
     recipient: str | None = None
     decimals: int = 6
@@ -148,7 +149,8 @@ class TempoMethod:
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
-        chain_id, nonce, gas_price = await get_tx_params(self.rpc_url, self.account.address)
+        resolved_rpc = self.rpc_url or rpc_url_for_chain(self.chain_id)
+        chain_id, nonce, gas_price = await get_tx_params(resolved_rpc, self.account.address)
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
@@ -198,7 +200,8 @@ class TempoMethod:
 def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
-    rpc_url: str = RPC_URL,
+    chain_id: int = CHAIN_ID,
+    rpc_url: str | None = None,
     root_account: str | None = None,
     currency: str | None = None,
     recipient: str | None = None,
@@ -210,7 +213,9 @@ def tempo(
     Args:
         intents: Intents to register (e.g. charge).
         account: Account for signing transactions.
-        rpc_url: Tempo RPC endpoint URL.
+        chain_id: Tempo chain ID (default: 4217 mainnet). Determines the
+            default RPC URL. Use 42431 for testnet (Moderato).
+        rpc_url: Override the default RPC URL for the chain.
         root_account: Root account address for access key signing.
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
@@ -222,13 +227,16 @@ def tempo(
 
     Example:
         from mpp.methods.tempo import ChargeIntent
+        from mpp.methods.tempo._defaults import TESTNET_CHAIN_ID
 
         method = tempo(
+            chain_id=TESTNET_CHAIN_ID,
             intents={"charge": ChargeIntent()},
         )
     """
     method = TempoMethod(
         account=account,
+        chain_id=chain_id,
         rpc_url=rpc_url,
         root_account=root_account,
         currency=currency,
@@ -236,5 +244,9 @@ def tempo(
         decimals=decimals,
         client_id=client_id,
     )
+    resolved_rpc = rpc_url or rpc_url_for_chain(chain_id)
+    for intent in intents.values():
+        if hasattr(intent, "rpc_url") and intent.rpc_url is None:
+            intent.rpc_url = resolved_rpc
     method._intents = dict(intents)
     return method

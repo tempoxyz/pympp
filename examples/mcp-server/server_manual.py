@@ -8,7 +8,6 @@ Usage:
     python server_manual.py
 
 Environment:
-    TEMPO_RPC_URL: Tempo RPC endpoint (default: https://rpc.testnet.tempo.xyz/)
     DESTINATION_ADDRESS: Payment recipient address (required)
     MCP_PORT: Port for SSE server (default: 8000)
 """
@@ -32,16 +31,15 @@ from mpp.extensions.mcp import (
     verify_or_challenge,
 )
 from mpp.methods.tempo import ChargeIntent
-from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
+from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, rpc_url_for_chain
 
-RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")
 PORT = int(os.environ.get("MCP_PORT", "8000"))
 
 if not DESTINATION:
     raise ValueError("DESTINATION_ADDRESS environment variable is required")
 
-intent = ChargeIntent(rpc_url=RPC_URL)
+intent = ChargeIntent(rpc_url=rpc_url_for_chain(TESTNET_CHAIN_ID))
 server = Server("paid-echo-server-manual")
 sse = SseServerTransport("/messages/")
 

@@ -95,7 +95,7 @@ async def verify_or_challenge(
         meta = params.get("_meta", {})
         result = await verify_or_challenge(
             meta=meta,
-            intent=ChargeIntent(rpc_url="..."),
+            intent=intent,  # ChargeIntent with rpc_url set by tempo()
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
             realm="api.example.com",
             secret_key="my-server-secret",

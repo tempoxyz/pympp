@@ -118,7 +118,7 @@ class Mpp:
             description: Optional human-readable description.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             fee_payer: Whether to use a fee payer for gas sponsorship.
-            chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            chain_id: Override the method's chain ID for this request.
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -137,6 +137,10 @@ class Mpp:
         if expires is None:
             expires = (datetime.now(UTC) + timedelta(seconds=DEFAULT_EXPIRY_SECONDS)).isoformat()
 
+        resolved_chain_id = chain_id
+        if resolved_chain_id is None:
+            resolved_chain_id = getattr(self.method, "chain_id", None)
+
         decimals = getattr(self.method, "decimals", DEFAULT_DECIMALS)
         base_amount = str(parse_units(amount, decimals))
 
@@ -147,14 +151,14 @@ class Mpp:
             "expires": expires,
         }
 
-        if memo or fee_payer or chain_id is not None:
-            method_details: dict[str, Any] = {}
-            if chain_id is not None:
-                method_details["chainId"] = chain_id
-            if memo:
-                method_details["memo"] = memo
-            if fee_payer:
-                method_details["feePayer"] = True
+        method_details: dict[str, Any] = {}
+        if resolved_chain_id is not None:
+            method_details["chainId"] = resolved_chain_id
+        if memo:
+            method_details["memo"] = memo
+        if fee_payer:
+            method_details["feePayer"] = True
+        if method_details:
             request["methodDetails"] = method_details
 
         return await verify_or_challenge(
@@ -196,7 +200,7 @@ class Mpp:
             recipient: Override the method's default recipient.
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
-            chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            chain_id: Override the method's chain ID for this request.
 
         Example:
             server = Mpp.create(method=tempo(currency=..., recipient=...))
@@ -242,8 +246,12 @@ class Mpp:
                 }
                 if expires is not None:
                     request["expires"] = expires
-                if chain_id is not None:
-                    request["methodDetails"] = {"chainId": chain_id}
+
+                resolved_chain_id = chain_id
+                if resolved_chain_id is None:
+                    resolved_chain_id = getattr(self.method, "chain_id", None)
+                if resolved_chain_id is not None:
+                    request["methodDetails"] = {"chainId": resolved_chain_id}
 
                 return await verify_or_challenge(
                     authorization=authorization,

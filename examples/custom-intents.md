@@ -119,8 +119,8 @@ from mpp.server import VerificationError
 class MultiMethodIntent:
     name = "charge"
 
-    def __init__(self, tempo_rpc: str, stripe_key: str):
-        self.tempo = ChargeIntent(rpc_url=tempo_rpc)
+    def __init__(self, tempo_chain_id: int, stripe_key: str):
+        self.tempo = ChargeIntent(rpc_url=rpc_url_for_chain(tempo_chain_id))
         self.stripe = StripeChargeIntent(api_key=stripe_key)
 
     async def verify(self, credential: Credential, request: dict) -> Receipt:

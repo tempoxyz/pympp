@@ -6,10 +6,37 @@ RPC_URL = "https://rpc.tempo.xyz"
 PATH_USD = "0x20c0000000000000000000000000000000000000"
 PATH_USD_DECIMALS = 6
 
-# Testnet
+# Testnet (Moderato)
 TESTNET_CHAIN_ID = 42431
 TESTNET_RPC_URL = "https://rpc.testnet.tempo.xyz"
 ESCROW_CONTRACT = "0x9d136eEa063eDE5418A6BC7bEafF009bBb6CFa70"
+
+# Chain ID → RPC URL mapping
+RPC_URLS: dict[int, str] = {
+    CHAIN_ID: RPC_URL,
+    TESTNET_CHAIN_ID: TESTNET_RPC_URL,
+}
+
+
+def rpc_url_for_chain(chain_id: int) -> str:
+    """Resolve the default RPC URL for a chain ID.
+
+    Args:
+        chain_id: Tempo chain ID (4217 for mainnet, 42431 for testnet).
+
+    Returns:
+        The default RPC URL for the given chain ID.
+
+    Raises:
+        ValueError: If the chain ID is not recognized.
+    """
+    url = RPC_URLS.get(chain_id)
+    if url is None:
+        raise ValueError(
+            f"Unknown chain ID {chain_id}. Known chains: {', '.join(str(c) for c in RPC_URLS)}"
+        )
+    return url
+
 
 # Testnet only — the fee payer service sponsors gas on testnet.
 # On mainnet, the server itself must pay gas or provide its own fee payer.
