@@ -66,9 +66,8 @@ def generate_challenge_id(
     verification - the server can verify a challenge was issued by it without
     storing state.
 
-    HMAC input format: pipe-delimited non-empty segments from
-    [realm, method, intent, request_b64, expires, digest]. Empty/falsy
-    segments are filtered out before joining (matches mppx behavior).
+    HMAC input format: realm|method|intent|request_b64|expires|digest (pipe-delimited).
+    All fields are always included; absent optional fields use empty string.
     Output: base64url(HMAC-SHA256(secret_key, input))
 
     Args:
@@ -95,8 +94,7 @@ def generate_challenge_id(
     request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     request_b64 = _b64url_encode(request_json)
 
-    segments = [realm, method, intent, request_b64, expires or "", digest or ""]
-    hmac_input = "|".join(s for s in segments if s)
+    hmac_input = "|".join([realm, method, intent, request_b64, expires or "", digest or ""])
 
     mac = hmac.new(
         secret_key.encode("utf-8"),
@@ -186,7 +184,12 @@ class Challenge:
             expires=expires,
             digest=digest,
         )
-        request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        request_json = json.dumps(
+            request,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+        )
         request_b64 = _b64url_encode(request_json)
         return cls(
             id=challenge_id,
