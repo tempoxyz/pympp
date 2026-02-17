@@ -236,5 +236,8 @@ def tempo(
         decimals=decimals,
         client_id=client_id,
     )
+    for intent in intents.values():
+        if hasattr(intent, "rpc_url") and intent.rpc_url is None:
+            intent.rpc_url = rpc_url
     method._intents = dict(intents)
     return method

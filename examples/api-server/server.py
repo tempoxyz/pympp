@@ -22,9 +22,10 @@ DESTINATION = os.environ.get(
 
 server = Mpp.create(
     method=tempo(
+        rpc_url=RPC_URL,
         currency=PATH_USD,
         recipient=DESTINATION,
-        intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
+        intents={"charge": ChargeIntent()},
     ),
 )
 

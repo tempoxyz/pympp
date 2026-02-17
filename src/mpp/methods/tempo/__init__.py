@@ -15,15 +15,14 @@ Example:
     )
 
     # Server-side
-    from mpp.server import verify_or_challenge
-    from mpp.methods.tempo import ChargeIntent
+    from mpp.server import Mpp
+    from mpp.methods.tempo import tempo, ChargeIntent
 
-    intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
-    result = await verify_or_challenge(
-        authorization=request.headers.get("Authorization"),
-        intent=intent,
-        request={"amount": "1000", ...},
-        realm="api.example.com",
+    server = Mpp.create(
+        method=tempo(
+            rpc_url="https://rpc.tempo.xyz",
+            intents={"charge": ChargeIntent()},
+        ),
     )
 """
 

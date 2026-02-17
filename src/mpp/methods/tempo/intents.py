@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp import Credential, Receipt
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, RPC_URL
+from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -62,37 +62,38 @@ class ChargeIntent:
 
     Verifies that a payment transaction matches the requested parameters.
 
+    When used via ``tempo()``, the ``rpc_url`` is propagated automatically
+    from the method level. You can also pass it directly for standalone use.
+
     This class manages an HTTP client lifecycle. Use as an async context manager
     for automatic cleanup, or call `aclose()` explicitly when done.
 
     Example:
-        from mpp.methods.tempo import ChargeIntent
+        from mpp.methods.tempo import tempo, ChargeIntent
 
-        # As context manager (recommended)
-        async with ChargeIntent(rpc_url="https://rpc.tempo.xyz") as intent:
-            receipt = await intent.verify(
-                credential=Credential(id="...", payload={"type": "hash", ...}),
-                request={"amount": "1000", "currency": "0x...", ...},
-            )
+        # rpc_url propagated from tempo()
+        method = tempo(
+            rpc_url="https://rpc.tempo.xyz",
+            intents={"charge": ChargeIntent()},
+        )
 
-        # Or with external client
-        async with httpx.AsyncClient() as client:
-            intent = ChargeIntent(rpc_url="...", http_client=client)
-            receipt = await intent.verify(...)
+        # Or standalone
+        intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
     """
 
     name = "charge"
 
     def __init__(
         self,
-        rpc_url: str = RPC_URL,
+        rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         """Initialize the charge intent.
 
         Args:
-            rpc_url: Tempo RPC endpoint URL.
+            rpc_url: Tempo RPC endpoint URL. If not set, will be inherited
+                from the ``tempo()`` factory.
             http_client: Optional httpx client for making RPC calls. If provided,
                 the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).

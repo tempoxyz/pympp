@@ -77,10 +77,29 @@ class TestTempoMethod:
         method = tempo(
             account=account,
             rpc_url="https://custom.rpc",
-            intents={"charge": ChargeIntent(rpc_url="https://custom.rpc")},
+            intents={"charge": ChargeIntent()},
         )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
+
+    def test_tempo_propagates_rpc_url_to_intents(self) -> None:
+        """tempo() should propagate rpc_url to intents that don't set one."""
+        intent = ChargeIntent()
+        assert intent.rpc_url is None
+        method = tempo(
+            rpc_url="https://custom.rpc",
+            intents={"charge": intent},
+        )
+        assert method.intents["charge"].rpc_url == "https://custom.rpc"
+
+    def test_tempo_does_not_override_explicit_intent_rpc_url(self) -> None:
+        """tempo() should not override an intent's explicitly-set rpc_url."""
+        intent = ChargeIntent(rpc_url="https://intent.rpc")
+        method = tempo(
+            rpc_url="https://method.rpc",
+            intents={"charge": intent},
+        )
+        assert method.intents["charge"].rpc_url == "https://intent.rpc"
 
     def test_intents_property(self) -> None:
         """Should have only the intents explicitly provided."""
@@ -128,21 +147,24 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
         """Should work as async context manager."""
-        async with ChargeIntent(rpc_url="https://rpc.test") as intent:
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
+        async with intent:
             assert intent.name == "charge"
 
     @pytest.mark.asyncio
     async def test_external_client(self) -> None:
         """Should accept external HTTP client."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        intent = ChargeIntent(rpc_url="https://rpc.test", http_client=mock_client)
+        intent = ChargeIntent(http_client=mock_client)
         assert intent._owns_client is False
         await intent.aclose()
 
     @pytest.mark.asyncio
     async def test_verify_expired_request(self) -> None:
         """Should reject expired requests."""
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
         credential = make_credential(payload={"type": "hash", "hash": "0x123"})
         expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
 
@@ -160,7 +182,8 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_verify_invalid_payload(self) -> None:
         """Should reject invalid credential payload."""
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
         credential = make_credential(payload="not-a-dict")
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
@@ -178,7 +201,8 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_verify_unknown_credential_type(self) -> None:
         """Should reject unknown credential types."""
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
         credential = make_credential(payload={"type": "unknown"})
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
@@ -197,7 +221,8 @@ class TestChargeIntent:
     async def test_verify_hash_success(self) -> None:
         """Should verify hash credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         mock_client = AsyncMock()
         transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -246,7 +271,8 @@ class TestChargeIntent:
     async def test_verify_hash_tx_not_found(self) -> None:
         """Should reject when transaction not found."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -270,7 +296,8 @@ class TestChargeIntent:
     async def test_verify_hash_tx_failed(self) -> None:
         """Should raise VerificationError for failed transaction."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -297,7 +324,8 @@ class TestChargeIntent:
     async def test_verify_hash_no_matching_logs(self) -> None:
         """Should reject when no matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -324,7 +352,8 @@ class TestChargeIntent:
     async def test_verify_transaction_success(self) -> None:
         """Should verify transaction credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         asset = "0x1234567890123456789012345678901234567890"
         destination = "0x4567890123456789012345678901234567890123"
@@ -374,7 +403,8 @@ class TestChargeIntent:
     async def test_verify_transaction_rpc_error(self) -> None:
         """Should raise on RPC error."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -408,7 +438,7 @@ class TestSponsoredTransfer:
         method = tempo(
             account=account,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+            intents={"charge": ChargeIntent()},
         )
 
         httpx_mock.add_response(
@@ -482,7 +512,8 @@ class TestSponsoredTransfer:
             },
         )
 
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
         credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
         )
@@ -518,7 +549,8 @@ class TestSponsoredTransfer:
             },
         )
 
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent = ChargeIntent()
+        intent.rpc_url = "https://rpc.test"
         credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
         )
