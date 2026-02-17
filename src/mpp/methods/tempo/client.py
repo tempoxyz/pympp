@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import RPC_URL
-from mpp.methods.tempo._rpc import get_tx_params
+from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
@@ -150,9 +150,18 @@ class TempoMethod:
 
         chain_id, nonce, gas_price = await get_tx_params(self.rpc_url, self.account.address)
 
+        gas_limit = DEFAULT_GAS_LIMIT
+        try:
+            estimated = await estimate_gas(
+                self.rpc_url, self.account.address, currency, transfer_data
+            )
+            gas_limit = max(gas_limit, estimated + 5_000)
+        except Exception:
+            pass
+
         tx = TempoTransaction.create(
             chain_id=chain_id,
-            gas_limit=DEFAULT_GAS_LIMIT,
+            gas_limit=gas_limit,
             max_fee_per_gas=gas_price,
             max_priority_fee_per_gas=gas_price,
             nonce=nonce,
@@ -177,11 +186,11 @@ class TempoMethod:
     def _encode_transfer_with_memo(self, to: str, amount: int, memo: str) -> str:
         """Encode a TIP-20 transferWithMemo call.
 
-        Selector: 0xb452ef41 = keccak256(
+        Selector: 0x95777d59 = keccak256(
             "transferWithMemo(address,uint256,bytes32)"
         )[:4]
         """
-        selector = "b452ef41"
+        selector = "95777d59"
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         memo_clean = memo[2:] if memo.startswith("0x") else memo

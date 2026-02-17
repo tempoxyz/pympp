@@ -43,11 +43,11 @@ RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
 # TIP-20 function selectors
 TRANSFER_SELECTOR = "a9059cbb"  # keccak256("transfer(address,uint256)")[:4]
-TRANSFER_WITH_MEMO_SELECTOR = "b452ef41"  # keccak256("transferWithMemo(...)")[:4]
+TRANSFER_WITH_MEMO_SELECTOR = "95777d59"  # keccak256("transferWithMemo(address,uint256,bytes32)")[:4]
 
 # Event topic hashes
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-TRANSFER_WITH_MEMO_TOPIC = "0x97e41cc1bb1f9e89199e4cb296a2ce65e20810e029dbbf3e3b46096f31e4fb48"
+TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -244,11 +244,15 @@ class ChargeIntent:
             if expected_memo:
                 if event_topic != TRANSFER_WITH_MEMO_TOPIC:
                     continue
+                # TransferWithMemo has 3 indexed params (from, to, memo)
+                # so memo is in topics[3] and only amount is in data
+                if len(topics) < 4:
+                    continue
                 data = log.get("data", "0x")
-                if len(data) < 130:
+                if len(data) < 66:
                     continue
                 amount = int(data[2:66], 16)
-                memo = "0x" + data[66:130]
+                memo = topics[3]
                 memo_clean = expected_memo.lower()
                 if not memo_clean.startswith("0x"):
                     memo_clean = "0x" + memo_clean

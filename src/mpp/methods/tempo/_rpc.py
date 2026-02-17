@@ -51,3 +51,21 @@ async def get_tx_params(
         _rpc_call(rpc_url, "eth_gasPrice", [], client=client),
     )
     return int(chain_id_hex, 16), int(nonce_hex, 16), int(gas_hex, 16)
+
+
+async def estimate_gas(
+    rpc_url: str,
+    from_addr: str,
+    to: str,
+    data: str,
+    *,
+    client: Any | None = None,
+) -> int:
+    """Estimate gas for a call via eth_estimateGas."""
+    result = await _rpc_call(
+        rpc_url,
+        "eth_estimateGas",
+        [{"from": from_addr, "to": to, "data": data}, "latest"],
+        client=client,
+    )
+    return int(result, 16)

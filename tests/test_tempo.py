@@ -453,6 +453,11 @@ class TestSponsoredTransfer:
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
+        # eth_estimateGas
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
+        )
 
         challenge = Challenge(
             id="test-sponsored",
