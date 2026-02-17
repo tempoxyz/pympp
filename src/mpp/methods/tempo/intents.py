@@ -43,7 +43,7 @@ RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
 # TIP-20 function selectors
 TRANSFER_SELECTOR = "a9059cbb"  # keccak256("transfer(address,uint256)")[:4]
-TRANSFER_WITH_MEMO_SELECTOR = "95777d59"  # keccak256("transferWithMemo(address,uint256,bytes32)")[:4]
+TRANSFER_WITH_MEMO_SELECTOR = "95777d59"  # transferWithMemo(address,uint256,bytes32)
 
 # Event topic hashes
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
