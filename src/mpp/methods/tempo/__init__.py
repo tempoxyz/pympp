@@ -26,6 +26,12 @@ Example:
     )
 """
 
+from mpp.methods.tempo._defaults import (
+    CHAIN_ID,
+    ESCROW_CONTRACTS,
+    TESTNET_CHAIN_ID,
+    escrow_contract_for_chain,
+)
 from mpp.methods.tempo.account import TempoAccount
 from mpp.methods.tempo.client import TempoMethod, TransactionError, tempo
 from mpp.methods.tempo.intents import ChargeIntent

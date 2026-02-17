@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
-from mpp.methods.tempo._defaults import RPC_URL, rpc_url_for_chain
+from mpp.methods.tempo._defaults import CHAIN_RPC_URLS, RPC_URL, rpc_url_for_chain
 from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
 
 if TYPE_CHECKING:
@@ -54,6 +54,7 @@ class TempoMethod:
     account: TempoAccount | None = None
     root_account: str | None = None
     rpc_url: str = RPC_URL
+    chain_id: int | None = None
     currency: str | None = None
     recipient: str | None = None
     decimals: int = 6
@@ -101,12 +102,24 @@ class TempoMethod:
         if memo is None:
             memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
 
+        # Resolve RPC URL from challenge's chainId (like mppx), falling back
+        # to the method-level rpc_url.
+        rpc_url = self.rpc_url
+        challenge_chain_id = (
+            method_details.get("chainId") if isinstance(method_details, dict) else None
+        )
+        if challenge_chain_id is not None:
+            resolved = CHAIN_RPC_URLS.get(int(challenge_chain_id))
+            if resolved is not None:
+                rpc_url = resolved
+
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
             recipient=request["recipient"],
             nonce_key=nonce_key,
             memo=memo,
+            rpc_url=rpc_url,
         )
 
         return Credential(
@@ -122,6 +135,7 @@ class TempoMethod:
         recipient: str,
         nonce_key: int = 0,
         memo: str | None = None,
+        rpc_url: str | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -134,6 +148,7 @@ class TempoMethod:
             recipient: Recipient address.
             nonce_key: 2D nonce key for parallel transaction streams.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
+            rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
@@ -143,17 +158,19 @@ class TempoMethod:
         if self.account is None:
             raise ValueError("No account configured")
 
+        resolved_rpc = rpc_url or self.rpc_url
+
         if memo:
             transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
-        chain_id, nonce, gas_price = await get_tx_params(self.rpc_url, self.account.address)
+        chain_id, nonce, gas_price = await get_tx_params(resolved_rpc, self.account.address)
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
             estimated = await estimate_gas(
-                self.rpc_url, self.account.address, currency, transfer_data
+                resolved_rpc, self.account.address, currency, transfer_data
             )
             gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
@@ -255,6 +272,7 @@ def tempo(
     method = TempoMethod(
         account=account,
         rpc_url=rpc_url,
+        chain_id=chain_id,
         root_account=root_account,
         currency=currency,
         recipient=recipient,

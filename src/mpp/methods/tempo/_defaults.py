@@ -9,7 +9,6 @@ PATH_USD_DECIMALS = 6
 # Testnet (Moderato)
 TESTNET_CHAIN_ID = 42431
 TESTNET_RPC_URL = "https://rpc.moderato.tempo.xyz"
-ESCROW_CONTRACT = "0x542831e3E4Ace07559b7C8787395f4Fb99F70787"
 
 # Testnet only — the fee payer service sponsors gas on testnet.
 # On mainnet, the server itself must pay gas or provide its own fee payer.
@@ -19,6 +18,12 @@ DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 CHAIN_RPC_URLS: dict[int, str] = {
     CHAIN_ID: RPC_URL,
     TESTNET_CHAIN_ID: TESTNET_RPC_URL,
+}
+
+# Chain ID -> escrow contract address mapping
+ESCROW_CONTRACTS: dict[int, str] = {
+    CHAIN_ID: "0x0901aED692C755b870F9605E56BAA66c35BEfF69",
+    TESTNET_CHAIN_ID: "0x542831e3E4Ace07559b7C8787395f4Fb99F70787",
 }
 
 
@@ -36,3 +41,19 @@ def rpc_url_for_chain(chain_id: int) -> str:
             f"Pass rpc_url explicitly for custom chains."
         )
     return url
+
+
+def escrow_contract_for_chain(chain_id: int) -> str:
+    """Return the default escrow contract address for a known chain ID.
+
+    Raises:
+        ValueError: If the chain ID is not recognized.
+    """
+    addr = ESCROW_CONTRACTS.get(chain_id)
+    if addr is None:
+        raise ValueError(
+            f"Unknown chain_id {chain_id}. "
+            f"Known chains: {list(ESCROW_CONTRACTS)}. "
+            f"Pass escrow_contract explicitly for custom chains."
+        )
+    return addr

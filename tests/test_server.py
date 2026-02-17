@@ -751,3 +751,143 @@ class TestMppPay:
 
         with pytest.raises(ValueError, match="does not support nonexistent intent"):
             server.pay(amount="0.50", intent="nonexistent")
+
+
+class TestMppChainIdAutoEmit:
+    """Tests for Mpp auto-emitting chainId from the method's chain_id."""
+
+    @pytest.mark.asyncio
+    async def test_charge_emits_chain_id_from_method(self) -> None:
+        """Mpp.charge() should include chainId in methodDetails from method.chain_id."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            chain_id = 42431
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await server.charge(authorization=None, amount="0.50")
+        assert isinstance(result, Challenge)
+        assert result.request["methodDetails"]["chainId"] == 42431
+
+    @pytest.mark.asyncio
+    async def test_charge_explicit_chain_id_overrides_method(self) -> None:
+        """Explicit chain_id= on charge() should override method.chain_id."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            chain_id = 42431
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await server.charge(authorization=None, amount="0.50", chain_id=4217)
+        assert isinstance(result, Challenge)
+        assert result.request["methodDetails"]["chainId"] == 4217
+
+    @pytest.mark.asyncio
+    async def test_charge_no_chain_id_no_method_details(self) -> None:
+        """No chainId when method has no chain_id and none passed."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        result = await server.charge(authorization=None, amount="0.50")
+        assert isinstance(result, Challenge)
+        assert "methodDetails" not in result.request
+
+    @pytest.mark.asyncio
+    async def test_pay_decorator_emits_chain_id_from_method(self) -> None:
+        """server.pay() should include chainId from method.chain_id."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            chain_id = 42431
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(MockRequest())
+
+        if HAS_STARLETTE:
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            www_auth = result["headers"]["WWW-Authenticate"]
+        challenge = Challenge.from_www_authenticate(www_auth)
+        assert challenge.request["methodDetails"]["chainId"] == 42431
+
+    @pytest.mark.asyncio
+    async def test_pay_decorator_explicit_chain_id_overrides(self) -> None:
+        """server.pay(chain_id=4217) should override method.chain_id."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            chain_id = 42431
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50", chain_id=4217)
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(MockRequest())
+
+        if HAS_STARLETTE:
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            www_auth = result["headers"]["WWW-Authenticate"]
+        challenge = Challenge.from_www_authenticate(www_auth)
+        assert challenge.request["methodDetails"]["chainId"] == 4217
