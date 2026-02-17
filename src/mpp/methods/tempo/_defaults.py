@@ -1,5 +1,7 @@
 """Shared defaults for Tempo payment method."""
 
+from types import MappingProxyType
+
 # Mainnet
 CHAIN_ID = 4217
 RPC_URL = "https://rpc.tempo.xyz"
@@ -15,16 +17,20 @@ TESTNET_RPC_URL = "https://rpc.moderato.tempo.xyz"
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
 
 # Chain ID -> default RPC URL mapping
-CHAIN_RPC_URLS: dict[int, str] = {
-    CHAIN_ID: RPC_URL,
-    TESTNET_CHAIN_ID: TESTNET_RPC_URL,
-}
+CHAIN_RPC_URLS: MappingProxyType[int, str] = MappingProxyType(
+    {
+        CHAIN_ID: RPC_URL,
+        TESTNET_CHAIN_ID: TESTNET_RPC_URL,
+    }
+)
 
-# Chain ID -> escrow contract address mapping
-ESCROW_CONTRACTS: dict[int, str] = {
-    CHAIN_ID: "0x0901aED692C755b870F9605E56BAA66c35BEfF69",
-    TESTNET_CHAIN_ID: "0x542831e3E4Ace07559b7C8787395f4Fb99F70787",
-}
+# Chain ID -> escrow contract address mapping (read-only)
+ESCROW_CONTRACTS: MappingProxyType[int, str] = MappingProxyType(
+    {
+        CHAIN_ID: "0x0901aED692C755b870F9605E56BAA66c35BEfF69",
+        TESTNET_CHAIN_ID: "0x542831e3E4Ace07559b7C8787395f4Fb99F70787",
+    }
+)
 
 
 def rpc_url_for_chain(chain_id: int) -> str:

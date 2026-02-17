@@ -105,13 +105,27 @@ class TempoMethod:
         # Resolve RPC URL from challenge's chainId (like mppx), falling back
         # to the method-level rpc_url.
         rpc_url = self.rpc_url
+        expected_chain_id: int | None = None
         challenge_chain_id = (
             method_details.get("chainId") if isinstance(method_details, dict) else None
         )
         if challenge_chain_id is not None:
-            resolved = CHAIN_RPC_URLS.get(int(challenge_chain_id))
-            if resolved is not None:
-                rpc_url = resolved
+            try:
+                parsed_chain_id = int(challenge_chain_id)
+            except (TypeError, ValueError):
+                pass
+            else:
+                resolved = CHAIN_RPC_URLS.get(parsed_chain_id)
+                if resolved is not None:
+                    rpc_url = resolved
+                    # Only enforce mismatch check when we resolved to a known
+                    # RPC URL — for unknown chains we fall back to the user's
+                    # custom rpc_url and can't verify the chain ID.
+                    expected_chain_id = parsed_chain_id
+
+        # Also check against the method-level chain_id if set.
+        if expected_chain_id is None and self.chain_id is not None:
+            expected_chain_id = self.chain_id
 
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
@@ -120,6 +134,7 @@ class TempoMethod:
             nonce_key=nonce_key,
             memo=memo,
             rpc_url=rpc_url,
+            expected_chain_id=expected_chain_id,
         )
 
         return Credential(
@@ -136,6 +151,7 @@ class TempoMethod:
         nonce_key: int = 0,
         memo: str | None = None,
         rpc_url: str | None = None,
+        expected_chain_id: int | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -149,9 +165,13 @@ class TempoMethod:
             nonce_key: 2D nonce key for parallel transaction streams.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
+            expected_chain_id: If set, verify the RPC reports this chain ID.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
+
+        Raises:
+            TransactionError: If the RPC's chain ID doesn't match expected.
         """
         from pytempo import Call, TempoTransaction
 
@@ -166,6 +186,12 @@ class TempoMethod:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
         chain_id, nonce, gas_price = await get_tx_params(resolved_rpc, self.account.address)
+
+        if expected_chain_id is not None and chain_id != expected_chain_id:
+            raise TransactionError(
+                f"Chain ID mismatch: RPC returned {chain_id}, "
+                f"expected {expected_chain_id} from challenge"
+            )
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:

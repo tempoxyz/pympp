@@ -723,9 +723,7 @@ class TestChainIdPropagation:
         assert method.rpc_url == "https://custom.rpc"
 
     @pytest.mark.asyncio
-    async def test_client_resolves_rpc_from_challenge_chain_id(
-        self, httpx_mock: HTTPXMock
-    ) -> None:
+    async def test_client_resolves_rpc_from_challenge_chain_id(self, httpx_mock: HTTPXMock) -> None:
         """Client should use RPC URL matching challenge's methodDetails.chainId."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         # Method defaults to mainnet RPC
@@ -826,3 +824,103 @@ class TestChainIdPropagation:
         for r in requests:
             assert "rpc.custom" in str(r.url)
         assert credential.payload["type"] == "transaction"
+
+    @pytest.mark.asyncio
+    async def test_client_ignores_non_numeric_chain_id(self, httpx_mock: HTTPXMock) -> None:
+        """Client should ignore non-numeric chainId and fall back to method rpc_url."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.custom",
+            intents={"charge": ChargeIntent()},
+        )
+
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-bad-chain-id",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": "not-a-number"},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+        assert credential.payload["type"] == "transaction"
+
+    @pytest.mark.asyncio
+    async def test_client_chain_id_mismatch_raises(self, httpx_mock: HTTPXMock) -> None:
+        """Client should raise TransactionError when RPC chain ID != challenge chain ID."""
+        from mpp.methods.tempo.client import TransactionError
+
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            intents={"charge": ChargeIntent()},
+        )
+
+        # RPC returns chain_id=4217 (mainnet) but challenge says 42431 (testnet)
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},  # 4217, wrong!
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-mismatch",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 42431},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        with pytest.raises(TransactionError, match="Chain ID mismatch"):
+            await method.create_credential(challenge)
+
+
+class TestDefaultsImmutability:
+    """Tests for read-only defaults dicts."""
+
+    def test_escrow_contracts_is_immutable(self) -> None:
+        """ESCROW_CONTRACTS should reject mutation."""
+        with pytest.raises(TypeError):
+            ESCROW_CONTRACTS[9999] = "0xdead"  # type: ignore[index]
+
+    def test_chain_rpc_urls_is_immutable(self) -> None:
+        """CHAIN_RPC_URLS should reject mutation."""
+        with pytest.raises(TypeError):
+            CHAIN_RPC_URLS[9999] = "https://evil.rpc"  # type: ignore[index]
