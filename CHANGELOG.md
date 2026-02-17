@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 (2026-02-17)
+
+### Patch Changes
+
+- Fixed PyPI publish workflow by using Python 3.12 for building (package requires >=3.12). (by @BrendanRyan, [#46](https://github.com/tempoxyz/pympp/pull/46))
+
 ## 0.1.1 (2026-02-17)
 
 ### Patch Changes
