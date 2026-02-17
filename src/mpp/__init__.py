@@ -92,7 +92,7 @@ def generate_challenge_id(
             request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
         )
     """
-    request_json = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+    request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     request_b64 = _b64url_encode(request_json)
 
     segments = [realm, method, intent, request_b64, expires or "", digest or ""]
@@ -186,7 +186,7 @@ class Challenge:
             expires=expires,
             digest=digest,
         )
-        request_json = json.dumps(request, separators=(",", ":"), ensure_ascii=False)
+        request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
         request_b64 = _b64url_encode(request_json)
         return cls(
             id=challenge_id,
