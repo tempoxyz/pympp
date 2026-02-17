@@ -147,10 +147,14 @@ class Mpp:
             "expires": expires,
         }
 
-        if memo or fee_payer or chain_id is not None:
+        resolved_chain_id = chain_id
+        if resolved_chain_id is None:
+            resolved_chain_id = getattr(self.method, "chain_id", None)
+
+        if memo or fee_payer or resolved_chain_id is not None:
             method_details: dict[str, Any] = {}
-            if chain_id is not None:
-                method_details["chainId"] = chain_id
+            if resolved_chain_id is not None:
+                method_details["chainId"] = resolved_chain_id
             if memo:
                 method_details["memo"] = memo
             if fee_payer:
@@ -242,8 +246,12 @@ class Mpp:
                 }
                 if expires is not None:
                     request["expires"] = expires
-                if chain_id is not None:
-                    request["methodDetails"] = {"chainId": chain_id}
+
+                resolved_chain_id = chain_id
+                if resolved_chain_id is None:
+                    resolved_chain_id = getattr(self.method, "chain_id", None)
+                if resolved_chain_id is not None:
+                    request["methodDetails"] = {"chainId": resolved_chain_id}
 
                 return await verify_or_challenge(
                     authorization=authorization,

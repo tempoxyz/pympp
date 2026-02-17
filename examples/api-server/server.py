@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, tempo
-from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
+from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID
 from mpp.server import Mpp
 
 app = FastAPI(
@@ -15,16 +15,16 @@ app = FastAPI(
     description="Example API demonstrating Machine Payments Protocol payment protection",
 )
 
-RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION", "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 )
 
 server = Mpp.create(
     method=tempo(
+        chain_id=TESTNET_CHAIN_ID,
         currency=PATH_USD,
         recipient=DESTINATION,
-        intents={"charge": ChargeIntent(rpc_url=RPC_URL)},
+        intents={"charge": ChargeIntent()},
     ),
 )
 

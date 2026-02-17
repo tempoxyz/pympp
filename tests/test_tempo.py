@@ -9,7 +9,15 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
-from mpp.methods.tempo import TempoAccount, tempo
+from mpp.methods.tempo import (
+    CHAIN_ID,
+    ESCROW_CONTRACTS,
+    TESTNET_CHAIN_ID,
+    TempoAccount,
+    escrow_contract_for_chain,
+    tempo,
+)
+from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
 from mpp.methods.tempo.intents import ChargeIntent
 from mpp.methods.tempo.schemas import (
@@ -77,10 +85,29 @@ class TestTempoMethod:
         method = tempo(
             account=account,
             rpc_url="https://custom.rpc",
-            intents={"charge": ChargeIntent(rpc_url="https://custom.rpc")},
+            intents={"charge": ChargeIntent()},
         )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
+
+    def test_tempo_propagates_rpc_url_to_intents(self) -> None:
+        """tempo() should propagate rpc_url to intents that don't set one."""
+        intent = ChargeIntent()
+        assert intent.rpc_url is None
+        method = tempo(
+            rpc_url="https://custom.rpc",
+            intents={"charge": intent},
+        )
+        assert method.intents["charge"].rpc_url == "https://custom.rpc"
+
+    def test_tempo_does_not_override_explicit_intent_rpc_url(self) -> None:
+        """tempo() should not override an intent's explicitly-set rpc_url."""
+        intent = ChargeIntent(rpc_url="https://intent.rpc")
+        method = tempo(
+            rpc_url="https://method.rpc",
+            intents={"charge": intent},
+        )
+        assert method.intents["charge"].rpc_url == "https://intent.rpc"
 
     def test_intents_property(self) -> None:
         """Should have only the intents explicitly provided."""
@@ -128,14 +155,15 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
         """Should work as async context manager."""
-        async with ChargeIntent(rpc_url="https://rpc.test") as intent:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        async with intent:
             assert intent.name == "charge"
 
     @pytest.mark.asyncio
     async def test_external_client(self) -> None:
         """Should accept external HTTP client."""
         mock_client = AsyncMock(spec=httpx.AsyncClient)
-        intent = ChargeIntent(rpc_url="https://rpc.test", http_client=mock_client)
+        intent = ChargeIntent(http_client=mock_client)
         assert intent._owns_client is False
         await intent.aclose()
 
@@ -408,7 +436,7 @@ class TestSponsoredTransfer:
         method = tempo(
             account=account,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+            intents={"charge": ChargeIntent()},
         )
 
         httpx_mock.add_response(
@@ -422,6 +450,11 @@ class TestSponsoredTransfer:
         httpx_mock.add_response(
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        # eth_estimateGas
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
         )
 
         challenge = Challenge(
@@ -625,3 +658,269 @@ class TestSchemas:
         data = req.model_dump()
         assert data["description"] == "Test payment"
         assert data["externalId"] == "ext-001"
+
+
+class TestDefaults:
+    """Tests for chain-aware defaults and exports."""
+
+    def test_chain_id_constants(self) -> None:
+        """CHAIN_ID and TESTNET_CHAIN_ID should be exported and correct."""
+        assert CHAIN_ID == 4217
+        assert TESTNET_CHAIN_ID == 42431
+
+    def test_escrow_contracts_per_chain(self) -> None:
+        """ESCROW_CONTRACTS should map both mainnet and testnet."""
+        assert CHAIN_ID in ESCROW_CONTRACTS
+        assert TESTNET_CHAIN_ID in ESCROW_CONTRACTS
+        assert ESCROW_CONTRACTS[CHAIN_ID] == "0x0901aED692C755b870F9605E56BAA66c35BEfF69"
+        assert ESCROW_CONTRACTS[TESTNET_CHAIN_ID] == "0x542831e3E4Ace07559b7C8787395f4Fb99F70787"
+
+    def test_escrow_contract_for_chain_mainnet(self) -> None:
+        """escrow_contract_for_chain should return mainnet address."""
+        addr = escrow_contract_for_chain(4217)
+        assert addr == "0x0901aED692C755b870F9605E56BAA66c35BEfF69"
+
+    def test_escrow_contract_for_chain_testnet(self) -> None:
+        """escrow_contract_for_chain should return testnet address."""
+        addr = escrow_contract_for_chain(42431)
+        assert addr == "0x542831e3E4Ace07559b7C8787395f4Fb99F70787"
+
+    def test_escrow_contract_for_chain_unknown(self) -> None:
+        """escrow_contract_for_chain should raise for unknown chain."""
+        with pytest.raises(ValueError, match="Unknown chain_id 99999"):
+            escrow_contract_for_chain(99999)
+
+    def test_chain_rpc_urls_matches_escrow_contracts(self) -> None:
+        """CHAIN_RPC_URLS and ESCROW_CONTRACTS should cover the same chains."""
+        assert set(CHAIN_RPC_URLS.keys()) == set(ESCROW_CONTRACTS.keys())
+
+
+class TestChainIdPropagation:
+    """Tests for chain_id propagation through tempo() factory and Mpp."""
+
+    def test_tempo_factory_stores_chain_id(self) -> None:
+        """tempo(chain_id=...) should store chain_id on the method."""
+        method = tempo(chain_id=42431, intents={"charge": ChargeIntent()})
+        assert method.chain_id == 42431
+
+    def test_tempo_factory_chain_id_defaults_none(self) -> None:
+        """tempo() without chain_id should default to None."""
+        method = tempo(intents={"charge": ChargeIntent()})
+        assert method.chain_id is None
+
+    def test_tempo_factory_chain_id_resolves_rpc(self) -> None:
+        """tempo(chain_id=42431) should resolve testnet RPC URL."""
+        method = tempo(chain_id=42431, intents={"charge": ChargeIntent()})
+        assert method.rpc_url == "https://rpc.moderato.tempo.xyz"
+
+    def test_tempo_factory_rpc_url_overrides_chain_id(self) -> None:
+        """Explicit rpc_url should override chain_id resolution."""
+        method = tempo(
+            chain_id=42431,
+            rpc_url="https://custom.rpc",
+            intents={"charge": ChargeIntent()},
+        )
+        assert method.rpc_url == "https://custom.rpc"
+
+    @pytest.mark.asyncio
+    async def test_client_resolves_rpc_from_challenge_chain_id(self, httpx_mock: HTTPXMock) -> None:
+        """Client should use RPC URL matching challenge's methodDetails.chainId."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        # Method defaults to mainnet RPC
+        method = tempo(
+            account=account,
+            intents={"charge": ChargeIntent()},
+        )
+        assert method.rpc_url == "https://rpc.tempo.xyz"
+
+        # Mock testnet RPC responses (chain_id, nonce, gas_price, estimateGas)
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0xa5bf", "id": 1},  # chain_id 42431
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
+        )
+
+        # Challenge says chainId=42431 in methodDetails
+        challenge = Challenge(
+            id="test-chain-resolve",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 42431},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+
+        # Should have called testnet RPC, not mainnet
+        requests = httpx_mock.get_requests()
+        assert len(requests) > 0
+        for r in requests:
+            assert "rpc.moderato.tempo.xyz" in str(r.url)
+        assert credential.payload["type"] == "transaction"
+
+    @pytest.mark.asyncio
+    async def test_client_falls_back_to_method_rpc_for_unknown_chain(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Client should fall back to method's rpc_url for unknown chainIds."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.custom",
+            intents={"charge": ChargeIntent()},
+        )
+
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-unknown-chain",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 99999},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+        requests = httpx_mock.get_requests()
+        assert len(requests) > 0
+        for r in requests:
+            assert "rpc.custom" in str(r.url)
+        assert credential.payload["type"] == "transaction"
+
+    @pytest.mark.asyncio
+    async def test_client_ignores_non_numeric_chain_id(self, httpx_mock: HTTPXMock) -> None:
+        """Client should ignore non-numeric chainId and fall back to method rpc_url."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.custom",
+            intents={"charge": ChargeIntent()},
+        )
+
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.custom",
+            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-bad-chain-id",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": "not-a-number"},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+        assert credential.payload["type"] == "transaction"
+
+    @pytest.mark.asyncio
+    async def test_client_chain_id_mismatch_raises(self, httpx_mock: HTTPXMock) -> None:
+        """Client should raise TransactionError when RPC chain ID != challenge chain ID."""
+        from mpp.methods.tempo.client import TransactionError
+
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            intents={"charge": ChargeIntent()},
+        )
+
+        # RPC returns chain_id=4217 (mainnet) but challenge says 42431 (testnet)
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},  # 4217, wrong!
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+        httpx_mock.add_response(
+            url="https://rpc.moderato.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+        )
+
+        challenge = Challenge(
+            id="test-mismatch",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 42431},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        with pytest.raises(TransactionError, match="Chain ID mismatch"):
+            await method.create_credential(challenge)
+
+
+class TestDefaultsImmutability:
+    """Tests for read-only defaults dicts."""
+
+    def test_escrow_contracts_is_immutable(self) -> None:
+        """ESCROW_CONTRACTS should reject mutation."""
+        with pytest.raises(TypeError):
+            ESCROW_CONTRACTS[9999] = "0xdead"  # type: ignore[index]
+
+    def test_chain_rpc_urls_is_immutable(self) -> None:
+        """CHAIN_RPC_URLS should reject mutation."""
+        with pytest.raises(TypeError):
+            CHAIN_RPC_URLS[9999] = "https://evil.rpc"  # type: ignore[index]

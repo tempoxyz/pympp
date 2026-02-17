@@ -15,18 +15,23 @@ Example:
     )
 
     # Server-side
-    from mpp.server import verify_or_challenge
-    from mpp.methods.tempo import ChargeIntent
+    from mpp.server import Mpp
+    from mpp.methods.tempo import tempo, ChargeIntent
 
-    intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
-    result = await verify_or_challenge(
-        authorization=request.headers.get("Authorization"),
-        intent=intent,
-        request={"amount": "1000", ...},
-        realm="api.example.com",
+    server = Mpp.create(
+        method=tempo(
+            chain_id=42431,
+            intents={"charge": ChargeIntent()},
+        ),
     )
 """
 
+from mpp.methods.tempo._defaults import (
+    CHAIN_ID,
+    ESCROW_CONTRACTS,
+    TESTNET_CHAIN_ID,
+    escrow_contract_for_chain,
+)
 from mpp.methods.tempo.account import TempoAccount
 from mpp.methods.tempo.client import TempoMethod, TransactionError, tempo
 from mpp.methods.tempo.intents import ChargeIntent

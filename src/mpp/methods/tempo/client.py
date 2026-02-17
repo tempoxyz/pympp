@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
-from mpp.methods.tempo._defaults import RPC_URL
-from mpp.methods.tempo._rpc import get_tx_params
+from mpp.methods.tempo._defaults import CHAIN_RPC_URLS, RPC_URL, rpc_url_for_chain
+from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
@@ -54,6 +54,7 @@ class TempoMethod:
     account: TempoAccount | None = None
     root_account: str | None = None
     rpc_url: str = RPC_URL
+    chain_id: int | None = None
     currency: str | None = None
     recipient: str | None = None
     decimals: int = 6
@@ -101,12 +102,39 @@ class TempoMethod:
         if memo is None:
             memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
 
+        # Resolve RPC URL from challenge's chainId (like mppx), falling back
+        # to the method-level rpc_url.
+        rpc_url = self.rpc_url
+        expected_chain_id: int | None = None
+        challenge_chain_id = (
+            method_details.get("chainId") if isinstance(method_details, dict) else None
+        )
+        if challenge_chain_id is not None:
+            try:
+                parsed_chain_id = int(challenge_chain_id)
+            except (TypeError, ValueError):
+                pass
+            else:
+                resolved = CHAIN_RPC_URLS.get(parsed_chain_id)
+                if resolved is not None:
+                    rpc_url = resolved
+                    # Only enforce mismatch check when we resolved to a known
+                    # RPC URL — for unknown chains we fall back to the user's
+                    # custom rpc_url and can't verify the chain ID.
+                    expected_chain_id = parsed_chain_id
+
+        # Also check against the method-level chain_id if set.
+        if expected_chain_id is None and self.chain_id is not None:
+            expected_chain_id = self.chain_id
+
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
             recipient=request["recipient"],
             nonce_key=nonce_key,
             memo=memo,
+            rpc_url=rpc_url,
+            expected_chain_id=expected_chain_id,
         )
 
         return Credential(
@@ -122,6 +150,8 @@ class TempoMethod:
         recipient: str,
         nonce_key: int = 0,
         memo: str | None = None,
+        rpc_url: str | None = None,
+        expected_chain_id: int | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -134,25 +164,47 @@ class TempoMethod:
             recipient: Recipient address.
             nonce_key: 2D nonce key for parallel transaction streams.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
+            rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
+            expected_chain_id: If set, verify the RPC reports this chain ID.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
+
+        Raises:
+            TransactionError: If the RPC's chain ID doesn't match expected.
         """
         from pytempo import Call, TempoTransaction
 
         if self.account is None:
             raise ValueError("No account configured")
 
+        resolved_rpc = rpc_url or self.rpc_url
+
         if memo:
             transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
-        chain_id, nonce, gas_price = await get_tx_params(self.rpc_url, self.account.address)
+        chain_id, nonce, gas_price = await get_tx_params(resolved_rpc, self.account.address)
+
+        if expected_chain_id is not None and chain_id != expected_chain_id:
+            raise TransactionError(
+                f"Chain ID mismatch: RPC returned {chain_id}, "
+                f"expected {expected_chain_id} from challenge"
+            )
+
+        gas_limit = DEFAULT_GAS_LIMIT
+        try:
+            estimated = await estimate_gas(
+                resolved_rpc, self.account.address, currency, transfer_data
+            )
+            gas_limit = max(gas_limit, estimated + 5_000)
+        except Exception:
+            pass
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
-            gas_limit=DEFAULT_GAS_LIMIT,
+            gas_limit=gas_limit,
             max_fee_per_gas=gas_price,
             max_priority_fee_per_gas=gas_price,
             nonce=nonce,
@@ -177,11 +229,11 @@ class TempoMethod:
     def _encode_transfer_with_memo(self, to: str, amount: int, memo: str) -> str:
         """Encode a TIP-20 transferWithMemo call.
 
-        Selector: 0xb452ef41 = keccak256(
+        Selector: 0x95777d59 = keccak256(
             "transferWithMemo(address,uint256,bytes32)"
         )[:4]
         """
-        selector = "b452ef41"
+        selector = "95777d59"
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         memo_clean = memo[2:] if memo.startswith("0x") else memo
@@ -198,7 +250,8 @@ class TempoMethod:
 def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
-    rpc_url: str = RPC_URL,
+    chain_id: int | None = None,
+    rpc_url: str | None = None,
     root_account: str | None = None,
     currency: str | None = None,
     recipient: str | None = None,
@@ -210,7 +263,10 @@ def tempo(
     Args:
         intents: Intents to register (e.g. charge).
         account: Account for signing transactions.
-        rpc_url: Tempo RPC endpoint URL.
+        chain_id: Tempo chain ID (4217 for mainnet, 42431 for testnet).
+            Resolves the RPC URL automatically from known chains.
+        rpc_url: Tempo RPC endpoint URL. Overrides the URL resolved
+            from ``chain_id``. Defaults to mainnet if neither is set.
         root_account: Root account address for access key signing.
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
@@ -223,18 +279,34 @@ def tempo(
     Example:
         from mpp.methods.tempo import ChargeIntent
 
+        # Testnet — resolves RPC automatically
         method = tempo(
+            chain_id=42431,
+            intents={"charge": ChargeIntent()},
+        )
+
+        # Custom RPC
+        method = tempo(
+            chain_id=42431,
+            rpc_url="https://my-rpc.example.com",
             intents={"charge": ChargeIntent()},
         )
     """
+    if rpc_url is None:
+        rpc_url = rpc_url_for_chain(chain_id) if chain_id else RPC_URL
+
     method = TempoMethod(
         account=account,
         rpc_url=rpc_url,
+        chain_id=chain_id,
         root_account=root_account,
         currency=currency,
         recipient=recipient,
         decimals=decimals,
         client_id=client_id,
     )
+    for intent in intents.values():
+        if hasattr(intent, "rpc_url") and intent.rpc_url is None:
+            intent.rpc_url = rpc_url
     method._intents = dict(intents)
     return method

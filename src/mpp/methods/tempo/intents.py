@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp import Credential, Receipt
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, RPC_URL
+from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -43,11 +43,11 @@ RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
 # TIP-20 function selectors
 TRANSFER_SELECTOR = "a9059cbb"  # keccak256("transfer(address,uint256)")[:4]
-TRANSFER_WITH_MEMO_SELECTOR = "b452ef41"  # keccak256("transferWithMemo(...)")[:4]
+TRANSFER_WITH_MEMO_SELECTOR = "95777d59"  # transferWithMemo(address,uint256,bytes32)
 
 # Event topic hashes
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-TRANSFER_WITH_MEMO_TOPIC = "0x97e41cc1bb1f9e89199e4cb296a2ce65e20810e029dbbf3e3b46096f31e4fb48"
+TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -62,41 +62,50 @@ class ChargeIntent:
 
     Verifies that a payment transaction matches the requested parameters.
 
+    When used via ``tempo()``, the ``rpc_url`` is propagated automatically
+    from the method level. You can also pass it directly for standalone use.
+
     This class manages an HTTP client lifecycle. Use as an async context manager
     for automatic cleanup, or call `aclose()` explicitly when done.
 
     Example:
-        from mpp.methods.tempo import ChargeIntent
+        from mpp.methods.tempo import tempo, ChargeIntent
 
-        # As context manager (recommended)
-        async with ChargeIntent(rpc_url="https://rpc.tempo.xyz") as intent:
-            receipt = await intent.verify(
-                credential=Credential(id="...", payload={"type": "hash", ...}),
-                request={"amount": "1000", "currency": "0x...", ...},
-            )
+        # chain_id resolves RPC automatically
+        method = tempo(
+            chain_id=42431,
+            intents={"charge": ChargeIntent()},
+        )
 
-        # Or with external client
-        async with httpx.AsyncClient() as client:
-            intent = ChargeIntent(rpc_url="...", http_client=client)
-            receipt = await intent.verify(...)
+        # Or standalone with chain_id
+        intent = ChargeIntent(chain_id=42431)
+
+        # Or explicit rpc_url (overrides chain_id)
+        intent = ChargeIntent(rpc_url="https://my-rpc.example.com")
     """
 
     name = "charge"
 
     def __init__(
         self,
-        rpc_url: str = RPC_URL,
+        chain_id: int | None = None,
+        rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         """Initialize the charge intent.
 
         Args:
-            rpc_url: Tempo RPC endpoint URL.
-            http_client: Optional httpx client for making RPC calls. If provided,
-                the caller is responsible for closing it.
+            chain_id: Tempo chain ID (4217 for mainnet, 42431 for
+                testnet). Resolves the RPC URL automatically.
+            rpc_url: Tempo RPC endpoint URL. Overrides ``chain_id``.
+                If neither is set, will be inherited from ``tempo()``.
+            http_client: Optional httpx client for making RPC calls.
+                If provided, the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).
         """
+        if rpc_url is None and chain_id is not None:
+            rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
         self._http_client = http_client
         self._owns_client = http_client is None
@@ -243,11 +252,15 @@ class ChargeIntent:
             if expected_memo:
                 if event_topic != TRANSFER_WITH_MEMO_TOPIC:
                     continue
+                # TransferWithMemo has 3 indexed params (from, to, memo)
+                # so memo is in topics[3] and only amount is in data
+                if len(topics) < 4:
+                    continue
                 data = log.get("data", "0x")
-                if len(data) < 130:
+                if len(data) < 66:
                     continue
                 amount = int(data[2:66], 16)
-                memo = "0x" + data[66:130]
+                memo = topics[3]
                 memo_clean = expected_memo.lower()
                 if not memo_clean.startswith("0x"):
                     memo_clean = "0x" + memo_clean
@@ -401,7 +414,6 @@ class ChargeIntent:
             raise VerificationError("Transaction contains no calls")
 
         expected_memo = request.methodDetails.memo
-        expected_selector = TRANSFER_WITH_MEMO_SELECTOR if expected_memo else TRANSFER_SELECTOR
 
         for call_item in calls_data:
             if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
@@ -431,7 +443,11 @@ class ChargeIntent:
                 continue
 
             selector = call_data[:8].lower()
-            if selector != expected_selector:
+
+            if expected_memo:
+                if selector != TRANSFER_WITH_MEMO_SELECTOR:
+                    continue
+            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
                 continue
 
             if len(call_data) < 136:
