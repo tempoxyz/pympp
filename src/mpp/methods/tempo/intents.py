@@ -402,7 +402,6 @@ class ChargeIntent:
             raise VerificationError("Transaction contains no calls")
 
         expected_memo = request.methodDetails.memo
-        expected_selector = TRANSFER_WITH_MEMO_SELECTOR if expected_memo else TRANSFER_SELECTOR
 
         for call_item in calls_data:
             if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
@@ -432,7 +431,11 @@ class ChargeIntent:
                 continue
 
             selector = call_data[:8].lower()
-            if selector != expected_selector:
+
+            if expected_memo:
+                if selector != TRANSFER_WITH_MEMO_SELECTOR:
+                    continue
+            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
                 continue
 
             if len(call_data) < 136:
