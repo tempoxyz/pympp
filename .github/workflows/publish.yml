@@ -16,6 +16,8 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - uses: wevm/changelogs@master
         with:
