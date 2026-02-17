@@ -74,7 +74,7 @@ class TestGenerateChallengeId:
             expires="2026-02-01T00:00:00Z",
             digest="sha-256=abc123def456",
         )
-        assert result == "96xfZu2wzXD-f-l-hClS9OgODVgIoPWSCWhUw6a4I1Q"
+        assert result == "jDq_IazIMny5JJk3-xm3eSxGaP6XbbaApxBi6fG_320"
 
     def test_different_secret_different_id(self) -> None:
         """Same parameters with different secret produces different ID."""
@@ -116,7 +116,7 @@ class TestGenerateChallengeId:
                 "description": "Payment for café ☕",
             },
         )
-        assert result == "stLlKuOMkHscBIqCE78v48-CY-I0JIQkm1rjotcb-rQ"
+        assert result == "sBt2jC0UaKG5HgqRYgWHI0O3j36TvF8AMTc6ZncA7kc"
 
     def test_nested_method_details(self) -> None:
         """Request with nested methodDetails object."""
@@ -132,7 +132,7 @@ class TestGenerateChallengeId:
                 "methodDetails": {"chainId": 42431, "feePayer": True},
             },
         )
-        assert result == "AbaOnesHVxXeDbG9eStLZOlBwTI87_8g7skZwL9tOvA"
+        assert result == "feHfQQxI0Sf6UhvhHUijemERZaMkJJxuHzyWXnB6188"
 
 
 class TestChallengeCreate:

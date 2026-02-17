@@ -165,7 +165,7 @@ class MCPCredential:
 
         from mpp import ChallengeEcho, Credential
 
-        request_json = json.dumps(self.challenge.request, separators=(",", ":"))
+        request_json = json.dumps(self.challenge.request, separators=(",", ":"), sort_keys=True)
         request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
 
         echo = ChallengeEcho(
