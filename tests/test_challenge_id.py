@@ -23,7 +23,7 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "2zBPShTPApayQwXeT8WydrfbsHFLWIC8cosfBzK3UUs"
+        assert result == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
 
     def test_with_expires(self) -> None:
         """Challenge ID with expires field included in HMAC."""
@@ -39,7 +39,7 @@ class TestGenerateChallengeId:
             },
             expires="2026-01-29T12:00:00Z",
         )
-        assert result == "HQEKiVUplCDQ6AIff8eN55Q3BpRmg2RqU0DOl3R8QIA"
+        assert result == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
 
     def test_with_digest(self) -> None:
         """Challenge ID with digest field included in HMAC."""
@@ -55,7 +55,7 @@ class TestGenerateChallengeId:
             },
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=",
         )
-        assert result == "WglnB-3knPMLPOVEdA8P81UXpy8oFVfBx31ntDh-VPk"
+        assert result == "EAX2sqwdeg8Km8LIKRBFhM5xDQvEgIlbTif9FKBsOiU"
 
     def test_full_challenge(self) -> None:
         """Challenge ID with all optional fields."""
@@ -89,7 +89,7 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "mi0krYRZpfDxn0DFDHeXOIYdU_SEcJQfURKGTN26Ehg"
+        assert result == "UMEn_1WPt2vz3XK8rrkbHET6RwqfwtK8VVNz0Xc2x4A"
 
     def test_empty_request(self) -> None:
         """Challenge ID with empty request object."""
@@ -100,7 +100,7 @@ class TestGenerateChallengeId:
             intent="authorize",
             request={},
         )
-        assert result == "yXILRwEbyiy4F2pCUoxcKbvYHy4ZyXtLxnzMZTi3qDs"
+        assert result == "jUTqTVe3kCv5rVizv1XBCs9qKCLg4AZLwBUnk4N3MR8"
 
     def test_unicode_in_description(self) -> None:
         """Request with unicode characters."""
@@ -116,7 +116,7 @@ class TestGenerateChallengeId:
                 "description": "Payment for café ☕",
             },
         )
-        assert result == "sBt2jC0UaKG5HgqRYgWHI0O3j36TvF8AMTc6ZncA7kc"
+        assert result == "OjiT_PsisJ_SkHEomn9dcfraObt4U3nO5Tg3gU0Etmg"
 
     def test_nested_method_details(self) -> None:
         """Request with nested methodDetails object."""
@@ -132,7 +132,140 @@ class TestGenerateChallengeId:
                 "methodDetails": {"chainId": 42431, "feePayer": True},
             },
         )
-        assert result == "feHfQQxI0Sf6UhvhHUijemERZaMkJJxuHzyWXnB6188"
+        assert result == "9Sl6t74wn9zPaakjTSK6DqhGtS5HQVQEkIUYBYdHTbA"
+
+
+class TestGoldenVectors:
+    """Cross-SDK golden vectors (shared with mppx and mpp-rs).
+
+    HMAC input: realm | method | intent | base64url(canonicalize(request)) | expires | digest
+    HMAC key:   UTF-8 bytes of secret_key ("test-vector-secret")
+    Output:     base64url(HMAC-SHA256(key, input), no padding)
+
+    These vectors cover every combination of optional HMAC fields (expires, digest)
+    and variations in each required field (realm, method, intent, request).
+    """
+
+    SECRET = "test-vector-secret"
+
+    def test_required_fields_only(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert result == "SOfbA51LV3LCkGE7RbomqwXdbWVlrZwlW-Z9aOHolxw"
+
+    def test_with_expires(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            expires="2025-01-06T12:00:00Z",
+        )
+        assert result == "R1ZSIwoIjkFhMCSzUGiCTesiigf5vV65EQ_3gVNtsNw"
+
+    def test_with_digest(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
+        )
+        assert result == "AiMmBdsSOkOYpXTupMnzVnrzZbqMY_P2i80vENRUSN4"
+
+    def test_with_expires_and_digest(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            expires="2025-01-06T12:00:00Z",
+            digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
+        )
+        assert result == "FMBGqN7MzpKagHsCcartZM09CnUqv7UgmaCy45Ozgug"
+
+    def test_description_not_in_hmac(self) -> None:
+        """description is not part of HMAC input, so ID matches 'required fields only'."""
+        with_desc = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert with_desc == "SOfbA51LV3LCkGE7RbomqwXdbWVlrZwlW-Z9aOHolxw"
+
+    def test_multi_field_request(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000", "currency": "0x1234", "recipient": "0xabcd"},
+        )
+        assert result == "5CXJi4bWMz2W54WjnlmoxnwTYe-JKwhw0z32ICQ65Es"
+
+    def test_nested_method_details(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x1234",
+                "methodDetails": {"chainId": 42431},
+            },
+        )
+        assert result == "eid66xXUZsj46Pb30AfAf7m5kPehgianI16rZ-QY8HU"
+
+    def test_empty_request(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={},
+        )
+        assert result == "6kq-PYTyXtaGAHTHCVUrc_hIsAwLeskeQFtDZerMYhM"
+
+    def test_different_realm(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="payments.other.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert result == "-gMjd8UeUvBcqUaUzarVj6ikH_YoDowpaNbEwK1Tmx8"
+
+    def test_different_method(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="stripe",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert result == "DRH9ycmIlZ2lYUatIHCrxpm9K7ig5pniZ3ulleb7vl0"
+
+    def test_different_intent(self) -> None:
+        result = generate_challenge_id(
+            secret_key=self.SECRET,
+            realm="api.example.com",
+            method="tempo",
+            intent="session",
+            request={"amount": "1000000"},
+        )
+        assert result == "INeBi93MhinvbwdUxeUUIaT5Q_ufgLKPYZb5Tg43A1o"
 
 
 class TestChallengeCreate:
@@ -151,7 +284,7 @@ class TestChallengeCreate:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert challenge.id == "2zBPShTPApayQwXeT8WydrfbsHFLWIC8cosfBzK3UUs"
+        assert challenge.id == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
         assert challenge.method == "tempo"
         assert challenge.intent == "charge"
 
@@ -170,7 +303,7 @@ class TestChallengeCreate:
             expires="2026-01-29T12:00:00Z",
             description="Test payment",
         )
-        assert challenge.id == "HQEKiVUplCDQ6AIff8eN55Q3BpRmg2RqU0DOl3R8QIA"
+        assert challenge.id == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
         assert challenge.expires == "2026-01-29T12:00:00Z"
         assert challenge.description == "Test payment"
 
