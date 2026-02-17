@@ -80,6 +80,12 @@ class TestChallenge:
         with pytest.raises(ParseError, match="Missing 'method' field"):
             Challenge.from_www_authenticate(header)
 
+    def test_parse_rejects_duplicate_params(self) -> None:
+        """Should reject headers with duplicate parameters."""
+        header = 'Payment id="a", realm="api", method="tempo", intent="charge", request="e30", id="b"'
+        with pytest.raises(ParseError, match="Duplicate parameter"):
+            Challenge.from_www_authenticate(header)
+
     def test_roundtrip_with_optional_fields(self) -> None:
         """Challenge with optional fields should survive roundtrip."""
         challenge = Challenge(
@@ -178,5 +184,14 @@ class TestReceipt:
             "eyJzdGF0dXMiOiJwZW5kaW5nIiwidGltZXN0YW1wIjoiMjAyNC0wMS0yMFQxMjowMDow"
             "MFoiLCJyZWZlcmVuY2UiOiIweCJ9"
         )
+        with pytest.raises(ParseError):
+            Receipt.from_payment_receipt(b64)
+
+    def test_parse_rejects_missing_method(self) -> None:
+        """Should reject receipts missing required method field."""
+        import base64
+        import json
+        data = {"status": "success", "timestamp": "2026-01-29T12:00:30Z", "reference": "0xabc"}
+        b64 = base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
         with pytest.raises(ParseError):
             Receipt.from_payment_receipt(b64)
