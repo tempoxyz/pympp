@@ -1,0 +1,120 @@
+pympp transferWithMemo Fix Summary
+===================================
+Date: 2026-02-17
+Branch: fix/accept-transfer-with-memo-selector
+Testnet: Moderato (chain 42431, https://rpc.moderato.tempo.xyz)
+
+
+PROBLEM
+-------
+Every pympp payment on testnet reverted. The pympp client always auto-generates
+an attribution memo (client.py line 102-103), which means it always calls
+transferWithMemo instead of plain transfer. All transferWithMemo calls reverted.
+
+
+ROOT CAUSES (3 bugs)
+--------------------
+
+1. Wrong function selector for transferWithMemo
+
+   pympp hardcoded selector 0xb452ef41 but the correct keccak256 of
+   "transferWithMemo(address,uint256,bytes32)" is 0x95777d59.
+
+   The precompile returned UnknownFunctionSelector(0xb452ef41), confirming
+   it doesn't recognize the bogus selector. eth_call with 0x95777d59 succeeds.
+
+   mppx computes the selector at runtime via viem's toFunctionSelector() so
+   it always had the correct value.
+
+   Files fixed:
+     - src/mpp/methods/tempo/client.py line 184: "b452ef41" -> "95777d59"
+     - src/mpp/methods/tempo/intents.py line 46: "b452ef41" -> "95777d59"
+
+2. Gas limit too low (100K hardcoded, actual usage ~38K but estimate ~558K)
+
+   Even after fixing the selector, transactions ran out of gas. The client
+   hardcoded DEFAULT_GAS_LIMIT = 100_000 but transferWithMemo on Moderato
+   estimates ~558K gas (conservative estimate including fee overhead).
+   The actual usage was only 38,275, but the node rejects txs where the
+   estimate exceeds the gas limit.
+
+   mppx uses viem's prepareTransactionRequest which calls eth_estimateGas
+   automatically.
+
+   Fix: Added eth_estimateGas call before building the transaction.
+   Falls back to 100K if estimation fails.
+
+   Files fixed:
+     - src/mpp/methods/tempo/_rpc.py: Added estimate_gas() function
+     - src/mpp/methods/tempo/client.py: Call estimate_gas before building tx
+
+3. Wrong TransferWithMemo event topic hash
+
+   pympp had TRANSFER_WITH_MEMO_TOPIC = "0x97e41cc1bb1f9e89..."
+   but the correct keccak256 of "TransferWithMemo(address,address,uint256,bytes32)"
+   is "0x57bc7354aa85aed3...".
+
+   This would have caused server-side receipt validation to fail (unable to
+   find matching event log) even if the tx succeeded.
+
+   Additionally, the event log parsing read memo from the data field, but
+   memo is an indexed parameter so it's in topics[3].
+
+   Files fixed:
+     - src/mpp/methods/tempo/intents.py line 50: Fixed topic hash
+     - src/mpp/methods/tempo/intents.py lines 244-260: Read memo from
+       topics[3] instead of data field
+
+
+VERIFICATION
+------------
+End-to-end test: pympp client (fetch.py) -> pympp server (api-server) on Moderato.
+
+Example successful transaction:
+  Hash:      0xcaea3fcb02d18433e1003cc81df1318011106bdb2ec6d46ed0d6768dede5e397
+  Type:      0x76 (Tempo)
+  From:      0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+  Chain:     42431 (Moderato)
+  Block:     5,353,465
+  Selector:  0x95777d59 (transferWithMemo)
+  To:        0x742d35Cc6634c0532925a3b844bC9e7595F8fE00
+  Amount:    1000 units = 0.001 PathUSD
+  Status:    0x1 SUCCESS
+  Gas Used:  38,275
+
+Event Logs (3):
+  Log #0: Transfer(from, to, amount)
+    from:   0xf39F...92266 (payer)
+    to:     0x742d...fE00  (recipient)
+    amount: 1000 = 0.001 PathUSD
+
+  Log #1: TransferWithMemo(from, to, amount, memo)
+    from:   0xf39F...92266 (payer)
+    to:     0x742d...fE00  (recipient)
+    amount: 1000 = 0.001 PathUSD
+    memo:   0xef1ed7120135bfd7eb12e2daed83fd00000000000000000000f5e2e31427c831
+
+  Log #2: Transfer(from, to, amount)  [gas fee]
+    from:   0xf39F...92266 (payer)
+    to:     0xfeec...00000 (fee collector)
+    amount: 766 = 0.000766 PathUSD
+
+Server logs:
+  GET /paid -> 402 Payment Required  (challenge issued)
+  GET /paid -> 200 OK                (payment verified, content returned)
+
+Client output:
+  {"message":"This is paid content!",
+   "payer":"did:pkh:eip155:42431:0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+   "tx":"0xcaea3fcb02d18433e1003cc81df1318011106bdb2ec6d46ed0d6768dede5e397"}
+
+All 208 unit tests pass.
+
+
+NOTE
+----
+The same wrong selector (b452ef41) also exists in:
+  - mpay-python/src/mpay/methods/tempo/client.py
+  - mpay-python/src/mpay/methods/tempo/intents.py
+  - mpay-sdks/sdks/pympp/ (copy of pympp)
+These should be fixed separately.

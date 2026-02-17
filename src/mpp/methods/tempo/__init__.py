@@ -20,7 +20,7 @@ Example:
 
     server = Mpp.create(
         method=tempo(
-            rpc_url="https://rpc.tempo.xyz",
+            chain_id=42431,
             intents={"charge": ChargeIntent()},
         ),
     )

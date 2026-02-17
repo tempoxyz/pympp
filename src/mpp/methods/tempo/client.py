@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
-from mpp.methods.tempo._defaults import RPC_URL
+from mpp.methods.tempo._defaults import RPC_URL, rpc_url_for_chain
 from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
 
 if TYPE_CHECKING:
@@ -207,7 +207,8 @@ class TempoMethod:
 def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
-    rpc_url: str = RPC_URL,
+    chain_id: int | None = None,
+    rpc_url: str | None = None,
     root_account: str | None = None,
     currency: str | None = None,
     recipient: str | None = None,
@@ -219,7 +220,10 @@ def tempo(
     Args:
         intents: Intents to register (e.g. charge).
         account: Account for signing transactions.
-        rpc_url: Tempo RPC endpoint URL.
+        chain_id: Tempo chain ID (4217 for mainnet, 42431 for testnet).
+            Resolves the RPC URL automatically from known chains.
+        rpc_url: Tempo RPC endpoint URL. Overrides the URL resolved
+            from ``chain_id``. Defaults to mainnet if neither is set.
         root_account: Root account address for access key signing.
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
@@ -232,10 +236,22 @@ def tempo(
     Example:
         from mpp.methods.tempo import ChargeIntent
 
+        # Testnet — resolves RPC automatically
         method = tempo(
+            chain_id=42431,
+            intents={"charge": ChargeIntent()},
+        )
+
+        # Custom RPC
+        method = tempo(
+            chain_id=42431,
+            rpc_url="https://my-rpc.example.com",
             intents={"charge": ChargeIntent()},
         )
     """
+    if rpc_url is None:
+        rpc_url = rpc_url_for_chain(chain_id) if chain_id else RPC_URL
+
     method = TempoMethod(
         account=account,
         rpc_url=rpc_url,

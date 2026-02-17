@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp import Credential, Receipt
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL
+from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -71,20 +71,24 @@ class ChargeIntent:
     Example:
         from mpp.methods.tempo import tempo, ChargeIntent
 
-        # rpc_url propagated from tempo()
+        # chain_id resolves RPC automatically
         method = tempo(
-            rpc_url="https://rpc.tempo.xyz",
+            chain_id=42431,
             intents={"charge": ChargeIntent()},
         )
 
-        # Or standalone
-        intent = ChargeIntent(rpc_url="https://rpc.tempo.xyz")
+        # Or standalone with chain_id
+        intent = ChargeIntent(chain_id=42431)
+
+        # Or explicit rpc_url (overrides chain_id)
+        intent = ChargeIntent(rpc_url="https://my-rpc.example.com")
     """
 
     name = "charge"
 
     def __init__(
         self,
+        chain_id: int | None = None,
         rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
@@ -92,12 +96,16 @@ class ChargeIntent:
         """Initialize the charge intent.
 
         Args:
-            rpc_url: Tempo RPC endpoint URL. If not set, will be inherited
-                from the ``tempo()`` factory.
-            http_client: Optional httpx client for making RPC calls. If provided,
-                the caller is responsible for closing it.
+            chain_id: Tempo chain ID (4217 for mainnet, 42431 for
+                testnet). Resolves the RPC URL automatically.
+            rpc_url: Tempo RPC endpoint URL. Overrides ``chain_id``.
+                If neither is set, will be inherited from ``tempo()``.
+            http_client: Optional httpx client for making RPC calls.
+                If provided, the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).
         """
+        if rpc_url is None and chain_id is not None:
+            rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
         self._http_client = http_client
         self._owns_client = http_client is None
