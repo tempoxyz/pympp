@@ -22,7 +22,6 @@ DESTINATION = os.environ.get(
 server = Mpp.create(
     method=tempo(
         chain_id=TESTNET_CHAIN_ID,
-        rpc_url=os.environ.get("TEMPO_RPC_URL"),
         currency=PATH_USD,
         recipient=DESTINATION,
         intents={"charge": ChargeIntent()},
