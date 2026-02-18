@@ -1,6 +1,6 @@
 [project]
 name = "pympp"
-version = "0.1.4"
+version = "0.1.5"
 description = "HTTP 402 Payment Authentication for Python"
 readme = "README.md"
 requires-python = ">=3.12"
