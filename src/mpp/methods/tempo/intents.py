@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp import Credential, Receipt
+from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
@@ -17,7 +18,6 @@ from mpp.methods.tempo.schemas import (
     HashCredentialPayload,
     TransactionCredentialPayload,
 )
-from mpp.errors import VerificationError
 
 if TYPE_CHECKING:
     import httpx
