@@ -13,8 +13,7 @@ if TYPE_CHECKING:
     from mpp import Credential, Receipt
 
 
-class VerificationError(Exception):
-    """Payment verification failed."""
+from mpp.errors import VerificationError as VerificationError  # noqa: F401 — re-export
 
 
 @runtime_checkable

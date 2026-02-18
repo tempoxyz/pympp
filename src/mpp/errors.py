@@ -151,3 +151,7 @@ class PaymentActionRequiredError(PaymentError):
     def __init__(self, reason: str | None = None) -> None:
         msg = f"Payment requires action: {reason}." if reason else "Payment requires action."
         super().__init__(msg)
+
+
+class VerificationError(Exception):
+    """Payment verification failed."""

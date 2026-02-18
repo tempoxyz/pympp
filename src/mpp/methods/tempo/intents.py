@@ -17,7 +17,7 @@ from mpp.methods.tempo.schemas import (
     HashCredentialPayload,
     TransactionCredentialPayload,
 )
-from mpp.server.intent import VerificationError
+from mpp.errors import VerificationError
 
 if TYPE_CHECKING:
     import httpx
