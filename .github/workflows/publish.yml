@@ -19,6 +19,20 @@ jobs:
         with:
           persist-credentials: true
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Debug twine upload
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          pip install build twine
+          python -m build
+          ls -la dist/
+          twine upload dist/*
+
       - uses: wevm/changelogs@master
         with:
           ecosystem: python

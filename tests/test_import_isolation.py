@@ -44,12 +44,8 @@ def test_client_import_does_not_load_server(client_module: str) -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, (
-        f"Import of {client_module} crashed:\n{result.stderr.strip()}"
-    )
+    assert result.returncode == 0, f"Import of {client_module} crashed:\n{result.stderr.strip()}"
     import json
 
     leaked = json.loads(result.stdout.strip())
-    assert leaked == [], (
-        f"Importing {client_module} pulled in server modules: {leaked}"
-    )
+    assert leaked == [], f"Importing {client_module} pulled in server modules: {leaked}"
