@@ -180,6 +180,7 @@ class Mpp:
         recipient: str | None = None,
         description: str | None = None,
         expires_in: timedelta | None = None,
+        fee_payer: bool = False,
         chain_id: int | None = None,
     ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
@@ -200,6 +201,7 @@ class Mpp:
             recipient: Override the method's default recipient.
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
+            fee_payer: Whether to use a fee payer for gas sponsorship.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
 
         Example:
@@ -250,8 +252,13 @@ class Mpp:
                 resolved_chain_id = chain_id
                 if resolved_chain_id is None:
                     resolved_chain_id = getattr(self.method, "chain_id", None)
-                if resolved_chain_id is not None:
-                    request["methodDetails"] = {"chainId": resolved_chain_id}
+                if fee_payer or resolved_chain_id is not None:
+                    method_details: dict[str, Any] = {}
+                    if resolved_chain_id is not None:
+                        method_details["chainId"] = resolved_chain_id
+                    if fee_payer:
+                        method_details["feePayer"] = True
+                    request["methodDetails"] = method_details
 
                 return await verify_or_challenge(
                     authorization=authorization,
