@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 (2026-02-18)
+
+### Patch Changes
+
+- chore: remove release environment requirement from publish workflow (by @BrendanRyan, [#58](https://github.com/tempoxyz/pympp/pull/58))
+
 ## 0.1.4 (2026-02-18)
 
 ### Patch Changes
