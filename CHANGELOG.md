@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.4 (2026-02-18)
+
+### Patch Changes
+
+- Moved `VerificationError` from `mpp.server.intent` to `mpp.errors` so that client-only imports no longer transitively load server dependencies. Added a re-export shim in `mpp.server.intent` for backwards compatibility and added import isolation tests to enforce the invariant. (by @BrendanRyan, [#55](https://github.com/tempoxyz/pympp/pull/55))
+- Sorted imports to satisfy ruff I001 linting rules in `src/mpp/methods/tempo/intents.py`. (by @BrendanRyan, [#55](https://github.com/tempoxyz/pympp/pull/55))
+
 ## 0.1.3 (2026-02-18)
 
 ### Patch Changes
