@@ -6,6 +6,7 @@ Implements the charge (TempoMethod) client method.
 from __future__ import annotations
 
 import time
+import attrs
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -189,7 +190,6 @@ class TempoMethod:
         Raises:
             TransactionError: If the RPC's chain ID doesn't match expected.
         """
-        import attrs
         from pytempo import Call, TempoTransaction
 
         if self.account is None:
