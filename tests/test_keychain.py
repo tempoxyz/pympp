@@ -64,7 +64,9 @@ class TestBuildKeychainSignature:
         msg_hash = b"\x00" * 32
 
         with pytest.raises(ValueError):
-            build_keychain_signature(msg_hash, access_key, "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ")
+            build_keychain_signature(
+                msg_hash, access_key, "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"
+            )
 
     def test_invalid_root_address_odd_length_hex(self) -> None:
         """Should raise on root address with odd-length hex string."""

@@ -26,12 +26,20 @@ def _parse(iso: str) -> datetime:
 
 
 class TestExpiresHelpers:
-    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    @pytest.mark.parametrize(
+        "fn,n,delta",
+        HELPERS,
+        ids=lambda x: x.__name__ if callable(x) else repr(x),
+    )
     def test_format(self, fn, n, delta) -> None:
         """Each helper should produce valid ISO 8601 with 3-digit ms and Z suffix."""
         assert ISO_PATTERN.match(fn(n))
 
-    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    @pytest.mark.parametrize(
+        "fn,n,delta",
+        HELPERS,
+        ids=lambda x: x.__name__ if callable(x) else repr(x),
+    )
     def test_value(self, fn, n, delta) -> None:
         """Result should be tightly bracketed: before + delta <= result <= after + delta.
 
@@ -45,7 +53,11 @@ class TestExpiresHelpers:
         ms_truncation = timedelta(milliseconds=1)
         assert before + delta - ms_truncation <= result <= after + delta
 
-    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    @pytest.mark.parametrize(
+        "fn,n,delta",
+        HELPERS,
+        ids=lambda x: x.__name__ if callable(x) else repr(x),
+    )
     def test_result_is_utc(self, fn, n, delta) -> None:
         """Parsed result should always be timezone-aware and in UTC."""
         result = _parse(fn(n))

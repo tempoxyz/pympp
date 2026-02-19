@@ -298,7 +298,8 @@ class TestChargeIntegration:
     async def test_verify_with_server_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
-        """When server specifies memo, client should use transferWithMemo and server should verify."""
+        """When server specifies memo, client should use
+        transferWithMemo and server should verify."""
         memo = "0x" + "ab" * 32
 
         method = tempo(
