@@ -29,7 +29,10 @@ Example:
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
+    PATH_USD,
     TESTNET_CHAIN_ID,
+    USDC,
+    default_currency_for_chain,
     escrow_contract_for_chain,
 )
 from mpp.methods.tempo.account import TempoAccount
