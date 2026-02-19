@@ -142,9 +142,7 @@ class TestClientServerIntegration:
 
     async def test_wrong_auth_scheme_returns_402(self, server_transport):
         async with httpx.AsyncClient(transport=server_transport, base_url="http://test") as client:
-            response = await client.get(
-                "/paid", headers={"authorization": "Bearer some-jwt-token"}
-            )
+            response = await client.get("/paid", headers={"authorization": "Bearer some-jwt-token"})
             assert response.status_code == 402
             assert response.headers["www-authenticate"].startswith("Payment ")
 
@@ -207,9 +205,7 @@ class TestClientServerIntegration:
         assert balance_after < balance_before
         assert balance_before - balance_after >= 1_000_000
 
-    async def test_e2e_charge_with_fee_payer(
-        self, rpc_url, funded_payer, fee_payer_transport
-    ):
+    async def test_e2e_charge_with_fee_payer(self, rpc_url, funded_payer, fee_payer_transport):
         method = tempo(
             account=funded_payer,
             rpc_url=rpc_url,
@@ -268,7 +264,10 @@ class TestClientServerIntegration:
         _fund_account(rpc_url, fee_payer_account.address, currency)
 
         transport = _make_transport(
-            rpc_url, funded_recipient.address, currency, chain_id,
+            rpc_url,
+            funded_recipient.address,
+            currency,
+            chain_id,
             fee_payer=fee_payer_account,
         )
 
