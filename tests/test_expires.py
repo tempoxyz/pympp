@@ -3,9 +3,21 @@
 import re
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from mpp._expires import days, hours, minutes, months, seconds, weeks, years
 
 ISO_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
+
+HELPERS = [
+    (seconds, 30, timedelta(seconds=30)),
+    (minutes, 5, timedelta(minutes=5)),
+    (hours, 2, timedelta(hours=2)),
+    (days, 7, timedelta(days=7)),
+    (weeks, 2, timedelta(weeks=2)),
+    (months, 1, timedelta(days=30)),
+    (years, 1, timedelta(days=365)),
+]
 
 
 def _parse(iso: str) -> datetime:
@@ -14,73 +26,31 @@ def _parse(iso: str) -> datetime:
 
 
 class TestExpiresHelpers:
-    def test_seconds_format(self) -> None:
-        """seconds() should produce valid ISO 8601 with 3-digit ms and Z suffix."""
-        result = seconds(30)
-        assert ISO_PATTERN.match(result)
+    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    def test_format(self, fn, n, delta) -> None:
+        """Each helper should produce valid ISO 8601 with 3-digit ms and Z suffix."""
+        assert ISO_PATTERN.match(fn(n))
 
-    def test_seconds_value(self) -> None:
-        """seconds(30) should be ~30s from now."""
+    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    def test_value(self, fn, n, delta) -> None:
+        """Result should be tightly bracketed: before + delta <= result <= after + delta.
+
+        The lower bound is adjusted by 1 ms because _to_iso truncates
+        microseconds to milliseconds (floor), so the serialized timestamp
+        can be up to 999 µs less than the actual instant.
+        """
         before = datetime.now(UTC)
-        result = _parse(seconds(30))
-        after = datetime.now(UTC) + timedelta(seconds=30)
-        assert before + timedelta(seconds=29) <= result <= after + timedelta(seconds=1)
+        result = _parse(fn(n))
+        after = datetime.now(UTC)
+        ms_truncation = timedelta(milliseconds=1)
+        assert before + delta - ms_truncation <= result <= after + delta
 
-    def test_minutes_format(self) -> None:
-        result = minutes(5)
-        assert ISO_PATTERN.match(result)
-
-    def test_minutes_value(self) -> None:
-        before = datetime.now(UTC)
-        result = _parse(minutes(5))
-        assert result > before + timedelta(minutes=4)
-
-    def test_hours_format(self) -> None:
-        result = hours(1)
-        assert ISO_PATTERN.match(result)
-
-    def test_hours_value(self) -> None:
-        before = datetime.now(UTC)
-        result = _parse(hours(2))
-        assert result > before + timedelta(hours=1)
-
-    def test_days_format(self) -> None:
-        result = days(1)
-        assert ISO_PATTERN.match(result)
-
-    def test_days_value(self) -> None:
-        before = datetime.now(UTC)
-        result = _parse(days(7))
-        assert result > before + timedelta(days=6)
-
-    def test_weeks_format(self) -> None:
-        result = weeks(1)
-        assert ISO_PATTERN.match(result)
-
-    def test_weeks_value(self) -> None:
-        before = datetime.now(UTC)
-        result = _parse(weeks(2))
-        assert result > before + timedelta(weeks=1)
-
-    def test_months_format(self) -> None:
-        result = months(1)
-        assert ISO_PATTERN.match(result)
-
-    def test_months_value(self) -> None:
-        """months(1) should be ~30 days from now."""
-        before = datetime.now(UTC)
-        result = _parse(months(1))
-        assert result > before + timedelta(days=29)
-
-    def test_years_format(self) -> None:
-        result = years(1)
-        assert ISO_PATTERN.match(result)
-
-    def test_years_value(self) -> None:
-        """years(1) should be ~365 days from now."""
-        before = datetime.now(UTC)
-        result = _parse(years(1))
-        assert result > before + timedelta(days=364)
+    @pytest.mark.parametrize("fn,n,delta", HELPERS, ids=lambda x: x.__name__ if callable(x) else repr(x))
+    def test_result_is_utc(self, fn, n, delta) -> None:
+        """Parsed result should always be timezone-aware and in UTC."""
+        result = _parse(fn(n))
+        assert result.tzinfo is not None
+        assert result.utcoffset() == timedelta(0)
 
     def test_all_end_with_z(self) -> None:
         """All helpers should produce timestamps ending with Z."""

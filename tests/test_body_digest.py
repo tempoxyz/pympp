@@ -42,6 +42,29 @@ class TestCompute:
         assert digest.startswith("sha-256=")
         assert compute(b"") == digest
 
+    def test_known_sha256_vector(self) -> None:
+        """Empty string digest should match the known SHA-256 of empty bytes."""
+        assert compute("") == "sha-256=47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
+
+    def test_large_body(self) -> None:
+        """1MB body should compute and roundtrip-verify successfully."""
+        body = b"x" * 1_000_000
+        assert verify(compute(body), body) is True
+
+    def test_unicode_body(self) -> None:
+        """Unicode string and its UTF-8 encoding should produce the same digest."""
+        text = "héllo wörld 🌍"
+        assert compute(text) == compute(text.encode("utf-8"))
+
+    def test_digest_is_valid_base64(self) -> None:
+        """Digest payload should decode as valid base64 to exactly 32 bytes."""
+        import base64
+
+        digest = compute("some data")
+        payload = digest.removeprefix("sha-256=")
+        raw = base64.b64decode(payload)
+        assert len(raw) == 32
+
 
 class TestVerify:
     def test_matching_digest_returns_true(self) -> None:
@@ -74,3 +97,11 @@ class TestVerify:
         """Tampered digest value should fail verification."""
         body = "test"
         assert verify("sha-256=AAAA", body) is False
+
+    def test_wrong_algorithm_prefix(self) -> None:
+        """Digest with wrong algorithm prefix should fail verification."""
+        assert verify("sha-512=AAAA", "test") is False
+
+    def test_empty_digest_string(self) -> None:
+        """Empty digest string should fail verification."""
+        assert verify("", "test") is False

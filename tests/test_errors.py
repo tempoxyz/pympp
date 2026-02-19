@@ -1,5 +1,7 @@
 """Tests for payment error types and RFC 9457 Problem Details."""
 
+import pytest
+
 from mpp.errors import (
     BadRequestError,
     InvalidChallengeError,
@@ -23,6 +25,7 @@ class TestToProblemDetails:
         assert details["type"] == "https://paymentauth.org/problems/payment-error"
         assert details["title"] == "Payment Error"
         assert details["status"] == 402
+        assert isinstance(details["status"], int)
         assert details["detail"] == "something went wrong"
 
     def test_includes_challenge_id_when_provided(self) -> None:
@@ -37,43 +40,55 @@ class TestToProblemDetails:
         details = err.to_problem_details()
         assert "challengeId" not in details
 
+    def test_problem_details_keys_are_exact(self) -> None:
+        """Problem Details keys should be exactly the expected set."""
+        err = PaymentError("test")
+
+        without = err.to_problem_details()
+        assert set(without.keys()) == {"type", "title", "status", "detail"}
+
+        with_cid = err.to_problem_details(challenge_id="ch-1")
+        assert set(with_cid.keys()) == {"type", "title", "status", "detail", "challengeId"}
+
 
 class TestAutoSlug:
-    def test_invalid_payload_slug(self) -> None:
-        """InvalidPayloadError type should end in /invalid-payload."""
-        assert InvalidPayloadError.type.endswith("/invalid-payload")
-
-    def test_malformed_credential_slug(self) -> None:
-        assert MalformedCredentialError.type.endswith("/malformed-credential")
-
-    def test_invalid_challenge_slug(self) -> None:
-        assert InvalidChallengeError.type.endswith("/invalid-challenge")
-
-    def test_verification_failed_slug(self) -> None:
-        assert VerificationFailedError.type.endswith("/verification-failed")
-
-    def test_payment_expired_slug(self) -> None:
-        assert PaymentExpiredError.type.endswith("/payment-expired")
-
-    def test_payment_insufficient_slug(self) -> None:
-        assert PaymentInsufficientError.type.endswith("/payment-insufficient")
-
-    def test_payment_action_required_slug(self) -> None:
-        assert PaymentActionRequiredError.type.endswith("/payment-action-required")
-
-    def test_payment_required_slug(self) -> None:
-        assert PaymentRequiredError.type.endswith("/payment-required")
+    @pytest.mark.parametrize(
+        "cls, expected_suffix",
+        [
+            (InvalidPayloadError, "/invalid-payload"),
+            (MalformedCredentialError, "/malformed-credential"),
+            (InvalidChallengeError, "/invalid-challenge"),
+            (VerificationFailedError, "/verification-failed"),
+            (PaymentExpiredError, "/payment-expired"),
+            (PaymentInsufficientError, "/payment-insufficient"),
+            (PaymentActionRequiredError, "/payment-action-required"),
+            (PaymentRequiredError, "/payment-required"),
+        ],
+        ids=lambda cls: cls.__name__ if isinstance(cls, type) else cls,
+    )
+    def test_auto_slug(self, cls: type, expected_suffix: str) -> None:
+        assert cls.type.endswith(expected_suffix)
 
 
 class TestAutoTitle:
-    def test_invalid_payload_title(self) -> None:
-        assert InvalidPayloadError.title == "Invalid Payload"
-
-    def test_malformed_credential_title(self) -> None:
-        assert MalformedCredentialError.title == "Malformed Credential"
-
-    def test_payment_expired_title(self) -> None:
-        assert PaymentExpiredError.title == "Payment Expired"
+    @pytest.mark.parametrize(
+        "cls, expected_title",
+        [
+            (InvalidPayloadError, "Invalid Payload"),
+            (MalformedCredentialError, "Malformed Credential"),
+            (InvalidChallengeError, "Invalid Challenge"),
+            (VerificationFailedError, "Verification Failed"),
+            (PaymentExpiredError, "Payment Expired"),
+            (PaymentInsufficientError, "Payment Insufficient"),
+            (PaymentMethodUnsupportedError, "Method Unsupported"),
+            (PaymentActionRequiredError, "Payment Action Required"),
+            (PaymentRequiredError, "Payment Required"),
+            (BadRequestError, "Bad Request"),
+        ],
+        ids=lambda cls: cls.__name__ if isinstance(cls, type) else cls,
+    )
+    def test_auto_title(self, cls: type, expected_title: str) -> None:
+        assert cls.title == expected_title
 
 
 class TestSubclassInstantiation:
@@ -171,6 +186,7 @@ class TestSubclassProblemDetails:
         details = err.to_problem_details(challenge_id="ch-1")
         assert details["type"].endswith("/invalid-payload")
         assert details["status"] == 402
+        assert isinstance(details["status"], int)
         assert details["challengeId"] == "ch-1"
         assert "bad" in details["detail"]
 
@@ -179,3 +195,4 @@ class TestSubclassProblemDetails:
         err = BadRequestError(reason="invalid")
         details = err.to_problem_details()
         assert details["status"] == 400
+        assert isinstance(details["status"], int)

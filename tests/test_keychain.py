@@ -54,7 +54,8 @@ class TestBuildKeychainSignature:
         access_key = TempoAccount.from_key(TEST_KEY)
         msg_hash = b"\x00" * 32
 
-        with pytest.raises((ValueError, AssertionError)):
+        # Production code uses `assert` for length validation after building the signature
+        with pytest.raises(AssertionError):
             build_keychain_signature(msg_hash, access_key, "0xdead")
 
     def test_invalid_root_address_not_hex(self) -> None:
@@ -64,3 +65,11 @@ class TestBuildKeychainSignature:
 
         with pytest.raises(ValueError):
             build_keychain_signature(msg_hash, access_key, "0xZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ")
+
+    def test_invalid_root_address_odd_length_hex(self) -> None:
+        """Should raise on root address with odd-length hex string."""
+        access_key = TempoAccount.from_key(TEST_KEY)
+        msg_hash = b"\x00" * 32
+
+        with pytest.raises(ValueError):
+            build_keychain_signature(msg_hash, access_key, "0x" + "a" * 39)

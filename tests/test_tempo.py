@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import rlp
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
@@ -19,7 +20,15 @@ from mpp.methods.tempo import (
 )
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
-from mpp.methods.tempo.intents import ChargeIntent
+from mpp.methods.tempo.intents import (
+    TRANSFER_SELECTOR,
+    TRANSFER_TOPIC,
+    TRANSFER_WITH_MEMO_SELECTOR,
+    TRANSFER_WITH_MEMO_TOPIC,
+    ChargeIntent,
+    _match_transfer_calldata,
+    _rpc_error_msg,
+)
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     HashCredentialPayload,
@@ -1138,16 +1147,12 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_memo_requires_transfer_with_memo_selector(self) -> None:
         """When memo is set, plain transfer selector should be rejected."""
-        from mpp.methods.tempo.intents import TRANSFER_SELECTOR, _match_transfer_calldata
-
         request = self._make_request(memo=self.MEMO)
         calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO)
         assert _match_transfer_calldata(calldata, request) is False
 
     def test_memo_accepts_correct_selector(self) -> None:
         """When memo is set, transferWithMemo selector should be accepted."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_SELECTOR, _match_transfer_calldata
-
         request = self._make_request(memo=self.MEMO)
         calldata = self._build_calldata(
             TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
@@ -1156,8 +1161,6 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_memo_wrong_memo_value(self) -> None:
         """Wrong memo value should be rejected."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_SELECTOR, _match_transfer_calldata
-
         request = self._make_request(memo=self.MEMO)
         wrong_memo = "0x" + "cc" * 32
         calldata = self._build_calldata(
@@ -1167,8 +1170,6 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_memo_short_calldata_rejected(self) -> None:
         """Calldata shorter than 200 hex chars should be rejected when memo expected."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_SELECTOR, _match_transfer_calldata
-
         request = self._make_request(memo=self.MEMO)
         # Only selector + to + amount = 136 chars, no memo
         to_padded = self.RECIPIENT[2:].lower().zfill(64)
@@ -1178,8 +1179,6 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_memo_normalization_no_0x_prefix(self) -> None:
         """Memo without 0x prefix should be normalized and matched."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_SELECTOR, _match_transfer_calldata
-
         memo_no_prefix = "ab" * 32
         request = self._make_request(memo=memo_no_prefix)
         calldata = self._build_calldata(
@@ -1189,12 +1188,6 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_no_memo_accepts_either_selector(self) -> None:
         """When no memo, both transfer and transferWithMemo selectors should be accepted."""
-        from mpp.methods.tempo.intents import (
-            TRANSFER_SELECTOR,
-            TRANSFER_WITH_MEMO_SELECTOR,
-            _match_transfer_calldata,
-        )
-
         request = self._make_request(memo=None)
         calldata_plain = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
         calldata_memo = self._build_calldata(
@@ -1205,10 +1198,22 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_short_calldata_rejected(self) -> None:
         """Calldata shorter than 136 chars should always be rejected."""
-        from mpp.methods.tempo.intents import _match_transfer_calldata
-
         request = self._make_request()
         assert _match_transfer_calldata("a9059cbb", request) is False
+
+    def test_wrong_selector_rejected(self) -> None:
+        """A completely bogus selector should be rejected."""
+        request = self._make_request()
+        calldata = self._build_calldata("deadbeef", self.RECIPIENT, self.AMOUNT)
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_uppercase_hex_normalization(self) -> None:
+        """Uppercase hex in recipient/amount should still match (case-insensitive)."""
+        request = self._make_request()
+        to_padded = self.RECIPIENT[2:].upper().zfill(64)
+        amount_padded = hex(self.AMOUNT)[2:].upper().zfill(64)
+        calldata = f"{TRANSFER_SELECTOR}{to_padded}{amount_padded}"
+        assert _match_transfer_calldata(calldata, request) is True
 
 
 class TestVerifyTransferLogsWithMemo:
@@ -1233,8 +1238,6 @@ class TestVerifyTransferLogsWithMemo:
 
     def test_memo_log_accepted(self) -> None:
         """TransferWithMemo log with correct memo should be accepted."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
         receipt = self._make_receipt([
@@ -1253,8 +1256,6 @@ class TestVerifyTransferLogsWithMemo:
 
     def test_memo_log_wrong_memo_rejected(self) -> None:
         """TransferWithMemo log with wrong memo should be rejected."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
         receipt = self._make_receipt([
@@ -1273,8 +1274,6 @@ class TestVerifyTransferLogsWithMemo:
 
     def test_memo_log_too_few_topics_rejected(self) -> None:
         """TransferWithMemo log with < 4 topics should be skipped."""
-        from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
         receipt = self._make_receipt([
@@ -1292,8 +1291,6 @@ class TestVerifyTransferLogsWithMemo:
 
     def test_no_memo_requires_transfer_topic(self) -> None:
         """When no memo expected, only TRANSFER_TOPIC should be accepted."""
-        from mpp.methods.tempo.intents import TRANSFER_TOPIC, TRANSFER_WITH_MEMO_TOPIC
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=None)
 
@@ -1355,8 +1352,6 @@ class TestValidateTransactionPayload:
 
     def test_empty_calls_raises(self) -> None:
         """Transaction with no calls should raise VerificationError."""
-        import rlp
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request()
 
@@ -1370,8 +1365,6 @@ class TestValidateTransactionPayload:
 
     def test_valid_tx_with_matching_call_passes(self) -> None:
         """Transaction with a matching transfer call should not raise."""
-        import rlp
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request()
 
@@ -1390,8 +1383,6 @@ class TestValidateTransactionPayload:
 
     def test_no_matching_call_raises(self) -> None:
         """Transaction with no matching call should raise VerificationError."""
-        import rlp
-
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request()
 
@@ -1415,30 +1406,22 @@ class TestRpcErrorMsg:
     """Tests for _rpc_error_msg helper."""
 
     def test_dict_error_with_message_and_data(self) -> None:
-        from mpp.methods.tempo.intents import _rpc_error_msg
-
         result = {"error": {"message": "insufficient funds", "data": "0xdead"}}
         msg = _rpc_error_msg(result)
         assert "insufficient funds" in msg
         assert "0xdead" in msg
 
     def test_dict_error_message_only(self) -> None:
-        from mpp.methods.tempo.intents import _rpc_error_msg
-
         result = {"error": {"message": "nonce too low"}}
         msg = _rpc_error_msg(result)
         assert msg == "nonce too low"
 
     def test_dict_error_name_fallback(self) -> None:
-        from mpp.methods.tempo.intents import _rpc_error_msg
-
         result = {"error": {"name": "SomeError"}}
         msg = _rpc_error_msg(result)
         assert "SomeError" in msg
 
     def test_string_error(self) -> None:
-        from mpp.methods.tempo.intents import _rpc_error_msg
-
         result = {"error": "something broke"}
         msg = _rpc_error_msg(result)
         assert msg == "something broke"

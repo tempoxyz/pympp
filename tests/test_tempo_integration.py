@@ -376,18 +376,19 @@ class TestChargeIntegration:
                 "memo": server_memo,
             },
         }
-        with pytest.raises(VerificationError):
+        with pytest.raises(VerificationError, match="Transfer log"):
             await charge_intent.verify(credential, server_request)
 
     async def test_default_memo_accepted_when_server_omits_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
-        """Client defaults memo via encode_attribution; server without memo should still verify.
+        """Verification fails when client defaults a memo but server omits one.
 
-        The client always adds a memo (via encode_attribution) when the server
-        doesn't specify one. The server's _verify_transfer_logs without memo
-        requires TRANSFER_TOPIC, but the tx emits TRANSFER_WITH_MEMO_TOPIC.
-        This test documents the actual behavior.
+        Known incompatibility: the client always adds a memo (via
+        encode_attribution) when the server doesn't specify one, so the tx
+        emits TRANSFER_WITH_MEMO_TOPIC. The server's _verify_transfer_logs
+        without memo requires TRANSFER_TOPIC, causing a topic mismatch and
+        verification failure.
         """
         method = tempo(
             account=funded_payer,
@@ -416,16 +417,10 @@ class TestChargeIntegration:
 
         credential = await method.create_credential(challenge)
 
-        # The server verifies with no memo in request — _verify_transfer_logs
-        # requires TRANSFER_TOPIC but the tx emits TRANSFER_WITH_MEMO_TOPIC.
-        # This documents the current behavior (it may pass or fail depending
-        # on whether the node emits both topics or just the memo topic).
-        try:
-            receipt = await charge_intent.verify(credential, request_dict)
-            assert receipt.status == "success"
-        except VerificationError:
-            # Expected: memo mismatch between client default and server expectation
-            pass
+        # Verification must fail: server looks for TRANSFER_TOPIC but the tx
+        # emits TRANSFER_WITH_MEMO_TOPIC due to the client-defaulted memo.
+        with pytest.raises(VerificationError, match="Transfer log"):
+            await charge_intent.verify(credential, request_dict)
 
     async def test_fee_payer_wrong_recipient_rejected(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
