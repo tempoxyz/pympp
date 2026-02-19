@@ -1240,53 +1240,59 @@ class TestVerifyTransferLogsWithMemo:
         """TransferWithMemo log with correct memo should be accepted."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
-        receipt = self._make_receipt([
-            {
-                "address": self.CURRENCY,
-                "topics": [
-                    TRANSFER_WITH_MEMO_TOPIC,
-                    "0x" + "0" * 24 + "abcd" * 10,
-                    "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                    self.MEMO,
-                ],
-                "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-            }
-        ])
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        self.MEMO,
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
         assert intent._verify_transfer_logs(receipt, request) is True
 
     def test_memo_log_wrong_memo_rejected(self) -> None:
         """TransferWithMemo log with wrong memo should be rejected."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
-        receipt = self._make_receipt([
-            {
-                "address": self.CURRENCY,
-                "topics": [
-                    TRANSFER_WITH_MEMO_TOPIC,
-                    "0x" + "0" * 24 + "abcd" * 10,
-                    "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                    "0x" + "cc" * 32,
-                ],
-                "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-            }
-        ])
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        "0x" + "cc" * 32,
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
         assert intent._verify_transfer_logs(receipt, request) is False
 
     def test_memo_log_too_few_topics_rejected(self) -> None:
         """TransferWithMemo log with < 4 topics should be skipped."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=self.MEMO)
-        receipt = self._make_receipt([
-            {
-                "address": self.CURRENCY,
-                "topics": [
-                    TRANSFER_WITH_MEMO_TOPIC,
-                    "0x" + "0" * 24 + "abcd" * 10,
-                    "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                ],
-                "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-            }
-        ])
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
         assert intent._verify_transfer_logs(receipt, request) is False
 
     def test_no_memo_requires_transfer_topic(self) -> None:
@@ -1295,31 +1301,35 @@ class TestVerifyTransferLogsWithMemo:
         request = self._make_request(memo=None)
 
         # TRANSFER_WITH_MEMO_TOPIC should be skipped when no memo expected
-        receipt_memo_topic = self._make_receipt([
-            {
-                "address": self.CURRENCY,
-                "topics": [
-                    TRANSFER_WITH_MEMO_TOPIC,
-                    "0x" + "0" * 24 + "abcd" * 10,
-                    "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                ],
-                "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-            }
-        ])
+        receipt_memo_topic = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
         assert intent._verify_transfer_logs(receipt_memo_topic, request) is False
 
         # TRANSFER_TOPIC should be accepted
-        receipt_plain = self._make_receipt([
-            {
-                "address": self.CURRENCY,
-                "topics": [
-                    TRANSFER_TOPIC,
-                    "0x" + "0" * 24 + "abcd" * 10,
-                    "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                ],
-                "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-            }
-        ])
+        receipt_plain = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
         assert intent._verify_transfer_logs(receipt_plain, request) is True
 
 
