@@ -482,14 +482,22 @@ class TestSponsoredTransfer:
 
     @pytest.mark.asyncio
     async def test_server_submits_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
-        """Server should submit sponsored tx to fee payer URL."""
+        """Server should submit sponsored tx via external fee payer service."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
+        # External fee payer signs and returns co-signed tx
         httpx_mock.add_response(
             url="https://sponsor.test",
+            json={"jsonrpc": "2.0", "result": "0x76cosigned", "id": 1},
+        )
+
+        # eth_sendRawTransaction to RPC
+        httpx_mock.add_response(
+            url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0xsponsored_hash", "id": 1},
         )
 
+        # eth_getTransactionReceipt
         httpx_mock.add_response(
             url="https://rpc.test",
             json={
@@ -539,7 +547,7 @@ class TestSponsoredTransfer:
 
     @pytest.mark.asyncio
     async def test_server_fee_payer_error(self, httpx_mock: HTTPXMock) -> None:
-        """Server should raise VerificationError when fee payer fails."""
+        """Server should raise VerificationError when external fee payer fails."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
         httpx_mock.add_response(
@@ -556,7 +564,7 @@ class TestSponsoredTransfer:
             payload={"type": "transaction", "signature": "0x76abcdef"},
         )
 
-        with pytest.raises(VerificationError, match="Transaction submission failed"):
+        with pytest.raises(VerificationError, match="Fee payer signing failed"):
             await intent.verify(
                 credential,
                 {

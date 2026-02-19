@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, rpc_url_for_chain
+from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -21,6 +21,8 @@ from mpp.methods.tempo.schemas import (
 
 if TYPE_CHECKING:
     import httpx
+
+    from mpp.methods.tempo.account import TempoAccount
 
 
 DEFAULT_TIMEOUT = 30.0
@@ -62,8 +64,9 @@ class ChargeIntent:
 
     Verifies that a payment transaction matches the requested parameters.
 
-    When used via ``tempo()``, the ``rpc_url`` is propagated automatically
-    from the method level. You can also pass it directly for standalone use.
+    When used via ``tempo()``, the ``rpc_url`` and ``fee_payer`` are read
+    from the parent method automatically. You can also pass ``rpc_url``
+    directly for standalone use.
 
     This class manages an HTTP client lifecycle. Use as an async context manager
     for automatic cleanup, or call `aclose()` explicitly when done.
@@ -107,9 +110,15 @@ class ChargeIntent:
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
+        self._method = None
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
+
+    @property
+    def fee_payer(self) -> TempoAccount | None:
+        """Fee payer account, read from the parent method."""
+        return getattr(self._method, "fee_payer", None) if self._method else None
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -286,34 +295,57 @@ class ChargeIntent:
 
         Pre-validates the transaction contains the expected TIP-20 transfer call
         before broadcasting. For sponsored transactions (methodDetails.feePayer
-        = True), forwards to fee payer service. For regular transactions,
+        = True), co-signs locally if a fee payer account is configured, otherwise
+        forwards to an external fee payer service. For regular transactions,
         submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
 
         client = await self._get_client()
 
+        raw_tx = payload.signature
+
         if request.methodDetails.feePayer:
-            fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
-            response = await client.post(
-                fee_payer_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [payload.signature],
-                    "id": 1,
-                },
-            )
-        else:
-            response = await client.post(
-                self.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [payload.signature],
-                    "id": 1,
-                },
-            )
+            if self.fee_payer is not None:
+                raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency)
+            else:
+                fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
+
+                sign_response = await client.post(
+                    fee_payer_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "eth_signRawTransaction",
+                        "params": [raw_tx],
+                        "id": 1,
+                    },
+                )
+                sign_response.raise_for_status()
+                sign_result = sign_response.json()
+
+                if "error" in sign_result:
+                    error_obj = sign_result["error"]
+                    if isinstance(error_obj, dict):
+                        error_msg = (
+                            error_obj.get("message") or error_obj.get("name") or str(error_obj)
+                        )
+                    else:
+                        error_msg = str(error_obj)
+                    raise VerificationError(f"Fee payer signing failed: {error_msg}")
+
+                raw_tx = sign_result.get("result")
+                if not raw_tx:
+                    raise VerificationError("Fee payer returned no signed transaction")
+
+        response = await client.post(
+            self.rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "eth_sendRawTransaction",
+                "params": [raw_tx],
+                "id": 1,
+            },
+        )
         response.raise_for_status()
         result = response.json()
 
@@ -368,6 +400,87 @@ class ChargeIntent:
             )
 
         return Receipt.success(tx_hash)
+
+    def _cosign_as_fee_payer(self, raw_tx: str, fee_token: str | None = None) -> str:
+        """Co-sign a client-signed transaction as fee payer.
+
+        Deserializes the client's transaction, sets the fee token, and
+        signs with domain ``0x78``. The resulting transaction contains
+        both the client's signature and the fee payer's signature.
+
+        Args:
+            raw_tx: Hex-encoded client-signed transaction (0x76...).
+            fee_token: TIP-20 token address for fee payment.
+                Defaults to pathUSD.
+
+        Returns:
+            Hex-encoded co-signed transaction ready for broadcast.
+
+        Raises:
+            VerificationError: If deserialization or signing fails.
+        """
+        import attrs
+        import rlp
+        from pytempo import Call, TempoTransaction
+        from pytempo.models import as_address
+
+        if self.fee_payer is None:
+            raise VerificationError("No fee payer account configured")
+
+        try:
+            all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
+            if not all_bytes or all_bytes[0] != 0x76:
+                raise ValueError("Not a Tempo transaction")
+            decoded = rlp.decode(all_bytes[1:])
+        except Exception as err:
+            raise VerificationError("Failed to deserialize client transaction") from err
+
+        def _int(b: bytes) -> int:
+            return int.from_bytes(b, "big") if b else 0
+
+        calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
+
+        # Recover sender address from the sender's signature
+        sender_sig = decoded[-1]  # last field
+        tx_for_recovery = TempoTransaction(
+            chain_id=_int(decoded[0]),
+            max_priority_fee_per_gas=_int(decoded[1]),
+            max_fee_per_gas=_int(decoded[2]),
+            gas_limit=_int(decoded[3]),
+            calls=calls,
+            access_list=(),
+            nonce_key=_int(decoded[6]),
+            nonce=_int(decoded[7]),
+            valid_before=_int(decoded[8]) if decoded[8] else None,
+            valid_after=_int(decoded[9]) if decoded[9] else None,
+            fee_token=decoded[10] if decoded[10] else None,
+            awaiting_fee_payer=True,
+        )
+        sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
+
+        from eth_account import Account
+
+        sender_address = Account._recover_hash(sender_hash, signature=sender_sig)
+
+        # Reconstruct with sender signature and address
+        resolved_fee_token = fee_token or PATH_USD
+        fee_token_bytes = bytes.fromhex(
+            resolved_fee_token[2:] if resolved_fee_token.startswith("0x") else resolved_fee_token
+        )
+
+        tx_to_sign = attrs.evolve(
+            tx_for_recovery,
+            sender_signature=sender_sig,
+            sender_address=as_address(sender_address),
+            fee_token=fee_token_bytes,
+        )
+
+        try:
+            cosigned = tx_to_sign.sign(self.fee_payer.private_key, for_fee_payer=True)
+        except Exception as err:
+            raise VerificationError("Fee payer signing failed") from err
+
+        return "0x" + cosigned.encode().hex()
 
     def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
         """Validate that a signed transaction contains the expected call.
