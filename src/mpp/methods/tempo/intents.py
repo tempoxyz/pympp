@@ -56,6 +56,41 @@ TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
+def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
+    """Check if ABI-encoded calldata matches the expected transfer parameters."""
+    if len(call_data_hex) < 136:
+        return False
+
+    selector = call_data_hex[:8].lower()
+    expected_memo = request.methodDetails.memo
+
+    if expected_memo:
+        if selector != TRANSFER_WITH_MEMO_SELECTOR:
+            return False
+    elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+        return False
+
+    decoded_to = "0x" + call_data_hex[32:72]
+    decoded_amount = int(call_data_hex[72:136], 16)
+
+    if decoded_to.lower() != request.recipient.lower():
+        return False
+    if decoded_amount != int(request.amount):
+        return False
+
+    if expected_memo:
+        if len(call_data_hex) < 200:
+            return False
+        decoded_memo = "0x" + call_data_hex[136:200]
+        memo_clean = expected_memo.lower()
+        if not memo_clean.startswith("0x"):
+            memo_clean = "0x" + memo_clean
+        if decoded_memo.lower() != memo_clean:
+            return False
+
+    return True
+
+
 # ──────────────────────────────────────────────────────────────────
 # Charge intent
 # ──────────────────────────────────────────────────────────────────
@@ -408,24 +443,9 @@ class ChargeIntent:
     ) -> str:
         """Co-sign a client-signed transaction as fee payer.
 
-        Deserializes the client's transaction, validates it contains the
-        expected payment call, sets the fee token, and signs with domain
-        ``0x78``. The resulting transaction contains both the client's
-        signature and the fee payer's signature.
-
-        Args:
-            raw_tx: Hex-encoded client-signed transaction (0x76...).
-            fee_token: TIP-20 token address for fee payment.
-                Defaults to pathUSD.
-            request: The charge request to validate against. When provided,
-                the transaction calls are checked to ensure they target the
-                expected currency with the correct transfer parameters.
-
-        Returns:
-            Hex-encoded co-signed transaction ready for broadcast.
-
-        Raises:
-            VerificationError: If deserialization, validation, or signing fails.
+        Deserializes the client's 0x76 transaction, optionally validates the
+        payment calls against ``request``, sets the fee token, and signs with
+        domain 0x78. Returns the fully co-signed transaction hex.
         """
         import rlp
         from pytempo import Call, TempoTransaction
@@ -447,14 +467,10 @@ class ChargeIntent:
 
         calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
 
-        # Validate the transaction calls match the expected payment before
-        # co-signing.  Without this check the server would sponsor arbitrary
-        # transactions submitted by any sender.
         if request is not None:
             self._validate_cosign_calls(calls, request)
 
-        # Recover sender address from the sender's signature
-        sender_sig = decoded[-1]  # last field
+        sender_sig = decoded[-1]
         tx_for_recovery = TempoTransaction(
             chain_id=_int(decoded[0]),
             max_priority_fee_per_gas=_int(decoded[1]),
@@ -475,7 +491,6 @@ class ChargeIntent:
 
         sender_address = Account._recover_hash(sender_hash, signature=sender_sig)
 
-        # Reconstruct with sender signature and address
         resolved_fee_token = fee_token or PATH_USD
         fee_token_bytes = bytes.fromhex(
             resolved_fee_token[2:] if resolved_fee_token.startswith("0x") else resolved_fee_token
@@ -498,10 +513,6 @@ class ChargeIntent:
     def _validate_cosign_calls(self, calls: tuple, request: ChargeRequest) -> None:
         """Validate that decoded transaction calls match the charge request.
 
-        Ensures the server only co-signs transactions that target the
-        expected currency contract with a valid transfer selector,
-        correct recipient, and correct amount.
-
         Args:
             calls: Decoded Call tuples from the transaction.
             request: The charge request with expected parameters.
@@ -509,86 +520,22 @@ class ChargeIntent:
         Raises:
             VerificationError: If no call matches the expected payment.
         """
-        expected_memo = request.methodDetails.memo
-
         for call in calls:
-            if isinstance(call.to, bytes):
-                call_to = call.to
-            else:
-                raw = call.to
-                if isinstance(raw, str) and raw.startswith("0x"):
-                    raw = raw[2:]
-                call_to = bytes.fromhex(str(raw))
-            call_to_hex = "0x" + call_to.hex()
-
-            if call_to_hex.lower() != request.currency.lower():
+            call_to = "0x" + bytes(call.to).hex()
+            if call_to.lower() != request.currency.lower():
                 continue
-
-            val = call.value
-            if isinstance(val, bytes):
-                val = int.from_bytes(val, "big")
-            if val:
+            if call.value:
                 continue
-
-            if isinstance(call.data, bytes):
-                call_data = call.data
-            else:
-                raw = call.data
-                if isinstance(raw, str) and raw.startswith("0x"):
-                    raw = raw[2:]
-                call_data = bytes.fromhex(str(raw))
-            call_data_hex = call_data.hex()
-
-            if len(call_data_hex) < 8:
-                continue
-
-            selector = call_data_hex[:8].lower()
-
-            if expected_memo:
-                if selector != TRANSFER_WITH_MEMO_SELECTOR:
-                    continue
-            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
-                continue
-
-            if len(call_data_hex) < 136:
-                continue
-            decoded_to = "0x" + call_data_hex[32:72]
-            decoded_amount = int(call_data_hex[72:136], 16)
-
-            if decoded_to.lower() != request.recipient.lower():
-                continue
-
-            if decoded_amount != int(request.amount):
-                continue
-
-            if expected_memo:
-                if len(call_data_hex) < 200:
-                    continue
-                decoded_memo = "0x" + call_data_hex[136:200]
-                memo_clean = expected_memo.lower()
-                if not memo_clean.startswith("0x"):
-                    memo_clean = "0x" + memo_clean
-                if decoded_memo.lower() != memo_clean:
-                    continue
-
-            return
+            if _match_transfer_calldata(call.data.hex(), request):
+                return
 
         raise VerificationError("Invalid transaction: no matching payment call found")
 
     def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
         """Validate that a signed transaction contains the expected call.
 
-        Deserializes the transaction and checks that it contains a call to the
-        expected currency contract with the correct function selector and
-        parameters.
-
-        This is a security enhancement to reject malicious transactions before
-        broadcasting. If decoding fails, we skip validation and rely on
-        post-broadcast log verification as the fallback.
-
-        Args:
-            signature: The signed transaction hex (0x76-prefixed for Tempo).
-            request: The charge request with expected parameters.
+        Best-effort pre-broadcast check. If decoding fails we skip validation
+        and rely on post-broadcast log verification as the fallback.
 
         Raises:
             VerificationError: If the transaction decodes successfully but
@@ -619,64 +566,20 @@ class ChargeIntent:
         if not calls_data:
             raise VerificationError("Transaction contains no calls")
 
-        expected_memo = request.methodDetails.memo
-
         for call_item in calls_data:
             if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
                 continue
-
             call_to_bytes = call_item[0]
             call_data_bytes = call_item[2]
-
             if not call_to_bytes or not call_data_bytes:
                 continue
 
-            call_to = (
-                "0x" + call_to_bytes.hex()
-                if isinstance(call_to_bytes, bytes)
-                else str(call_to_bytes)
-            )
-            call_data = (
-                call_data_bytes.hex()
-                if isinstance(call_data_bytes, bytes)
-                else str(call_data_bytes)
-            )
-
+            call_to = "0x" + call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
             if call_to.lower() != request.currency.lower():
                 continue
 
-            if len(call_data) < 8:
-                continue
-
-            selector = call_data[:8].lower()
-
-            if expected_memo:
-                if selector != TRANSFER_WITH_MEMO_SELECTOR:
-                    continue
-            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
-                continue
-
-            if len(call_data) < 136:
-                continue
-            decoded_to = "0x" + call_data[32:72]
-            decoded_amount = int(call_data[72:136], 16)
-
-            if decoded_to.lower() != request.recipient.lower():
-                continue
-
-            if decoded_amount != int(request.amount):
-                continue
-
-            if expected_memo:
-                if len(call_data) < 200:
-                    continue
-                decoded_memo = "0x" + call_data[136:200]
-                memo_clean = expected_memo.lower()
-                if not memo_clean.startswith("0x"):
-                    memo_clean = "0x" + memo_clean
-                if decoded_memo.lower() != memo_clean:
-                    continue
-
-            return
+            call_data = call_data_bytes.hex() if isinstance(call_data_bytes, bytes) else str(call_data_bytes)
+            if _match_transfer_calldata(call_data, request):
+                return
 
         raise VerificationError("Invalid transaction: no matching payment call found")
