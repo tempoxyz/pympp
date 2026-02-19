@@ -1,12 +1,20 @@
 """mpp test suite."""
 
+import os
 from typing import Any
+
+import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode
 
 # Default secret used by tests when calling verify_or_challenge
 TEST_SECRET = "test-secret"
 TEST_REALM = "test.example.com"
+
+INTEGRATION = pytest.mark.skipif(
+    not os.environ.get("TEMPO_RPC_URL"),
+    reason="TEMPO_RPC_URL not set (no local node)",
+)
 
 
 def make_credential(
