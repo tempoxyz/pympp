@@ -9,9 +9,11 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import attrs
+
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, rpc_url_for_chain
+from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -22,34 +24,67 @@ from mpp.methods.tempo.schemas import (
 if TYPE_CHECKING:
     import httpx
 
+    from mpp.methods.tempo.account import TempoAccount
+
 
 DEFAULT_TIMEOUT = 30.0
 
-# Receipt polling configuration
-#
-# After submitting a transaction, we poll for the receipt since it won't be
-# available until the transaction is included in a block. Block times vary:
-# - Tempo mainnet: ~400ms
-# - Tempo testnet: ~2-4s (can be slower under load)
-#
-# For comparison, viem's waitForTransactionReceipt uses:
-# - 6 retries with exponential backoff (200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s)
-# - 180s total timeout
-#
-# We use a simpler fixed-delay approach that provides ~10s total wait time,
-# sufficient for testnet latency while keeping the implementation simple.
+# Receipt polling: 20 * 0.5s = ~10s, enough for testnet block times (~2-4s).
 MAX_RECEIPT_RETRY_ATTEMPTS = 20
 RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
-# TIP-20 function selectors
-TRANSFER_SELECTOR = "a9059cbb"  # keccak256("transfer(address,uint256)")[:4]
-TRANSFER_WITH_MEMO_SELECTOR = "95777d59"  # transferWithMemo(address,uint256,bytes32)
+TRANSFER_SELECTOR = "a9059cbb"
+TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 
-# Event topic hashes
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+def _rpc_error_msg(result: dict) -> str:
+    """Extract error message from a JSON-RPC error response."""
+    error_obj = result["error"]
+    if isinstance(error_obj, dict):
+        msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
+        data = error_obj.get("data", "")
+        return f"{msg}: {data}" if data else msg
+    return str(error_obj)
+
+
+def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
+    """Check if ABI-encoded calldata matches the expected transfer parameters."""
+    if len(call_data_hex) < 136:
+        return False
+
+    selector = call_data_hex[:8].lower()
+    expected_memo = request.methodDetails.memo
+
+    if expected_memo:
+        if selector != TRANSFER_WITH_MEMO_SELECTOR:
+            return False
+    elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+        return False
+
+    decoded_to = "0x" + call_data_hex[32:72]
+    decoded_amount = int(call_data_hex[72:136], 16)
+
+    if decoded_to.lower() != request.recipient.lower():
+        return False
+    if decoded_amount != int(request.amount):
+        return False
+
+    if expected_memo:
+        if len(call_data_hex) < 200:
+            return False
+        decoded_memo = "0x" + call_data_hex[136:200]
+        memo_clean = expected_memo.lower()
+        if not memo_clean.startswith("0x"):
+            memo_clean = "0x" + memo_clean
+        if decoded_memo.lower() != memo_clean:
+            return False
+
+    return True
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -62,8 +97,9 @@ class ChargeIntent:
 
     Verifies that a payment transaction matches the requested parameters.
 
-    When used via ``tempo()``, the ``rpc_url`` is propagated automatically
-    from the method level. You can also pass it directly for standalone use.
+    When used via ``tempo()``, the ``rpc_url`` and ``fee_payer`` are read
+    from the parent method automatically. You can also pass ``rpc_url``
+    directly for standalone use.
 
     This class manages an HTTP client lifecycle. Use as an async context manager
     for automatic cleanup, or call `aclose()` explicitly when done.
@@ -107,9 +143,15 @@ class ChargeIntent:
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
+        self._method = None
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
+
+    @property
+    def fee_payer(self) -> TempoAccount | None:
+        """Fee payer account, read from the parent method."""
+        return getattr(self._method, "fee_payer", None) if self._method else None
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -286,47 +328,57 @@ class ChargeIntent:
 
         Pre-validates the transaction contains the expected TIP-20 transfer call
         before broadcasting. For sponsored transactions (methodDetails.feePayer
-        = True), forwards to fee payer service. For regular transactions,
+        = True), co-signs locally if a fee payer account is configured, otherwise
+        forwards to an external fee payer service. For regular transactions,
         submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
 
         client = await self._get_client()
 
+        raw_tx = payload.signature
+
         if request.methodDetails.feePayer:
-            fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
-            response = await client.post(
-                fee_payer_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [payload.signature],
-                    "id": 1,
-                },
-            )
-        else:
-            response = await client.post(
-                self.rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransaction",
-                    "params": [payload.signature],
-                    "id": 1,
-                },
-            )
+            if self.fee_payer is not None:
+                raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+            else:
+                fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
+
+                sign_response = await client.post(
+                    fee_payer_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "eth_signRawTransaction",
+                        "params": [raw_tx],
+                        "id": 1,
+                    },
+                )
+                sign_response.raise_for_status()
+                sign_result = sign_response.json()
+
+                if "error" in sign_result:
+                    raise VerificationError(
+                        f"Fee payer signing failed: {_rpc_error_msg(sign_result)}"
+                    )
+
+                raw_tx = sign_result.get("result")
+                if not raw_tx:
+                    raise VerificationError("Fee payer returned no signed transaction")
+
+        response = await client.post(
+            self.rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "eth_sendRawTransaction",
+                "params": [raw_tx],
+                "id": 1,
+            },
+        )
         response.raise_for_status()
         result = response.json()
 
         if "error" in result:
-            error_obj = result["error"]
-            if isinstance(error_obj, dict):
-                error_msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
-                error_data = error_obj.get("data", "")
-            else:
-                error_msg = str(error_obj)
-                error_data = ""
-            full_error = f"{error_msg}: {error_data}" if error_data else error_msg
-            raise VerificationError(f"Transaction submission failed: {full_error}")
+            raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
 
         tx_hash = result.get("result")
         if not tx_hash:
@@ -369,43 +421,101 @@ class ChargeIntent:
 
         return Receipt.success(tx_hash)
 
-    def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
-        """Validate that a signed transaction contains the expected call.
+    def _cosign_as_fee_payer(
+        self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
+    ) -> str:
+        """Co-sign a client-signed transaction as fee payer.
 
-        Deserializes the transaction and checks that it contains a call to the
-        expected currency contract with the correct function selector and
-        parameters.
-
-        This is a security enhancement to reject malicious transactions before
-        broadcasting. If decoding fails, we skip validation and rely on
-        post-broadcast log verification as the fallback.
-
-        Args:
-            signature: The signed transaction hex (0x76-prefixed for Tempo).
-            request: The charge request with expected parameters.
-
-        Raises:
-            VerificationError: If the transaction decodes successfully but
-                doesn't match expected parameters.
+        Deserializes the client's 0x76 transaction, optionally validates the
+        payment calls against ``request``, sets the fee token, and signs with
+        domain 0x78. Returns the fully co-signed transaction hex.
         """
+        import rlp
+        from pytempo import Call, TempoTransaction
+        from pytempo.models import as_address
+
+        if self.fee_payer is None:
+            raise VerificationError("No fee payer account configured")
+
+        try:
+            all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
+            if not all_bytes or all_bytes[0] != 0x76:
+                raise ValueError("Not a Tempo transaction")
+            decoded = rlp.decode(all_bytes[1:])
+        except Exception as err:
+            raise VerificationError("Failed to deserialize client transaction") from err
+
+        def _int(b: bytes) -> int:
+            return int.from_bytes(b, "big") if b else 0
+
+        calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
+
+        if request is not None:
+            self._validate_calls(calls, request)
+
+        sender_sig = decoded[-1]
+        tx_for_recovery = TempoTransaction(
+            chain_id=_int(decoded[0]),
+            max_priority_fee_per_gas=_int(decoded[1]),
+            max_fee_per_gas=_int(decoded[2]),
+            gas_limit=_int(decoded[3]),
+            calls=calls,
+            access_list=(),
+            nonce_key=_int(decoded[6]),
+            nonce=_int(decoded[7]),
+            valid_before=_int(decoded[8]) if decoded[8] else None,
+            valid_after=_int(decoded[9]) if decoded[9] else None,
+            fee_token=decoded[10] if decoded[10] else None,
+            awaiting_fee_payer=True,
+        )
+        sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
+
+        from eth_account import Account
+
+        sender_address = Account._recover_hash(sender_hash, signature=sender_sig)
+
+        tx_to_sign = attrs.evolve(
+            tx_for_recovery,
+            sender_signature=sender_sig,
+            sender_address=as_address(sender_address),
+            fee_token=fee_token or PATH_USD,
+        )
+
+        try:
+            cosigned = tx_to_sign.sign(self.fee_payer.private_key, for_fee_payer=True)
+        except Exception as err:
+            raise VerificationError("Fee payer signing failed") from err
+
+        return "0x" + cosigned.encode().hex()
+
+    def _validate_calls(self, calls: tuple, request: ChargeRequest) -> None:
+        """Validate that at least one call matches the expected transfer."""
+        for call in calls:
+            call_to = "0x" + bytes(call.to).hex()
+            if call_to.lower() != request.currency.lower():
+                continue
+            if call.value:
+                continue
+            if _match_transfer_calldata(call.data.hex(), request):
+                return
+        raise VerificationError("Invalid transaction: no matching payment call found")
+
+    def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
+        """Best-effort pre-broadcast check. Silently skips if decoding fails."""
         try:
             import rlp
         except ImportError:
             return
-
         try:
             tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
         except ValueError:
             return
-
         if not tx_bytes or tx_bytes[0] != 0x76:
             return
-
         try:
             decoded = rlp.decode(tx_bytes[1:])
         except Exception:
             return
-
         if not isinstance(decoded, list) or len(decoded) < 5:
             return
 
@@ -413,64 +523,18 @@ class ChargeIntent:
         if not calls_data:
             raise VerificationError("Transaction contains no calls")
 
-        expected_memo = request.methodDetails.memo
-
         for call_item in calls_data:
             if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
                 continue
-
-            call_to_bytes = call_item[0]
-            call_data_bytes = call_item[2]
-
+            call_to_bytes, call_data_bytes = call_item[0], call_item[2]
             if not call_to_bytes or not call_data_bytes:
                 continue
-
-            call_to = (
-                "0x" + call_to_bytes.hex()
-                if isinstance(call_to_bytes, bytes)
-                else str(call_to_bytes)
-            )
-            call_data = (
-                call_data_bytes.hex()
-                if isinstance(call_data_bytes, bytes)
-                else str(call_data_bytes)
-            )
-
-            if call_to.lower() != request.currency.lower():
+            to_hex = call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
+            if ("0x" + to_hex).lower() != request.currency.lower():
                 continue
-
-            if len(call_data) < 8:
-                continue
-
-            selector = call_data[:8].lower()
-
-            if expected_memo:
-                if selector != TRANSFER_WITH_MEMO_SELECTOR:
-                    continue
-            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
-                continue
-
-            if len(call_data) < 136:
-                continue
-            decoded_to = "0x" + call_data[32:72]
-            decoded_amount = int(call_data[72:136], 16)
-
-            if decoded_to.lower() != request.recipient.lower():
-                continue
-
-            if decoded_amount != int(request.amount):
-                continue
-
-            if expected_memo:
-                if len(call_data) < 200:
-                    continue
-                decoded_memo = "0x" + call_data[136:200]
-                memo_clean = expected_memo.lower()
-                if not memo_clean.startswith("0x"):
-                    memo_clean = "0x" + memo_clean
-                if decoded_memo.lower() != memo_clean:
-                    continue
-
-            return
+            raw = call_data_bytes
+            data_hex = raw.hex() if isinstance(raw, bytes) else str(raw)
+            if _match_transfer_calldata(data_hex, request):
+                return
 
         raise VerificationError("Invalid transaction: no matching payment call found")

@@ -5,8 +5,11 @@ Implements the charge (TempoMethod) client method.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import attrs
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
@@ -19,6 +22,8 @@ if TYPE_CHECKING:
 
 
 DEFAULT_GAS_LIMIT = 100_000
+EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
+FEE_PAYER_VALID_BEFORE_SECS = 25
 
 
 class TransactionError(Exception):
@@ -52,6 +57,7 @@ class TempoMethod:
 
     name: str = "tempo"
     account: TempoAccount | None = None
+    fee_payer: TempoAccount | None = None
     root_account: str | None = None
     rpc_url: str = RPC_URL
     chain_id: int | None = None
@@ -90,6 +96,11 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
+        method_details = request.get("methodDetails", {})
+        use_fee_payer = (
+            method_details.get("feePayer", False) if isinstance(method_details, dict) else False
+        )
+
         nonce_key = request.get("nonce_key", 0)
         if isinstance(nonce_key, str):
             if nonce_key.startswith("0x"):
@@ -97,7 +108,6 @@ class TempoMethod:
             else:
                 nonce_key = int(nonce_key)
 
-        method_details = request.get("methodDetails", {})
         memo = method_details.get("memo") if isinstance(method_details, dict) else None
         if memo is None:
             memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
@@ -135,6 +145,7 @@ class TempoMethod:
             memo=memo,
             rpc_url=rpc_url,
             expected_chain_id=expected_chain_id,
+            awaiting_fee_payer=use_fee_payer,
         )
 
         return Credential(
@@ -152,11 +163,17 @@ class TempoMethod:
         memo: str | None = None,
         rpc_url: str | None = None,
         expected_chain_id: int | None = None,
+        awaiting_fee_payer: bool = False,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
         Creates a TempoTransaction (type 0x76) with fee token set to the
         transfer currency, allowing gas to be paid in the same token.
+
+        When ``awaiting_fee_payer`` is True, the transaction is built with
+        a fee payer placeholder so a sponsoring service can co-sign it
+        before broadcast. Uses expiring nonces (nonce_key=U256::MAX,
+        nonce=0) with a ``valid_before`` window for replay protection.
 
         Args:
             amount: Transfer amount as string.
@@ -166,6 +183,7 @@ class TempoMethod:
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
             expected_chain_id: If set, verify the RPC reports this chain ID.
+            awaiting_fee_payer: If True, build for fee payer sponsorship.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
@@ -185,13 +203,24 @@ class TempoMethod:
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
-        chain_id, nonce, gas_price = await get_tx_params(resolved_rpc, self.account.address)
+        chain_id, on_chain_nonce, gas_price = await get_tx_params(
+            resolved_rpc, self.account.address
+        )
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
                 f"Chain ID mismatch: RPC returned {chain_id}, "
                 f"expected {expected_chain_id} from challenge"
             )
+
+        if awaiting_fee_payer:
+            resolved_nonce_key = EXPIRING_NONCE_KEY
+            resolved_nonce = 0
+            valid_before = int(time.time()) + FEE_PAYER_VALID_BEFORE_SECS
+        else:
+            resolved_nonce_key = nonce_key
+            resolved_nonce = on_chain_nonce
+            valid_before = None
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
@@ -207,13 +236,19 @@ class TempoMethod:
             gas_limit=gas_limit,
             max_fee_per_gas=gas_price,
             max_priority_fee_per_gas=gas_price,
-            nonce=nonce,
-            nonce_key=nonce_key,
-            fee_token=currency,
+            nonce=resolved_nonce,
+            nonce_key=resolved_nonce_key,
+            fee_token=None if awaiting_fee_payer else currency,
+            awaiting_fee_payer=awaiting_fee_payer,
+            valid_before=valid_before,
             calls=(Call.create(to=currency, value=0, data=transfer_data),),
         )
 
         signed_tx = tx.sign(self.account.private_key)
+
+        if awaiting_fee_payer:
+            signed_tx = attrs.evolve(signed_tx, fee_payer_signature=b"\x00")
+
         return "0x" + signed_tx.encode().hex(), chain_id
 
     def _encode_transfer(self, to: str, amount: int) -> str:
@@ -250,6 +285,7 @@ class TempoMethod:
 def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
+    fee_payer: TempoAccount | None = None,
     chain_id: int | None = None,
     rpc_url: str | None = None,
     root_account: str | None = None,
@@ -262,7 +298,11 @@ def tempo(
 
     Args:
         intents: Intents to register (e.g. charge).
-        account: Account for signing transactions.
+        account: Account for signing transactions (client-side).
+        fee_payer: Account for co-signing sponsored transactions
+            (server-side). When set, the server signs with domain
+            ``0x78`` and broadcasts directly — no external fee payer
+            service needed.
         chain_id: Tempo chain ID (4217 for mainnet, 42431 for testnet).
             Resolves the RPC URL automatically from known chains.
         rpc_url: Tempo RPC endpoint URL. Overrides the URL resolved
@@ -277,18 +317,18 @@ def tempo(
         A configured TempoMethod instance.
 
     Example:
-        from mpp.methods.tempo import ChargeIntent
+        from mpp.methods.tempo import ChargeIntent, TempoAccount
 
-        # Testnet — resolves RPC automatically
+        # Server with fee payer — sponsors gas for clients
         method = tempo(
             chain_id=42431,
+            fee_payer=TempoAccount.from_env("FEE_PAYER_KEY"),
             intents={"charge": ChargeIntent()},
         )
 
-        # Custom RPC
+        # Client
         method = tempo(
-            chain_id=42431,
-            rpc_url="https://my-rpc.example.com",
+            account=TempoAccount.from_key("0x..."),
             intents={"charge": ChargeIntent()},
         )
     """
@@ -297,6 +337,7 @@ def tempo(
 
     method = TempoMethod(
         account=account,
+        fee_payer=fee_payer,
         rpc_url=rpc_url,
         chain_id=chain_id,
         root_account=root_account,
@@ -308,5 +349,7 @@ def tempo(
     for intent in intents.values():
         if hasattr(intent, "rpc_url") and intent.rpc_url is None:
             intent.rpc_url = rpc_url
+        if hasattr(intent, "_method"):
+            intent._method = method
     method._intents = dict(intents)
     return method
