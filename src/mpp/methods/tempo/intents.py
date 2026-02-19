@@ -378,9 +378,7 @@ class ChargeIntent:
         result = response.json()
 
         if "error" in result:
-            raise VerificationError(
-                f"Transaction submission failed: {_rpc_error_msg(result)}"
-            )
+            raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
 
         tx_hash = result.get("result")
         if not tx_hash:
