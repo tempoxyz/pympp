@@ -212,14 +212,12 @@ class TestMppCharge:
         assert result.request["recipient"] == "0xother"
 
     @pytest.mark.asyncio
-    async def test_charge_missing_currency_raises(self) -> None:
-        srv = Mpp.create(
-            method=tempo(intents={"charge": ChargeIntent()}),
-            realm="test.com",
-            secret_key="test-secret",
-        )
-        with pytest.raises(ValueError, match="currency must be set"):
-            await srv.charge(authorization=None, amount="1.00")
+    async def test_charge_defaults_currency_to_usdc(self) -> None:
+        """Currency defaults to USDC when not explicitly set."""
+        from mpp.methods.tempo import USDC
+
+        method = tempo(intents={"charge": ChargeIntent()})
+        assert method.currency == USDC
 
     @pytest.mark.asyncio
     async def test_charge_missing_recipient_raises(self) -> None:

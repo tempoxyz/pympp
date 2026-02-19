@@ -6,6 +6,7 @@ from types import MappingProxyType
 CHAIN_ID = 4217
 RPC_URL = "https://rpc.tempo.xyz"
 PATH_USD = "0x20c0000000000000000000000000000000000000"
+USDC = "0x20C000000000000000000000b9537d11c60E8b50"
 PATH_USD_DECIMALS = 6
 
 # Testnet (Moderato)
@@ -15,6 +16,15 @@ TESTNET_RPC_URL = "https://rpc.moderato.tempo.xyz"
 # Testnet only — the fee payer service sponsors gas on testnet.
 # On mainnet, the server itself must pay gas or provide its own fee payer.
 DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
+
+# Chain ID -> default currency mapping
+# Mainnet defaults to USDC, testnet defaults to pathUSD
+DEFAULT_CURRENCIES: MappingProxyType[int, str] = MappingProxyType(
+    {
+        CHAIN_ID: USDC,
+        TESTNET_CHAIN_ID: PATH_USD,
+    }
+)
 
 # Chain ID -> default RPC URL mapping
 CHAIN_RPC_URLS: MappingProxyType[int, str] = MappingProxyType(
@@ -47,6 +57,17 @@ def rpc_url_for_chain(chain_id: int) -> str:
             f"Pass rpc_url explicitly for custom chains."
         )
     return url
+
+
+def default_currency_for_chain(chain_id: int | None) -> str:
+    """Return the default currency for a known chain ID.
+
+    Returns USDC for mainnet, pathUSD for testnet.
+    If chain_id is None, returns USDC (mainnet default).
+    """
+    if chain_id is None:
+        return USDC
+    return DEFAULT_CURRENCIES.get(chain_id, USDC)
 
 
 def escrow_contract_for_chain(chain_id: int) -> str:
