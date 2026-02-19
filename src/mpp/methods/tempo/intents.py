@@ -512,23 +512,31 @@ class ChargeIntent:
         expected_memo = request.methodDetails.memo
 
         for call in calls:
-            call_to = call.to if isinstance(call.to, bytes) else bytes.fromhex(
-                call.to[2:] if isinstance(call.to, str) and call.to.startswith("0x") else str(call.to)
-            )
+            if isinstance(call.to, bytes):
+                call_to = call.to
+            else:
+                raw = call.to
+                if isinstance(raw, str) and raw.startswith("0x"):
+                    raw = raw[2:]
+                call_to = bytes.fromhex(str(raw))
             call_to_hex = "0x" + call_to.hex()
 
             if call_to_hex.lower() != request.currency.lower():
                 continue
 
-            if call.value and int.from_bytes(call.value, "big") if isinstance(call.value, bytes) else (call.value or 0):
-                if isinstance(call.value, int) and call.value != 0:
-                    continue
-                elif isinstance(call.value, bytes) and int.from_bytes(call.value, "big") != 0:
-                    continue
+            val = call.value
+            if isinstance(val, bytes):
+                val = int.from_bytes(val, "big")
+            if val:
+                continue
 
-            call_data = call.data if isinstance(call.data, bytes) else bytes.fromhex(
-                call.data[2:] if isinstance(call.data, str) and call.data.startswith("0x") else str(call.data)
-            )
+            if isinstance(call.data, bytes):
+                call_data = call.data
+            else:
+                raw = call.data
+                if isinstance(raw, str) and raw.startswith("0x"):
+                    raw = raw[2:]
+                call_data = bytes.fromhex(str(raw))
             call_data_hex = call_data.hex()
 
             if len(call_data_hex) < 8:

@@ -6,9 +6,10 @@ Implements the charge (TempoMethod) client method.
 from __future__ import annotations
 
 import time
-import attrs
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+import attrs
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution

@@ -630,7 +630,7 @@ class TestCosignAsFeePayer:
         fee_payer = TempoAccount.from_key(fee_payer_key)
 
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        method = tempo(
+        tempo(
             fee_payer=fee_payer,
             rpc_url="https://rpc.test",
             intents={"charge": intent},
@@ -758,7 +758,7 @@ class TestFeePayerPropagation:
         """tempo() should propagate fee_payer to intents via _method backlink."""
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
         intent = ChargeIntent()
-        method = tempo(
+        tempo(
             fee_payer=fee_payer,
             rpc_url="https://rpc.test",
             intents={"charge": intent},
