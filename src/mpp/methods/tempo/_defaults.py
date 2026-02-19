@@ -62,12 +62,12 @@ def rpc_url_for_chain(chain_id: int) -> str:
 def default_currency_for_chain(chain_id: int | None) -> str:
     """Return the default currency for a known chain ID.
 
-    Returns USDC for mainnet, pathUSD for testnet.
+    Returns USDC for mainnet, pathUSD for testnet and unknown chains.
     If chain_id is None, returns USDC (mainnet default).
     """
     if chain_id is None:
         return USDC
-    return DEFAULT_CURRENCIES.get(chain_id, USDC)
+    return DEFAULT_CURRENCIES.get(chain_id, PATH_USD)
 
 
 def escrow_contract_for_chain(chain_id: int) -> str:
