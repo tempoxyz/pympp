@@ -665,9 +665,7 @@ class TestCosignAsFeePayer:
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
         with pytest.raises(VerificationError, match="No fee payer account configured"):
-            intent._cosign_as_fee_payer(
-                "0x76abcdef", "0x20c0000000000000000000000000000000000000"
-            )
+            intent._cosign_as_fee_payer("0x76abcdef", "0x20c0000000000000000000000000000000000000")
 
     def test_cosign_validates_call_target(self) -> None:
         """Should reject tx targeting wrong currency when request is provided."""
@@ -714,9 +712,7 @@ class TestCosignAsFeePayer:
         intent = ChargeIntent(rpc_url="https://rpc.test")
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
-        raw_tx = self._build_client_tx(
-            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
-        )
+        raw_tx = self._build_client_tx(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00")
 
         request = ChargeRequest(
             amount="1000000",
