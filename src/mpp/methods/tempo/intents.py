@@ -9,6 +9,8 @@ import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import attrs
+
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
@@ -307,7 +309,7 @@ class ChargeIntent:
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
-                raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency)
+                raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency, request=request)
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
 
@@ -401,25 +403,30 @@ class ChargeIntent:
 
         return Receipt.success(tx_hash)
 
-    def _cosign_as_fee_payer(self, raw_tx: str, fee_token: str | None = None) -> str:
+    def _cosign_as_fee_payer(
+        self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
+    ) -> str:
         """Co-sign a client-signed transaction as fee payer.
 
-        Deserializes the client's transaction, sets the fee token, and
-        signs with domain ``0x78``. The resulting transaction contains
-        both the client's signature and the fee payer's signature.
+        Deserializes the client's transaction, validates it contains the
+        expected payment call, sets the fee token, and signs with domain
+        ``0x78``. The resulting transaction contains both the client's
+        signature and the fee payer's signature.
 
         Args:
             raw_tx: Hex-encoded client-signed transaction (0x76...).
             fee_token: TIP-20 token address for fee payment.
                 Defaults to pathUSD.
+            request: The charge request to validate against. When provided,
+                the transaction calls are checked to ensure they target the
+                expected currency with the correct transfer parameters.
 
         Returns:
             Hex-encoded co-signed transaction ready for broadcast.
 
         Raises:
-            VerificationError: If deserialization or signing fails.
+            VerificationError: If deserialization, validation, or signing fails.
         """
-        import attrs
         import rlp
         from pytempo import Call, TempoTransaction
         from pytempo.models import as_address
@@ -439,6 +446,12 @@ class ChargeIntent:
             return int.from_bytes(b, "big") if b else 0
 
         calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
+
+        # Validate the transaction calls match the expected payment before
+        # co-signing.  Without this check the server would sponsor arbitrary
+        # transactions submitted by any sender.
+        if request is not None:
+            self._validate_cosign_calls(calls, request)
 
         # Recover sender address from the sender's signature
         sender_sig = decoded[-1]  # last field
@@ -481,6 +494,78 @@ class ChargeIntent:
             raise VerificationError("Fee payer signing failed") from err
 
         return "0x" + cosigned.encode().hex()
+
+    def _validate_cosign_calls(self, calls: tuple, request: ChargeRequest) -> None:
+        """Validate that decoded transaction calls match the charge request.
+
+        Ensures the server only co-signs transactions that target the
+        expected currency contract with a valid transfer selector,
+        correct recipient, and correct amount.
+
+        Args:
+            calls: Decoded Call tuples from the transaction.
+            request: The charge request with expected parameters.
+
+        Raises:
+            VerificationError: If no call matches the expected payment.
+        """
+        expected_memo = request.methodDetails.memo
+
+        for call in calls:
+            call_to = call.to if isinstance(call.to, bytes) else bytes.fromhex(
+                call.to[2:] if isinstance(call.to, str) and call.to.startswith("0x") else str(call.to)
+            )
+            call_to_hex = "0x" + call_to.hex()
+
+            if call_to_hex.lower() != request.currency.lower():
+                continue
+
+            if call.value and int.from_bytes(call.value, "big") if isinstance(call.value, bytes) else (call.value or 0):
+                if isinstance(call.value, int) and call.value != 0:
+                    continue
+                elif isinstance(call.value, bytes) and int.from_bytes(call.value, "big") != 0:
+                    continue
+
+            call_data = call.data if isinstance(call.data, bytes) else bytes.fromhex(
+                call.data[2:] if isinstance(call.data, str) and call.data.startswith("0x") else str(call.data)
+            )
+            call_data_hex = call_data.hex()
+
+            if len(call_data_hex) < 8:
+                continue
+
+            selector = call_data_hex[:8].lower()
+
+            if expected_memo:
+                if selector != TRANSFER_WITH_MEMO_SELECTOR:
+                    continue
+            elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+                continue
+
+            if len(call_data_hex) < 136:
+                continue
+            decoded_to = "0x" + call_data_hex[32:72]
+            decoded_amount = int(call_data_hex[72:136], 16)
+
+            if decoded_to.lower() != request.recipient.lower():
+                continue
+
+            if decoded_amount != int(request.amount):
+                continue
+
+            if expected_memo:
+                if len(call_data_hex) < 200:
+                    continue
+                decoded_memo = "0x" + call_data_hex[136:200]
+                memo_clean = expected_memo.lower()
+                if not memo_clean.startswith("0x"):
+                    memo_clean = "0x" + memo_clean
+                if decoded_memo.lower() != memo_clean:
+                    continue
+
+            return
+
+        raise VerificationError("Invalid transaction: no matching payment call found")
 
     def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
         """Validate that a signed transaction contains the expected call.

@@ -580,6 +580,203 @@ class TestSponsoredTransfer:
             )
 
 
+class TestCosignAsFeePayer:
+    """Tests for local fee payer co-signing."""
+
+    def _build_client_tx(
+        self,
+        currency: str = "0x20c0000000000000000000000000000000000000",
+        recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        amount: int = 1000000,
+        chain_id: int = 42431,
+        with_memo: str | None = None,
+    ) -> str:
+        """Build a client-signed fee-payer-awaiting transaction."""
+        import attrs
+        from pytempo import Call, TempoTransaction
+
+        if with_memo:
+            selector = "95777d59"
+            to_padded = recipient[2:].lower().zfill(64)
+            amount_padded = hex(amount)[2:].zfill(64)
+            memo_clean = with_memo[2:] if with_memo.startswith("0x") else with_memo
+            transfer_data = f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+        else:
+            selector = "a9059cbb"
+            to_padded = recipient[2:].lower().zfill(64)
+            amount_padded = hex(amount)[2:].zfill(64)
+            transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+
+        tx = TempoTransaction.create(
+            chain_id=chain_id,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            fee_token=None,
+            awaiting_fee_payer=True,
+            valid_before=9999999999,
+            calls=(Call.create(to=currency, value=0, data=transfer_data),),
+        )
+
+        signed = tx.sign(TEST_PRIVATE_KEY)
+        signed = attrs.evolve(signed, fee_payer_signature=b"\x00")
+        return "0x" + signed.encode().hex()
+
+    def test_cosign_roundtrip(self) -> None:
+        """Should successfully co-sign a valid client transaction."""
+        fee_payer_key = "0x" + "ab" * 32
+        fee_payer = TempoAccount.from_key(fee_payer_key)
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        method = tempo(
+            fee_payer=fee_payer,
+            rpc_url="https://rpc.test",
+            intents={"charge": intent},
+        )
+
+        raw_tx = self._build_client_tx()
+        result = intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+        assert result.startswith("0x76")
+        assert len(result) > len(raw_tx)
+
+    def test_cosign_rejects_wrong_tx_type(self) -> None:
+        """Should reject transactions that aren't type 0x76."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="Failed to deserialize"):
+            intent._cosign_as_fee_payer("0x02abcdef", "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_malformed_hex(self) -> None:
+        """Should reject non-hex input."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="Failed to deserialize"):
+            intent._cosign_as_fee_payer("0xZZZZ", "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_no_fee_payer(self) -> None:
+        """Should raise when no fee payer account is configured."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        with pytest.raises(VerificationError, match="No fee payer account configured"):
+            intent._cosign_as_fee_payer(
+                "0x76abcdef", "0x20c0000000000000000000000000000000000000"
+            )
+
+    def test_cosign_validates_call_target(self) -> None:
+        """Should reject tx targeting wrong currency when request is provided."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        raw_tx = self._build_client_tx(
+            currency="0x20c0000000000000000000000000000000000000",
+            amount=1000000,
+        )
+
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0xDEAD000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_validates_amount(self) -> None:
+        """Should reject tx with wrong amount when request is provided."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        raw_tx = self._build_client_tx(amount=1000000)
+
+        request = ChargeRequest(
+            amount="9999999",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_validates_recipient(self) -> None:
+        """Should reject tx with wrong recipient when request is provided."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        raw_tx = self._build_client_tx(
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        )
+
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0xDEAD000000000000000000000000000000000000",
+            expires="2030-01-20T12:00:00Z",
+        )
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_accepts_matching_request(self) -> None:
+        """Should succeed when tx matches request parameters."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        raw_tx = self._build_client_tx(
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            amount=1000000,
+        )
+
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+
+        result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+        assert result.startswith("0x76")
+
+
+class TestFeePayerPropagation:
+    """Tests for fee_payer propagation through tempo() factory."""
+
+    def test_tempo_propagates_fee_payer(self) -> None:
+        """tempo() should propagate fee_payer to intents via _method backlink."""
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent()
+        method = tempo(
+            fee_payer=fee_payer,
+            rpc_url="https://rpc.test",
+            intents={"charge": intent},
+        )
+        assert intent.fee_payer is fee_payer
+
+    def test_fee_payer_none_by_default(self) -> None:
+        """ChargeIntent should have no fee_payer when tempo() is called without one."""
+        intent = ChargeIntent()
+        tempo(rpc_url="https://rpc.test", intents={"charge": intent})
+        assert intent.fee_payer is None
+
+    def test_fee_payer_none_standalone(self) -> None:
+        """ChargeIntent should have no fee_payer when used standalone."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        assert intent.fee_payer is None
+
+
 class TestSchemas:
     def test_charge_request_valid(self) -> None:
         """Should validate charge request with default methodDetails."""
