@@ -14,9 +14,10 @@ import pytest
 
 from mpp import Challenge
 from mpp.errors import VerificationError
-from mpp.methods.tempo import ChargeIntent, tempo
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._rpc import get_tx_params
 from tests import INTEGRATION, make_credential
+from tests.conftest import _fund_account
 
 pytestmark = [pytest.mark.integration, INTEGRATION]
 
@@ -214,3 +215,133 @@ class TestChargeIntegration:
 
         with pytest.raises(VerificationError):
             await charge_intent.verify(credential, request_dict)
+
+    async def test_verify_premium_charge(
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
+    ):
+        method = tempo(
+            account=funded_payer,
+            rpc_url=rpc_url,
+            intents={"charge": ChargeIntent()},
+        )
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+            "methodDetails": {
+                "feePayer": False,
+                "chainId": chain_id,
+            },
+        }
+        challenge = Challenge(
+            id="integ-premium",
+            method="tempo",
+            intent="charge",
+            request=request_dict,
+        )
+
+        credential = await method.create_credential(challenge)
+        receipt = await charge_intent.verify(credential, request_dict)
+
+        assert receipt.status == "success"
+        assert receipt.method == "tempo"
+        assert receipt.reference.startswith("0x")
+        assert len(receipt.reference) >= 66
+
+    async def test_e2e_charge_with_fee_payer(
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
+    ):
+        fee_payer_account = TempoAccount.from_key("0x" + __import__("os").urandom(32).hex())
+        _fund_account(rpc_url, fee_payer_account.address, currency)
+
+        intent = ChargeIntent(rpc_url=rpc_url)
+        tempo(
+            rpc_url=rpc_url,
+            fee_payer=fee_payer_account,
+            intents={"charge": intent},
+        )
+
+        client_method = tempo(
+            account=funded_payer,
+            rpc_url=rpc_url,
+            intents={"charge": ChargeIntent()},
+        )
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+            "methodDetails": {
+                "feePayer": True,
+                "chainId": chain_id,
+            },
+        }
+        challenge = Challenge(
+            id="integ-fee-payer",
+            method="tempo",
+            intent="charge",
+            request=request_dict,
+        )
+
+        credential = await client_method.create_credential(challenge)
+        receipt = await intent.verify(credential, request_dict)
+
+        assert receipt.status == "success"
+        assert receipt.method == "tempo"
+        assert receipt.reference.startswith("0x")
+        assert len(receipt.reference) >= 66
+
+    async def test_fee_payer_wrong_recipient_rejected(
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
+    ):
+        fee_payer_account = TempoAccount.from_key("0x" + __import__("os").urandom(32).hex())
+        _fund_account(rpc_url, fee_payer_account.address, currency)
+
+        intent = ChargeIntent(rpc_url=rpc_url)
+        tempo(
+            rpc_url=rpc_url,
+            fee_payer=fee_payer_account,
+            intents={"charge": intent},
+        )
+
+        wrong_recipient = "0x0000000000000000000000000000000000000001"
+
+        client_method = tempo(
+            account=funded_payer,
+            rpc_url=rpc_url,
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="integ-fee-payer-wrong",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": currency,
+                "recipient": wrong_recipient,
+                "expires": _future_expires(),
+                "methodDetails": {
+                    "feePayer": True,
+                    "chainId": chain_id,
+                },
+            },
+        )
+        credential = await client_method.create_credential(challenge)
+
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": _future_expires(),
+            "methodDetails": {
+                "feePayer": True,
+                "chainId": chain_id,
+            },
+        }
+
+        with pytest.raises(VerificationError):
+            await intent.verify(credential, request_dict)
