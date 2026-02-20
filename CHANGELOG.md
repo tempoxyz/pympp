@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 (2026-02-20)
+
+### Minor Changes
+
+- Added `opaque`/`meta` field support for server-defined correlation data in challenges. The `meta` parameter on `Challenge.create()` and `verify_or_challenge()` stores arbitrary string key-value pairs as an HMAC-bound `opaque` field, included in challenge IDs and serialized in `WWW-Authenticate` and `Authorization` headers. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+- Added full fee payer support to the Tempo method, allowing servers to co-sign sponsored transactions locally using a configured `fee_payer` account instead of forwarding to an external service. Updated the `tempo()` factory and `ChargeIntent` to propagate the fee payer account, and introduced expiring nonce logic for replay protection on sponsored transactions. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+- Added chain-specific default currency selection: mainnet now defaults to USDC and testnet defaults to pathUSD. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. Updated tests to reflect the new default currency behavior. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+
+### Patch Changes
+
+- Reordered `_REALM_ENV_VARS` list alphabetically and added `FLY_APP_NAME`, `HEROKU_APP_NAME`, and `WEBSITE_HOSTNAME` environment variables for realm detection. (by @BrendanRyan, [#68](https://github.com/tempoxyz/pympp/pull/68))
+
 ## 0.1.5 (2026-02-18)
 
 ### Patch Changes
