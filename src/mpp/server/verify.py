@@ -79,16 +79,40 @@ async def verify_or_challenge(
     request = transform_units(request)
 
     if authorization is None:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     payment_scheme = _extract_payment_scheme(authorization)
     if payment_scheme is None:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     try:
         credential = Credential.from_authorization(payment_scheme)
     except ParseError:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     # Stateless challenge verification: recompute expected challenge ID from
     # echoed parameters and compare to the credential's challenge ID.
@@ -106,7 +130,15 @@ async def verify_or_challenge(
         opaque=echo_opaque,
     )
     if not _constant_time_equal(echo.id, expected_id):
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     receipt: Receipt = await intent.verify(credential, request)
 

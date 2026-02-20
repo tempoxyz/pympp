@@ -490,6 +490,7 @@ class TestOpaque:
             meta={"pi": "pi_3abc123XYZ"},
         )
         from dataclasses import replace
+
         tampered = replace(challenge, opaque={"pi": "pi_TAMPERED"})
         assert not tampered.verify("my-secret", "api.example.com")
 
