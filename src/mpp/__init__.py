@@ -101,7 +101,17 @@ def generate_challenge_id(
         opaque_json = json.dumps(opaque, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
         opaque_b64 = _b64url_encode(opaque_json)
 
-    hmac_input = "|".join([realm, method, intent, request_b64, expires or "", digest or "", opaque_b64])
+    hmac_input = "|".join(
+        [
+            realm,
+            method,
+            intent,
+            request_b64,
+            expires or "",
+            digest or "",
+            opaque_b64,
+        ]
+    )
 
     mac = hmac.new(
         secret_key.encode("utf-8"),
@@ -259,7 +269,12 @@ class Challenge:
         """
         opaque_b64 = None
         if self.opaque is not None:
-            opaque_json = json.dumps(self.opaque, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+            opaque_json = json.dumps(
+                self.opaque,
+                separators=(",", ":"),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
             opaque_b64 = _b64url_encode(opaque_json)
         return ChallengeEcho(
             id=self.id,
