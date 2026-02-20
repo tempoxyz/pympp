@@ -38,7 +38,7 @@ class ParseError(Exception):
 
 def _b64_encode(data: dict[str, Any]) -> str:
     """Encode dict as URL-safe base64 JSON (compact, no padding)."""
-    compact_json = json.dumps(data, separators=(",", ":"))
+    compact_json = json.dumps(data, separators=(",", ":"), sort_keys=True)
     encoded = base64.urlsafe_b64encode(compact_json.encode()).decode()
     return encoded.rstrip("=")
 
@@ -131,6 +131,11 @@ def parse_www_authenticate(header: str) -> Challenge:
     # Decode request JSON
     request = _b64_decode(request_b64)
 
+    opaque_b64 = params.get("opaque")
+    opaque = None
+    if opaque_b64:
+        opaque = _b64_decode(opaque_b64)
+
     return Challenge(
         id=id_,
         method=method,
@@ -141,6 +146,7 @@ def parse_www_authenticate(header: str) -> Challenge:
         digest=params.get("digest"),
         expires=params.get("expires"),
         description=params.get("description"),
+        opaque=opaque,
     )
 
 
@@ -169,6 +175,9 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
     if challenge.description:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
+    if challenge.opaque is not None:
+        opaque_b64 = _b64_encode(challenge.opaque)
+        parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
 
@@ -213,6 +222,7 @@ def parse_authorization(header: str) -> Credential:
         request=str(challenge_data.get("request", "")),
         expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
         digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
+        opaque=str(challenge_data["opaque"]) if challenge_data.get("opaque") else None,
     )
 
     return Credential(
@@ -244,6 +254,8 @@ def format_authorization(credential: Credential) -> str:
         challenge_dict["expires"] = credential.challenge.expires
     if credential.challenge.digest:
         challenge_dict["digest"] = credential.challenge.digest
+    if credential.challenge.opaque is not None:
+        challenge_dict["opaque"] = credential.challenge.opaque
 
     payload: dict[str, Any] = {
         "challenge": challenge_dict,
