@@ -257,6 +257,46 @@ class TestClientServerIntegration:
         with pytest.raises(httpx.ConnectError):
             await intent.verify(credential, request_params)
 
+    async def test_e2e_charge_with_memo(
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
+    ):
+        """Full roundtrip with server-specified memo."""
+        memo = "0x" + "de" * 32
+
+        intent = ChargeIntent(rpc_url=rpc_url)
+        request_params = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            "methodDetails": {
+                "feePayer": False,
+                "chainId": chain_id,
+                "memo": memo,
+            },
+        }
+        transport = RealVerifyTransport(
+            intent=intent,
+            request_params=request_params,
+            realm="test.local",
+        )
+
+        method = tempo(
+            account=funded_payer,
+            rpc_url=rpc_url,
+            intents={"charge": ChargeIntent()},
+        )
+        payment_transport = PaymentTransport(methods=[method], inner=transport)
+
+        async with httpx.AsyncClient(transport=payment_transport, base_url="http://test") as client:
+            response = await client.get("/paid")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["paid"] is True
+
+            receipt = Receipt.from_payment_receipt(response.headers["payment-receipt"])
+            assert receipt.status == "success"
+
     async def test_fee_payer_balance_accounting(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):

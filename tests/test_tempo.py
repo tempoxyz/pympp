@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import rlp
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
@@ -19,7 +20,15 @@ from mpp.methods.tempo import (
 )
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
-from mpp.methods.tempo.intents import ChargeIntent
+from mpp.methods.tempo.intents import (
+    TRANSFER_SELECTOR,
+    TRANSFER_TOPIC,
+    TRANSFER_WITH_MEMO_SELECTOR,
+    TRANSFER_WITH_MEMO_TOPIC,
+    ChargeIntent,
+    _match_transfer_calldata,
+    _rpc_error_msg,
+)
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     HashCredentialPayload,
@@ -1111,6 +1120,321 @@ class TestChainIdPropagation:
 
         with pytest.raises(TransactionError, match="Chain ID mismatch"):
             await method.create_credential(challenge)
+
+
+class TestMatchTransferCalldataWithMemo:
+    """Tests for _match_transfer_calldata with memo field."""
+
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    AMOUNT = 1000000
+    MEMO = "0x" + "ab" * 32
+
+    def _make_request(self, memo: str | None = None) -> ChargeRequest:
+        return ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            expires="2030-01-20T12:00:00Z",
+            methodDetails=MethodDetails(memo=memo),
+        )
+
+    def _build_calldata(self, selector: str, recipient: str, amount: int, memo: str = "") -> str:
+        to_padded = recipient[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        memo_part = memo[2:] if memo.startswith("0x") else memo
+        return f"{selector}{to_padded}{amount_padded}{memo_part}"
+
+    def test_memo_requires_transfer_with_memo_selector(self) -> None:
+        """When memo is set, plain transfer selector should be rejected."""
+        request = self._make_request(memo=self.MEMO)
+        calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO)
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_memo_accepts_correct_selector(self) -> None:
+        """When memo is set, transferWithMemo selector should be accepted."""
+        request = self._make_request(memo=self.MEMO)
+        calldata = self._build_calldata(
+            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
+        )
+        assert _match_transfer_calldata(calldata, request) is True
+
+    def test_memo_wrong_memo_value(self) -> None:
+        """Wrong memo value should be rejected."""
+        request = self._make_request(memo=self.MEMO)
+        wrong_memo = "0x" + "cc" * 32
+        calldata = self._build_calldata(
+            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, wrong_memo
+        )
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_memo_short_calldata_rejected(self) -> None:
+        """Calldata shorter than 200 hex chars should be rejected when memo expected."""
+        request = self._make_request(memo=self.MEMO)
+        # Only selector + to + amount = 136 chars, no memo
+        to_padded = self.RECIPIENT[2:].lower().zfill(64)
+        amount_padded = hex(self.AMOUNT)[2:].zfill(64)
+        calldata = f"{TRANSFER_WITH_MEMO_SELECTOR}{to_padded}{amount_padded}"
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_memo_normalization_no_0x_prefix(self) -> None:
+        """Memo without 0x prefix should be normalized and matched."""
+        memo_no_prefix = "ab" * 32
+        request = self._make_request(memo=memo_no_prefix)
+        calldata = self._build_calldata(
+            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, "0x" + memo_no_prefix
+        )
+        assert _match_transfer_calldata(calldata, request) is True
+
+    def test_no_memo_accepts_either_selector(self) -> None:
+        """When no memo, both transfer and transferWithMemo selectors should be accepted."""
+        request = self._make_request(memo=None)
+        calldata_plain = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
+        calldata_memo = self._build_calldata(
+            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT
+        )
+        assert _match_transfer_calldata(calldata_plain, request) is True
+        assert _match_transfer_calldata(calldata_memo, request) is True
+
+    def test_short_calldata_rejected(self) -> None:
+        """Calldata shorter than 136 chars should always be rejected."""
+        request = self._make_request()
+        assert _match_transfer_calldata("a9059cbb", request) is False
+
+    def test_wrong_selector_rejected(self) -> None:
+        """A completely bogus selector should be rejected."""
+        request = self._make_request()
+        calldata = self._build_calldata("deadbeef", self.RECIPIENT, self.AMOUNT)
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_uppercase_hex_normalization(self) -> None:
+        """Uppercase hex in recipient/amount should still match (case-insensitive)."""
+        request = self._make_request()
+        to_padded = self.RECIPIENT[2:].upper().zfill(64)
+        amount_padded = hex(self.AMOUNT)[2:].upper().zfill(64)
+        calldata = f"{TRANSFER_SELECTOR}{to_padded}{amount_padded}"
+        assert _match_transfer_calldata(calldata, request) is True
+
+
+class TestVerifyTransferLogsWithMemo:
+    """Tests for _verify_transfer_logs with memo field."""
+
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    AMOUNT = 1000000
+    MEMO = "0x" + "ab" * 32
+
+    def _make_receipt(self, logs: list) -> dict:
+        return {"status": "0x1", "logs": logs}
+
+    def _make_request(self, memo: str | None = None) -> ChargeRequest:
+        return ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            expires="2030-01-20T12:00:00Z",
+            methodDetails=MethodDetails(memo=memo),
+        )
+
+    def test_memo_log_accepted(self) -> None:
+        """TransferWithMemo log with correct memo should be accepted."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request(memo=self.MEMO)
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        self.MEMO,
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
+        assert intent._verify_transfer_logs(receipt, request) is True
+
+    def test_memo_log_wrong_memo_rejected(self) -> None:
+        """TransferWithMemo log with wrong memo should be rejected."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request(memo=self.MEMO)
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        "0x" + "cc" * 32,
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
+        assert intent._verify_transfer_logs(receipt, request) is False
+
+    def test_memo_log_too_few_topics_rejected(self) -> None:
+        """TransferWithMemo log with < 4 topics should be skipped."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request(memo=self.MEMO)
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
+        assert intent._verify_transfer_logs(receipt, request) is False
+
+    def test_no_memo_requires_transfer_topic(self) -> None:
+        """When no memo expected, only TRANSFER_TOPIC should be accepted."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request(memo=None)
+
+        # TRANSFER_WITH_MEMO_TOPIC should be skipped when no memo expected
+        receipt_memo_topic = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
+        assert intent._verify_transfer_logs(receipt_memo_topic, request) is False
+
+        # TRANSFER_TOPIC should be accepted
+        receipt_plain = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                }
+            ]
+        )
+        assert intent._verify_transfer_logs(receipt_plain, request) is True
+
+
+class TestValidateTransactionPayload:
+    """Tests for _validate_transaction_payload."""
+
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+    def _make_request(self) -> ChargeRequest:
+        return ChargeRequest(
+            amount="1000000",
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            expires="2030-01-20T12:00:00Z",
+        )
+
+    def test_non_tempo_tx_returns_silently(self) -> None:
+        """Non-0x76 prefix transaction should be silently skipped."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+        # 0x02 is a standard EIP-1559 tx prefix
+        intent._validate_transaction_payload("0x02abcdef", request)
+
+    def test_invalid_hex_returns_silently(self) -> None:
+        """Non-hex signature should be silently skipped."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+        intent._validate_transaction_payload("0xZZZZ", request)
+
+    def test_empty_calls_raises(self) -> None:
+        """Transaction with no calls should raise VerificationError."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+
+        # Build minimal RLP: [chain_id, mpfpg, mfpg, gas, calls=[], ...]
+        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [], b"", b"", b"\x00", b"", b"", b""]
+        payload = b"\x76" + rlp.encode(decoded)
+        sig = "0x" + payload.hex()
+
+        with pytest.raises(VerificationError, match="no calls"):
+            intent._validate_transaction_payload(sig, request)
+
+    def test_valid_tx_with_matching_call_passes(self) -> None:
+        """Transaction with a matching transfer call should not raise."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+
+        selector = bytes.fromhex("a9059cbb")
+        to_padded = bytes.fromhex(self.RECIPIENT[2:].lower().zfill(64))
+        amount_padded = bytes.fromhex(hex(1000000)[2:].zfill(64))
+        call_data = selector + to_padded + amount_padded
+
+        currency_bytes = bytes.fromhex(self.CURRENCY[2:])
+        call = [currency_bytes, b"", call_data]
+        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        payload = b"\x76" + rlp.encode(decoded)
+        sig = "0x" + payload.hex()
+
+        intent._validate_transaction_payload(sig, request)
+
+    def test_no_matching_call_raises(self) -> None:
+        """Transaction with no matching call should raise VerificationError."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+
+        # Call targeting wrong currency
+        wrong_currency = bytes.fromhex("dead" + "00" * 18)
+        selector = bytes.fromhex("a9059cbb")
+        to_padded = bytes.fromhex(self.RECIPIENT[2:].lower().zfill(64))
+        amount_padded = bytes.fromhex(hex(1000000)[2:].zfill(64))
+        call_data = selector + to_padded + amount_padded
+
+        call = [wrong_currency, b"", call_data]
+        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        payload = b"\x76" + rlp.encode(decoded)
+        sig = "0x" + payload.hex()
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
+
+
+class TestRpcErrorMsg:
+    """Tests for _rpc_error_msg helper."""
+
+    def test_dict_error_with_message_and_data(self) -> None:
+        result = {"error": {"message": "insufficient funds", "data": "0xdead"}}
+        msg = _rpc_error_msg(result)
+        assert "insufficient funds" in msg
+        assert "0xdead" in msg
+
+    def test_dict_error_message_only(self) -> None:
+        result = {"error": {"message": "nonce too low"}}
+        msg = _rpc_error_msg(result)
+        assert msg == "nonce too low"
+
+    def test_dict_error_name_fallback(self) -> None:
+        result = {"error": {"name": "SomeError"}}
+        msg = _rpc_error_msg(result)
+        assert "SomeError" in msg
+
+    def test_string_error(self) -> None:
+        result = {"error": "something broke"}
+        msg = _rpc_error_msg(result)
+        assert msg == "something broke"
 
 
 class TestDefaultsImmutability:
