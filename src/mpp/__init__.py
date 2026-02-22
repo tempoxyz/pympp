@@ -58,6 +58,7 @@ def generate_challenge_id(
     request: dict[str, Any],
     expires: str | None = None,
     digest: str | None = None,
+    opaque: dict[str, str] | None = None,
 ) -> str:
     """Generate HMAC-SHA256 challenge ID per spec.
 
@@ -66,7 +67,7 @@ def generate_challenge_id(
     verification - the server can verify a challenge was issued by it without
     storing state.
 
-    HMAC input format: realm|method|intent|request_b64|expires|digest (pipe-delimited).
+    HMAC input format: realm|method|intent|request_b64|expires|digest|opaque (pipe-delimited).
     All fields are always included; absent optional fields use empty string.
     Output: base64url(HMAC-SHA256(secret_key, input))
 
@@ -78,6 +79,7 @@ def generate_challenge_id(
         request: Payment request parameters.
         expires: Optional expiration timestamp (ISO 8601).
         digest: Optional digest of request body.
+        opaque: Optional server-defined correlation data.
 
     Returns:
         Base64url-encoded HMAC-SHA256 of the challenge parameters.
@@ -94,7 +96,22 @@ def generate_challenge_id(
     request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     request_b64 = _b64url_encode(request_json)
 
-    hmac_input = "|".join([realm, method, intent, request_b64, expires or "", digest or ""])
+    opaque_b64 = ""
+    if opaque is not None:
+        opaque_json = json.dumps(opaque, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        opaque_b64 = _b64url_encode(opaque_json)
+
+    hmac_input = "|".join(
+        [
+            realm,
+            method,
+            intent,
+            request_b64,
+            expires or "",
+            digest or "",
+            opaque_b64,
+        ]
+    )
 
     mac = hmac.new(
         secret_key.encode("utf-8"),
@@ -141,6 +158,7 @@ class Challenge:
     digest: str | None = None
     expires: str | None = None
     description: str | None = None
+    opaque: dict[str, str] | None = None
 
     @classmethod
     def create(
@@ -154,6 +172,7 @@ class Challenge:
         expires: str | None = None,
         digest: str | None = None,
         description: str | None = None,
+        meta: dict[str, str] | None = None,
     ) -> Challenge:
         """Create a Challenge with an HMAC-bound ID.
 
@@ -171,6 +190,7 @@ class Challenge:
             expires: Optional expiration timestamp (ISO 8601).
             digest: Optional digest of request body.
             description: Optional human-readable description.
+            meta: Optional server-defined correlation data (stored as opaque).
 
         Returns:
             A Challenge with an HMAC-bound ID.
@@ -183,6 +203,7 @@ class Challenge:
             request=request,
             expires=expires,
             digest=digest,
+            opaque=meta,
         )
         request_json = json.dumps(
             request,
@@ -201,6 +222,7 @@ class Challenge:
             digest=digest,
             expires=expires,
             description=description,
+            opaque=meta,
         )
 
     @classmethod
@@ -235,6 +257,7 @@ class Challenge:
             request=self.request,
             expires=self.expires,
             digest=self.digest,
+            opaque=self.opaque,
         )
         return _constant_time_equal(self.id, expected_id)
 
@@ -244,6 +267,15 @@ class Challenge:
         Returns:
             A ChallengeEcho with the challenge parameters.
         """
+        opaque_b64 = None
+        if self.opaque is not None:
+            opaque_json = json.dumps(
+                self.opaque,
+                separators=(",", ":"),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            opaque_b64 = _b64url_encode(opaque_json)
         return ChallengeEcho(
             id=self.id,
             realm=self.realm,
@@ -252,6 +284,7 @@ class Challenge:
             request=self.request_b64,
             expires=self.expires,
             digest=self.digest,
+            opaque=opaque_b64,
         )
 
 
@@ -279,6 +312,7 @@ class ChallengeEcho:
     request: str
     expires: str | None = None
     digest: str | None = None
+    opaque: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

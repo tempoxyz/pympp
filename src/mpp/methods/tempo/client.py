@@ -13,7 +13,12 @@ import attrs
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
-from mpp.methods.tempo._defaults import CHAIN_RPC_URLS, RPC_URL, rpc_url_for_chain
+from mpp.methods.tempo._defaults import (
+    CHAIN_RPC_URLS,
+    RPC_URL,
+    default_currency_for_chain,
+    rpc_url_for_chain,
+)
 from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
 
 if TYPE_CHECKING:
@@ -334,6 +339,9 @@ def tempo(
     """
     if rpc_url is None:
         rpc_url = rpc_url_for_chain(chain_id) if chain_id else RPC_URL
+
+    if currency is None:
+        currency = default_currency_for_chain(chain_id)
 
     method = TempoMethod(
         account=account,

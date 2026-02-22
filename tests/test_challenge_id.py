@@ -23,7 +23,7 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
+        assert result == "XmJ98SdsAdzwP9Oa-8In322Uh6yweMO6rywdomWk_V4"
 
     def test_with_expires(self) -> None:
         """Challenge ID with expires field included in HMAC."""
@@ -39,7 +39,7 @@ class TestGenerateChallengeId:
             },
             expires="2026-01-29T12:00:00Z",
         )
-        assert result == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
+        assert result == "EvqUWMPJjqhoVJVG3mhTYVqCa3Mk7bUVd_OjeJGek1A"
 
     def test_with_digest(self) -> None:
         """Challenge ID with digest field included in HMAC."""
@@ -55,7 +55,7 @@ class TestGenerateChallengeId:
             },
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=",
         )
-        assert result == "EAX2sqwdeg8Km8LIKRBFhM5xDQvEgIlbTif9FKBsOiU"
+        assert result == "qcJUPoapy4bFLznQjQUutwPLyXW7FvALrWA_sMENgAY"
 
     def test_full_challenge(self) -> None:
         """Challenge ID with all optional fields."""
@@ -74,7 +74,7 @@ class TestGenerateChallengeId:
             expires="2026-02-01T00:00:00Z",
             digest="sha-256=abc123def456",
         )
-        assert result == "jDq_IazIMny5JJk3-xm3eSxGaP6XbbaApxBi6fG_320"
+        assert result == "J6w7zq6nHLnchss3AYbLxNirdpuaV8_Msn37DQSz6Bw"
 
     def test_different_secret_different_id(self) -> None:
         """Same parameters with different secret produces different ID."""
@@ -89,7 +89,7 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "UMEn_1WPt2vz3XK8rrkbHET6RwqfwtK8VVNz0Xc2x4A"
+        assert result == "_o55RP0duNvJYtw9PXnf44mGyY5ajV_wwGzoGdTFuNs"
 
     def test_empty_request(self) -> None:
         """Challenge ID with empty request object."""
@@ -100,7 +100,7 @@ class TestGenerateChallengeId:
             intent="authorize",
             request={},
         )
-        assert result == "jUTqTVe3kCv5rVizv1XBCs9qKCLg4AZLwBUnk4N3MR8"
+        assert result == "MYEC2oq3_B3cHa_My1Lx3NQKn_iUiMfsns6361N0SX0"
 
     def test_unicode_in_description(self) -> None:
         """Request with unicode characters."""
@@ -116,7 +116,7 @@ class TestGenerateChallengeId:
                 "description": "Payment for café ☕",
             },
         )
-        assert result == "OjiT_PsisJ_SkHEomn9dcfraObt4U3nO5Tg3gU0Etmg"
+        assert result == "1_GKJqATKvVnIUY3f8MFq48bMs18JHz_3CBK8pu52yA"
 
     def test_nested_method_details(self) -> None:
         """Request with nested methodDetails object."""
@@ -132,7 +132,7 @@ class TestGenerateChallengeId:
                 "methodDetails": {"chainId": 42431, "feePayer": True},
             },
         )
-        assert result == "9Sl6t74wn9zPaakjTSK6DqhGtS5HQVQEkIUYBYdHTbA"
+        assert result == "VkSq83C7vQFvdX3MqHM7s-N1QOo2nae4F1iHmbV5pgg"
 
 
 class TestGoldenVectors:
@@ -156,7 +156,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "SOfbA51LV3LCkGE7RbomqwXdbWVlrZwlW-Z9aOHolxw"
+        assert result == "X6v1eo7fJ76gAxqY0xN9Jd__4lUyDDYmriryOM-5FO4"
 
     def test_with_expires(self) -> None:
         result = generate_challenge_id(
@@ -167,7 +167,7 @@ class TestGoldenVectors:
             request={"amount": "1000000"},
             expires="2025-01-06T12:00:00Z",
         )
-        assert result == "R1ZSIwoIjkFhMCSzUGiCTesiigf5vV65EQ_3gVNtsNw"
+        assert result == "ChPX33RkKSZoSUyZcu8ai4hhkvjZJFkZVnvWs5s0iXI"
 
     def test_with_digest(self) -> None:
         result = generate_challenge_id(
@@ -178,7 +178,7 @@ class TestGoldenVectors:
             request={"amount": "1000000"},
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
         )
-        assert result == "AiMmBdsSOkOYpXTupMnzVnrzZbqMY_P2i80vENRUSN4"
+        assert result == "JHB7EFsPVb-xsYCo8LHcOzeX1gfXWVoUSzQsZhKAfKM"
 
     def test_with_expires_and_digest(self) -> None:
         result = generate_challenge_id(
@@ -190,7 +190,7 @@ class TestGoldenVectors:
             expires="2025-01-06T12:00:00Z",
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
         )
-        assert result == "FMBGqN7MzpKagHsCcartZM09CnUqv7UgmaCy45Ozgug"
+        assert result == "m39jbWWCIfmfJZSwCfvKFFtBl0Qwf9X4nOmDb21peLA"
 
     def test_description_not_in_hmac(self) -> None:
         """description is not part of HMAC input, so ID matches 'required fields only'."""
@@ -201,7 +201,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert with_desc == "SOfbA51LV3LCkGE7RbomqwXdbWVlrZwlW-Z9aOHolxw"
+        assert with_desc == "X6v1eo7fJ76gAxqY0xN9Jd__4lUyDDYmriryOM-5FO4"
 
     def test_multi_field_request(self) -> None:
         result = generate_challenge_id(
@@ -211,7 +211,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000", "currency": "0x1234", "recipient": "0xabcd"},
         )
-        assert result == "5CXJi4bWMz2W54WjnlmoxnwTYe-JKwhw0z32ICQ65Es"
+        assert result == "_H5TOnnlW0zduQ5OhQ3EyLVze_TqxLDPda2CGZPZxOc"
 
     def test_nested_method_details(self) -> None:
         result = generate_challenge_id(
@@ -225,7 +225,7 @@ class TestGoldenVectors:
                 "methodDetails": {"chainId": 42431},
             },
         )
-        assert result == "eid66xXUZsj46Pb30AfAf7m5kPehgianI16rZ-QY8HU"
+        assert result == "TqujwpuDDg_zsWGINAd5XObO2rRe6uYufpqvtDmr6N8"
 
     def test_empty_request(self) -> None:
         result = generate_challenge_id(
@@ -235,7 +235,7 @@ class TestGoldenVectors:
             intent="charge",
             request={},
         )
-        assert result == "6kq-PYTyXtaGAHTHCVUrc_hIsAwLeskeQFtDZerMYhM"
+        assert result == "yLN7yChAejW9WNmb54HpJIWpdb1WWXeA3_aCx4dxmkU"
 
     def test_different_realm(self) -> None:
         result = generate_challenge_id(
@@ -245,7 +245,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "-gMjd8UeUvBcqUaUzarVj6ikH_YoDowpaNbEwK1Tmx8"
+        assert result == "3F5bOo2a9RUihdwKk4hGRvBvzQmVPBMDvW0YM-8GD00"
 
     def test_different_method(self) -> None:
         result = generate_challenge_id(
@@ -255,7 +255,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "DRH9ycmIlZ2lYUatIHCrxpm9K7ig5pniZ3ulleb7vl0"
+        assert result == "o0ra2sd7HcB4Ph0Vns69gRDUhSj5WNOnUopcDqKPLz4"
 
     def test_different_intent(self) -> None:
         result = generate_challenge_id(
@@ -265,7 +265,7 @@ class TestGoldenVectors:
             intent="session",
             request={"amount": "1000000"},
         )
-        assert result == "INeBi93MhinvbwdUxeUUIaT5Q_ufgLKPYZb5Tg43A1o"
+        assert result == "aAY7_IEDzsznNYplhOSE8cERQxvjFcT4Lcn-7FHjLVE"
 
 
 class TestChallengeCreate:
@@ -284,7 +284,7 @@ class TestChallengeCreate:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert challenge.id == "s0gsoewXwdYI13oPnrtdKTEN4-sIQ-LbQUNV_HttPnA"
+        assert challenge.id == "XmJ98SdsAdzwP9Oa-8In322Uh6yweMO6rywdomWk_V4"
         assert challenge.method == "tempo"
         assert challenge.intent == "charge"
 
@@ -303,7 +303,7 @@ class TestChallengeCreate:
             expires="2026-01-29T12:00:00Z",
             description="Test payment",
         )
-        assert challenge.id == "0rMv3trZIudpkJCQxeL2RLQz6uALKTNErWulN07hDLk"
+        assert challenge.id == "EvqUWMPJjqhoVJVG3mhTYVqCa3Mk7bUVd_OjeJGek1A"
         assert challenge.expires == "2026-01-29T12:00:00Z"
         assert challenge.description == "Test payment"
 
@@ -387,3 +387,120 @@ class TestChallengeVerify:
             expires="2099-12-31T23:59:59Z",  # Tampered
         )
         assert not tampered.verify("test-secret-key-12345", "api.example.com")
+
+
+class TestOpaque:
+    """Test opaque/meta field for server-defined correlation data."""
+
+    def test_meta_sets_opaque_on_challenge(self) -> None:
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        assert challenge.opaque == {"pi": "pi_3abc123XYZ"}
+
+    def test_opaque_is_none_when_no_meta(self) -> None:
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert challenge.opaque is None
+
+    def test_opaque_affects_challenge_id(self) -> None:
+        with_meta = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        without_meta = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+        )
+        assert with_meta.id != without_meta.id
+
+    def test_different_opaque_different_ids(self) -> None:
+        meta1 = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_111"},
+        )
+        meta2 = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_222"},
+        )
+        assert meta1.id != meta2.id
+
+    def test_same_opaque_same_id(self) -> None:
+        c1 = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        c2 = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        assert c1.id == c2.id
+
+    def test_verify_succeeds_with_opaque(self) -> None:
+        challenge = Challenge.create(
+            secret_key="my-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        assert challenge.verify("my-secret", "api.example.com")
+
+    def test_verify_detects_tampered_opaque(self) -> None:
+        challenge = Challenge.create(
+            secret_key="my-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={"pi": "pi_3abc123XYZ"},
+        )
+        from dataclasses import replace
+
+        tampered = replace(challenge, opaque={"pi": "pi_TAMPERED"})
+        assert not tampered.verify("my-secret", "api.example.com")
+
+    def test_empty_meta_produces_opaque(self) -> None:
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000000"},
+            meta={},
+        )
+        assert challenge.opaque == {}
