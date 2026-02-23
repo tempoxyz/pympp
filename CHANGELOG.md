@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 (2026-02-23)
+
+### Minor Changes
+
+- Added extensive test coverage for memo-based transfers, including unit tests for `_match_transfer_calldata` and `_verify_transfer_logs` with memo fields, integration tests for end-to-end charge flows with server-specified memos, and new test modules for body digest computation, error types, expires helpers, and keychain signature handling. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+- Added 0x78 fee payer envelope encoding/decoding module with `encode_fee_payer_envelope` and `decode_fee_payer_envelope` functions. Updated `ChargeIntent._cosign_as_fee_payer` to use the new 0x78 wire format instead of 0x76, including sender address verification against the recovered signer. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+- Added chain-specific default currency selection: mainnet now defaults to USDC and testnet defaults to pathUSD. Exported `USDC`, `PATH_USD`, and `default_currency_for_chain` from the tempo package public API. Updated tests to reflect the new default currency behavior. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+
+### Patch Changes
+
+- Added pyright, build, and twine as dev dependencies. Improved CI pipeline with separate lint, test, and package jobs, concurrency cancellation, coverage enforcement, and package validation. Fixed pyright type errors with `type: ignore` annotations and refactored `ChargeIntent` to use a `_get_rpc_url()` helper to safely unwrap the optional RPC URL. (by @BrendanRyan, [#70](https://github.com/tempoxyz/pympp/pull/70))
+
 ## 0.2.0 (2026-02-20)
 
 ### Minor Changes
