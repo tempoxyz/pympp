@@ -1497,7 +1497,7 @@ class TestValidateTransactionPayload0x76:
 
         # Build minimal RLP: [chain_id, mpfpg, mfpg, gas, calls=[], ...]
         decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [], b"", b"", b"\x00", b"", b"", b""]
-        payload = b"\x76" + rlp.encode(decoded)
+        payload = b"\x76" + bytes(rlp.encode(decoded))
         sig = "0x" + payload.hex()
 
         with pytest.raises(VerificationError, match="no calls"):

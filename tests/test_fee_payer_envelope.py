@@ -66,7 +66,7 @@ class TestEncodeFeePayerEnvelope:
         decoded = rlp.decode(encoded[1:])
         sender_addr = decoded[11]
         assert len(sender_addr) == 20
-        assert sender_addr == bytes(signed.sender_address)
+        assert sender_addr == bytes(signed.sender_address)  # type: ignore[arg-type]
 
     def test_sender_signature_is_last_field(self) -> None:
         """Sender signature (65 bytes r||s||v) must be the last field."""
@@ -75,7 +75,7 @@ class TestEncodeFeePayerEnvelope:
         decoded = rlp.decode(encoded[1:])
         sig = decoded[-1]
         assert len(sig) == 65
-        assert sig == signed.sender_signature.to_bytes()
+        assert sig == signed.sender_signature.to_bytes()  # type: ignore[union-attr]
 
     def test_chain_id_preserved(self) -> None:
         """Chain ID must be correctly encoded at index 0."""
@@ -140,8 +140,8 @@ class TestDecodeFeePayerEnvelope:
         encoded = encode_fee_payer_envelope(signed)
         decoded, sender_addr, sender_sig, key_auth = decode_fee_payer_envelope(encoded)
 
-        assert sender_addr == bytes(signed.sender_address)
-        assert sender_sig == signed.sender_signature.to_bytes()
+        assert sender_addr == bytes(signed.sender_address)  # type: ignore[arg-type]
+        assert sender_sig == signed.sender_signature.to_bytes()  # type: ignore[union-attr]
         assert key_auth is None
 
     def test_roundtrip_fields(self) -> None:
@@ -184,7 +184,7 @@ class TestDecodeFeePayerEnvelope:
     def test_rejects_too_short_rlp(self) -> None:
         """Should reject RLP with too few fields."""
         # 0x78 + RLP of a short list
-        short = bytes([0x78]) + rlp.encode([b"", b"", b""])
+        short = bytes([0x78]) + bytes(rlp.encode([b"", b"", b""]))
         with pytest.raises(ValueError, match="Malformed"):
             decode_fee_payer_envelope(short)
 
@@ -230,7 +230,7 @@ class TestEncoderDecoderIntegration:
         decoded_fields = rlp.decode(encoded[1:])
         # Replace sender address with a different address
         decoded_fields[11] = b"\xde\xad" + b"\x00" * 18
-        tampered = bytes([0x78]) + rlp.encode(decoded_fields)
+        tampered = bytes([0x78]) + bytes(rlp.encode(decoded_fields))
         tampered_hex = "0x" + tampered.hex()
 
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
@@ -268,7 +268,7 @@ class TestEncoderDecoderIntegration:
         # Tamper nonce_key (index 6) to a non-MAX value
         decoded_fields = rlp.decode(encoded[1:])
         decoded_fields[6] = (42).to_bytes(1, "big")
-        tampered = bytes([0x78]) + rlp.encode(decoded_fields)
+        tampered = bytes([0x78]) + bytes(rlp.encode(decoded_fields))
         tampered_hex = "0x" + tampered.hex()
 
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
@@ -319,5 +319,5 @@ class TestEncoderDecoderIntegration:
         # fee_token at index 10 should be 20 bytes
         assert len(decoded[10]) == 20
         assert ("0x" + decoded[10].hex()).lower() == CURRENCY.lower()
-        assert sender_addr == bytes(signed.sender_address)
+        assert sender_addr == bytes(signed.sender_address)  # type: ignore[arg-type]
         assert key_auth is None

@@ -38,9 +38,9 @@ def encode_fee_payer_envelope(signed_tx: TempoTransaction) -> bytes:
         Raw bytes: ``0x78 || RLP([fields...])``.
     """
     sender_sig = signed_tx.sender_signature
-    sig_bytes = sender_sig.to_bytes() if hasattr(sender_sig, "to_bytes") else bytes(sender_sig)
+    sig_bytes = sender_sig.to_bytes() if hasattr(sender_sig, "to_bytes") else bytes(sender_sig)  # type: ignore[arg-type]
 
-    sender_addr = bytes(signed_tx.sender_address)
+    sender_addr = bytes(signed_tx.sender_address)  # type: ignore[arg-type]
 
     fields: list = [
         signed_tx.chain_id,
@@ -97,4 +97,4 @@ def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, bytes | 
     else:
         key_authorization = None
 
-    return decoded, sender_address, sender_signature, key_authorization
+    return decoded, bytes(sender_address), bytes(sender_signature), key_authorization  # type: ignore[arg-type]
