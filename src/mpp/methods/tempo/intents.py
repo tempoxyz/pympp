@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -434,34 +435,51 @@ class ChargeIntent:
     ) -> str:
         """Co-sign a client-signed transaction as fee payer.
 
-        Deserializes the client's 0x76 transaction, optionally validates the
-        payment calls against ``request``, sets the fee token, and signs with
-        domain 0x78. Returns the fully co-signed transaction hex.
+        Deserializes the client's 0x78 fee payer envelope, optionally validates
+        the payment calls against ``request``, sets the fee token, and co-signs.
+        Returns the fully co-signed 0x76 transaction hex.
         """
-        import rlp
         from pytempo import Call, TempoTransaction
         from pytempo.models import as_address
+
+        from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
         if self.fee_payer is None:
             raise VerificationError("No fee payer account configured")
 
         try:
             all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
-            if not all_bytes or all_bytes[0] != 0x76:
-                raise ValueError("Not a Tempo transaction")
-            decoded = rlp.decode(all_bytes[1:])
+            decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(all_bytes)
         except Exception as err:
             raise VerificationError("Failed to deserialize client transaction") from err
 
         def _int(b: bytes) -> int:
             return int.from_bytes(b, "big") if b else 0
 
+        # Fee-payer invariants (matches mpp-rs cosign_fee_payer_transaction)
+        if decoded[10]:
+            raise VerificationError(
+                "Fee payer transaction must not include fee_token (server sets it)"
+            )
+
+        nonce_key = _int(decoded[6])
+        if nonce_key != (1 << 256) - 1:
+            raise VerificationError("Fee payer envelope must use expiring nonce key (U256::MAX)")
+
+        valid_before_raw = decoded[8]
+        if not valid_before_raw:
+            raise VerificationError("Fee payer envelope must include valid_before")
+        valid_before = _int(valid_before_raw)
+        if valid_before <= int(time.time()):
+            raise VerificationError(
+                f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
+            )
+
         calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
 
         if request is not None:
             self._validate_calls(calls, request)
 
-        sender_sig = decoded[-1]
         tx_for_recovery = TempoTransaction(
             chain_id=_int(decoded[0]),
             max_priority_fee_per_gas=_int(decoded[1]),
@@ -475,17 +493,22 @@ class ChargeIntent:
             valid_after=_int(decoded[9]) if decoded[9] else None,
             fee_token=decoded[10] if decoded[10] else None,
             awaiting_fee_payer=True,
+            key_authorization=key_auth,
         )
         sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
 
         from eth_account import Account
 
-        sender_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        envelope_address = "0x" + sender_addr_bytes.hex()
+
+        if recovered_address.lower() != envelope_address.lower():
+            raise VerificationError("Sender address does not match recovered signer")
 
         tx_to_sign = attrs.evolve(
             tx_for_recovery,
             sender_signature=sender_sig,
-            sender_address=as_address(sender_address),
+            sender_address=as_address(recovered_address),
             fee_token=fee_token or PATH_USD,
         )
 
@@ -518,7 +541,7 @@ class ChargeIntent:
             tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
         except ValueError:
             return
-        if not tx_bytes or tx_bytes[0] != 0x76:
+        if not tx_bytes or tx_bytes[0] not in (0x76, 0x78):
             return
         try:
             decoded = rlp.decode(tx_bytes[1:])

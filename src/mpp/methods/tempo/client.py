@@ -9,8 +9,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import attrs
-
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
@@ -252,7 +250,9 @@ class TempoMethod:
         signed_tx = tx.sign(self.account.private_key)
 
         if awaiting_fee_payer:
-            signed_tx = attrs.evolve(signed_tx, fee_payer_signature=b"\x00")
+            from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+            return "0x" + encode_fee_payer_envelope(signed_tx).hex(), chain_id
 
         return "0x" + signed_tx.encode().hex(), chain_id
 
