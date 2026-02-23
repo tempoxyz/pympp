@@ -14,7 +14,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [lint, test, package]
+    needs: [test, package]
     runs-on: ubuntu-latest
     steps:
       - run: |
@@ -22,29 +22,6 @@ jobs:
             echo "One or more required jobs failed or were cancelled"
             exit 1
           fi
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-extras --dev
-
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format check
-        run: uv run ruff format --check .
-
-      - name: Type check
-        run: uv run pyright
 
   test:
     runs-on: ubuntu-latest
@@ -58,12 +35,21 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
+
+      - name: Lint
+        if: matrix.python-version == '3.12'
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run pyright
 
       - name: Run tests
         run: uv run pytest -v --cov=mpp --cov-report=term-missing --cov-fail-under=90
@@ -75,6 +61,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
@@ -82,8 +70,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Build package
-        run: uv run python -m build
-
-      - name: Validate package
-        run: uv run twine check --strict dist/*
+      - name: Build and validate package
+        run: |
+          uv run python -m build
+          uv run twine check --strict dist/*
