@@ -40,8 +40,8 @@ class TestMppCreate:
         )
         assert srv.realm == "api.example.com"
         assert srv.secret_key == "test-secret"
-        assert srv.method.currency == "0x20c0000000000000000000000000000000000000"
-        assert srv.method.recipient == "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        assert srv.method.currency == "0x20c0000000000000000000000000000000000000"  # type: ignore[attr-defined]
+        assert srv.method.recipient == "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"  # type: ignore[attr-defined]
 
     def test_create_auto_realm(self) -> None:
         with patch.dict(os.environ, {"MPP_REALM": "auto.example.com"}):

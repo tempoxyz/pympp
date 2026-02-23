@@ -355,9 +355,9 @@ def tempo(
         client_id=client_id,
     )
     for intent in intents.values():
-        if hasattr(intent, "rpc_url") and intent.rpc_url is None:
-            intent.rpc_url = rpc_url
+        if hasattr(intent, "rpc_url") and intent.rpc_url is None:  # type: ignore[union-attr]
+            intent.rpc_url = rpc_url  # type: ignore[union-attr]
         if hasattr(intent, "_method"):
-            intent._method = method
+            intent._method = method  # type: ignore[union-attr]
     method._intents = dict(intents)
     return method

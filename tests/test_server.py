@@ -269,6 +269,7 @@ class TestPay:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
             assert "WWW-Authenticate" in result.headers
@@ -395,9 +396,11 @@ class TestPay:
         result = await handler(request)
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
         else:
+            assert isinstance(result, dict)
             assert result["_mpp_challenge"] is True
             assert result["status"] == 402
 
@@ -443,10 +446,12 @@ class TestPay:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
             www_auth = result.headers["WWW-Authenticate"]
         else:
+            assert isinstance(result, dict)
             assert result["_mpp_challenge"] is True
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
@@ -491,6 +496,7 @@ class TestMppPay:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
             assert "WWW-Authenticate" in result.headers
@@ -671,9 +677,11 @@ class TestMppPay:
         result = await handler(request)
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
         else:
+            assert isinstance(result, dict)
             assert result["_mpp_challenge"] is True
             assert result["status"] == 402
 
@@ -694,10 +702,12 @@ class TestMppPay:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
             assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
             www_auth = result.headers["WWW-Authenticate"]
         else:
+            assert isinstance(result, dict)
             www_auth = result["headers"]["WWW-Authenticate"]
         assert 'description="Premium access"' in www_auth
 
@@ -717,7 +727,7 @@ class TestMppPay:
             intents = {"charge": session_intent, "session": session_intent}
 
         server = Mpp(
-            method=MockMethod(),
+            method=MockMethod(),  # type: ignore[arg-type]
             realm="api.example.com",
             secret_key="test-secret",
         )
@@ -773,7 +783,7 @@ class TestMppChainIdAutoEmit:
             intents = {"charge": test_intent}
 
         server = Mpp(
-            method=MockMethod(),
+            method=MockMethod(),  # type: ignore[arg-type]
             realm="api.example.com",
             secret_key="test-secret",
         )
@@ -799,7 +809,7 @@ class TestMppChainIdAutoEmit:
             intents = {"charge": test_intent}
 
         server = Mpp(
-            method=MockMethod(),
+            method=MockMethod(),  # type: ignore[arg-type]
             realm="api.example.com",
             secret_key="test-secret",
         )
@@ -839,7 +849,7 @@ class TestMppChainIdAutoEmit:
             intents = {"charge": test_intent}
 
         server = Mpp(
-            method=MockMethod(),
+            method=MockMethod(),  # type: ignore[arg-type]
             realm="api.example.com",
             secret_key="test-secret",
         )
@@ -851,8 +861,11 @@ class TestMppChainIdAutoEmit:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
             www_auth = result.headers["WWW-Authenticate"]
         else:
+            assert isinstance(result, dict)
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.request["methodDetails"]["chainId"] == 42431
@@ -874,7 +887,7 @@ class TestMppChainIdAutoEmit:
             intents = {"charge": test_intent}
 
         server = Mpp(
-            method=MockMethod(),
+            method=MockMethod(),  # type: ignore[arg-type]
             realm="api.example.com",
             secret_key="test-secret",
         )
@@ -886,8 +899,11 @@ class TestMppChainIdAutoEmit:
         result = await handler(MockRequest())
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
             www_auth = result.headers["WWW-Authenticate"]
         else:
+            assert isinstance(result, dict)
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.request["methodDetails"]["chainId"] == 4217

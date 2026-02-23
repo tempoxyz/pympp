@@ -2,6 +2,7 @@
 
 import os
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -107,7 +108,7 @@ class TestTempoMethod:
             rpc_url="https://custom.rpc",
             intents={"charge": intent},
         )
-        assert method.intents["charge"].rpc_url == "https://custom.rpc"
+        assert cast(ChargeIntent, method.intents["charge"]).rpc_url == "https://custom.rpc"
 
     def test_tempo_does_not_override_explicit_intent_rpc_url(self) -> None:
         """tempo() should not override an intent's explicitly-set rpc_url."""
@@ -116,7 +117,7 @@ class TestTempoMethod:
             rpc_url="https://method.rpc",
             intents={"charge": intent},
         )
-        assert method.intents["charge"].rpc_url == "https://intent.rpc"
+        assert cast(ChargeIntent, method.intents["charge"]).rpc_url == "https://intent.rpc"
 
     def test_intents_property(self) -> None:
         """Should have only the intents explicitly provided."""
@@ -198,7 +199,7 @@ class TestChargeIntent:
     async def test_verify_invalid_payload(self) -> None:
         """Should reject invalid credential payload."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(payload="not-a-dict")
+        credential = make_credential(payload="not-a-dict")  # type: ignore[arg-type]
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
         with pytest.raises(VerificationError, match="Invalid credential payload"):
@@ -1386,7 +1387,7 @@ class TestValidateTransactionPayload:
         currency_bytes = bytes.fromhex(self.CURRENCY[2:])
         call = [currency_bytes, b"", call_data]
         decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
-        payload = b"\x76" + rlp.encode(decoded)
+        payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
         sig = "0x" + payload.hex()
 
         intent._validate_transaction_payload(sig, request)
@@ -1405,7 +1406,7 @@ class TestValidateTransactionPayload:
 
         call = [wrong_currency, b"", call_data]
         decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
-        payload = b"\x76" + rlp.encode(decoded)
+        payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
         sig = "0x" + payload.hex()
 
         with pytest.raises(VerificationError, match="no matching payment call"):
