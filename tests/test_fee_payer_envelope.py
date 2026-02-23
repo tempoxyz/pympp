@@ -1,11 +1,10 @@
 """Tests for fee payer envelope encoding/decoding (0x78 wire format)."""
 
-import rlp
 import pytest
+import rlp
 from pytempo import Call, TempoTransaction
 
 from mpp.methods.tempo.fee_payer_envelope import (
-    FEE_PAYER_ENVELOPE_TYPE_ID,
     decode_fee_payer_envelope,
     encode_fee_payer_envelope,
 )

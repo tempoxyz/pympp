@@ -1463,8 +1463,8 @@ class TestVerifyTransferLogsWithMemo:
         assert intent._verify_transfer_logs(receipt_plain, request) is True
 
 
-class TestValidateTransactionPayload:
-    """Tests for _validate_transaction_payload."""
+class TestValidateTransactionPayload0x76:
+    """Tests for _validate_transaction_payload with 0x76 transactions."""
 
     CURRENCY = "0x20c0000000000000000000000000000000000000"
     RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
