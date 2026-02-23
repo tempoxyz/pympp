@@ -6,11 +6,15 @@ on:
   pull_request:
     branches: [main, master]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test]
+    needs: [lint, test, package]
     runs-on: ubuntu-latest
     steps:
       - run: |
@@ -19,9 +23,33 @@ jobs:
             exit 1
           fi
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run pyright
+
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
 
@@ -37,11 +65,25 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Lint
-        run: uv run ruff check .
-
-      - name: Format check
-        run: uv run ruff format --check .
-
       - name: Run tests
-        run: uv run pytest -v
+        run: uv run pytest -v --cov=mpp --cov-report=term-missing --cov-fail-under=90
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Build package
+        run: uv run python -m build
+
+      - name: Validate package
+        run: uv run twine check --strict dist/*

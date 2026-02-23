@@ -68,5 +68,5 @@ def transform_request(
         The transformed request.
     """
     if hasattr(method, "transform_request"):
-        return method.transform_request(request, credential)
+        return method.transform_request(request, credential)  # type: ignore[union-attr]
     return request

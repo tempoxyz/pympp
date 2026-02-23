@@ -168,6 +168,12 @@ class ChargeIntent:
             await self._http_client.aclose()
             self._http_client = None
 
+    def _get_rpc_url(self) -> str:
+        """Return the RPC URL, raising if not configured."""
+        if self.rpc_url is None:
+            raise VerificationError("No rpc_url configured on ChargeIntent")
+        return self.rpc_url
+
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create an HTTP client."""
         if self._http_client is None:
@@ -224,8 +230,9 @@ class ChargeIntent:
         """Verify a credential with a transaction hash."""
         client = await self._get_client()
 
+        rpc_url = self._get_rpc_url()
         response = await client.post(
-            self.rpc_url,
+            rpc_url,
             json={
                 "jsonrpc": "2.0",
                 "method": "eth_getTransactionReceipt",
@@ -365,8 +372,9 @@ class ChargeIntent:
                 if not raw_tx:
                     raise VerificationError("Fee payer returned no signed transaction")
 
+        rpc_url = self._get_rpc_url()
         response = await client.post(
-            self.rpc_url,
+            rpc_url,
             json={
                 "jsonrpc": "2.0",
                 "method": "eth_sendRawTransaction",
@@ -387,7 +395,7 @@ class ChargeIntent:
         receipt_data = None
         for attempt in range(MAX_RECEIPT_RETRY_ATTEMPTS):
             receipt_response = await client.post(
-                self.rpc_url,
+                rpc_url,
                 json={
                     "jsonrpc": "2.0",
                     "method": "eth_getTransactionReceipt",

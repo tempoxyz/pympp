@@ -119,7 +119,7 @@ def pay(
     ) -> Callable[P, Awaitable[R]]:
         @wraps(handler)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-            meta = kwargs.pop("_meta", None)
+            meta: dict[str, Any] | None = kwargs.pop("_meta", None)  # type: ignore[arg-type]
 
             if callable(request):
                 request_params = request(*args, **kwargs)
