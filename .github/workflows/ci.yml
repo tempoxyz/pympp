@@ -51,10 +51,15 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
+      - name: Add venv to PATH
+        if: matrix.python-version == '3.12'
+        run: echo "$PWD/.venv/bin" >> $GITHUB_PATH
+
       - name: Type check
         if: matrix.python-version == '3.12'
-        timeout-minutes: 5
-        run: uv run pyright
+        uses: jakebailey/pyright-action@v3
+        with:
+          version: PATH
 
       - name: Run tests
         run: uv run pytest -v --cov=mpp --cov-report=term-missing --cov-fail-under=90
