@@ -488,7 +488,7 @@ class TestSponsoredTransfer:
 
         assert credential.challenge.id == "test-sponsored"
         assert credential.payload["type"] == "transaction"
-        assert credential.payload["signature"].startswith("0x76")
+        assert credential.payload["signature"].startswith("0x78")
 
     @pytest.mark.asyncio
     async def test_server_submits_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
@@ -602,7 +602,6 @@ class TestCosignAsFeePayer:
         with_memo: str | None = None,
     ) -> str:
         """Build a client-signed fee-payer-awaiting transaction."""
-        import attrs
         from pytempo import Call, TempoTransaction
 
         if with_memo:
@@ -631,8 +630,10 @@ class TestCosignAsFeePayer:
         )
 
         signed = tx.sign(TEST_PRIVATE_KEY)
-        signed = attrs.evolve(signed, fee_payer_signature=b"\x00")
-        return "0x" + signed.encode().hex()
+
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        return "0x" + encode_fee_payer_envelope(signed).hex()
 
     def test_cosign_roundtrip(self) -> None:
         """Should successfully co-sign a valid client transaction."""
@@ -653,7 +654,7 @@ class TestCosignAsFeePayer:
         assert len(result) > len(raw_tx)
 
     def test_cosign_rejects_wrong_tx_type(self) -> None:
-        """Should reject transactions that aren't type 0x76."""
+        """Should reject transactions that aren't type 0x78."""
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
         intent = ChargeIntent(rpc_url="https://rpc.test")
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
@@ -755,6 +756,134 @@ class TestCosignAsFeePayer:
 
         result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
+
+
+class TestValidateTransactionPayload:
+    """Tests for _validate_transaction_payload with both 0x76 and 0x78."""
+
+    def _build_0x78_envelope(
+        self,
+        currency: str = "0x20c0000000000000000000000000000000000000",
+        recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        amount: int = 1000000,
+    ) -> str:
+        """Build a 0x78 fee payer envelope."""
+        from pytempo import Call, TempoTransaction
+
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        selector = "a9059cbb"
+        to_padded = recipient[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+
+        tx = TempoTransaction.create(
+            chain_id=42431,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            fee_token=None,
+            awaiting_fee_payer=True,
+            valid_before=9999999999,
+            calls=(Call.create(to=currency, value=0, data=transfer_data),),
+        )
+        signed = tx.sign(TEST_PRIVATE_KEY)
+        return "0x" + encode_fee_payer_envelope(signed).hex()
+
+    def _build_0x76_tx(
+        self,
+        currency: str = "0x20c0000000000000000000000000000000000000",
+        recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        amount: int = 1000000,
+    ) -> str:
+        """Build a standard 0x76 transaction."""
+        import attrs
+        from pytempo import Call, TempoTransaction
+
+        selector = "a9059cbb"
+        to_padded = recipient[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+
+        tx = TempoTransaction.create(
+            chain_id=42431,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=0,
+            fee_token=currency,
+            calls=(Call.create(to=currency, value=0, data=transfer_data),),
+        )
+        signed = tx.sign(TEST_PRIVATE_KEY)
+        signed = attrs.evolve(signed, fee_payer_signature=b"\x00")
+        return "0x" + signed.encode().hex()
+
+    def test_accepts_0x78_with_matching_call(self) -> None:
+        """Should accept a 0x78 envelope with a valid payment call."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        sig = self._build_0x78_envelope()
+        # Should not raise
+        intent._validate_transaction_payload(sig, request)
+
+    def test_rejects_0x78_with_wrong_amount(self) -> None:
+        """Should reject a 0x78 envelope with mismatched amount."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="9999999",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        sig = self._build_0x78_envelope(amount=1000000)
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
+
+    def test_rejects_0x78_with_wrong_currency(self) -> None:
+        """Should reject a 0x78 envelope targeting wrong currency."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0xDEAD000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        sig = self._build_0x78_envelope()
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
+
+    def test_accepts_0x76_with_matching_call(self) -> None:
+        """Should still accept standard 0x76 transactions."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        sig = self._build_0x76_tx()
+        # Should not raise
+        intent._validate_transaction_payload(sig, request)
+
+    def test_silently_skips_unknown_prefix(self) -> None:
+        """Should silently skip transactions with unrecognized type prefix."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            expires="2030-01-20T12:00:00Z",
+        )
+        # 0x02 prefix — should silently skip (not raise)
+        intent._validate_transaction_payload("0x02abcdef", request)
 
 
 class TestFeePayerPropagation:

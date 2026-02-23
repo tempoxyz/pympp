@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from mpp import Challenge, Credential, Receipt
-from mpp.methods.tempo import ChargeIntent, tempo
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID
 from mpp.server import Mpp
 
@@ -19,11 +19,17 @@ DESTINATION = os.environ.get(
     "PAYMENT_DESTINATION", "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 )
 
+# Optional: set FEE_PAYER_KEY to sponsor gas for clients.
+# When set, the server co-signs 0x78 fee payer envelopes locally.
+fee_payer_key = os.environ.get("FEE_PAYER_KEY")
+fee_payer = TempoAccount.from_key(fee_payer_key) if fee_payer_key else None
+
 server = Mpp.create(
     method=tempo(
         chain_id=TESTNET_CHAIN_ID,
         currency=PATH_USD,
         recipient=DESTINATION,
+        fee_payer=fee_payer,
         intents={"charge": ChargeIntent()},
     ),
 )
@@ -42,6 +48,7 @@ async def paid_endpoint(request: Request):
         authorization=request.headers.get("Authorization"),
         amount="0.001",
         chain_id=TESTNET_CHAIN_ID,
+        fee_payer=fee_payer is not None,
     )
 
     if isinstance(result, Challenge):

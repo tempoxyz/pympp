@@ -105,6 +105,7 @@ class Mpp:
         memo: str | None = None,
         fee_payer: bool = False,
         chain_id: int | None = None,
+        extra: dict[str, str] | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
@@ -147,6 +148,13 @@ class Mpp:
             "expires": expires,
         }
 
+        # Optional server-provided metadata that will be echoed back by the client
+        # because it is embedded in the base64url-encoded `request`.
+        if extra is not None:
+            if any((not isinstance(k, str) or not isinstance(v, str)) for k, v in extra.items()):
+                raise ValueError("extra must be a dict[str, str]")
+            request["extra"] = extra
+
         resolved_chain_id = chain_id
         if resolved_chain_id is None:
             resolved_chain_id = getattr(self.method, "chain_id", None)
@@ -181,6 +189,7 @@ class Mpp:
         description: str | None = None,
         expires_in: timedelta | None = None,
         chain_id: int | None = None,
+        extra: dict[str, str] | None = None,
     ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
         Callable[[Any], Awaitable[R | Any]],
@@ -246,6 +255,11 @@ class Mpp:
                 }
                 if expires is not None:
                     request["expires"] = expires
+
+                if extra is not None:
+                    if any((not isinstance(k, str) or not isinstance(v, str)) for k, v in extra.items()):
+                        raise ValueError("extra must be a dict[str, str]")
+                    request["extra"] = extra
 
                 resolved_chain_id = chain_id
                 if resolved_chain_id is None:

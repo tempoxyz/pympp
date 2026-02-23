@@ -28,6 +28,13 @@ def parse_args() -> argparse.Namespace:
         help="Request body data",
     )
     parser.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        default=[],
+        help='Custom header "Key: Value" (repeatable)',
+    )
+    parser.add_argument(
         "--key",
         help="Tempo private key (or set TEMPO_PRIVATE_KEY)",
     )
@@ -49,11 +56,17 @@ async def run(args: argparse.Namespace) -> int:
     rpc_url = args.rpc_url or os.environ.get("TEMPO_RPC_URL")
     method = tempo(account=account, rpc_url=rpc_url or "https://rpc.tempo.xyz", intents={"charge": ChargeIntent()})
 
+    headers = {}
+    for h in args.header:
+        key, _, value = h.partition(":")
+        headers[key.strip()] = value.strip()
+
     async with Client(methods=[method]) as client:
         response = await client.request(
             args.method,
             args.url,
             content=args.data,
+            headers=headers if headers else None,
         )
 
         if response.status_code >= 400:
