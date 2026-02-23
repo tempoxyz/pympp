@@ -378,7 +378,7 @@ class TestPayDecorator:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:
-            await my_tool("test")
+            await my_tool("test")  # type: ignore[call-arg]
 
         error = exc_info.value.to_jsonrpc_error()
         assert error["code"] == CODE_PAYMENT_REQUIRED
@@ -412,7 +412,7 @@ class TestPayDecorator:
             source="0x1234",
         )
 
-        result = await my_tool("test", _meta=mcp_credential.to_meta())
+        result = await my_tool("test", _meta=mcp_credential.to_meta())  # type: ignore[call-arg]
         assert result == "Result: test, paid by 0x1234"
 
     async def test_raises_malformed_credential_error(self) -> None:
@@ -431,7 +431,7 @@ class TestPayDecorator:
             return f"Result: {query}"
 
         with pytest.raises(MalformedCredentialError) as exc_info:
-            await my_tool("test", _meta={META_CREDENTIAL: {"invalid": "data"}})
+            await my_tool("test", _meta={META_CREDENTIAL: {"invalid": "data"}})  # type: ignore[call-arg]
 
         error = exc_info.value.to_jsonrpc_error()
         assert error["code"] == CODE_MALFORMED_CREDENTIAL
@@ -461,7 +461,7 @@ class TestPayDecorator:
         )
 
         with pytest.raises(PaymentVerificationError) as exc_info:
-            await my_tool("test", _meta=mcp_credential.to_meta())
+            await my_tool("test", _meta=mcp_credential.to_meta())  # type: ignore[call-arg]
 
         error = exc_info.value.to_jsonrpc_error()
         assert error["code"] == CODE_PAYMENT_VERIFICATION_FAILED
@@ -483,7 +483,7 @@ class TestPayDecorator:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:
-            await my_tool("hello")
+            await my_tool("hello")  # type: ignore[call-arg]
 
         challenge = exc_info.value.challenges[0]
         assert challenge.request == {"amount": "50"}
@@ -505,7 +505,7 @@ class TestPayDecorator:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:
-            await my_tool("test")
+            await my_tool("test")  # type: ignore[call-arg]
 
         challenge = exc_info.value.challenges[0]
         assert challenge.realm == "mcp.example.com"
@@ -535,7 +535,7 @@ class TestPayDecorator:
             return f"Result: {query}"
 
         with pytest.raises(PaymentRequiredError) as exc_info:
-            await my_tool("test")
+            await my_tool("test")  # type: ignore[call-arg]
 
         challenge = exc_info.value.challenges[0]
         assert challenge.realm == "localhost"
