@@ -1,7 +1,7 @@
 [project]
 name = "pympp"
 version = "0.3.0"
-description = "HTTP 402 Payment Authentication for Python"
+description = "Python SDK for the Machine Payments Protocol (MPP)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
