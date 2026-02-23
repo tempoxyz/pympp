@@ -449,9 +449,7 @@ class ChargeIntent:
 
         try:
             all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
-            decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(
-                all_bytes
-            )
+            decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(all_bytes)
         except Exception as err:
             raise VerificationError("Failed to deserialize client transaction") from err
 
@@ -466,9 +464,7 @@ class ChargeIntent:
 
         nonce_key = _int(decoded[6])
         if nonce_key != (1 << 256) - 1:
-            raise VerificationError(
-                "Fee payer envelope must use expiring nonce key (U256::MAX)"
-            )
+            raise VerificationError("Fee payer envelope must use expiring nonce key (U256::MAX)")
 
         valid_before_raw = decoded[8]
         if not valid_before_raw:

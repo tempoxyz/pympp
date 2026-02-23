@@ -257,7 +257,9 @@ class Mpp:
                     request["expires"] = expires
 
                 if extra is not None:
-                    if any((not isinstance(k, str) or not isinstance(v, str)) for k, v in extra.items()):
+                    if any(
+                        not isinstance(k, str) or not isinstance(v, str) for k, v in extra.items()
+                    ):
                         raise ValueError("extra must be a dict[str, str]")
                     request["extra"] = extra
 
