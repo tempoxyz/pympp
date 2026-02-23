@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -456,6 +457,27 @@ class ChargeIntent:
 
         def _int(b: bytes) -> int:
             return int.from_bytes(b, "big") if b else 0
+
+        # Fee-payer invariants (matches mpp-rs cosign_fee_payer_transaction)
+        if decoded[10]:
+            raise VerificationError(
+                "Fee payer transaction must not include fee_token (server sets it)"
+            )
+
+        nonce_key = _int(decoded[6])
+        if nonce_key != (1 << 256) - 1:
+            raise VerificationError(
+                "Fee payer envelope must use expiring nonce key (U256::MAX)"
+            )
+
+        valid_before_raw = decoded[8]
+        if not valid_before_raw:
+            raise VerificationError("Fee payer envelope must include valid_before")
+        valid_before = _int(valid_before_raw)
+        if valid_before <= int(time.time()):
+            raise VerificationError(
+                f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
+            )
 
         calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
 

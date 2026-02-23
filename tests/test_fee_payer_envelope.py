@@ -241,6 +241,76 @@ class TestEncoderDecoderIntegration:
         with pytest.raises(VerificationError, match="Sender address does not match"):
             intent._cosign_as_fee_payer(tampered_hex, CURRENCY)
 
+    def test_cosign_rejects_fee_token_in_envelope(self) -> None:
+        """Server should reject an envelope that includes fee_token (server sets it)."""
+        from mpp.methods.tempo import TempoAccount, tempo
+        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.server.intent import VerificationError
+
+        signed = _make_signed_tx(fee_token=CURRENCY)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="must not include fee_token"):
+            intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+
+    def test_cosign_rejects_non_expiring_nonce_key(self) -> None:
+        """Server should reject an envelope with a non-expiring nonce key."""
+        from mpp.methods.tempo import TempoAccount, tempo
+        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.server.intent import VerificationError
+
+        signed = _make_signed_tx()
+        encoded = encode_fee_payer_envelope(signed)
+
+        # Tamper nonce_key (index 6) to a non-MAX value
+        decoded_fields = rlp.decode(encoded[1:])
+        decoded_fields[6] = (42).to_bytes(1, "big")
+        tampered = bytes([0x78]) + rlp.encode(decoded_fields)
+        tampered_hex = "0x" + tampered.hex()
+
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="expiring nonce key"):
+            intent._cosign_as_fee_payer(tampered_hex, CURRENCY)
+
+    def test_cosign_rejects_missing_valid_before(self) -> None:
+        """Server should reject an envelope without valid_before."""
+        from mpp.methods.tempo import TempoAccount, tempo
+        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.server.intent import VerificationError
+
+        signed = _make_signed_tx(valid_before=None)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="must include valid_before"):
+            intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+
+    def test_cosign_rejects_expired_valid_before(self) -> None:
+        """Server should reject an envelope with valid_before in the past."""
+        from mpp.methods.tempo import TempoAccount, tempo
+        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.server.intent import VerificationError
+
+        signed = _make_signed_tx(valid_before=1)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        with pytest.raises(VerificationError, match="expired"):
+            intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+
     def test_encode_decode_with_fee_token(self) -> None:
         """Should correctly roundtrip when fee_token is set."""
         signed = _make_signed_tx(fee_token=CURRENCY)
