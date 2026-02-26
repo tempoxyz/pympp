@@ -1,13 +1,13 @@
 # pympp
 
-Python SDK for the [**Machine Payments Protocol**](https://mpp.sh)
+Python SDK for the [**Machine Payments Protocol**](https://mpp.dev)
 
 [![PyPI](https://img.shields.io/pypi/v/pympp.svg)](https://pypi.org/project/pympp/)
 [![License](https://img.shields.io/pypi/l/pympp.svg)](LICENSE)
 
 ## Documentation
 
-Full documentation, API reference, and guides are available at **[mpp.sh/sdk/python](https://mpp.sh/sdk/python)**.
+Full documentation, API reference, and guides are available at **[mpp.dev/sdk/python](https://mpp.dev/sdk/python)**.
 
 ## Install
 
@@ -46,7 +46,7 @@ from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 account = TempoAccount.from_key("0x...")
 
 async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
-    response = await client.get("https://mpp.sh/api/ping/paid")
+    response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
 ## Examples
