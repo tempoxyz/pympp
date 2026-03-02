@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from mpp._expires import days, hours, minutes, months, seconds, weeks, years
+from mpp._expires import _to_iso, days, hours, minutes, months, seconds, weeks, years
 
 ISO_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
@@ -75,3 +75,42 @@ class TestExpiresHelpers:
             result = fn(1)
             ms_part = result.split(".")[1].rstrip("Z")
             assert len(ms_part) == 3
+
+
+class TestToIso:
+    """_to_iso should use isoformat() for robust timezone handling."""
+
+    def test_utc_datetime_ends_with_z(self) -> None:
+        """UTC datetime should produce timestamp ending with Z."""
+        dt = datetime(2025, 6, 15, 12, 30, 45, 123456, tzinfo=UTC)
+        result = _to_iso(dt)
+        assert result.endswith("Z")
+        assert "+00:00" not in result
+
+    def test_millisecond_precision(self) -> None:
+        """Output should have exactly millisecond precision."""
+        dt = datetime(2025, 1, 1, 0, 0, 0, 500000, tzinfo=UTC)
+        result = _to_iso(dt)
+        ms_part = result.split(".")[1].rstrip("Z")
+        assert len(ms_part) == 3
+
+    def test_zero_microseconds(self) -> None:
+        """Zero microseconds should produce .000Z."""
+        dt = datetime(2025, 1, 1, 0, 0, 0, 0, tzinfo=UTC)
+        result = _to_iso(dt)
+        assert result == "2025-01-01T00:00:00.000Z"
+
+    def test_sub_millisecond_truncation(self) -> None:
+        """Microseconds should be truncated to milliseconds."""
+        dt = datetime(2025, 6, 15, 10, 30, 0, 123456, tzinfo=UTC)
+        result = _to_iso(dt)
+        assert ".123Z" in result
+
+    def test_roundtrip_parse(self) -> None:
+        """Output should be parseable back to a datetime."""
+        dt = datetime(2025, 3, 15, 8, 45, 30, 789000, tzinfo=UTC)
+        result = _to_iso(dt)
+        parsed = datetime.fromisoformat(result.replace("Z", "+00:00"))
+        assert parsed.year == 2025
+        assert parsed.month == 3
+        assert parsed.second == 30

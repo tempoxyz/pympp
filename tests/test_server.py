@@ -907,3 +907,131 @@ class TestMppChainIdAutoEmit:
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.request["methodDetails"]["chainId"] == 4217
+
+
+class TestCrossRealmPrevention:
+    """After HMAC verification, assert echoed realm/method/intent match."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_realm(self) -> None:
+        """Credential issued for realm-A should be rejected at realm-B."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        shared_secret = "shared-key"
+        request = {"amount": "1000"}
+
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="realm-A",
+            secret_key=shared_secret,
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="realm-B",
+            secret_key=shared_secret,
+        )
+        assert isinstance(result, Challenge), "Should reject cross-realm credential"
+
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_method(self) -> None:
+        """Credential for method-A should be rejected when server expects method-B."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        secret = "test-secret"
+        request = {"amount": "1000"}
+
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            method="tempo",
+            secret_key=secret,
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="r",
+            method="stripe",
+            secret_key=secret,
+        )
+        assert isinstance(result, Challenge), "Should reject wrong method"
+
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_intent(self) -> None:
+        """Credential for intent 'charge' should be rejected when server expects 'session'."""
+
+        class SessionIntent:
+            name = "session"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        secret = "test-secret"
+        request = {"amount": "1000"}
+
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            intent="charge",
+            secret_key=secret,
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=SessionIntent(),
+            request=request,
+            realm="r",
+            secret_key=secret,
+        )
+        assert isinstance(result, Challenge), "Should reject wrong intent"
+
+    @pytest.mark.asyncio
+    async def test_accepts_matching_realm_method_intent(self) -> None:
+        """Credential should be accepted when realm/method/intent all match."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0xOK")
+
+        secret = "test-secret"
+        request = {"amount": "1000"}
+
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            method="tempo",
+            intent="charge",
+            secret_key=secret,
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="r",
+            method="tempo",
+            secret_key=secret,
+        )
+        assert isinstance(result, tuple), "Should accept matching credential"
+        _, receipt = result
+        assert receipt.reference == "0xOK"
