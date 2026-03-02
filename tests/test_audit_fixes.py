@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from mpp import (
-    ChallengeEcho,
     Challenge,
     Credential,
     Receipt,
@@ -22,7 +21,7 @@ from mpp import (
 from mpp._body_digest import compute as body_digest_compute
 from mpp._expires import _to_iso
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential
-from mpp.extensions.mcp.verify import create_challenge, verify_or_challenge
+from mpp.extensions.mcp.verify import verify_or_challenge
 from mpp.server.verify import verify_or_challenge as http_verify_or_challenge
 from tests import TEST_SECRET, make_bound_credential
 
@@ -64,9 +63,7 @@ class TestPY01_MCPDigestOpaque:
 
     def test_mcp_challenge_to_dict_omits_none_digest_opaque(self) -> None:
         """to_dict should omit digest/opaque when None."""
-        ch = MCPChallenge(
-            id="test", realm="r", method="tempo", intent="charge", request={}
-        )
+        ch = MCPChallenge(id="test", realm="r", method="tempo", intent="charge", request={})
         d = ch.to_dict()
         assert "digest" not in d
         assert "opaque" not in d
@@ -449,9 +446,7 @@ class TestPY06_MCPCredentialToCore:
         core = cred.to_core()
         assert core.challenge.opaque is not None
         # Decode to verify contents
-        decoded = json.loads(
-            base64.urlsafe_b64decode(core.challenge.opaque + "==").decode()
-        )
+        decoded = json.loads(base64.urlsafe_b64decode(core.challenge.opaque + "==").decode())
         assert decoded == {"pi": "pi_123"}
 
     def test_to_core_opaque_is_sorted(self) -> None:

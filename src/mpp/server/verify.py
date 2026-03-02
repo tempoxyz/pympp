@@ -142,11 +142,35 @@ async def verify_or_challenge(
 
     # Assert echoed challenge fields match server's values to prevent cross-realm attacks
     if echo.realm != realm:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
     if echo.method != method_name:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
     if echo.intent != intent.name:
-        return _create_challenge(method_name, intent.name, request, realm, secret_key, description, meta)
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     receipt: Receipt = await intent.verify(credential, request)
 
