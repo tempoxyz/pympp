@@ -45,6 +45,8 @@ class MCPChallenge:
     request: dict[str, Any]
     expires: str | None = None
     description: str | None = None
+    digest: str | None = None
+    opaque: dict[str, str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict for wire format."""
@@ -59,6 +61,10 @@ class MCPChallenge:
             result["expires"] = self.expires
         if self.description is not None:
             result["description"] = self.description
+        if self.digest is not None:
+            result["digest"] = self.digest
+        if self.opaque is not None:
+            result["opaque"] = self.opaque
         return result
 
     @classmethod
@@ -72,6 +78,8 @@ class MCPChallenge:
             request=data["request"],
             expires=data.get("expires"),
             description=data.get("description"),
+            digest=data.get("digest"),
+            opaque=data.get("opaque"),
         )
 
     def to_core(self) -> Challenge:
@@ -168,6 +176,11 @@ class MCPCredential:
         request_json = json.dumps(self.challenge.request, separators=(",", ":"), sort_keys=True)
         request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
 
+        opaque_b64 = None
+        if self.challenge.opaque is not None:
+            opaque_json = json.dumps(self.challenge.opaque, separators=(",", ":"), sort_keys=True)
+            opaque_b64 = base64.urlsafe_b64encode(opaque_json.encode()).decode().rstrip("=")
+
         echo = ChallengeEcho(
             id=self.challenge.id,
             realm=self.challenge.realm,
@@ -175,6 +188,8 @@ class MCPCredential:
             intent=self.challenge.intent,
             request=request_b64,
             expires=self.challenge.expires,
+            digest=self.challenge.digest,
+            opaque=opaque_b64,
         )
         return Credential(
             challenge=echo,

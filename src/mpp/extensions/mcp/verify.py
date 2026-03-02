@@ -147,6 +147,8 @@ async def verify_or_challenge(
         intent=echoed.intent,
         request=echoed.request,
         expires=echoed.expires,
+        digest=echoed.digest,
+        opaque=echoed.opaque,
     )
     if not _constant_time_equal(echoed.id, expected_id):
         return create_challenge(
