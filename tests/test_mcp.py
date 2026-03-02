@@ -2,7 +2,7 @@
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -40,10 +40,18 @@ def _make_bound_mcp_challenge(
     description: str | None = None,
     digest: str | None = None,
     opaque: dict[str, str] | None = None,
+    _no_default_expires: bool = False,
 ) -> MCPChallenge:
-    """Create an MCPChallenge with an HMAC-bound ID for testing."""
+    """Create an MCPChallenge with an HMAC-bound ID for testing.
+
+    Defaults ``expires`` to 1 hour in the future so credentials pass
+    expiry enforcement.  Pass ``_no_default_expires=True`` to test the
+    missing-expires rejection path.
+    """
     if request is None:
         request = {"amount": "1000"}
+    if expires is None and not _no_default_expires:
+        expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     challenge_id = generate_challenge_id(
         secret_key=secret_key,
         realm=realm,
@@ -932,6 +940,100 @@ class TestMCPChallengeExpiryEnforcement:
         assert isinstance(result, tuple)
         _, receipt = result
         assert receipt.status == "success"
+
+
+class TestMCPExpiryFailClosed:
+    """Tests for fail-closed expiry enforcement in MCP verify_or_challenge."""
+
+    async def test_rejects_missing_expires(self) -> None:
+        """Should return a new challenge when expires is absent."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        challenge = _make_bound_mcp_challenge(
+            request={"amount": "1000"},
+            _no_default_expires=True,
+        )
+        mcp_credential = MCPCredential(
+            challenge=challenge,
+            payload={"signature": "0xabc"},
+        )
+
+        result = await verify_or_challenge(
+            meta=mcp_credential.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        assert isinstance(result, MCPChallenge)
+
+    async def test_rejects_malformed_expires(self) -> None:
+        """Should return a new challenge when expires is unparseable."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        challenge = _make_bound_mcp_challenge(
+            request={"amount": "1000"},
+            expires="not-a-date",
+        )
+        mcp_credential = MCPCredential(
+            challenge=challenge,
+            payload={"signature": "0xabc"},
+        )
+
+        result = await verify_or_challenge(
+            meta=mcp_credential.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        assert isinstance(result, MCPChallenge)
+
+
+class TestMCPCrossEndpointReplay:
+    """Tests for cross-endpoint credential replay prevention in MCP."""
+
+    async def test_rejects_credential_with_wrong_intent(self) -> None:
+        """Should reject a credential whose echoed intent doesn't match."""
+
+        class ChargeIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        # Create a credential for a different intent
+        challenge = _make_bound_mcp_challenge(
+            request={"amount": "1000"},
+            intent="session",
+        )
+        mcp_credential = MCPCredential(
+            challenge=challenge,
+            payload={"signature": "0xabc"},
+        )
+
+        # Present it to the "charge" endpoint
+        result = await verify_or_challenge(
+            meta=mcp_credential.to_meta(),
+            intent=ChargeIntent(),  # type: ignore[arg-type]
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+
+        assert isinstance(result, MCPChallenge)
 
 
 class TestCreateChallenge:

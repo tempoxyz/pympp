@@ -39,6 +39,13 @@ def make_credential(
     return Credential(challenge=echo, payload=payload, source=source)
 
 
+def _default_expires() -> str:
+    """Return an expires timestamp 1 hour in the future."""
+    from datetime import UTC, datetime, timedelta
+
+    return (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+
 def make_bound_credential(
     payload: dict[str, Any],
     request: dict[str, Any],
@@ -53,9 +60,11 @@ def make_bound_credential(
     """Create a Credential with an HMAC-bound challenge ID for testing.
 
     This produces credentials that will pass stateless challenge verification
-    in verify_or_challenge().
+    in verify_or_challenge().  If no ``expires`` is provided, a default 1-hour
+    future timestamp is used so that credentials pass expiry enforcement.
     """
-    import json
+    if expires is None:
+        expires = _default_expires()
 
     challenge = Challenge.create(
         secret_key=secret_key,

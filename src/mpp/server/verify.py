@@ -139,23 +139,55 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
-    # Enforce challenge expiry from the echoed (HMAC-bound) expires field.
-    # This prevents replaying credentials after their challenge has expired.
-    if echo.expires:
-        try:
-            expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
-            if expires_dt < datetime.now(UTC):
-                return _create_challenge(
-                    method_name,
-                    intent.name,
-                    request,
-                    realm,
-                    secret_key,
-                    description,
-                    meta,
-                )
-        except ValueError:
-            pass  # Malformed expires; let intent handle it
+    # Verify the echoed intent matches this endpoint's expected intent to
+    # prevent cross-endpoint credential replay (a credential obtained from
+    # a cheap endpoint being presented to an expensive one).
+    if echo.intent != intent.name:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
+
+    # Enforce challenge expiry — fail closed.  Credentials without an
+    # expires field or with an unparseable value are rejected outright so
+    # that attackers cannot bypass expiry by omitting or corrupting it.
+    if not echo.expires:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
+    try:
+        expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+    except ValueError:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
+    if expires_dt < datetime.now(UTC):
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
 
     receipt: Receipt = await intent.verify(credential, request)
 
@@ -173,8 +205,15 @@ def _create_challenge(
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID."""
     if "expires" not in request:
-        expires = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
-        request = {**request, "expires": expires.isoformat().replace("+00:00", "Z")}
+        expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
+        expires_str = expires_dt.isoformat().replace("+00:00", "Z")
+        request = {**request, "expires": expires_str}
+
+    # Guard against non-string values that would cause a TypeError in
+    # generate_challenge_id().
+    expires = request.get("expires")
+    if not isinstance(expires, str):
+        expires = None
 
     return Challenge.create(
         secret_key=secret_key,
@@ -182,7 +221,7 @@ def _create_challenge(
         method=method,
         intent=intent_name,
         request=request,
-        expires=request.get("expires"),
+        expires=expires,
         description=description,
         meta=meta,
     )

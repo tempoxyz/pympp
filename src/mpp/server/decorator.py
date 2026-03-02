@@ -39,19 +39,22 @@ def _is_insecure_request(request: Any) -> bool:
     """Check if the request arrived over plain HTTP (not TLS).
 
     Supports Starlette/FastAPI (request.url.scheme), Django (request.scheme),
-    and X-Forwarded-Proto behind reverse proxies.
+    and X-Forwarded-Proto behind reverse proxies.  The proxy header is checked
+    first because TLS-terminating proxies (ALB, NGINX) forward plain HTTP to
+    the application, making ``request.url.scheme`` unreliable.
     """
+    # Check X-Forwarded-Proto first — behind reverse proxies the inner
+    # scheme is always HTTP even when the client used HTTPS.
+    if hasattr(request, "headers"):
+        proto = request.headers.get("x-forwarded-proto")
+        if proto:
+            return proto.lower() != "https"
     # Starlette/FastAPI: request.url.scheme
     if hasattr(request, "url") and hasattr(request.url, "scheme"):
         return request.url.scheme == "http"
     # Django: request.scheme
     if hasattr(request, "scheme"):
         return request.scheme == "http"
-    # Check X-Forwarded-Proto header (common behind reverse proxies)
-    if hasattr(request, "headers"):
-        proto = request.headers.get("x-forwarded-proto")
-        if proto:
-            return proto.lower() != "https"
     return False
 
 
@@ -90,6 +93,8 @@ def wrap_payment_handler[R](
     handler: Callable[..., Awaitable[R]],
     verify_fn: Callable[[str | None, Any], Awaitable[Challenge | tuple[Credential, Receipt]]],
     realm_fn: Callable[[], str],
+    *,
+    allow_insecure: bool = False,
 ) -> Callable[..., Awaitable[R | Any]]:
     """Wrap a handler with the payment challenge/verify flow.
 
@@ -105,6 +110,7 @@ def wrap_payment_handler[R](
         verify_fn: Called with ``(authorization, request_obj)``; must return
             a ``Challenge`` or ``(Credential, Receipt)`` tuple.
         realm_fn: Returns the realm string for challenge responses.
+        allow_insecure: If True, allow plain HTTP (for dev/testing).
     """
     sig = inspect.signature(handler)
     params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
@@ -127,11 +133,20 @@ def wrap_payment_handler[R](
 
         authorization = get_authorization(request_obj)
 
-        if _is_insecure_request(request_obj):
-            logger.warning(
-                "Payment challenge/credential exchange over plain HTTP. "
-                "The spec requires TLS (§11). Use HTTPS in production."
-            )
+        if _is_insecure_request(request_obj) and not allow_insecure:
+            try:
+                from starlette.responses import JSONResponse
+
+                return JSONResponse(
+                    {"error": "TLS required for payment endpoints (spec §11)"},
+                    status_code=400,
+                )
+            except ImportError:
+                return {
+                    "_mpp_error": True,
+                    "status": 400,
+                    "body": '{"error": "TLS required for payment endpoints (spec §11)"}',
+                }
 
         result = await verify_fn(authorization, request_obj)
 
@@ -155,6 +170,7 @@ def pay[R](
     secret_key: str | None = None,
     method: str | None = None,
     description: str | None = None,
+    allow_insecure: bool = False,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
     Callable[[Any], Awaitable[R | Any]],
@@ -215,6 +231,8 @@ def pay[R](
                 description=description,
             )
 
-        return wrap_payment_handler(handler, _verify, lambda: resolved_realm)
+        return wrap_payment_handler(
+            handler, _verify, lambda: resolved_realm, allow_insecure=allow_insecure
+        )
 
     return decorator

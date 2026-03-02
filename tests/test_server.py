@@ -274,6 +274,97 @@ class TestChallengeExpiryEnforcement:
         _, receipt = result
         assert receipt.status == "success"
 
+    @pytest.mark.asyncio
+    async def test_rejects_missing_expires(self) -> None:
+        """Should reject credentials that lack an expires field (fail closed)."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        # Construct a credential with no expires but a valid HMAC
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="",  # empty string to force falsy expires
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_expires(self) -> None:
+        """Should reject credentials with unparseable expires (fail closed)."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="not-a-date",
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+
+class TestCrossEndpointReplay:
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_intent(self) -> None:
+        """Should reject a credential whose echoed intent doesn't match the endpoint."""
+
+        @intent(name="charge")
+        async def charge_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @intent(name="session")
+        async def session_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0xsession")
+
+        # Create a credential for the "session" intent
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "100"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            intent="session",
+        )
+        auth_header = credential.to_authorization()
+
+        # Present it to the "charge" endpoint — should be rejected
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=charge_intent,
+            request={"amount": "100"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.intent == "charge"
+
 
 class MockRequest:
     """Mock request object for testing."""
@@ -287,6 +378,143 @@ class DjangoStyleRequest:
 
     def __init__(self, authorization: str | None = None) -> None:
         self.META = {"HTTP_AUTHORIZATION": authorization} if authorization else {}
+
+
+class _Url:
+    def __init__(self, scheme: str) -> None:
+        self.scheme = scheme
+
+
+class StarletteStyleRequest:
+    """Mock Starlette-style request with url.scheme and headers."""
+
+    def __init__(
+        self,
+        scheme: str = "https",
+        authorization: str | None = None,
+        forwarded_proto: str | None = None,
+    ) -> None:
+        self.url = _Url(scheme)
+        self.headers: dict[str, str] = {}
+        if authorization:
+            self.headers["authorization"] = authorization
+        if forwarded_proto:
+            self.headers["x-forwarded-proto"] = forwarded_proto
+
+
+class TestIsInsecureRequest:
+    """Tests for _is_insecure_request helper."""
+
+    def test_https_is_secure(self) -> None:
+        from mpp.server.decorator import _is_insecure_request
+
+        assert _is_insecure_request(StarletteStyleRequest(scheme="https")) is False
+
+    def test_http_is_insecure(self) -> None:
+        from mpp.server.decorator import _is_insecure_request
+
+        assert _is_insecure_request(StarletteStyleRequest(scheme="http")) is True
+
+    def test_forwarded_proto_https_overrides_http_scheme(self) -> None:
+        """Behind a TLS-terminating proxy, X-Forwarded-Proto should be trusted."""
+        from mpp.server.decorator import _is_insecure_request
+
+        req = StarletteStyleRequest(scheme="http", forwarded_proto="https")
+        assert _is_insecure_request(req) is False
+
+    def test_forwarded_proto_http_is_insecure(self) -> None:
+        from mpp.server.decorator import _is_insecure_request
+
+        req = StarletteStyleRequest(scheme="https", forwarded_proto="http")
+        assert _is_insecure_request(req) is True
+
+
+class TestTLSEnforcement:
+    """Tests for server-side TLS enforcement (reject plain HTTP)."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_plain_http(self) -> None:
+        """Should return 400 for plain HTTP requests."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(
+            req: StarletteStyleRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(StarletteStyleRequest(scheme="http"))
+
+        if HAS_STARLETTE:
+            assert result.status_code == 400
+        else:
+            assert isinstance(result, dict)
+            assert result["status"] == 400
+
+    @pytest.mark.asyncio
+    async def test_allows_plain_http_with_allow_insecure(self) -> None:
+        """Should proceed over plain HTTP when allow_insecure=True."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            allow_insecure=True,
+        )
+        async def handler(
+            req: StarletteStyleRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        # No auth header → should get a 402 challenge, not a 400 TLS error
+        result = await handler(StarletteStyleRequest(scheme="http"))
+
+        if HAS_STARLETTE:
+            assert result.status_code == 402
+        else:
+            assert isinstance(result, dict)
+            assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    async def test_allows_https(self) -> None:
+        """Should proceed normally over HTTPS."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(
+            req: StarletteStyleRequest, credential: Credential, receipt: Receipt
+        ) -> dict:
+            return {"data": "paid"}
+
+        # HTTPS with no auth → should get a 402 challenge
+        result = await handler(StarletteStyleRequest(scheme="https"))
+
+        if HAS_STARLETTE:
+            assert result.status_code == 402
+        else:
+            assert isinstance(result, dict)
+            assert result["status"] == 402
 
 
 class TestWrapPaymentHandler:

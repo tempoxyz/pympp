@@ -173,23 +173,54 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
-    # Enforce challenge expiry from the echoed (HMAC-bound) expires field.
-    # This prevents replaying credentials after their challenge has expired.
-    if echoed.expires:
-        try:
-            expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
-            if expires_dt < datetime.now(UTC):
-                return create_challenge(
-                    method=method_name,
-                    intent_name=intent.name,
-                    request=request,
-                    realm=realm,
-                    secret_key=secret_key,
-                    expires_in=expires_in,
-                    description=description,
-                )
-        except ValueError:
-            pass  # Malformed expires; let intent handle it
+    # Verify the echoed intent matches this endpoint's expected intent to
+    # prevent cross-endpoint credential replay.
+    if echoed.intent != intent.name:
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
+
+    # Enforce challenge expiry — fail closed.  Credentials without an
+    # expires field or with an unparseable value are rejected outright so
+    # that attackers cannot bypass expiry by omitting or corrupting it.
+    if not echoed.expires:
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
+    try:
+        expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
+    except ValueError:
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
+    if expires_dt < datetime.now(UTC):
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
 
     from mpp.server.intent import VerificationError
 

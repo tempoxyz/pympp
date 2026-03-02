@@ -187,6 +187,7 @@ async def request(
     url: str,
     *,
     methods: Sequence[Method],
+    allow_insecure: bool = False,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -201,15 +202,19 @@ async def request(
             methods=[tempo(...)],
         )
     """
-    async with Client(methods) as client:
+    async with Client(methods, allow_insecure=allow_insecure) as client:
         return await client.request(method, url, **kwargs)
 
 
-async def get(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
+async def get(
+    url: str, *, methods: Sequence[Method], allow_insecure: bool = False, **kwargs: Any
+) -> httpx.Response:
     """Send a GET request with automatic payment handling."""
-    return await request("GET", url, methods=methods, **kwargs)
+    return await request("GET", url, methods=methods, allow_insecure=allow_insecure, **kwargs)
 
 
-async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
+async def post(
+    url: str, *, methods: Sequence[Method], allow_insecure: bool = False, **kwargs: Any
+) -> httpx.Response:
     """Send a POST request with automatic payment handling."""
-    return await request("POST", url, methods=methods, **kwargs)
+    return await request("POST", url, methods=methods, allow_insecure=allow_insecure, **kwargs)
