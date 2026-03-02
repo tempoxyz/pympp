@@ -454,6 +454,8 @@ class TestTLSEnforcement:
         result = await handler(StarletteStyleRequest(scheme="http"))
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
             assert result.status_code == 400
         else:
             assert isinstance(result, dict)
@@ -483,6 +485,8 @@ class TestTLSEnforcement:
         result = await handler(StarletteStyleRequest(scheme="http"))
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
         else:
             assert isinstance(result, dict)
@@ -511,6 +515,8 @@ class TestTLSEnforcement:
         result = await handler(StarletteStyleRequest(scheme="https"))
 
         if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
             assert result.status_code == 402
         else:
             assert isinstance(result, dict)
