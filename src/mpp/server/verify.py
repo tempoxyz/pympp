@@ -117,8 +117,19 @@ async def verify_or_challenge(
     # Stateless challenge verification: recompute expected challenge ID from
     # echoed parameters and compare to the credential's challenge ID.
     echo = credential.challenge
-    echo_request = _b64_decode(echo.request) if echo.request else {}
-    echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+    try:
+        echo_request = _b64_decode(echo.request) if echo.request else {}
+        echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+    except ParseError:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
     expected_id = generate_challenge_id(
         secret_key=secret_key,
         realm=echo.realm,
@@ -171,6 +182,23 @@ async def verify_or_challenge(
             description,
             meta,
         )
+
+    # Reject expired challenges at the transport layer as defense-in-depth
+    if echo.expires:
+        try:
+            expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(UTC):
+                return _create_challenge(
+                    method_name,
+                    intent.name,
+                    request,
+                    realm,
+                    secret_key,
+                    description,
+                    meta,
+                )
+        except (ValueError, TypeError):
+            pass
 
     receipt: Receipt = await intent.verify(credential, request)
 

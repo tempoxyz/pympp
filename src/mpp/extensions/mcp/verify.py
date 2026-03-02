@@ -173,6 +173,23 @@ async def verify_or_challenge(
             description=description,
         )
 
+    # Reject expired challenges at the transport layer as defense-in-depth
+    if echoed.expires:
+        try:
+            expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(UTC):
+                return create_challenge(
+                    method=method_name,
+                    intent_name=intent.name,
+                    request=request,
+                    realm=realm,
+                    secret_key=secret_key,
+                    expires_in=expires_in,
+                    description=description,
+                )
+        except (ValueError, TypeError):
+            pass
+
     from mpp.server.intent import VerificationError
 
     core_credential = mcp_credential.to_core()

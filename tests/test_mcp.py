@@ -768,6 +768,56 @@ class TestVerifyOrChallenge:
         )
         assert isinstance(result, MCPChallenge), "Should reject wrong intent"
 
+    async def test_rejects_expired_credential(self) -> None:
+        """Credential with expired challenge should be rejected at transport layer."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        challenge = _make_bound_mcp_challenge(
+            request=request,
+            expires="2020-01-01T00:00:00.000Z",
+        )
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request=request,
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+        assert isinstance(result, MCPChallenge), "Should reject expired credential"
+
+    async def test_accepts_non_expired_credential(self) -> None:
+        """Credential with future expires should be accepted."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0xOK")
+
+        request = {"amount": "1000"}
+        challenge = _make_bound_mcp_challenge(
+            request=request,
+            expires="2099-01-01T00:00:00.000Z",
+        )
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request=request,
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+        assert isinstance(result, tuple), "Should accept non-expired credential"
+
 
 class TestCreateChallenge:
     """Tests for create_challenge helper."""

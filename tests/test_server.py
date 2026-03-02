@@ -909,6 +909,129 @@ class TestMppChainIdAutoEmit:
         assert challenge.request["methodDetails"]["chainId"] == 4217
 
 
+class TestMalformedEchoedFields:
+    """Malformed base64 in echoed request/opaque should re-issue challenge, not crash."""
+
+    @pytest.mark.asyncio
+    async def test_returns_challenge_for_invalid_base64_request(self) -> None:
+        """Invalid base64 in echoed request should return challenge, not 500."""
+        from mpp import ChallengeEcho, Credential
+
+        echo = ChallengeEcho(
+            id="fake-id",
+            realm="r",
+            method="tempo",
+            intent="charge",
+            request="not!valid!base64!!!",
+        )
+        credential = Credential(challenge=echo, payload={"sig": "0x"})
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request={"amount": "1000"},
+            realm="r",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_returns_challenge_for_invalid_base64_opaque(self) -> None:
+        """Invalid base64 in echoed opaque should return challenge, not 500."""
+        from mpp import ChallengeEcho, Credential
+
+        echo = ChallengeEcho(
+            id="fake-id",
+            realm="r",
+            method="tempo",
+            intent="charge",
+            request="e30",  # valid base64 for {}
+            opaque="not!valid!base64!!!",
+        )
+        credential = Credential(challenge=echo, payload={"sig": "0x"})
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request={"amount": "1000"},
+            realm="r",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, Challenge)
+
+
+class TestExpiresEnforcement:
+    """Transport-layer expires enforcement as defense-in-depth."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_expired_credential(self) -> None:
+        """Credential with expired challenge should be rejected at transport layer."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+            expires="2020-01-01T00:00:00.000Z",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, Challenge), "Should reject expired credential"
+
+    @pytest.mark.asyncio
+    async def test_accepts_non_expired_credential(self) -> None:
+        """Credential with future expires should be accepted."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0xOK")
+
+        request = {"amount": "1000"}
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+            expires="2099-01-01T00:00:00.000Z",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, tuple), "Should accept non-expired credential"
+
+
 class TestCrossRealmPrevention:
     """After HMAC verification, assert echoed realm/method/intent match."""
 
