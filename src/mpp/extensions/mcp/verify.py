@@ -161,6 +161,18 @@ async def verify_or_challenge(
             description=description,
         )
 
+    # Assert echoed challenge fields match server's values to prevent cross-realm attacks
+    if echoed.realm != realm or echoed.method != method_name or echoed.intent != intent.name:
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
+
     from mpp.server.intent import VerificationError
 
     core_credential = mcp_credential.to_core()

@@ -691,6 +691,83 @@ class TestVerifyOrChallenge:
 
         assert exc_info.value.detail == "Payment failed"
 
+    async def test_rejects_credential_with_wrong_realm(self) -> None:
+        """Credential issued for realm-A should be rejected at realm-B."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        challenge = _make_bound_mcp_challenge(
+            request=request,
+            realm="realm-A",
+            secret_key="shared-key",
+        )
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request=request,
+            realm="realm-B",
+            secret_key="shared-key",
+        )
+        assert isinstance(result, MCPChallenge), "Should reject cross-realm credential"
+
+    async def test_rejects_credential_with_wrong_method(self) -> None:
+        """Credential for method 'tempo' should be rejected when server expects 'stripe'."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        challenge = _make_bound_mcp_challenge(
+            request=request,
+            secret_key="shared-key",
+        )
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request=request,
+            realm="api.example.com",
+            method="stripe",
+            secret_key="shared-key",
+        )
+        assert isinstance(result, MCPChallenge), "Should reject wrong method"
+
+    async def test_rejects_credential_with_wrong_intent(self) -> None:
+        """Credential for intent 'charge' should be rejected when server expects 'session'."""
+
+        class SessionIntent:
+            name = "session"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        challenge = _make_bound_mcp_challenge(
+            request=request,
+            secret_key="shared-key",
+        )
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=SessionIntent(),  # type: ignore[arg-type]
+            request=request,
+            realm="api.example.com",
+            secret_key="shared-key",
+        )
+        assert isinstance(result, MCPChallenge), "Should reject wrong intent"
+
 
 class TestCreateChallenge:
     """Tests for create_challenge helper."""
