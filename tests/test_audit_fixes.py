@@ -461,6 +461,7 @@ class TestPY06_MCPCredentialToCore:
         )
         cred = MCPCredential(challenge=ch, payload={})
         core = cred.to_core()
+        assert core.challenge.opaque is not None
         decoded_json = base64.urlsafe_b64decode(core.challenge.opaque + "==").decode()
         # Keys should be sorted: "a" before "z"
         assert decoded_json.index('"a"') < decoded_json.index('"z"')
