@@ -132,6 +132,20 @@ class TestMCPChallenge:
         assert core.intent == "charge"
         assert core.request == {"amount": "1000"}
 
+    def test_to_core_preserves_digest_opaque(self) -> None:
+        mcp_challenge = MCPChallenge(
+            id="ch_abc",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            digest="sha-256=abc",
+            opaque={"pi": "pi_123"},
+        )
+        core = mcp_challenge.to_core()
+        assert core.digest == "sha-256=abc"
+        assert core.opaque == {"pi": "pi_123"}
+
     def test_from_core(self) -> None:
         core = Challenge(
             id="ch_abc",
@@ -149,6 +163,19 @@ class TestMCPChallenge:
         assert mcp.realm == "api.example.com"
         assert mcp.expires == "2025-01-15T12:05:00Z"
         assert mcp.description == "Test"
+
+    def test_from_core_preserves_digest_opaque(self) -> None:
+        core = Challenge(
+            id="ch_abc",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            digest="sha-256=xyz",
+            opaque={"k": "v"},
+        )
+        mcp = MCPChallenge.from_core(core, realm="r")
+        assert mcp.digest == "sha-256=xyz"
+        assert mcp.opaque == {"k": "v"}
 
 
 class TestMCPCredential:

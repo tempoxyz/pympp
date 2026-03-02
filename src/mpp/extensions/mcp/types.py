@@ -91,6 +91,8 @@ class MCPChallenge:
             method=self.method,
             intent=self.intent,
             request=self.request,
+            digest=self.digest,
+            opaque=self.opaque,
         )
 
     @classmethod
@@ -110,6 +112,8 @@ class MCPChallenge:
             request=challenge.request,
             expires=expires,
             description=description,
+            digest=challenge.digest,
+            opaque=challenge.opaque,
         )
 
 
