@@ -214,6 +214,67 @@ class TestVerificationError:
         assert receipt.reference == "tx-success-456"
 
 
+class TestChallengeExpiryEnforcement:
+    @pytest.mark.asyncio
+    async def test_rejects_expired_credential(self) -> None:
+        """Should return a new challenge when echoed expires is in the past."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="2020-01-01T00:00:00Z",
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_accepts_unexpired_credential(self) -> None:
+        """Should accept credential when echoed expires is in the future."""
+        from datetime import UTC, datetime, timedelta
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires=future,
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, tuple)
+        _, receipt = result
+        assert receipt.status == "success"
+
+
 class MockRequest:
     """Mock request object for testing."""
 

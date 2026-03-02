@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json as _json
+import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
@@ -15,6 +16,8 @@ from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent
+
+logger = logging.getLogger(__name__)
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 
@@ -30,6 +33,26 @@ def get_authorization(request: Any) -> str | None:
     if hasattr(request, "META"):
         return request.META.get("HTTP_AUTHORIZATION")
     return None
+
+
+def _is_insecure_request(request: Any) -> bool:
+    """Check if the request arrived over plain HTTP (not TLS).
+
+    Supports Starlette/FastAPI (request.url.scheme), Django (request.scheme),
+    and X-Forwarded-Proto behind reverse proxies.
+    """
+    # Starlette/FastAPI: request.url.scheme
+    if hasattr(request, "url") and hasattr(request.url, "scheme"):
+        return request.url.scheme == "http"
+    # Django: request.scheme
+    if hasattr(request, "scheme"):
+        return request.scheme == "http"
+    # Check X-Forwarded-Proto header (common behind reverse proxies)
+    if hasattr(request, "headers"):
+        proto = request.headers.get("x-forwarded-proto")
+        if proto:
+            return proto.lower() != "https"
+    return False
 
 
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
@@ -103,6 +126,12 @@ def wrap_payment_handler[R](
             )
 
         authorization = get_authorization(request_obj)
+
+        if _is_insecure_request(request_obj):
+            logger.warning(
+                "Payment challenge/credential exchange over plain HTTP. "
+                "The spec requires TLS (§11). Use HTTPS in production."
+            )
 
         result = await verify_fn(authorization, request_obj)
 

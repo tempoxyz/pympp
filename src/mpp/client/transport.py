@@ -44,6 +44,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
     3. Creates credentials and retries the request
     4. Returns the final response (success or failure)
 
+    By default, Payment credentials are only sent over HTTPS (per spec §11).
+    Set ``allow_insecure=True`` for development/testing over plain HTTP.
+
     Example:
         transport = PaymentTransport(
             methods=[tempo(...)],
@@ -58,9 +61,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self,
         methods: Sequence[Method],
         inner: httpx.AsyncBaseTransport | None = None,
+        *,
+        allow_insecure: bool = False,
     ) -> None:
         self._methods = {m.name: m for m in methods}
         self._inner = inner or httpx.AsyncHTTPTransport()
+        self._allow_insecure = allow_insecure
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
@@ -89,6 +95,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 continue
 
         if not challenge or not matched_method:
+            return response
+
+        # Reject plain HTTP to prevent MITM credential theft (spec §11)
+        if request.url.scheme == "http" and not self._allow_insecure:
+            logger.warning(
+                "Refusing to send Payment credentials over plain HTTP to %s. "
+                "Use HTTPS or set allow_insecure=True for development.",
+                request.url.host,
+            )
             return response
 
         # Check expiry before paying (client-side guardrail)
@@ -130,8 +145,8 @@ class Client:
             response = await client.get("https://api.example.com/resource")
     """
 
-    def __init__(self, methods: Sequence[Method]) -> None:
-        self._transport = PaymentTransport(methods)
+    def __init__(self, methods: Sequence[Method], *, allow_insecure: bool = False) -> None:
+        self._transport = PaymentTransport(methods, allow_insecure=allow_insecure)
         self._client = httpx.AsyncClient(transport=self._transport)
 
     async def __aenter__(self) -> Client:

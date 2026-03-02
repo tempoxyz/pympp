@@ -139,6 +139,24 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
+    # Enforce challenge expiry from the echoed (HMAC-bound) expires field.
+    # This prevents replaying credentials after their challenge has expired.
+    if echo.expires:
+        try:
+            expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(UTC):
+                return _create_challenge(
+                    method_name,
+                    intent.name,
+                    request,
+                    realm,
+                    secret_key,
+                    description,
+                    meta,
+                )
+        except ValueError:
+            pass  # Malformed expires; let intent handle it
+
     receipt: Receipt = await intent.verify(credential, request)
 
     return (credential, receipt)
