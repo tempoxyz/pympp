@@ -173,6 +173,18 @@ async def verify_or_challenge(
             description=description,
         )
 
+    # Assert echoed request matches server's current request
+    if echoed.request != request:
+        return create_challenge(
+            method=method_name,
+            intent_name=intent.name,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            expires_in=expires_in,
+            description=description,
+        )
+
     # Reject expired challenges at the transport layer as defense-in-depth
     if echoed.expires:
         try:

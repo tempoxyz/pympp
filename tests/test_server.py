@@ -1032,6 +1032,66 @@ class TestExpiresEnforcement:
         assert isinstance(result, tuple), "Should accept non-expired credential"
 
 
+class TestRequestSubstitutionPrevention:
+    """Credential for one request should be rejected at a different request endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_rejects_credential_for_different_amount(self) -> None:
+        """Cheap-route credential should not work at expensive route."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        cheap_request = {"amount": "100", "currency": "0xUSD", "recipient": "0xR"}
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=cheap_request,
+            realm="r",
+            secret_key="test-secret",
+        )
+
+        expensive_request = {"amount": "999999", "currency": "0xUSD", "recipient": "0xR"}
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=expensive_request,
+            realm="r",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, Challenge), "Should reject credential for different amount"
+
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_opaque(self) -> None:
+        """Credential with mismatched opaque/meta should be rejected."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        request = {"amount": "1000"}
+        credential = make_bound_credential(
+            payload={"sig": "0x"},
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=MockIntent(),
+            request=request,
+            realm="r",
+            secret_key="test-secret",
+            meta={"tier": "premium"},
+        )
+        assert isinstance(result, Challenge), "Should reject credential with wrong opaque"
+
+
 class TestCrossRealmPrevention:
     """After HMAC verification, assert echoed realm/method/intent match."""
 

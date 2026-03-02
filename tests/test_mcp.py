@@ -795,6 +795,29 @@ class TestVerifyOrChallenge:
         )
         assert isinstance(result, MCPChallenge), "Should reject wrong intent"
 
+    async def test_rejects_credential_for_different_request(self) -> None:
+        """Credential for cheap request should be rejected at expensive endpoint."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                return Receipt.success(reference="0x123")
+
+        cheap_request = {"amount": "100"}
+        challenge = _make_bound_mcp_challenge(request=cheap_request)
+        cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
+
+        expensive_request = {"amount": "999999"}
+        result = await verify_or_challenge(
+            meta=cred.to_meta(),
+            intent=MockIntent(),  # type: ignore[arg-type]
+            request=expensive_request,
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+        )
+        assert isinstance(result, MCPChallenge), "Should reject credential for different request"
+
     async def test_rejects_expired_credential(self) -> None:
         """Credential with expired challenge should be rejected at transport layer."""
 

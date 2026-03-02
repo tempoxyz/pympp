@@ -183,6 +183,30 @@ async def verify_or_challenge(
             meta,
         )
 
+    # Assert echoed request matches server's current request (exclude dynamic expires)
+    echo_req_comparable = {k: v for k, v in echo_request.items() if k != "expires"}
+    server_req_comparable = {k: v for k, v in request.items() if k != "expires"}
+    if echo_req_comparable != server_req_comparable:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
+    if echo_opaque != meta:
+        return _create_challenge(
+            method_name,
+            intent.name,
+            request,
+            realm,
+            secret_key,
+            description,
+            meta,
+        )
+
     # Reject expired challenges at the transport layer as defense-in-depth
     if echo.expires:
         try:
@@ -225,6 +249,7 @@ def _create_challenge(
         method=method,
         intent=intent_name,
         request=request,
+        expires=request.get("expires"),
         description=description,
         meta=meta,
     )
