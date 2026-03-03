@@ -153,6 +153,26 @@ async def verify_or_challenge(
             meta,
         )
 
+    # Verify the echoed request parameters match this endpoint's expected
+    # request to prevent cross-endpoint replay when two endpoints share
+    # the same intent name but differ in amount, recipient, or currency.
+    # Compare only the fields present in the server's expected request
+    # (excluding "expires" which is generated per-challenge).
+    for key, value in request.items():
+        if key == "expires":
+            continue
+        echo_value = echo_request.get(key)
+        if echo_value != value:
+            return _create_challenge(
+                method_name,
+                intent.name,
+                request,
+                realm,
+                secret_key,
+                description,
+                meta,
+            )
+
     # Enforce challenge expiry — fail closed.  Credentials without an
     # expires field or with an unparseable value are rejected outright so
     # that attackers cannot bypass expiry by omitting or corrupting it.
@@ -188,6 +208,14 @@ async def verify_or_challenge(
             description,
             meta,
         )
+
+    # Ensure request dict includes "expires" for intent.verify().
+    # _create_challenge generates expires into a copy, but when
+    # verification succeeds we skip that path.  Use the HMAC-bound
+    # expires from the echoed challenge so the intent sees the same
+    # value the client committed to.
+    if "expires" not in request and echo.expires:
+        request = {**request, "expires": echo.expires}
 
     receipt: Receipt = await intent.verify(credential, request)
 

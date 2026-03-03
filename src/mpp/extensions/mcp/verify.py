@@ -186,6 +186,24 @@ async def verify_or_challenge(
             description=description,
         )
 
+    # Verify the echoed request parameters match this endpoint's expected
+    # request to prevent cross-endpoint replay when two endpoints share
+    # the same intent name but differ in amount, recipient, or currency.
+    echoed_request = echoed.request if isinstance(echoed.request, dict) else {}
+    for key, value in request.items():
+        if key == "expires":
+            continue
+        if echoed_request.get(key) != value:
+            return create_challenge(
+                method=method_name,
+                intent_name=intent.name,
+                request=request,
+                realm=realm,
+                secret_key=secret_key,
+                expires_in=expires_in,
+                description=description,
+            )
+
     # Enforce challenge expiry — fail closed.  Credentials without an
     # expires field or with an unparseable value are rejected outright so
     # that attackers cannot bypass expiry by omitting or corrupting it.
