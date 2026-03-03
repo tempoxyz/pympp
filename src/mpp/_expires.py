@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 def _to_iso(dt: datetime) -> str:
     """Format a datetime as ISO 8601 with Z suffix and millisecond precision."""
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def seconds(n: int) -> str:

@@ -21,7 +21,7 @@ def compute(body: str | bytes | dict[str, Any]) -> str:
         Digest in the format ``sha-256=<base64>``.
     """
     if isinstance(body, dict):
-        body = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+        body = json.dumps(body, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
     if isinstance(body, str):
         body = body.encode("utf-8")
     digest = hashlib.sha256(body).digest()

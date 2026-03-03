@@ -78,47 +78,32 @@ async def verify_or_challenge(
     method_name = method or "tempo"
     request = transform_units(request)
 
-    if authorization is None:
+    def new_challenge() -> Challenge:
         return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
+            method_name, intent.name, request, realm, secret_key, description, meta
         )
+
+    if authorization is None:
+        return new_challenge()
 
     payment_scheme = _extract_payment_scheme(authorization)
     if payment_scheme is None:
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
 
     try:
         credential = Credential.from_authorization(payment_scheme)
     except ParseError:
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
 
     # Stateless challenge verification: recompute expected challenge ID from
     # echoed parameters and compare to the credential's challenge ID.
     echo = credential.challenge
-    echo_request = _b64_decode(echo.request) if echo.request else {}
-    echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+    try:
+        echo_request = _b64_decode(echo.request) if echo.request else {}
+        echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+    except ParseError:
+        return new_challenge()
+
     expected_id = generate_challenge_id(
         secret_key=secret_key,
         realm=echo.realm,
@@ -130,15 +115,29 @@ async def verify_or_challenge(
         opaque=echo_opaque,
     )
     if not _constant_time_equal(echo.id, expected_id):
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
+
+    # Assert echoed challenge fields match server's values
+    if echo.realm != realm or echo.method != method_name or echo.intent != intent.name:
+        return new_challenge()
+
+    # Assert echoed request matches server's current request (exclude dynamic expires)
+    echo_req_comparable = {k: v for k, v in echo_request.items() if k != "expires"}
+    server_req_comparable = {k: v for k, v in request.items() if k != "expires"}
+    if echo_req_comparable != server_req_comparable:
+        return new_challenge()
+
+    if echo_opaque != meta:
+        return new_challenge()
+
+    # Reject expired challenges at the transport layer as defense-in-depth
+    if echo.expires:
+        try:
+            expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(UTC):
+                return new_challenge()
+        except (ValueError, TypeError):
+            pass
 
     receipt: Receipt = await intent.verify(credential, request)
 
@@ -165,6 +164,7 @@ def _create_challenge(
         method=method,
         intent=intent_name,
         request=request,
+        expires=request.get("expires"),
         description=description,
         meta=meta,
     )

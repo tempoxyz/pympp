@@ -119,9 +119,7 @@ async def verify_or_challenge(
     method_name = method or "tempo"
     meta = meta or {}
 
-    credential_data = meta.get(META_CREDENTIAL)
-
-    if credential_data is None:
+    def new_challenge() -> MCPChallenge:
         return create_challenge(
             method=method_name,
             intent_name=intent.name,
@@ -131,6 +129,11 @@ async def verify_or_challenge(
             expires_in=expires_in,
             description=description,
         )
+
+    credential_data = meta.get(META_CREDENTIAL)
+
+    if credential_data is None:
+        return new_challenge()
 
     try:
         mcp_credential = MCPCredential.from_dict(credential_data)
@@ -147,17 +150,28 @@ async def verify_or_challenge(
         intent=echoed.intent,
         request=echoed.request,
         expires=echoed.expires,
+        digest=echoed.digest,
+        opaque=echoed.opaque,
     )
     if not _constant_time_equal(echoed.id, expected_id):
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
+        return new_challenge()
+
+    # Assert echoed challenge fields match server's values
+    if echoed.realm != realm or echoed.method != method_name or echoed.intent != intent.name:
+        return new_challenge()
+
+    # Assert echoed request matches server's current request
+    if echoed.request != request:
+        return new_challenge()
+
+    # Reject expired challenges at the transport layer as defense-in-depth
+    if echoed.expires:
+        try:
+            expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
+            if expires_dt < datetime.now(UTC):
+                return new_challenge()
+        except (ValueError, TypeError):
+            pass
 
     from mpp.server.intent import VerificationError
 
@@ -166,17 +180,8 @@ async def verify_or_challenge(
     try:
         core_receipt = await intent.verify(core_credential, request)
     except VerificationError as e:
-        challenge = create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
         raise PaymentVerificationError(
-            challenges=[challenge],
+            challenges=[new_challenge()],
             reason="verification-failed",
             detail=str(e),
         ) from e
