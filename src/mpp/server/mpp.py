@@ -7,9 +7,11 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
+from mpp._parsing import ParseError
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.decorator import wrap_payment_handler
+from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
@@ -19,6 +21,33 @@ R = TypeVar("R")
 
 DEFAULT_EXPIRY_SECONDS = 300
 DEFAULT_DECIMALS = 6
+
+
+def _credential_for_transform(authorization: str | None) -> Credential | None:
+    """Best-effort credential parsing for method transform hooks.
+
+    Transform hooks should be able to branch on authenticated context when
+    a valid Payment credential is present. Parsing failures return None so
+    verification remains fail-closed inside verify_or_challenge.
+    """
+    if authorization is None:
+        return None
+
+    payment_scheme = next(
+        (
+            scheme.strip()
+            for scheme in authorization.split(",")
+            if scheme.strip().lower().startswith("payment ")
+        ),
+        None,
+    )
+    if payment_scheme is None:
+        return None
+
+    try:
+        return Credential.from_authorization(payment_scheme)
+    except ParseError:
+        return None
 
 
 class Mpp:
@@ -169,6 +198,8 @@ class Mpp:
                 method_details["feePayer"] = True
             request["methodDetails"] = method_details
 
+        request = transform_request(self.method, request, _credential_for_transform(authorization))
+
         return await verify_or_challenge(
             authorization=authorization,
             intent=intent,
@@ -268,6 +299,12 @@ class Mpp:
                     resolved_chain_id = getattr(self.method, "chain_id", None)
                 if resolved_chain_id is not None:
                     request["methodDetails"] = {"chainId": resolved_chain_id}
+
+                request = transform_request(
+                    self.method,
+                    request,
+                    _credential_for_transform(authorization),
+                )
 
                 return await verify_or_challenge(
                     authorization=authorization,
