@@ -214,6 +214,158 @@ class TestVerificationError:
         assert receipt.reference == "tx-success-456"
 
 
+class TestChallengeExpiryEnforcement:
+    @pytest.mark.asyncio
+    async def test_rejects_expired_credential(self) -> None:
+        """Should return a new challenge when echoed expires is in the past."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="2020-01-01T00:00:00Z",
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_accepts_unexpired_credential(self) -> None:
+        """Should accept credential when echoed expires is in the future."""
+        from datetime import UTC, datetime, timedelta
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires=future,
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, tuple)
+        _, receipt = result
+        assert receipt.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_rejects_missing_expires(self) -> None:
+        """Should reject credentials that lack an expires field (fail closed)."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        # Construct a credential with no expires but a valid HMAC
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="",  # empty string to force falsy expires
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_expires(self) -> None:
+        """Should reject credentials with unparseable expires (fail closed)."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="not-a-date",
+        )
+        auth_header = credential.to_authorization()
+
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+
+class TestCrossEndpointReplay:
+    @pytest.mark.asyncio
+    async def test_rejects_credential_with_wrong_intent(self) -> None:
+        """Should reject a credential whose echoed intent doesn't match the endpoint."""
+
+        @intent(name="charge")
+        async def charge_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @intent(name="session")
+        async def session_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0xsession")
+
+        # Create a credential for the "session" intent
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "100"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            intent="session",
+        )
+        auth_header = credential.to_authorization()
+
+        # Present it to the "charge" endpoint — should be rejected
+        result = await verify_or_challenge(
+            authorization=auth_header,
+            intent=charge_intent,
+            request={"amount": "100"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.intent == "charge"
+
+
 class MockRequest:
     """Mock request object for testing."""
 

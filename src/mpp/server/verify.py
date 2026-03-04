@@ -139,6 +139,36 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
+    # Verify the echoed request parameters match this endpoint's expected
+    # request to prevent cross-endpoint replay when two endpoints share
+    # the same intent name but differ in amount, recipient, or currency.
+    # Compare only the fields present in the server's expected request
+    # (excluding "expires" which is generated per-challenge).
+    for key, value in request.items():
+        if key == "expires":
+            continue
+        if echo_request.get(key) != value:
+            return new_challenge()
+
+    # Enforce challenge expiry — fail closed.  Credentials without an
+    # expires field or with an unparseable value are rejected outright.
+    if not echo.expires:
+        return new_challenge()
+    try:
+        expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+    except ValueError:
+        return new_challenge()
+    if expires_dt < datetime.now(UTC):
+        return new_challenge()
+
+    # Ensure request dict includes "expires" for intent.verify().
+    # _create_challenge generates expires into a copy, but when
+    # verification succeeds we skip that path.  Use the HMAC-bound
+    # expires from the echoed challenge so the intent sees the same
+    # value the client committed to.
+    if "expires" not in request and echo.expires:
+        request = {**request, "expires": echo.expires}
+
     receipt: Receipt = await intent.verify(credential, request)
 
     return (credential, receipt)
@@ -155,8 +185,15 @@ def _create_challenge(
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID."""
     if "expires" not in request:
-        expires = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
-        request = {**request, "expires": expires.isoformat().replace("+00:00", "Z")}
+        expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
+        expires_str = expires_dt.isoformat().replace("+00:00", "Z")
+        request = {**request, "expires": expires_str}
+
+    # Guard against non-string values that would cause a TypeError in
+    # generate_challenge_id().
+    expires = request.get("expires")
+    if not isinstance(expires, str):
+        expires = None
 
     return Challenge.create(
         secret_key=secret_key,
@@ -164,7 +201,7 @@ def _create_challenge(
         method=method,
         intent=intent_name,
         request=request,
-        expires=request.get("expires"),
+        expires=expires,
         description=description,
         meta=meta,
     )

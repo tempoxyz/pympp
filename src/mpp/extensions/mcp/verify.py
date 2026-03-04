@@ -173,6 +173,27 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
+    # Verify the echoed request parameters match this endpoint's expected
+    # request to prevent cross-endpoint replay when two endpoints share
+    # the same intent name but differ in amount, recipient, or currency.
+    echoed_request = echoed.request if isinstance(echoed.request, dict) else {}
+    for key, value in request.items():
+        if key == "expires":
+            continue
+        if echoed_request.get(key) != value:
+            return new_challenge()
+
+    # Enforce challenge expiry — fail closed.  Credentials without an
+    # expires field or with an unparseable value are rejected outright.
+    if not echoed.expires:
+        return new_challenge()
+    try:
+        expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
+    except ValueError:
+        return new_challenge()
+    if expires_dt < datetime.now(UTC):
+        return new_challenge()
+
     from mpp.server.intent import VerificationError
 
     core_credential = mcp_credential.to_core()
