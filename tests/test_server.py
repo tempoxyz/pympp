@@ -1130,6 +1130,84 @@ class TestMppRequestTransformHook:
         challenge = Challenge.from_www_authenticate(www_auth)
         assert challenge.request["extra"]["hook"] == "pay"
 
+    @pytest.mark.asyncio
+    async def test_charge_passes_parsed_credential_to_transform_request(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        seen: dict[str, str] = {}
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+            def transform_request(self, request: dict, credential: Credential | None) -> dict:
+                assert credential is not None
+                seen["id"] = credential.challenge.id
+                return request
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await server.charge(authorization=credential.to_authorization(), amount="0.50")
+        assert isinstance(result, tuple)
+        assert seen["id"] == credential.challenge.id
+
+    @pytest.mark.asyncio
+    async def test_pay_passes_parsed_credential_to_transform_request(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        seen: dict[str, str] = {}
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+            def transform_request(self, request: dict, credential: Credential | None) -> dict:
+                assert credential is not None
+                seen["id"] = credential.challenge.id
+                return request
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await handler(MockRequest(authorization=credential.to_authorization()))
+        assert result["data"] == "paid"
+        assert seen["id"] == credential.challenge.id
+
 
 class TestMalformedEchoedFields:
     """Malformed base64 in echoed request/opaque should re-issue challenge, not crash."""
