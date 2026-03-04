@@ -58,8 +58,6 @@ class Mpp:
         realm: str,
         secret_key: str,
         defaults: dict[str, Any] | None = None,
-        *,
-        allow_insecure: bool = False,
     ) -> None:
         """Initialize the payment handler.
 
@@ -69,13 +67,11 @@ class Mpp:
             secret_key: Server secret for HMAC-bound challenge IDs.
                 Enables stateless challenge verification.
             defaults: Default request values merged with per-call request params.
-            allow_insecure: If True, allow plain HTTP (for dev/testing).
         """
         self.method = method
         self.realm = realm
         self.secret_key = secret_key
         self.defaults = defaults or {}
-        self.allow_insecure = allow_insecure
 
     @classmethod
     def create(
@@ -283,8 +279,6 @@ class Mpp:
                     description=description,
                 )
 
-            return wrap_payment_handler(
-                handler, _verify, lambda: self.realm, allow_insecure=self.allow_insecure
-            )
+            return wrap_payment_handler(handler, _verify, lambda: self.realm)
 
         return decorator
