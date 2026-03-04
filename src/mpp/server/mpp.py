@@ -10,6 +10,7 @@ from mpp import Challenge, Credential, Receipt
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.decorator import wrap_payment_handler
+from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
@@ -169,6 +170,8 @@ class Mpp:
                 method_details["feePayer"] = True
             request["methodDetails"] = method_details
 
+        request = transform_request(self.method, request, None)
+
         return await verify_or_challenge(
             authorization=authorization,
             intent=intent,
@@ -268,6 +271,8 @@ class Mpp:
                     resolved_chain_id = getattr(self.method, "chain_id", None)
                 if resolved_chain_id is not None:
                     request["methodDetails"] = {"chainId": resolved_chain_id}
+
+                request = transform_request(self.method, request, None)
 
                 return await verify_or_challenge(
                     authorization=authorization,

@@ -1061,6 +1061,76 @@ class TestMppChainIdAutoEmit:
         assert challenge.request["methodDetails"]["chainId"] == 4217
 
 
+class TestMppRequestTransformHook:
+    """Tests for method.transform_request integration in Mpp helpers."""
+
+    @pytest.mark.asyncio
+    async def test_charge_applies_method_transform_request(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+            def transform_request(self, request: dict, credential: Credential | None) -> dict:
+                assert credential is None
+                return {**request, "extra": {"hook": "charge"}}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await server.charge(authorization=None, amount="0.50")
+        assert isinstance(result, Challenge)
+        assert result.request["extra"]["hook"] == "charge"
+
+    @pytest.mark.asyncio
+    async def test_pay_applies_method_transform_request(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+            def transform_request(self, request: dict, credential: Credential | None) -> dict:
+                assert credential is None
+                return {**request, "extra": {"hook": "pay"}}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        result = await handler(MockRequest())
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            assert isinstance(result, dict)
+            www_auth = result["headers"]["WWW-Authenticate"]
+
+        challenge = Challenge.from_www_authenticate(www_auth)
+        assert challenge.request["extra"]["hook"] == "pay"
+
+
 class TestMalformedEchoedFields:
     """Malformed base64 in echoed request/opaque should re-issue challenge, not crash."""
 
