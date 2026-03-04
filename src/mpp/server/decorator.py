@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import json as _json
-import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any
@@ -16,8 +15,6 @@ from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent
-
-logger = logging.getLogger(__name__)
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 

@@ -173,19 +173,6 @@ async def verify_or_challenge(
         except (ValueError, TypeError):
             pass
 
-    # Verify the echoed intent matches this endpoint's expected intent to
-    # prevent cross-endpoint credential replay.
-    if echoed.intent != intent.name:
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
-
     # Verify the echoed request parameters match this endpoint's expected
     # request to prevent cross-endpoint replay when two endpoints share
     # the same intent name but differ in amount, recipient, or currency.
