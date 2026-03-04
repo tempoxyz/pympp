@@ -1134,12 +1134,12 @@ class TestMppRequestTransformHook:
         assert challenge.request["extra"]["hook"] == "pay"
 
     @pytest.mark.asyncio
-    async def test_charge_passes_parsed_credential_to_transform_request(self) -> None:
+    async def test_charge_transform_request_is_deterministic_across_retries(self) -> None:
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        seen: dict[str, str] = {}
+        seen: list[bool] = []
 
         class MockMethod:
             name = "tempo"
@@ -1149,9 +1149,9 @@ class TestMppRequestTransformHook:
             intents = {"charge": test_intent}
 
             def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                assert credential is not None
-                seen["id"] = credential.challenge.id
-                return request
+                seen.append(credential is not None)
+                marker = "credential" if credential is not None else "none"
+                return {**request, "extra": {"hook": marker}}
 
         server = Mpp(
             method=MockMethod(),  # type: ignore[arg-type]
@@ -1159,24 +1159,28 @@ class TestMppRequestTransformHook:
             secret_key="test-secret",
         )
 
+        first = await server.charge(authorization=None, amount="0.50")
+        assert isinstance(first, Challenge)
+        assert first.request["extra"]["hook"] == "none"
+
         credential = make_bound_credential(
             payload={},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            request=first.request,
             realm="api.example.com",
             secret_key="test-secret",
         )
 
         result = await server.charge(authorization=credential.to_authorization(), amount="0.50")
         assert isinstance(result, tuple)
-        assert seen["id"] == credential.challenge.id
+        assert seen == [False, False]
 
     @pytest.mark.asyncio
-    async def test_pay_passes_parsed_credential_to_transform_request(self) -> None:
+    async def test_pay_transform_request_is_deterministic_across_retries(self) -> None:
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        seen: dict[str, str] = {}
+        seen: list[bool] = []
 
         class MockMethod:
             name = "tempo"
@@ -1186,9 +1190,9 @@ class TestMppRequestTransformHook:
             intents = {"charge": test_intent}
 
             def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                assert credential is not None
-                seen["id"] = credential.challenge.id
-                return request
+                seen.append(credential is not None)
+                marker = "credential" if credential is not None else "none"
+                return {**request, "extra": {"hook": marker}}
 
         server = Mpp(
             method=MockMethod(),  # type: ignore[arg-type]
@@ -1200,16 +1204,29 @@ class TestMppRequestTransformHook:
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
+        challenge_result = await handler(MockRequest())
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(challenge_result, StarletteResponse)
+            challenge = Challenge.from_www_authenticate(
+                challenge_result.headers["WWW-Authenticate"]
+            )
+        else:
+            assert isinstance(challenge_result, dict)
+            challenge = Challenge.from_www_authenticate(
+                challenge_result["headers"]["WWW-Authenticate"]
+            )
+
         credential = make_bound_credential(
             payload={},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            request=challenge.request,
             realm="api.example.com",
             secret_key="test-secret",
         )
 
         result = await handler(MockRequest(authorization=credential.to_authorization()))
         assert result["data"] == "paid"
-        assert seen["id"] == credential.challenge.id
+        assert seen == [False, False]
 
 
 class TestMalformedEchoedFields:
