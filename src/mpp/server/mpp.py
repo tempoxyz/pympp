@@ -113,7 +113,7 @@ class Mpp:
         Args:
             method: Payment method (e.g., tempo(currency=..., recipient=...)).
             realm: Server realm. Auto-detected from environment if omitted.
-            secret_key: HMAC secret. Auto-generated and persisted to .env if omitted.
+            secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
         """
         return cls(
             method=method,

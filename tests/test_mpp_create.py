@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -70,19 +69,13 @@ class TestMppCreate:
             )
             assert srv.realm == "localhost"
 
-    def test_create_auto_secret_key(self, tmp_path: Path) -> None:
-        env_file = tmp_path / ".env"
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("mpp.server._defaults._ENV_FILE", env_file),
-        ):
-            srv = Mpp.create(
-                method=tempo(intents={"charge": ChargeIntent()}),
-                realm="test.com",
-            )
-            assert len(srv.secret_key) == 36  # UUID format
-            assert env_file.exists()
-            assert f"MPP_SECRET_KEY={srv.secret_key}" in env_file.read_text()
+    def test_create_requires_secret_key(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError, match="Missing secret key"):
+                Mpp.create(
+                    method=tempo(intents={"charge": ChargeIntent()}),
+                    realm="test.com",
+                )
 
     def test_create_auto_secret_key_from_env(self) -> None:
         with patch.dict(os.environ, {"MPP_SECRET_KEY": "env-secret"}):
@@ -92,15 +85,18 @@ class TestMppCreate:
             )
             assert srv.secret_key == "env-secret"
 
-    def test_create_auto_secret_key_stable(self, tmp_path: Path) -> None:
-        env_file = tmp_path / ".env"
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch("mpp.server._defaults._ENV_FILE", env_file),
-        ):
-            srv1 = Mpp.create(method=tempo(intents={"charge": ChargeIntent()}), realm="test.com")
-            srv2 = Mpp.create(method=tempo(intents={"charge": ChargeIntent()}), realm="test.com")
-            assert srv1.secret_key == srv2.secret_key
+    def test_create_uses_explicit_secret_key(self) -> None:
+        srv1 = Mpp.create(
+            method=tempo(intents={"charge": ChargeIntent()}),
+            realm="test.com",
+            secret_key="test-secret",
+        )
+        srv2 = Mpp.create(
+            method=tempo(intents={"charge": ChargeIntent()}),
+            realm="test.com",
+            secret_key="test-secret",
+        )
+        assert srv1.secret_key == srv2.secret_key
 
 
 class TestMppCharge:

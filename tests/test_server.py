@@ -576,6 +576,7 @@ class TestPay:
 
         assert my_handler.__name__ == "my_handler"
         assert my_handler.__doc__ == "My handler docstring."
+        assert my_handler.__wrapped__.__name__ == "my_handler"
 
     @pytest.mark.asyncio
     async def test_custom_method_name(self) -> None:
