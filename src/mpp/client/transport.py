@@ -190,15 +190,11 @@ async def request(
         return await client.request(method, url, **kwargs)
 
 
-async def get(
-    url: str, *, methods: Sequence[Method], **kwargs: Any
-) -> httpx.Response:
+async def get(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
     """Send a GET request with automatic payment handling."""
     return await request("GET", url, methods=methods, **kwargs)
 
 
-async def post(
-    url: str, *, methods: Sequence[Method], **kwargs: Any
-) -> httpx.Response:
+async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
     """Send a POST request with automatic payment handling."""
     return await request("POST", url, methods=methods, **kwargs)
