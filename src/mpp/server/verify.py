@@ -147,53 +147,19 @@ async def verify_or_challenge(
     for key, value in request.items():
         if key == "expires":
             continue
-        echo_value = echo_request.get(key)
-        if echo_value != value:
-            return _create_challenge(
-                method_name,
-                intent.name,
-                request,
-                realm,
-                secret_key,
-                description,
-                meta,
-            )
+        if echo_request.get(key) != value:
+            return new_challenge()
 
     # Enforce challenge expiry — fail closed.  Credentials without an
-    # expires field or with an unparseable value are rejected outright so
-    # that attackers cannot bypass expiry by omitting or corrupting it.
+    # expires field or with an unparseable value are rejected outright.
     if not echo.expires:
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
     try:
         expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
     except ValueError:
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
     if expires_dt < datetime.now(UTC):
-        return _create_challenge(
-            method_name,
-            intent.name,
-            request,
-            realm,
-            secret_key,
-            description,
-            meta,
-        )
+        return new_challenge()
 
     # Ensure request dict includes "expires" for intent.verify().
     # _create_challenge generates expires into a copy, but when

@@ -181,51 +181,18 @@ async def verify_or_challenge(
         if key == "expires":
             continue
         if echoed_request.get(key) != value:
-            return create_challenge(
-                method=method_name,
-                intent_name=intent.name,
-                request=request,
-                realm=realm,
-                secret_key=secret_key,
-                expires_in=expires_in,
-                description=description,
-            )
+            return new_challenge()
 
     # Enforce challenge expiry — fail closed.  Credentials without an
-    # expires field or with an unparseable value are rejected outright so
-    # that attackers cannot bypass expiry by omitting or corrupting it.
+    # expires field or with an unparseable value are rejected outright.
     if not echoed.expires:
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
+        return new_challenge()
     try:
         expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
     except ValueError:
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
+        return new_challenge()
     if expires_dt < datetime.now(UTC):
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            expires_in=expires_in,
-            description=description,
-        )
+        return new_challenge()
 
     from mpp.server.intent import VerificationError
 
