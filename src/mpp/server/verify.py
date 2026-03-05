@@ -25,6 +25,7 @@ async def verify_or_challenge(
     method: str | None = None,
     description: str | None = None,
     meta: dict[str, str] | None = None,
+    expires: str | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -47,6 +48,7 @@ async def verify_or_challenge(
             Enables stateless challenge verification by computing challenge IDs
             as HMAC-SHA256 over the challenge parameters.
         method: The payment method name (defaults to "tempo").
+        expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
 
     Returns:
         If no valid Authorization header:
@@ -80,7 +82,7 @@ async def verify_or_challenge(
 
     def new_challenge() -> Challenge:
         return _create_challenge(
-            method_name, intent.name, request, realm, secret_key, description, meta
+            method_name, intent.name, request, realm, secret_key, description, meta, expires
         )
 
     if authorization is None:
@@ -121,10 +123,9 @@ async def verify_or_challenge(
     if echo.realm != realm or echo.method != method_name or echo.intent != intent.name:
         return new_challenge()
 
-    # Assert echoed request matches server's current request (exclude dynamic expires)
-    echo_req_comparable = {k: v for k, v in echo_request.items() if k != "expires"}
-    server_req_comparable = {k: v for k, v in request.items() if k != "expires"}
-    if echo_req_comparable != server_req_comparable:
+    # Assert echoed request matches server's current request.
+    # expires is a challenge-level auth-param, not in the request body.
+    if echo_request != request:
         return new_challenge()
 
     if echo_opaque != meta:
@@ -142,11 +143,7 @@ async def verify_or_challenge(
     # Verify the echoed request parameters match this endpoint's expected
     # request to prevent cross-endpoint replay when two endpoints share
     # the same intent name but differ in amount, recipient, or currency.
-    # Compare only the fields present in the server's expected request
-    # (excluding "expires" which is generated per-challenge).
     for key, value in request.items():
-        if key == "expires":
-            continue
         if echo_request.get(key) != value:
             return new_challenge()
 
@@ -161,14 +158,6 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return new_challenge()
 
-    # Ensure request dict includes "expires" for intent.verify().
-    # _create_challenge generates expires into a copy, but when
-    # verification succeeds we skip that path.  Use the HMAC-bound
-    # expires from the echoed challenge so the intent sees the same
-    # value the client committed to.
-    if "expires" not in request and echo.expires:
-        request = {**request, "expires": echo.expires}
-
     receipt: Receipt = await intent.verify(credential, request)
 
     return (credential, receipt)
@@ -182,18 +171,16 @@ def _create_challenge(
     secret_key: str,
     description: str | None = None,
     meta: dict[str, str] | None = None,
+    expires: str | None = None,
 ) -> Challenge:
-    """Create a new payment challenge with HMAC-bound ID."""
-    if "expires" not in request:
-        expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
-        expires_str = expires_dt.isoformat().replace("+00:00", "Z")
-        request = {**request, "expires": expires_str}
+    """Create a new payment challenge with HMAC-bound ID.
 
-    # Guard against non-string values that would cause a TypeError in
-    # generate_challenge_id().
-    expires = request.get("expires")
-    if not isinstance(expires, str):
-        expires = None
+    ``expires`` is a challenge-level auth-param (not part of the request body).
+    If not provided, defaults to 5 minutes from now.
+    """
+    if expires is None:
+        expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
+        expires = expires_dt.isoformat().replace("+00:00", "Z")
 
     return Challenge.create(
         secret_key=secret_key,

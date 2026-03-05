@@ -20,12 +20,13 @@ class ChargeRequest(BaseModel):
     """Request schema for the charge intent.
 
     Follows the IETF Payment Authentication Scheme spec for Tempo method.
+    Expiry is conveyed exclusively via the challenge-level ``expires``
+    auth-param, not inside the request body.
     """
 
     amount: str
     currency: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     recipient: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
-    expires: str
     description: str | None = None
     externalId: str | None = None
     methodDetails: MethodDetails = Field(default_factory=MethodDetails)

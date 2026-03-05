@@ -122,7 +122,7 @@ class TestMppCharge:
         assert result.request["amount"] == "500000"
         assert result.request["currency"] == "0x20c0000000000000000000000000000000000000"
         assert result.request["recipient"] == "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
-        assert "expires" in result.request
+        assert result.expires is not None  # expires is a challenge-level auth-param
 
     @pytest.mark.asyncio
     async def test_charge_auto_expires_5_minutes(self) -> None:
@@ -140,7 +140,8 @@ class TestMppCharge:
         after = datetime.now(UTC)
 
         assert isinstance(result, Challenge)
-        expires = datetime.fromisoformat(result.request["expires"])
+        assert result.expires is not None
+        expires = datetime.fromisoformat(result.expires)
         assert expires > before + timedelta(minutes=4, seconds=59)
         assert expires < after + timedelta(minutes=5, seconds=1)
 
@@ -158,7 +159,7 @@ class TestMppCharge:
         exp = "2030-01-20T12:00:00+00:00"
         result = await srv.charge(authorization=None, amount="1.00", expires=exp)
         assert isinstance(result, Challenge)
-        assert result.request["expires"] == exp
+        assert result.expires == exp
 
     @pytest.mark.asyncio
     async def test_charge_amount_conversion(self) -> None:

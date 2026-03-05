@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 R = TypeVar("R")
 
-DEFAULT_EXPIRY_SECONDS = 300
 DEFAULT_DECIMALS = 6
 
 
@@ -144,7 +143,8 @@ class Mpp:
                 Automatically converted to base units (6 decimals for pathUSD).
             currency: Override the method's default currency.
             recipient: Override the method's default recipient.
-            expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
+            expires: Challenge expiration as auth-param (ISO 8601).
+                Defaults to now + 5 minutes. Not included in the request body.
             description: Optional human-readable description.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             fee_payer: Whether to use a fee payer for gas sponsorship.
@@ -164,9 +164,6 @@ class Mpp:
         if not resolved_recipient:
             raise ValueError("recipient must be set on the method or passed to charge()")
 
-        if expires is None:
-            expires = (datetime.now(UTC) + timedelta(seconds=DEFAULT_EXPIRY_SECONDS)).isoformat()
-
         decimals = getattr(self.method, "decimals", DEFAULT_DECIMALS)
         base_amount = str(parse_units(amount, decimals))
 
@@ -174,7 +171,6 @@ class Mpp:
             "amount": base_amount,
             "currency": resolved_currency,
             "recipient": resolved_recipient,
-            "expires": expires,
         }
 
         # Optional server-provided metadata that will be echoed back by the client
@@ -208,6 +204,7 @@ class Mpp:
             secret_key=self.secret_key,
             method=self.method.name,
             description=description,
+            expires=expires,
         )
 
     def pay(
@@ -275,17 +272,15 @@ class Mpp:
                 decimals = getattr(self.method, "decimals", DEFAULT_DECIMALS)
                 base_amount = str(parse_units(amount, decimals))
 
-                expires: str | None = None
+                challenge_expires: str | None = None
                 if expires_in is not None:
-                    expires = (datetime.now(UTC) + expires_in).isoformat()
+                    challenge_expires = (datetime.now(UTC) + expires_in).isoformat()
 
                 request: dict[str, Any] = {
                     "amount": base_amount,
                     "currency": resolved_currency,
                     "recipient": resolved_recipient,
                 }
-                if expires is not None:
-                    request["expires"] = expires
 
                 if extra is not None:
                     if any(
@@ -314,6 +309,7 @@ class Mpp:
                     secret_key=self.secret_key,
                     method=self.method.name,
                     description=description,
+                    expires=challenge_expires,
                 )
 
             return wrap_payment_handler(handler, _verify, lambda: self.realm)
