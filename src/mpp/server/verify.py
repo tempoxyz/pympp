@@ -178,6 +178,11 @@ def _create_challenge(
     ``expires`` is a challenge-level auth-param (not part of the request body).
     If not provided, defaults to 5 minutes from now.
     """
+    # Runtime guard: untyped callers may pass a non-string expires value.
+    # Fall back to a generated default instead of raising during HMAC input join.
+    if expires is not None and not isinstance(expires, str):
+        expires = None
+
     if expires is None:
         expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
         expires = expires_dt.isoformat().replace("+00:00", "Z")
