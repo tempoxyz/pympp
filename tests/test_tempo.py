@@ -181,8 +181,8 @@ class TestChargeIntent:
     async def test_verify_expired_request(self) -> None:
         """Should reject expired requests."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(payload={"type": "hash", "hash": "0x123"})
         expired = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        credential = make_credential(payload={"type": "hash", "hash": "0x123"}, expires=expired)
 
         with pytest.raises(VerificationError, match="expired"):
             await intent.verify(
@@ -191,7 +191,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x123",
                     "recipient": "0x456",
-                    "expires": expired,
                 },
             )
 
@@ -199,8 +198,8 @@ class TestChargeIntent:
     async def test_verify_invalid_payload(self) -> None:
         """Should reject invalid credential payload."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(payload="not-a-dict")  # type: ignore[arg-type]
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        credential = make_credential(payload="not-a-dict", expires=future)  # type: ignore[arg-type]
 
         with pytest.raises(VerificationError, match="Invalid credential payload"):
             await intent.verify(
@@ -209,7 +208,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x123",
                     "recipient": "0x456",
-                    "expires": future,
                 },
             )
 
@@ -217,8 +215,8 @@ class TestChargeIntent:
     async def test_verify_unknown_credential_type(self) -> None:
         """Should reject unknown credential types."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(payload={"type": "unknown"})
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        credential = make_credential(payload={"type": "unknown"}, expires=future)
 
         with pytest.raises(VerificationError, match="Invalid credential type"):
             await intent.verify(
@@ -227,7 +225,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x123",
                     "recipient": "0x456",
-                    "expires": future,
                 },
             )
 
@@ -266,14 +263,13 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
         receipt = await intent.verify(
             credential,
             {
                 "amount": "1000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "expires": future,
             },
         )
 
@@ -292,7 +288,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"}, expires=future)
         with pytest.raises(VerificationError, match="Transaction not found"):
             await intent.verify(
                 credential,
@@ -300,7 +296,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x1234567890123456789012345678901234567890",
                     "recipient": "0x4567890123456789012345678901234567890123",
-                    "expires": future,
                 },
             )
 
@@ -319,7 +314,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"}, expires=future)
         with pytest.raises(VerificationError, match="Transaction reverted"):
             await intent.verify(
                 credential,
@@ -327,7 +322,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x1234567890123456789012345678901234567890",
                     "recipient": "0x4567890123456789012345678901234567890123",
-                    "expires": future,
                 },
             )
 
@@ -346,7 +340,7 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"}, expires=future)
         with pytest.raises(VerificationError, match="Transfer log"):
             await intent.verify(
                 credential,
@@ -354,7 +348,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x1234567890123456789012345678901234567890",
                     "recipient": "0x4567890123456789012345678901234567890123",
-                    "expires": future,
                 },
             )
 
@@ -394,6 +387,7 @@ class TestChargeIntent:
 
         credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
         )
         receipt = await intent.verify(
             credential,
@@ -401,7 +395,6 @@ class TestChargeIntent:
                 "amount": str(amount),
                 "currency": asset,
                 "recipient": destination,
-                "expires": future,
             },
         )
 
@@ -425,6 +418,7 @@ class TestChargeIntent:
 
         credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
         )
         with pytest.raises(VerificationError, match="Transaction submission failed"):
             await intent.verify(
@@ -433,7 +427,6 @@ class TestChargeIntent:
                     "amount": "1000",
                     "currency": "0x1234567890123456789012345678901234567890",
                     "recipient": "0x4567890123456789012345678901234567890123",
-                    "expires": future,
                 },
             )
 
@@ -536,6 +529,7 @@ class TestSponsoredTransfer:
         intent = ChargeIntent(rpc_url="https://rpc.test")
         credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
+            expires=future,
         )
 
         receipt = await intent.verify(
@@ -544,7 +538,6 @@ class TestSponsoredTransfer:
                 "amount": "1000000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "expires": future,
                 "methodDetails": {
                     "feePayer": True,
                     "feePayerUrl": "https://sponsor.test",
@@ -572,6 +565,7 @@ class TestSponsoredTransfer:
         intent = ChargeIntent(rpc_url="https://rpc.test")
         credential = make_credential(
             payload={"type": "transaction", "signature": "0x76abcdef"},
+            expires=future,
         )
 
         with pytest.raises(VerificationError, match="Fee payer signing failed"):
@@ -581,7 +575,6 @@ class TestSponsoredTransfer:
                     "amount": "1000000",
                     "currency": "0x20c0000000000000000000000000000000000000",
                     "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                    "expires": future,
                     "methodDetails": {
                         "feePayer": True,
                         "feePayerUrl": "https://sponsor.test",
@@ -693,7 +686,6 @@ class TestCosignAsFeePayer:
             amount="1000000",
             currency="0xDEAD000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
 
         with pytest.raises(VerificationError, match="no matching payment call"):
@@ -711,7 +703,6 @@ class TestCosignAsFeePayer:
             amount="9999999",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
 
         with pytest.raises(VerificationError, match="no matching payment call"):
@@ -729,7 +720,6 @@ class TestCosignAsFeePayer:
             amount="1000000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0xDEAD000000000000000000000000000000000000",
-            expires="2030-01-20T12:00:00Z",
         )
 
         with pytest.raises(VerificationError, match="no matching payment call"):
@@ -751,7 +741,6 @@ class TestCosignAsFeePayer:
             amount="1000000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
 
         result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
@@ -828,7 +817,6 @@ class TestValidateTransactionPayload:
             amount="1000000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         sig = self._build_0x78_envelope()
         # Should not raise
@@ -841,7 +829,6 @@ class TestValidateTransactionPayload:
             amount="9999999",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         sig = self._build_0x78_envelope(amount=1000000)
         with pytest.raises(VerificationError, match="no matching payment call"):
@@ -854,7 +841,6 @@ class TestValidateTransactionPayload:
             amount="1000000",
             currency="0xDEAD000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         sig = self._build_0x78_envelope()
         with pytest.raises(VerificationError, match="no matching payment call"):
@@ -867,7 +853,6 @@ class TestValidateTransactionPayload:
             amount="1000000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         sig = self._build_0x76_tx()
         # Should not raise
@@ -880,7 +865,6 @@ class TestValidateTransactionPayload:
             amount="1000000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         # 0x02 prefix — should silently skip (not raise)
         intent._validate_transaction_payload("0x02abcdef", request)
@@ -919,7 +903,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         assert req.amount == "1000"
         assert req.methodDetails.feePayer is False
@@ -931,7 +914,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
             methodDetails=MethodDetails(
                 feePayer=True,
                 feePayerUrl="https://sponsor.test",
@@ -958,7 +940,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
             description="Payment for API access",
         )
         assert req.description == "Payment for API access"
@@ -969,7 +950,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
             externalId="order-12345",
         )
         assert req.externalId == "order-12345"
@@ -980,7 +960,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
         )
         assert req.description is None
         assert req.externalId is None
@@ -991,7 +970,6 @@ class TestSchemas:
             amount="1000",
             currency="0x20c0000000000000000000000000000000000000",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            expires="2030-01-20T12:00:00Z",
             description="Test payment",
             externalId="ext-001",
         )
@@ -1265,7 +1243,6 @@ class TestMatchTransferCalldataWithMemo:
             amount=str(self.AMOUNT),
             currency=self.CURRENCY,
             recipient=self.RECIPIENT,
-            expires="2030-01-20T12:00:00Z",
             methodDetails=MethodDetails(memo=memo),
         )
 
@@ -1362,7 +1339,6 @@ class TestVerifyTransferLogsWithMemo:
             amount=str(self.AMOUNT),
             currency=self.CURRENCY,
             recipient=self.RECIPIENT,
-            expires="2030-01-20T12:00:00Z",
             methodDetails=MethodDetails(memo=memo),
         )
 
@@ -1474,7 +1450,6 @@ class TestValidateTransactionPayload0x76:
             amount="1000000",
             currency=self.CURRENCY,
             recipient=self.RECIPIENT,
-            expires="2030-01-20T12:00:00Z",
         )
 
     def test_non_tempo_tx_returns_silently(self) -> None:

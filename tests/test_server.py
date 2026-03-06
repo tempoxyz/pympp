@@ -37,7 +37,7 @@ class TestVerifyOrChallenge:
         assert result.method == "tempo"
         assert result.intent == "charge"
         assert result.request["amount"] == "1000"
-        assert "expires" in result.request  # default expires is added
+        assert result.expires is not None  # default expires is a challenge-level auth-param
 
     @pytest.mark.asyncio
     async def test_returns_challenge_when_invalid_scheme(self) -> None:
