@@ -113,7 +113,6 @@ def wrap_payment_handler[R](
         return await handler(request_obj, credential, receipt)
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
-    del wrapper.__wrapped__
 
     return wrapper
 
@@ -148,7 +147,7 @@ def pay[R](
         realm: The realm for the WWW-Authenticate header.
             Auto-detected from environment if omitted.
         secret_key: Server secret for HMAC-bound challenge IDs.
-            Auto-generated and persisted to .env if omitted.
+            Required unless `MPP_SECRET_KEY` is set.
         method: The payment method name (defaults to "tempo").
         description: Human-readable description of what the payment is for.
 

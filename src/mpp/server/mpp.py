@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
-from mpp._parsing import ParseError
 from mpp._units import parse_units
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.decorator import wrap_payment_handler
@@ -20,33 +19,6 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 
 DEFAULT_DECIMALS = 6
-
-
-def _credential_for_transform(authorization: str | None) -> Credential | None:
-    """Best-effort credential parsing for method transform hooks.
-
-    Transform hooks should be able to branch on authenticated context when
-    a valid Payment credential is present. Parsing failures return None so
-    verification remains fail-closed inside verify_or_challenge.
-    """
-    if authorization is None:
-        return None
-
-    payment_scheme = next(
-        (
-            scheme.strip()
-            for scheme in authorization.split(",")
-            if scheme.strip().lower().startswith("payment ")
-        ),
-        None,
-    )
-    if payment_scheme is None:
-        return None
-
-    try:
-        return Credential.from_authorization(payment_scheme)
-    except ParseError:
-        return None
 
 
 class Mpp:
@@ -113,7 +85,7 @@ class Mpp:
         Args:
             method: Payment method (e.g., tempo(currency=..., recipient=...)).
             realm: Server realm. Auto-detected from environment if omitted.
-            secret_key: HMAC secret. Auto-generated and persisted to .env if omitted.
+            secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
         """
         return cls(
             method=method,
@@ -194,7 +166,7 @@ class Mpp:
                 method_details["feePayer"] = True
             request["methodDetails"] = method_details
 
-        request = transform_request(self.method, request, _credential_for_transform(authorization))
+        request = transform_request(self.method, request, None)
 
         return await verify_or_challenge(
             authorization=authorization,
@@ -298,7 +270,7 @@ class Mpp:
                 request = transform_request(
                     self.method,
                     request,
-                    _credential_for_transform(authorization),
+                    None,
                 )
 
                 return await verify_or_challenge(

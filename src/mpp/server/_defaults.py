@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import os
-import uuid
-from pathlib import Path
 
-from dotenv import dotenv_values
-
-_ENV_FILE = Path(".env")
 _SECRET_KEY_NAME = "MPP_SECRET_KEY"
 
 _REALM_ENV_VARS = [
@@ -32,24 +27,14 @@ def detect_realm() -> str:
     return "localhost"
 
 
-def _read_env_file(key: str) -> str | None:
-    if not _ENV_FILE.exists():
-        return None
-    values = dotenv_values(_ENV_FILE)
-    return values.get(key)
-
-
 def detect_secret_key() -> str:
-    """Get or generate a persistent secret key."""
+    """Get server secret key from environment.
+
+    Mirrors mppx behavior: the secret key is required and must be provided
+    via `MPP_SECRET_KEY` or passed explicitly to server APIs.
+    """
     value = os.environ.get(_SECRET_KEY_NAME)
-    if value:
+    if value and value.strip():
         return value
 
-    value = _read_env_file(_SECRET_KEY_NAME)
-    if value:
-        return value
-
-    value = str(uuid.uuid4())
-    with _ENV_FILE.open("a") as f:
-        f.write(f"{_SECRET_KEY_NAME}={value}\n")
-    return value
+    raise ValueError("Missing secret key. Set MPP_SECRET_KEY or pass secret_key explicitly.")

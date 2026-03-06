@@ -416,6 +416,7 @@ class TestPayDecorator:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
@@ -469,6 +470,7 @@ class TestPayDecorator:
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
@@ -521,6 +523,7 @@ class TestPayDecorator:
             intent=MockIntent(),  # type: ignore[arg-type]
             request=lambda query, **kw: {"amount": str(len(query) * 10)},
             realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
@@ -543,6 +546,7 @@ class TestPayDecorator:
         @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
@@ -573,6 +577,7 @@ class TestPayDecorator:
         @pay(
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
+            secret_key=MCP_TEST_SECRET,
         )
         async def my_tool(query: str, *, credential: MCPCredential, receipt: MCPReceipt) -> str:
             return f"Result: {query}"
