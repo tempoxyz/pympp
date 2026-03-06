@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.4.0 (2026-03-06)
+
+### Minor Changes
+
+- Require explicit server secret key — remove implicit `.env` auto-generation/persistence. `MPP_SECRET_KEY` must be set in the environment or `secret_key` passed explicitly; whitespace-only values are rejected. Preserves `__wrapped__` on payment decorators. Aligns pympp with mpp-rs and mppx behavior. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Consolidated `expires` from the request body into the challenge-level `expires` auth-param exclusively. Removed `expires` as a field from `ChargeRequest` schema and updated all server, intent, and test code to read expiry from `credential.challenge.expires` instead. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Added `digest` and `opaque` fields to `MCPChallenge` for extended challenge metadata propagation. Fixed deterministic body digest computation by adding `sort_keys=True` to JSON serialization, and corrected ISO 8601 timestamp formatting. Added cross-realm attack prevention by validating echoed challenge fields (`realm`, `method`, `intent`) against server-expected values in both HTTP and MCP transports. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+
+### Patch Changes
+
+- Applied `transform_request` method hook in `Mpp.charge` and `Mpp.pay` helpers, ensuring the method's request transform is called before verification. Added tests covering both helpers. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Updated documentation URLs from `machinepayments.dev` to `mpp.dev`, updated the IETF draft reference link, removed the `currency` parameter from the README example, updated the example API endpoint, and updated the package description in `pyproject.toml`. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+- Added server-side expiry enforcement to reject replayed credentials after their challenge has expired. (by @BrendanRyan, [#81](https://github.com/tempoxyz/pympp/pull/81))
+
 ## 0.3.0 (2026-02-23)
 
 ### Minor Changes
