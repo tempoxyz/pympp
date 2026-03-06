@@ -34,7 +34,7 @@ def detect_secret_key() -> str:
     via `MPP_SECRET_KEY` or passed explicitly to server APIs.
     """
     value = os.environ.get(_SECRET_KEY_NAME)
-    if value:
+    if value and value.strip():
         return value
 
     raise ValueError("Missing secret key. Set MPP_SECRET_KEY or pass secret_key explicitly.")

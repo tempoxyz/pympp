@@ -77,6 +77,14 @@ class TestMppCreate:
                     realm="test.com",
                 )
 
+    def test_create_rejects_whitespace_secret_key(self) -> None:
+        with patch.dict(os.environ, {"MPP_SECRET_KEY": "   "}, clear=True):
+            with pytest.raises(ValueError, match="Missing secret key"):
+                Mpp.create(
+                    method=tempo(intents={"charge": ChargeIntent()}),
+                    realm="test.com",
+                )
+
     def test_create_auto_secret_key_from_env(self) -> None:
         with patch.dict(os.environ, {"MPP_SECRET_KEY": "env-secret"}):
             srv = Mpp.create(
