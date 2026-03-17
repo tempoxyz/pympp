@@ -38,7 +38,7 @@ CHAIN_RPC_URLS: MappingProxyType[int, str] = MappingProxyType(
 ESCROW_CONTRACTS: MappingProxyType[int, str] = MappingProxyType(
     {
         CHAIN_ID: "0x33b901018174DDabE4841042ab76ba85D4e24f25",
-        TESTNET_CHAIN_ID: "0x542831e3E4Ace07559b7C8787395f4Fb99F70787",
+        TESTNET_CHAIN_ID: "0xe1c4d3dce17bc111181ddf716f75bae49e61a336",
     }
 )
 
