@@ -991,7 +991,7 @@ class TestDefaults:
         assert CHAIN_ID in ESCROW_CONTRACTS
         assert TESTNET_CHAIN_ID in ESCROW_CONTRACTS
         assert ESCROW_CONTRACTS[CHAIN_ID] == "0x33b901018174DDabE4841042ab76ba85D4e24f25"
-        assert ESCROW_CONTRACTS[TESTNET_CHAIN_ID] == "0x542831e3E4Ace07559b7C8787395f4Fb99F70787"
+        assert ESCROW_CONTRACTS[TESTNET_CHAIN_ID] == "0xe1c4d3dce17bc111181ddf716f75bae49e61a336"
 
     def test_escrow_contract_for_chain_mainnet(self) -> None:
         """escrow_contract_for_chain should return mainnet address."""
@@ -1001,7 +1001,7 @@ class TestDefaults:
     def test_escrow_contract_for_chain_testnet(self) -> None:
         """escrow_contract_for_chain should return testnet address."""
         addr = escrow_contract_for_chain(42431)
-        assert addr == "0x542831e3E4Ace07559b7C8787395f4Fb99F70787"
+        assert addr == "0xe1c4d3dce17bc111181ddf716f75bae49e61a336"
 
     def test_escrow_contract_for_chain_unknown(self) -> None:
         """escrow_contract_for_chain should raise for unknown chain."""
