@@ -14,7 +14,6 @@ import attrs
 
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
-from mpp.store import Store
 from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
@@ -22,6 +21,7 @@ from mpp.methods.tempo.schemas import (
     HashCredentialPayload,
     TransactionCredentialPayload,
 )
+from mpp.store import Store
 
 if TYPE_CHECKING:
     import httpx
@@ -153,7 +153,7 @@ class ChargeIntent:
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
-        self.store = store
+        self._store = store
 
     @property
     def fee_payer(self) -> TempoAccount | None:
@@ -239,8 +239,8 @@ class ChargeIntent:
         request: ChargeRequest,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
-        if self.store is not None:
-            seen = await self.store.get(f"mpp:charge:{payload.hash}")
+        if self._store is not None:
+            seen = await self._store.get(f"mpp:charge:{payload.hash}")
             if seen is not None:
                 raise VerificationError("Transaction hash has already been used.")
 
@@ -274,8 +274,8 @@ class ChargeIntent:
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
-        if self.store is not None:
-            await self.store.put(f"mpp:charge:{payload.hash}", time.time())
+        if self._store is not None:
+            await self._store.put(f"mpp:charge:{payload.hash}", True)
 
         return Receipt.success(payload.hash)
 
