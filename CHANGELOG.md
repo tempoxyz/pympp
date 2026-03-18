@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1 (2026-03-18)
+
+### Patch Changes
+
+- Updated the testnet escrow contract address to `0xe1c4d3dce17bc111181ddf716f75bae49e61a336`. (by @BrendanRyan, [#90](https://github.com/tempoxyz/pympp/pull/90))
+- Updated `examples/api-server/README.md` to replace references to the external `purl` tool with the `pympp` client (`python -m mpp.fetch`) and corrected the `secret_key` documentation to reflect that it is read from the `MPP_SECRET_KEY` env var rather than auto-generated. (by @BrendanRyan, [#90](https://github.com/tempoxyz/pympp/pull/90))
+- Added a pluggable `Store` interface and `MemoryStore` implementation for transaction hash replay protection in `ChargeIntent`. When a store is provided, verified tx hashes are recorded and subsequent attempts to reuse the same hash are rejected with a `VerificationError`. (by @BrendanRyan, [#90](https://github.com/tempoxyz/pympp/pull/90))
+- Updated mainnet escrow contract address to `0x33b901018174DDabE4841042ab76ba85D4e24f25`. (by @BrendanRyan, [#90](https://github.com/tempoxyz/pympp/pull/90))
+- Raised `DEFAULT_GAS_LIMIT` from 100,000 to 1,000,000 for Tempo AA (type-0x76) transactions to account for their higher intrinsic gas cost (~270k for a single TIP-20 transfer). (by @BrendanRyan, [#90](https://github.com/tempoxyz/pympp/pull/90))
+
 ## 0.4.0 (2026-03-06)
 
 ### Minor Changes
