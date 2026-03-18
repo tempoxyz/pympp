@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.1 (2026-03-18)
+
+### Patch Changes
+
+- Updated the testnet escrow contract address to `0xe1c4d3dce17bc111181ddf716f75bae49e61a336`. (by @BrendanRyan, [#87](https://github.com/tempoxyz/pympp/pull/87))
+- Updated `examples/api-server/README.md` to replace references to the external `purl` tool with the `pympp` client (`python -m mpp.fetch`) and corrected the `secret_key` documentation to reflect that it is read from the `MPP_SECRET_KEY` env var rather than auto-generated. (by @BrendanRyan, [#87](https://github.com/tempoxyz/pympp/pull/87))
+- Updated mainnet escrow contract address to `0x33b901018174DDabE4841042ab76ba85D4e24f25`. (by @BrendanRyan, [#87](https://github.com/tempoxyz/pympp/pull/87))
+
 ## 0.4.0 (2026-03-06)
 
 ### Minor Changes
