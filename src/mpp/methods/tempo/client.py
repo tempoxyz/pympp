@@ -24,7 +24,10 @@ if TYPE_CHECKING:
     from mpp.server.intent import Intent
 
 
-DEFAULT_GAS_LIMIT = 100_000
+# Tempo AA (type-0x76) transactions have higher intrinsic gas than legacy txs
+# (~270k for a single TIP-20 transfer). A safe static limit avoids the need for
+# AA-aware eth_estimateGas calls, matching the approach used by mpp-rs.
+DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 FEE_PAYER_VALID_BEFORE_SECS = 25
 
