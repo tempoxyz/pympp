@@ -12,7 +12,6 @@ A FastAPI server with payment-protected endpoints using the Machine Payments Pro
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- [purl](https://purl.tempo.xyz/) for testing paid endpoints
 
 ## Installation
 
@@ -47,10 +46,10 @@ curl http://localhost:8000/free
 # {"message":"This content is free!"}
 ```
 
-**Paid endpoint** (use purl to handle payment automatically):
+**Paid endpoint** (use the pympp client to handle payment automatically):
 
 ```bash
-purl http://localhost:8000/paid
+python -m mpp.fetch http://localhost:8000/paid
 # {"message":"This is paid content!","payer":"0x...","tx":"0x..."}
 ```
 
@@ -77,7 +76,7 @@ server = Mpp.create(
 
 `Mpp.create()` sets up the payment handler with smart defaults:
 - **realm** auto-detected from environment (`MPP_REALM`, `VERCEL_URL`, etc.)
-- **secret_key** auto-generated and persisted to `.env`
+- **secret_key** read from `MPP_SECRET_KEY` env var (or passed explicitly)
 - **currency** and **recipient** configured once on the method
 
 ### Charging
