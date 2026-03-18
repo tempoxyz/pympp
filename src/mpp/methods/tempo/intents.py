@@ -21,6 +21,7 @@ from mpp.methods.tempo.schemas import (
     HashCredentialPayload,
     TransactionCredentialPayload,
 )
+from mpp.store import Store
 
 if TYPE_CHECKING:
     import httpx
@@ -129,6 +130,7 @@ class ChargeIntent:
         rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        store: Store | None = None,
     ) -> None:
         """Initialize the charge intent.
 
@@ -140,6 +142,9 @@ class ChargeIntent:
             http_client: Optional httpx client for making RPC calls.
                 If provided, the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).
+            store: Optional key-value store for tx hash replay protection.
+                When provided, each verified hash is recorded and subsequent
+                attempts to reuse it are rejected.
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -148,6 +153,7 @@ class ChargeIntent:
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
+        self._store = store
 
     @property
     def fee_payer(self) -> TempoAccount | None:
@@ -233,6 +239,11 @@ class ChargeIntent:
         request: ChargeRequest,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
+        if self._store is not None:
+            seen = await self._store.get(f"mpp:charge:{payload.hash}")
+            if seen is not None:
+                raise VerificationError("Transaction hash has already been used.")
+
         client = await self._get_client()
 
         rpc_url = self._get_rpc_url()
@@ -262,6 +273,9 @@ class ChargeIntent:
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
+
+        if self._store is not None:
+            await self._store.put(f"mpp:charge:{payload.hash}", True)
 
         return Receipt.success(payload.hash)
 
