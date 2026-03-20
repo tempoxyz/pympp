@@ -240,9 +240,9 @@ class ChargeIntent:
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
         if self._store is not None:
-            seen = await self._store.get(f"mpp:charge:{payload.hash}")
-            if seen is not None:
-                raise VerificationError("Transaction hash has already been used.")
+            store_key = f"mpp:charge:{payload.hash.lower()}"
+            if not await self._store.put_if_absent(store_key, payload.hash):
+                raise VerificationError("Transaction hash already used")
 
         client = await self._get_client()
 
@@ -273,9 +273,6 @@ class ChargeIntent:
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
-
-        if self._store is not None:
-            await self._store.put(f"mpp:charge:{payload.hash}", True)
 
         return Receipt.success(payload.hash)
 

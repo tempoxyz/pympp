@@ -326,7 +326,7 @@ class TestChargeIntent:
         assert receipt.status == "success"
 
         # Second verification with same hash should fail
-        with pytest.raises(VerificationError, match="Transaction hash has already been used"):
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
             await intent.verify(credential, request)
 
     @pytest.mark.asyncio
