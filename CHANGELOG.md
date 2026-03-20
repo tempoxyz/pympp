@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 (2026-03-20)
+
+### Patch Changes
+
+- Added atomic `put_if_absent` method to `Store` protocol and `MemoryStore`, replacing the racy `get()`/`put()` pattern for charge replay protection. Normalized transaction hashes to lowercase before dedup to prevent mixed-case bypasses. (by @BrendanRyan, [#91](https://github.com/tempoxyz/pympp/pull/91))
+
 ## 0.4.1 (2026-03-18)
 
 ### Patch Changes
