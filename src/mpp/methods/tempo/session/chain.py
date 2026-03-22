@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from eth_abi import decode, encode
+from eth_typing import HexAddress
 from eth_utils import keccak
 
 from mpp.errors import VerificationError
@@ -32,10 +33,10 @@ RECEIPT_RETRY_DELAY_SECONDS = 0.5
 class OnChainChannel:
     """On-chain channel state returned by ``escrow.getChannel()``."""
 
-    payer: str
-    payee: str
-    token: str
-    authorized_signer: str
+    payer: HexAddress
+    payee: HexAddress
+    token: HexAddress
+    authorized_signer: HexAddress
     deposit: int
     settled: int
     close_requested_at: int

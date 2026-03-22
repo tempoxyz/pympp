@@ -512,9 +512,6 @@ class SessionIntent:
             channel_id_bytes = bytes.fromhex(
                 channel_id[2:] if channel_id.startswith("0x") else channel_id
             )
-            escrow_bytes = bytes.fromhex(
-                escrow[2:] if escrow.startswith("0x") else escrow
-            )
         except ValueError as e:
             raise VerificationError(f"invalid hex in close tx params: {e}") from e
 
@@ -566,13 +563,13 @@ class SessionIntent:
             raise VerificationError("failed to get gas price for close tx")
         gas_price = int(gas_result["result"], 16)
 
-        tx = TempoTransaction(
+        tx = TempoTransaction.create(
             chain_id=chain_id,
             nonce=nonce,
             gas_limit=2_000_000,
             max_fee_per_gas=gas_price,
             max_priority_fee_per_gas=gas_price,
-            calls=(Call(to=escrow_bytes, value=0, data=calldata),),
+            calls=(Call.create(to=escrow, value=0, data=calldata),),
         )
 
         signed = tx.sign(signer.key)

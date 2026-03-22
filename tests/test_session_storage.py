@@ -11,7 +11,9 @@ from mpp.methods.tempo.session.storage import MemoryChannelStore, deduct_from_ch
 from mpp.methods.tempo.session.types import ChannelState
 
 
-def _make_channel(channel_id: str = "0xch", deposit: int = 100_000, voucher: int = 10_000) -> ChannelState:
+def _make_channel(
+    channel_id: str = "0xch", deposit: int = 100_000, voucher: int = 10_000
+) -> ChannelState:
     return ChannelState(
         channel_id=channel_id,
         chain_id=42431,

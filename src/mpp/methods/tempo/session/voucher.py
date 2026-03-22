@@ -1,8 +1,8 @@
 """EIP-712 voucher verification and channel ID computation.
 
 Ported from mpp-rs ``voucher.rs``.  Uses ``eth_account`` for EIP-712
-typed-data recovery and ``eth_utils.keccak`` for hashing (both
-available transitively via pytempo).
+typed-data signing/recovery and ``eth_utils.keccak`` for channel ID
+hashing (both available transitively via pytempo).
 """
 
 from __future__ import annotations
@@ -105,8 +105,7 @@ def _verify_voucher_ecdsa(
     }
 
     signable = encode_typed_data(full_message=typed_data)
-    signing_hash = keccak(b"\x19\x01" + signable.header + signable.body)
-    recovered = Account._recover_hash(signing_hash, signature=signature_bytes)
+    recovered = Account.recover_message(signable, signature=signature_bytes)
     return recovered.lower() == expected_signer.lower()
 
 

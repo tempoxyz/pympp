@@ -135,15 +135,17 @@ class TestClosePayload:
 class TestParseSessionPayload:
     def test_dispatches_all_actions(self) -> None:
         assert isinstance(
-            parse_session_payload(
-                {"action": "open", "type": "transaction", "channelId": "0x", "transaction": "0x", "cumulativeAmount": "0", "signature": "0x"}
-            ),
+            parse_session_payload({
+                "action": "open", "type": "transaction", "channelId": "0x",
+                "transaction": "0x", "cumulativeAmount": "0", "signature": "0x",
+            }),
             OpenPayload,
         )
         assert isinstance(
-            parse_session_payload(
-                {"action": "topUp", "type": "transaction", "channelId": "0x", "transaction": "0x", "additionalDeposit": "0"}
-            ),
+            parse_session_payload({
+                "action": "topUp", "type": "transaction", "channelId": "0x",
+                "transaction": "0x", "additionalDeposit": "0",
+            }),
             TopUpPayload,
         )
         assert isinstance(

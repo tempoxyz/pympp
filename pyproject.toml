@@ -75,6 +75,7 @@ quote-style = "double"
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 include = ["src", "tests"]
+reportPrivateImportUsage = "warning"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

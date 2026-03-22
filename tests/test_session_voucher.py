@@ -93,15 +93,15 @@ class TestIsKeychainEnvelope:
 
 class TestComputeChannelId:
     def test_deterministic(self) -> None:
-        args = dict(
-            payer="0x1111111111111111111111111111111111111111",
-            payee="0x2222222222222222222222222222222222222222",
-            token="0x3333333333333333333333333333333333333333",
-            salt="0x" + "00" * 32,
-            authorized_signer="0x4444444444444444444444444444444444444444",
-            escrow_contract=ESCROW,
-            chain_id=CHAIN_ID,
-        )
+        args = {
+            "payer": "0x1111111111111111111111111111111111111111",
+            "payee": "0x2222222222222222222222222222222222222222",
+            "token": "0x3333333333333333333333333333333333333333",
+            "salt": "0x" + "00" * 32,
+            "authorized_signer": "0x4444444444444444444444444444444444444444",
+            "escrow_contract": ESCROW,
+            "chain_id": CHAIN_ID,
+        }
         id1 = compute_channel_id(**args)
         id2 = compute_channel_id(**args)
         assert id1 == id2
@@ -109,15 +109,17 @@ class TestComputeChannelId:
         assert len(id1) == 66  # 0x + 64 hex chars
 
     def test_differs_for_different_params(self) -> None:
-        base = dict(
-            payer="0x1111111111111111111111111111111111111111",
-            payee="0x2222222222222222222222222222222222222222",
-            token="0x3333333333333333333333333333333333333333",
-            salt="0x" + "00" * 32,
-            authorized_signer="0x4444444444444444444444444444444444444444",
-            escrow_contract=ESCROW,
-            chain_id=CHAIN_ID,
-        )
+        base = {
+            "payer": "0x1111111111111111111111111111111111111111",
+            "payee": "0x2222222222222222222222222222222222222222",
+            "token": "0x3333333333333333333333333333333333333333",
+            "salt": "0x" + "00" * 32,
+            "authorized_signer": "0x4444444444444444444444444444444444444444",
+            "escrow_contract": ESCROW,
+            "chain_id": CHAIN_ID,
+        }
         id1 = compute_channel_id(**base)
-        id2 = compute_channel_id(**{**base, "payer": "0x9999999999999999999999999999999999999999"})
+        id2 = compute_channel_id(
+            **{**base, "payer": "0x9999999999999999999999999999999999999999"}
+        )
         assert id1 != id2
