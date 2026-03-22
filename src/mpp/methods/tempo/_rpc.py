@@ -8,6 +8,16 @@ from typing import Any
 DEFAULT_TIMEOUT = 30.0
 
 
+def rpc_error_msg(result: dict) -> str:
+    """Extract error message from a JSON-RPC error response."""
+    error_obj = result["error"]
+    if isinstance(error_obj, dict):
+        msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
+        data = error_obj.get("data", "")
+        return f"{msg}: {data}" if data else msg
+    return str(error_obj)
+
+
 async def _rpc_call(
     rpc_url: str,
     method: str,

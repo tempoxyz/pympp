@@ -15,6 +15,7 @@ import attrs
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
+from mpp.methods.tempo._rpc import rpc_error_msg as _rpc_error_msg
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -42,16 +43,6 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
-
-
-def _rpc_error_msg(result: dict) -> str:
-    """Extract error message from a JSON-RPC error response."""
-    error_obj = result["error"]
-    if isinstance(error_obj, dict):
-        msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
-        data = error_obj.get("data", "")
-        return f"{msg}: {data}" if data else msg
-    return str(error_obj)
 
 
 def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
