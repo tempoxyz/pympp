@@ -8,22 +8,22 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
-from mpp import Challenge, Credential, ChallengeEcho, Receipt
+from mpp import Challenge, ChallengeEcho, Credential
 from mpp.errors import (
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
 )
-from mpp.methods.stripe import ChargeIntent, StripeMethod, stripe
+from mpp.methods.stripe import ChargeIntent, stripe
 from mpp.methods.stripe.client import OnChallengeParameters
 from mpp.methods.stripe.intents import _resolve_payment_intents
-from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload, StripeMethodDetails
-
+from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload
 
 # ──────────────────────────────────────────────────────────────────
 # Schema tests
@@ -44,42 +44,48 @@ class TestStripeCredentialPayload:
         assert payload.externalId == "order-42"
 
     def test_missing_spt(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             StripeCredentialPayload.model_validate({"externalId": "order-42"})
 
 
 class TestChargeRequest:
     def test_valid_request(self):
-        req = ChargeRequest.model_validate({
-            "amount": "150",
-            "currency": "usd",
-            "methodDetails": {
-                "networkId": "bn_test",
-                "paymentMethodTypes": ["card"],
-            },
-        })
+        req = ChargeRequest.model_validate(
+            {
+                "amount": "150",
+                "currency": "usd",
+                "methodDetails": {
+                    "networkId": "bn_test",
+                    "paymentMethodTypes": ["card"],
+                },
+            }
+        )
         assert req.amount == "150"
         assert req.currency == "usd"
         assert req.methodDetails.networkId == "bn_test"
         assert req.methodDetails.paymentMethodTypes == ["card"]
 
     def test_missing_method_details(self):
-        with pytest.raises(Exception):
-            ChargeRequest.model_validate({
-                "amount": "150",
-                "currency": "usd",
-            })
+        with pytest.raises(ValidationError):
+            ChargeRequest.model_validate(
+                {
+                    "amount": "150",
+                    "currency": "usd",
+                }
+            )
 
     def test_empty_payment_method_types(self):
-        with pytest.raises(Exception):
-            ChargeRequest.model_validate({
-                "amount": "150",
-                "currency": "usd",
-                "methodDetails": {
-                    "networkId": "bn_test",
-                    "paymentMethodTypes": [],
-                },
-            })
+        with pytest.raises(ValidationError):
+            ChargeRequest.model_validate(
+                {
+                    "amount": "150",
+                    "currency": "usd",
+                    "methodDetails": {
+                        "networkId": "bn_test",
+                        "paymentMethodTypes": [],
+                    },
+                }
+            )
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -177,6 +183,7 @@ class TestStripeMethod:
     @pytest.mark.asyncio
     async def test_create_credential_missing_network_id_raises(self):
         """networkId is required in challenge.methodDetails (mppx parity)."""
+
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
@@ -186,19 +193,22 @@ class TestStripeMethod:
             intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
-        challenge = _make_challenge(request={
-            "amount": "150",
-            "currency": "usd",
-            "methodDetails": {
-                "paymentMethodTypes": ["card"],
-            },
-        })
+        challenge = _make_challenge(
+            request={
+                "amount": "150",
+                "currency": "usd",
+                "methodDetails": {
+                    "paymentMethodTypes": ["card"],
+                },
+            }
+        )
         with pytest.raises(ValueError, match="networkId is required"):
             await method.create_credential(challenge)
 
     @pytest.mark.asyncio
     async def test_create_credential_rejects_metadata_external_id(self):
         """metadata.externalId is reserved (mppx parity)."""
+
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
@@ -208,15 +218,17 @@ class TestStripeMethod:
             intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
-        challenge = _make_challenge(request={
-            "amount": "150",
-            "currency": "usd",
-            "methodDetails": {
-                "networkId": "bn_test",
-                "paymentMethodTypes": ["card"],
-                "metadata": {"externalId": "should-fail"},
-            },
-        })
+        challenge = _make_challenge(
+            request={
+                "amount": "150",
+                "currency": "usd",
+                "methodDetails": {
+                    "networkId": "bn_test",
+                    "paymentMethodTypes": ["card"],
+                    "metadata": {"externalId": "should-fail"},
+                },
+            }
+        )
         with pytest.raises(ValueError, match="externalId is reserved"):
             await method.create_credential(challenge)
 
@@ -280,9 +292,7 @@ class TestStripeMethod:
         challenge = _make_challenge(expires=expires)
         await method.create_credential(challenge)
 
-        expected = math.floor(
-            datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
-        )
+        expected = math.floor(datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp())
         assert recorded_params[0].expires_at == expected
 
     @pytest.mark.asyncio

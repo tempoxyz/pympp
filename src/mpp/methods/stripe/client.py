@@ -14,9 +14,8 @@ from typing import TYPE_CHECKING, Any
 from mpp import Challenge, Credential
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
-
     from mpp import Credential as CredentialType
+    from mpp.server.intent import Intent
 
 
 @dataclass(frozen=True)
@@ -117,14 +116,11 @@ class StripeMethod:
         metadata = method_details.get("metadata") if isinstance(method_details, dict) else None
         if isinstance(metadata, dict) and "externalId" in metadata:
             raise ValueError(
-                "methodDetails.metadata.externalId is reserved; "
-                "use credential externalId instead"
+                "methodDetails.metadata.externalId is reserved; use credential externalId instead"
             )
 
         if challenge.expires:
-            expires_at = math.floor(
-                _parse_iso_timestamp(challenge.expires)
-            )
+            expires_at = math.floor(_parse_iso_timestamp(challenge.expires))
         else:
             expires_at = math.floor(time.time()) + 3600
 
