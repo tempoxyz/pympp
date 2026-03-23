@@ -2,23 +2,26 @@
 
 from __future__ import annotations
 
+import base64
 import math
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from mpp import Challenge, Credential, ChallengeEcho, Receipt
 from mpp.errors import (
     PaymentActionRequiredError,
     PaymentExpiredError,
-    VerificationError,
+    VerificationFailedError,
 )
 from mpp.methods.stripe import ChargeIntent, StripeMethod, stripe
 from mpp.methods.stripe.client import OnChallengeParameters
+from mpp.methods.stripe.intents import _resolve_payment_intents
 from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload, StripeMethodDetails
 
 
@@ -171,6 +174,52 @@ class TestStripeMethod:
         with pytest.raises(ValueError, match="payment_method"):
             await method.create_credential(challenge)
 
+    @pytest.mark.asyncio
+    async def test_create_credential_missing_network_id_raises(self):
+        """networkId is required in challenge.methodDetails (mppx parity)."""
+        async def fake_create_token(params: OnChallengeParameters) -> str:
+            return "spt_test_abc"
+
+        method = stripe(
+            create_token=fake_create_token,
+            payment_method="pm_card_visa",
+            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+        )
+
+        challenge = _make_challenge(request={
+            "amount": "150",
+            "currency": "usd",
+            "methodDetails": {
+                "paymentMethodTypes": ["card"],
+            },
+        })
+        with pytest.raises(ValueError, match="networkId is required"):
+            await method.create_credential(challenge)
+
+    @pytest.mark.asyncio
+    async def test_create_credential_rejects_metadata_external_id(self):
+        """metadata.externalId is reserved (mppx parity)."""
+        async def fake_create_token(params: OnChallengeParameters) -> str:
+            return "spt_test_abc"
+
+        method = stripe(
+            create_token=fake_create_token,
+            payment_method="pm_card_visa",
+            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+        )
+
+        challenge = _make_challenge(request={
+            "amount": "150",
+            "currency": "usd",
+            "methodDetails": {
+                "networkId": "bn_test",
+                "paymentMethodTypes": ["card"],
+                "metadata": {"externalId": "should-fail"},
+            },
+        })
+        with pytest.raises(ValueError, match="externalId is reserved"):
+            await method.create_credential(challenge)
+
     def test_transform_request(self):
         method = stripe(
             network_id="bn_test",
@@ -313,14 +362,55 @@ class FakePaymentIntents:
 
 
 class FakeStripeClient:
+    """Legacy-style client with client.payment_intents."""
+
     def __init__(self, result: FakePaymentIntent | None = None):
         self.payment_intents = FakePaymentIntents(result)
+
+
+class FakeV1:
+    def __init__(self, result: FakePaymentIntent | None = None):
+        self.payment_intents = FakePaymentIntents(result)
+
+
+class FakeModernStripeClient:
+    """Modern-style client with client.v1.payment_intents (stripe-python v8+)."""
+
+    def __init__(self, result: FakePaymentIntent | None = None):
+        self.v1 = FakeV1(result)
+
+
+class TestResolvePaymentIntents:
+    def test_modern_client_v1(self):
+        client = FakeModernStripeClient()
+        pi = _resolve_payment_intents(client)
+        assert pi is client.v1.payment_intents
+
+    def test_legacy_client(self):
+        client = FakeStripeClient()
+        pi = _resolve_payment_intents(client)
+        assert pi is client.payment_intents
+
+    def test_unsupported_client_raises(self):
+        with pytest.raises(TypeError, match="Unsupported Stripe client"):
+            _resolve_payment_intents(object())
 
 
 class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_verify_with_client_success(self):
         intent = ChargeIntent(client=FakeStripeClient())
+        credential = _make_credential()
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_test_123"
+        assert receipt.method == "stripe"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_modern_client_success(self):
+        """Verify works with client.v1.payment_intents (stripe-python v8+)."""
+        intent = ChargeIntent(client=FakeModernStripeClient())
         credential = _make_credential()
         receipt = await intent.verify(credential, SAMPLE_REQUEST)
 
@@ -360,7 +450,7 @@ class TestChargeIntent:
         intent = ChargeIntent(client=FakeStripeClient(result=pi))
         credential = _make_credential()
 
-        with pytest.raises(VerificationError, match="requires_payment_method"):
+        with pytest.raises(VerificationFailedError, match="requires_payment_method"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -378,7 +468,7 @@ class TestChargeIntent:
             payload={"not_spt": "bad"},
         )
 
-        with pytest.raises(VerificationError, match="spt"):
+        with pytest.raises(VerificationFailedError, match="spt"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -393,7 +483,7 @@ class TestChargeIntent:
         intent = ChargeIntent(client=FailingClient())
         credential = _make_credential()
 
-        with pytest.raises(VerificationError, match="PaymentIntent failed"):
+        with pytest.raises(VerificationFailedError, match="PaymentIntent failed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     def test_no_client_or_secret_key_raises(self):
@@ -403,11 +493,11 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_analytics_metadata(self):
         """Verify analytics metadata is passed to PaymentIntent creation."""
-        captured_kwargs: list[dict] = []
+        captured: list[tuple[tuple, dict]] = []
 
         class CapturingIntents:
             def create(self, *args: Any, **kwargs: Any) -> FakePaymentIntent:
-                captured_kwargs.append(kwargs)
+                captured.append((args, kwargs))
                 return FakePaymentIntent()
 
         class CapturingClient:
@@ -417,7 +507,7 @@ class TestChargeIntent:
         credential = _make_credential()
         await intent.verify(credential, SAMPLE_REQUEST)
 
-        params = captured_kwargs[0]["params"]
+        params = captured[0][0][0]
         metadata = params["metadata"]
         assert metadata["mpp_version"] == "1"
         assert metadata["mpp_is_mpp"] == "true"
@@ -429,11 +519,11 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_idempotency_key(self):
         """Verify idempotency key format matches mppx."""
-        captured_kwargs: list[dict] = []
+        captured: list[tuple[tuple, dict]] = []
 
         class CapturingIntents:
             def create(self, *args: Any, **kwargs: Any) -> FakePaymentIntent:
-                captured_kwargs.append(kwargs)
+                captured.append((args, kwargs))
                 return FakePaymentIntent()
 
         class CapturingClient:
@@ -443,17 +533,42 @@ class TestChargeIntent:
         credential = _make_credential(spt="spt_test_xyz")
         await intent.verify(credential, SAMPLE_REQUEST)
 
-        options = captured_kwargs[0]["options"]
+        options = captured[0][1]["options"]
         assert options["idempotency_key"] == "mppx_test-challenge-id_spt_test_xyz"
+
+    @pytest.mark.asyncio
+    async def test_client_request_body_is_first_positional_arg(self):
+        """Verify request body is passed as first positional arg (Stripe SDK convention)."""
+        captured: list[tuple[tuple, dict]] = []
+
+        class CapturingIntents:
+            def create(self, *args: Any, **kwargs: Any) -> FakePaymentIntent:
+                captured.append((args, kwargs))
+                return FakePaymentIntent()
+
+        class CapturingClient:
+            payment_intents = CapturingIntents()
+
+        intent = ChargeIntent(client=CapturingClient())
+        credential = _make_credential()
+        await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert len(captured[0][0]) == 1
+        body = captured[0][0][0]
+        assert body["amount"] == 150
+        assert body["currency"] == "usd"
+        assert body["confirm"] is True
+        assert body["shared_payment_granted_token"] == "spt_test_abc"
+        assert "options" in captured[0][1]
 
     @pytest.mark.asyncio
     async def test_user_metadata_overrides_analytics(self):
         """User-supplied metadata should override analytics keys."""
-        captured_kwargs: list[dict] = []
+        captured: list[tuple[tuple, dict]] = []
 
         class CapturingIntents:
             def create(self, *args: Any, **kwargs: Any) -> FakePaymentIntent:
-                captured_kwargs.append(kwargs)
+                captured.append((args, kwargs))
                 return FakePaymentIntent()
 
         class CapturingClient:
@@ -470,9 +585,144 @@ class TestChargeIntent:
         }
         await intent.verify(credential, request_with_metadata)
 
-        metadata = captured_kwargs[0]["params"]["metadata"]
+        metadata = captured[0][0][0]["metadata"]
         assert metadata["mpp_version"] == "custom"
         assert metadata["user_key"] == "user_val"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Raw HTTP path tests (_create_with_secret_key)
+# ──────────────────────────────────────────────────────────────────
+
+
+class TestChargeIntentRawHttp:
+    @pytest.mark.asyncio
+    async def test_verify_with_secret_key_success(self):
+        """Verify the raw HTTP path creates a PaymentIntent successfully."""
+        mock_response = httpx.Response(
+            200,
+            json={"id": "pi_http_123", "status": "succeeded"},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_http_123"
+        assert receipt.method == "stripe"
+
+        call_kwargs = mock_client.post.call_args
+        assert "api.stripe.com/v1/payment_intents" in call_kwargs.args[0]
+
+        headers = call_kwargs.kwargs["headers"]
+        expected_auth = base64.b64encode(b"sk_test_raw:").decode()
+        assert headers["Authorization"] == f"Basic {expected_auth}"
+        assert headers["Idempotency-Key"] == "mppx_test-challenge-id_spt_test_abc"
+
+        data = call_kwargs.kwargs["data"]
+        assert data["amount"] == "150"
+        assert data["currency"] == "usd"
+        assert data["shared_payment_granted_token"] == "spt_test_abc"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_secret_key_stripe_error(self):
+        """Verify Stripe error details are surfaced in the exception."""
+        mock_response = httpx.Response(
+            400,
+            json={"error": {"message": "Invalid card number", "code": "card_declined"}},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="Invalid card number"):
+            await intent.verify(credential, SAMPLE_REQUEST)
+
+    @pytest.mark.asyncio
+    async def test_verify_with_secret_key_non_json_error(self):
+        """Verify non-JSON error responses are handled gracefully."""
+        mock_response = httpx.Response(
+            500,
+            text="Internal Server Error",
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="Internal Server Error"):
+            await intent.verify(credential, SAMPLE_REQUEST)
+
+    @pytest.mark.asyncio
+    async def test_verify_with_secret_key_metadata_in_form(self):
+        """Verify metadata is encoded as form fields."""
+        mock_response = httpx.Response(
+            200,
+            json={"id": "pi_meta", "status": "succeeded"},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+        await intent.verify(credential, SAMPLE_REQUEST)
+
+        data = mock_client.post.call_args.kwargs["data"]
+        assert data["metadata[mpp_is_mpp]"] == "true"
+        assert data["metadata[mpp_version]"] == "1"
+
+
+# ──────────────────────────────────────────────────────────────────
+# Async context manager tests
+# ──────────────────────────────────────────────────────────────────
+
+
+class TestChargeIntentLifecycle:
+    @pytest.mark.asyncio
+    async def test_aclose_closes_owned_client(self):
+        """Owned HTTP client is closed on aclose()."""
+        intent = ChargeIntent(secret_key="sk_test")
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        intent._http_client = mock_client
+        intent._owns_client = True
+
+        await intent.aclose()
+
+        mock_client.aclose.assert_awaited_once()
+        assert intent._http_client is None
+
+    @pytest.mark.asyncio
+    async def test_aclose_does_not_close_injected_client(self):
+        """Injected HTTP client is NOT closed on aclose()."""
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        intent = ChargeIntent(secret_key="sk_test", http_client=mock_client)
+
+        await intent.aclose()
+
+        mock_client.aclose.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_context_manager_closes_owned_client(self):
+        """__aexit__ closes the owned HTTP client."""
+        intent = ChargeIntent(secret_key="sk_test")
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        intent._http_client = mock_client
+        intent._owns_client = True
+
+        async with intent:
+            pass
+
+        mock_client.aclose.assert_awaited_once()
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -504,3 +754,11 @@ class TestStripeFactory:
         assert method.network_id == "bn_custom"
         assert method.payment_method_types == ["card", "sepa_debit"]
         assert method.recipient == "acct_123"
+
+    def test_no_secret_key_param(self):
+        """Factory no longer accepts secret_key (removed per review)."""
+        with pytest.raises(TypeError):
+            stripe(
+                intents={"charge": ChargeIntent(secret_key="sk_test")},
+                secret_key="sk_test",  # type: ignore[call-arg]
+            )

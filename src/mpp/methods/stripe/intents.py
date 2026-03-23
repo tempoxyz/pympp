@@ -13,7 +13,7 @@ from mpp import Credential, Receipt
 from mpp.errors import (
     PaymentActionRequiredError,
     PaymentExpiredError,
-    VerificationError,
+    VerificationFailedError,
 )
 from mpp.methods.stripe._defaults import STRIPE_API_BASE
 from mpp.methods.stripe.schemas import StripeCredentialPayload
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
     class StripeClient(Protocol):
         """Duck-typed interface for the ``stripe`` Python SDK.
 
-        Matches the subset of the API used for server-side payment verification.
-        Any object with a ``payment_intents.create()`` method is accepted.
+        Accepts either the modern ``StripeClient`` (``client.v1.payment_intents``)
+        or legacy/custom clients (``client.payment_intents``).
         """
 
         payment_intents: StripePaymentIntents
@@ -50,6 +50,25 @@ def _build_analytics(credential: Credential) -> dict[str, str]:
     if credential.source:
         analytics["mpp_client_id"] = credential.source
     return analytics
+
+
+def _resolve_payment_intents(client: Any) -> Any:
+    """Resolve the payment_intents accessor from a Stripe client.
+
+    Supports both the modern ``StripeClient`` (``client.v1.payment_intents``)
+    and legacy/custom clients (``client.payment_intents``).
+    """
+    v1 = getattr(client, "v1", None)
+    if v1 is not None:
+        pi = getattr(v1, "payment_intents", None)
+        if pi is not None:
+            return pi
+    pi = getattr(client, "payment_intents", None)
+    if pi is not None:
+        return pi
+    raise TypeError(
+        "Unsupported Stripe client: expected .v1.payment_intents or .payment_intents"
+    )
 
 
 class ChargeIntent:
@@ -85,7 +104,8 @@ class ChargeIntent:
 
         Args:
             client: Pre-configured Stripe SDK instance (duck-typed).
-                Any object with ``payment_intents.create()`` works.
+                Supports both ``StripeClient`` (v8+, ``client.v1.payment_intents``)
+                and legacy clients (``client.payment_intents``).
             secret_key: Stripe secret API key for raw HTTP verification.
                 Used only when ``client`` is not provided.
             http_client: Optional httpx client for raw HTTP calls.
@@ -145,7 +165,7 @@ class ChargeIntent:
             A receipt indicating success.
 
         Raises:
-            VerificationError: If the SPT is missing or PaymentIntent fails.
+            VerificationFailedError: If the SPT is missing or PaymentIntent fails.
             PaymentExpiredError: If the challenge has expired.
             PaymentActionRequiredError: If 3DS or other action is needed.
         """
@@ -159,7 +179,7 @@ class ChargeIntent:
         try:
             parsed = StripeCredentialPayload.model_validate(credential.payload)
         except Exception as err:
-            raise VerificationError(
+            raise VerificationFailedError(
                 "Invalid credential payload: missing or malformed spt"
             ) from err
 
@@ -189,7 +209,7 @@ class ChargeIntent:
         if pi["status"] == "requires_action":
             raise PaymentActionRequiredError("Stripe PaymentIntent requires action")
         if pi["status"] != "succeeded":
-            raise VerificationError(f"Stripe PaymentIntent status: {pi['status']}")
+            raise VerificationFailedError(f"Stripe PaymentIntent status: {pi['status']}")
 
         return Receipt.success(
             reference=pi["id"],
@@ -207,8 +227,9 @@ class ChargeIntent:
     ) -> dict[str, str]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
-            result = client.payment_intents.create(
-                params={
+            payment_intents = _resolve_payment_intents(client)
+            result = payment_intents.create(
+                {
                     "amount": int(request["amount"]),
                     "automatic_payment_methods": {
                         "allow_redirects": "never",
@@ -221,12 +242,11 @@ class ChargeIntent:
                 },
                 options={"idempotency_key": f"mppx_{challenge_id}_{spt}"},
             )
-            # Handle both sync and async Stripe clients
-            if hasattr(result, "__await__"):
-                result = await result
             return {"id": result.id, "status": result.status}
+        except (VerificationFailedError, TypeError):
+            raise
         except Exception as err:
-            raise VerificationError("Stripe PaymentIntent failed") from err
+            raise VerificationFailedError("Stripe PaymentIntent failed") from err
 
     async def _create_with_secret_key(
         self,
@@ -263,7 +283,15 @@ class ChargeIntent:
         )
 
         if not response.is_success:
-            raise VerificationError("Stripe PaymentIntent failed")
+            detail = None
+            try:
+                err = response.json().get("error", {})
+                detail = err.get("message") or err.get("code")
+            except Exception:
+                detail = response.text[:200] if response.text else None
+            raise VerificationFailedError(
+                detail or f"Stripe PaymentIntent failed (HTTP {response.status_code})"
+            )
 
         result = response.json()
         return {"id": result["id"], "status": result["status"]}
