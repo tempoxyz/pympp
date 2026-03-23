@@ -8,6 +8,7 @@ Code examples for using the Machine Payments Protocol (pympp).
 |---------|-------------|
 | [fetch/](fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server/](mcp-server/) | MCP server with payment-protected tools |
+| [stripe/](stripe/) | Stripe SPT payment flow (server + headless client) |
 
 ## Documentation Examples
 
