@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from mpp import Credential, Receipt
 from mpp.errors import (
@@ -17,22 +17,6 @@ from mpp.errors import (
 )
 from mpp.methods.stripe._defaults import STRIPE_API_BASE
 from mpp.methods.stripe.schemas import StripeCredentialPayload
-
-if TYPE_CHECKING:
-    from typing import Protocol
-
-    class StripePaymentIntents(Protocol):
-        def create(self, *args: Any, **kwargs: Any) -> Any: ...
-
-    class StripeClient(Protocol):
-        """Duck-typed interface for the ``stripe`` Python SDK.
-
-        Accepts either the modern ``StripeClient`` (``client.v1.payment_intents``)
-        or legacy/custom clients (``client.payment_intents``).
-        """
-
-        payment_intents: StripePaymentIntents
-
 
 DEFAULT_TIMEOUT = 30.0
 
@@ -93,7 +77,7 @@ class ChargeIntent:
 
     def __init__(
         self,
-        client: StripeClient | None = None,
+        client: Any | None = None,
         secret_key: str | None = None,
         http_client: Any | None = None,
         timeout: float = DEFAULT_TIMEOUT,
@@ -217,7 +201,7 @@ class ChargeIntent:
 
     async def _create_with_client(
         self,
-        client: StripeClient,
+        client: Any,
         challenge_id: str,
         request: dict[str, Any],
         spt: str,
