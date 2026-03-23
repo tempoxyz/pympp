@@ -17,7 +17,7 @@ Example:
         methods=[stripe(
             create_token=create_spt,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_...")},
+            intents={},
         )],
     )
 
@@ -27,7 +27,6 @@ Example:
 
     server = Mpp.create(
         method=stripe(
-            secret_key="sk_...",
             network_id="bn_...",
             payment_method_types=["card"],
             currency="usd",

@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from mpp import Credential as CredentialType
 
 
+@dataclass(frozen=True)
 class OnChallengeParameters:
     """Parameters passed to the ``create_token`` callback.
 
@@ -32,34 +33,13 @@ class OnChallengeParameters:
         payment_method: Stripe payment method ID (e.g. ``"pm_card_visa"``).
     """
 
-    __slots__ = (
-        "amount",
-        "challenge",
-        "currency",
-        "expires_at",
-        "metadata",
-        "network_id",
-        "payment_method",
-    )
-
-    def __init__(
-        self,
-        *,
-        amount: str,
-        challenge: Challenge,
-        currency: str,
-        expires_at: int,
-        metadata: dict[str, str] | None,
-        network_id: str | None,
-        payment_method: str | None,
-    ) -> None:
-        self.amount = amount
-        self.challenge = challenge
-        self.currency = currency
-        self.expires_at = expires_at
-        self.metadata = metadata
-        self.network_id = network_id
-        self.payment_method = payment_method
+    amount: str
+    challenge: Challenge
+    currency: str
+    expires_at: int
+    metadata: dict[str, str] | None
+    network_id: str
+    payment_method: str
 
 
 CreateTokenFn = Callable[[OnChallengeParameters], Awaitable[str]]
@@ -132,7 +112,14 @@ class StripeMethod:
         amount = str(request.get("amount", ""))
         currency = str(request.get("currency", ""))
         network_id = method_details.get("networkId") if isinstance(method_details, dict) else None
+        if not network_id:
+            raise ValueError("networkId is required in challenge.methodDetails")
         metadata = method_details.get("metadata") if isinstance(method_details, dict) else None
+        if isinstance(metadata, dict) and "externalId" in metadata:
+            raise ValueError(
+                "methodDetails.metadata.externalId is reserved; "
+                "use credential externalId instead"
+            )
 
         if challenge.expires:
             expires_at = math.floor(
@@ -186,7 +173,6 @@ def stripe(
     recipient: str | None = None,
     network_id: str | None = None,
     payment_method_types: list[str] | None = None,
-    secret_key: str | None = None,
 ) -> StripeMethod:
     """Create a Stripe payment method.
 
@@ -203,8 +189,6 @@ def stripe(
             challenge ``methodDetails.networkId``.
         payment_method_types: Stripe payment method types (default: ``["card"]``).
             Included in challenge ``methodDetails.paymentMethodTypes``.
-        secret_key: Stripe secret API key. Passed through to intents if needed;
-            not used directly by the method.
 
     Returns:
         A configured :class:`StripeMethod` instance.
@@ -214,7 +198,6 @@ def stripe(
 
         # Server
         method = stripe(
-            secret_key="sk_...",
             network_id="bn_...",
             payment_method_types=["card"],
             currency="usd",
