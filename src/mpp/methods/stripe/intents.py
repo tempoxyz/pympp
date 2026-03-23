@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from mpp import Credential, Receipt
+from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import (
     PaymentActionRequiredError,
     PaymentExpiredError,
@@ -17,8 +18,6 @@ from mpp.errors import (
 )
 from mpp.methods.stripe._defaults import STRIPE_API_BASE
 from mpp.methods.stripe.schemas import StripeCredentialPayload
-
-DEFAULT_TIMEOUT = 30.0
 
 
 def _build_analytics(credential: Credential) -> dict[str, str]:
