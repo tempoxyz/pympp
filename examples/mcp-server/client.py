@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""MCP client demonstrating the payment flow.
+"""MCP client demonstrating automatic payment handling.
 
 Connects to an already-running MCP server via SSE and demonstrates:
 1. Calling a free tool (echo)
-2. Calling a paid tool without credentials (gets -32042 error)
-3. Parsing the challenge, creating a credential, and retrying
+2. Calling a paid tool (premium_echo) with automatic payment
+
+Uses McpClient to handle the payment flow automatically—no manual
+challenge parsing or credential creation needed.
 
 Usage:
     # Terminal 1: Start the server
@@ -27,11 +29,7 @@ import sys
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
-from mpp.extensions.mcp import (
-    CODE_PAYMENT_REQUIRED,
-    MCPChallenge,
-    MCPCredential,
-)
+from mpp.extensions.mcp import McpClient
 from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 
 SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
@@ -57,69 +55,30 @@ async def run_client() -> None:
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
 
+            # Wrap the session with automatic payment handling
+            client = McpClient(session, methods=[method])
+
             tools = await session.list_tools()
             print("Available tools:")
             for tool in tools.tools:
                 print(f"  - {tool.name}: {tool.description}")
             print()
 
+            # 1. Free tool — works without payment
             print("1. Calling free tool (echo)...")
-            result = await session.call_tool("echo", {"message": "Hello, world!"})
-            print(f"   Result: {result.content[0].text}")
+            result = await client.call_tool("echo", {"message": "Hello, world!"})
+            print(f"   Result: {result.result.content[0].text}")
             print()
 
-            print("2. Calling paid tool without credential (premium_echo)...")
-            try:
-                result = await session.call_tool(
-                    "premium_echo", {"message": "Hello, premium!"}
-                )
-                print(f"   Result: {result.content[0].text}")
-            except Exception as e:
-                error_data = getattr(e, "error", None) or {}
-                error_code = (
-                    error_data.get("code")
-                    if isinstance(error_data, dict)
-                    else getattr(error_data, "code", None)
-                )
-
-                print(f"   Got error code: {error_code}")
-
-                if error_code == CODE_PAYMENT_REQUIRED:
-                    data = (
-                        error_data.get("data", {})
-                        if isinstance(error_data, dict)
-                        else getattr(error_data, "data", {})
-                    )
-                    challenges = (
-                        data.get("challenges", []) if isinstance(data, dict) else []
-                    )
-
-                    if challenges:
-                        challenge_data = challenges[0]
-                        print(f"   Challenge ID: {challenge_data.get('id', 'unknown')}")
-                        print()
-
-                        print("3. Creating payment credential...")
-                        challenge = MCPChallenge.from_dict(challenge_data)
-                        core_credential = await method.create_credential(
-                            challenge.to_core()
-                        )
-
-                        mcp_credential = MCPCredential.from_core(
-                            core_credential, challenge
-                        )
-                        print(f"   Credential created for challenge: {challenge.id}")
-                        print()
-
-                        print("4. Retrying with credential...")
-                        result = await session.call_tool(
-                            "premium_echo",
-                            {"message": "Hello, premium!"},
-                            meta=mcp_credential.to_meta(),
-                        )
-                        print(f"   Result: {result.content[0].text}")
-                else:
-                    print(f"   Unexpected error: {e}")
+            # 2. Paid tool — McpClient handles payment automatically
+            print("2. Calling paid tool (premium_echo)...")
+            result = await client.call_tool(
+                "premium_echo", {"message": "Hello, premium!"}
+            )
+            print(f"   Result: {result.result.content[0].text}")
+            if result.receipt:
+                print(f"   Receipt: {result.receipt.status}, ref={result.receipt.reference}")
+            print()
 
 
 def main() -> None:
