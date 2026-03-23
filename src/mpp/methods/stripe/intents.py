@@ -66,9 +66,7 @@ def _resolve_payment_intents(client: Any) -> Any:
     pi = getattr(client, "payment_intents", None)
     if pi is not None:
         return pi
-    raise TypeError(
-        "Unsupported Stripe client: expected .v1.payment_intents or .payment_intents"
-    )
+    raise TypeError("Unsupported Stripe client: expected .v1.payment_intents or .payment_intents")
 
 
 class ChargeIntent:
