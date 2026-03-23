@@ -60,8 +60,6 @@ async def create_spt(request: Request):
         "usage_limits[max_amount]": body["amount"],
         "usage_limits[expires_at]": str(body["expiresAt"]),
     }
-    if body.get("networkId"):
-        params["seller_details[network_id]"] = body["networkId"]
 
     import httpx
 
@@ -75,7 +73,8 @@ async def create_spt(request: Request):
             },
             data=params,
         )
-        response.raise_for_status()
+        if not response.is_success:
+            return JSONResponse(status_code=502, content=response.json())
         result = response.json()
 
     return {"spt": result["id"]}
