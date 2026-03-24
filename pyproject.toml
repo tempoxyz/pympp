@@ -50,6 +50,7 @@ dev = [
     "build>=1.0",
     "twine>=6.0",
     "aiosqlite>=0.20",
+    "redis>=5.0",
 ]
 
 [build-system]
@@ -82,4 +83,7 @@ include = ["src", "tests"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: requires TEMPO_RPC_URL (real Tempo node)"]
+markers = [
+    "integration: requires TEMPO_RPC_URL (real Tempo node)",
+    "redis: requires REDIS_URL (real Redis instance)",
+]
