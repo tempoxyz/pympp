@@ -109,9 +109,7 @@ class SQLiteStore:
         Returns ``True`` if the key was new, ``False`` if it existed.
         """
         now = time.time()
-        await self._db.execute(
-            "DELETE FROM kv WHERE key = ? AND expires_at <= ?", (key, now)
-        )
+        await self._db.execute("DELETE FROM kv WHERE key = ? AND expires_at <= ?", (key, now))
         cursor = await self._db.execute(
             "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
             (key, value, self._expires_at()),

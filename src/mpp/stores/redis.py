@@ -56,7 +56,5 @@ class RedisStore:
         Returns ``True`` when the key was new and the write succeeded,
         ``False`` when the key already existed (duplicate).
         """
-        result = await self._redis.set(
-            self._key(key), value, nx=True, ex=self._ttl
-        )
+        result = await self._redis.set(self._key(key), value, nx=True, ex=self._ttl)
         return result is not None
