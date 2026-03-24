@@ -24,6 +24,7 @@ pytestmark = [
 async def redis_client():
     from redis.asyncio import from_url
 
+    assert REDIS_URL is not None
     client = from_url(REDIS_URL)
     yield client
     await client.aclose()
