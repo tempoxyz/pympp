@@ -12,6 +12,7 @@ from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.decorator import wrap_payment_handler
 from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
+from mpp.store import Store
 
 if TYPE_CHECKING:
     from mpp.server.method import Method
@@ -58,6 +59,7 @@ class Mpp:
         realm: str,
         secret_key: str,
         defaults: dict[str, Any] | None = None,
+        store: Store | None = None,
     ) -> None:
         """Initialize the payment handler.
 
@@ -67,11 +69,26 @@ class Mpp:
             secret_key: Server secret for HMAC-bound challenge IDs.
                 Enables stateless challenge verification.
             defaults: Default request values merged with per-call request params.
+            store: Optional key-value store for replay protection.
+                When provided, automatically wired into intents that
+                accept a ``store`` (e.g., ``ChargeIntent``).
         """
         self.method = method
         self.realm = realm
         self.secret_key = secret_key
         self.defaults = defaults or {}
+
+        if store is not None:
+            self._wire_store(store)
+
+    def _wire_store(self, store: Store) -> None:
+        """Inject *store* into intents that have a ``_store`` attribute set to None."""
+        intents = getattr(self.method, "intents", None)
+        if not isinstance(intents, dict):
+            return
+        for intent_obj in intents.values():
+            if hasattr(intent_obj, "_store") and intent_obj._store is None:
+                intent_obj._store = store
 
     @classmethod
     def create(
@@ -79,6 +96,7 @@ class Mpp:
         method: Method,
         realm: str | None = None,
         secret_key: str | None = None,
+        store: Store | None = None,
     ) -> Mpp:
         """Create an Mpp instance with smart defaults.
 
@@ -86,11 +104,14 @@ class Mpp:
             method: Payment method (e.g., tempo(currency=..., recipient=...)).
             realm: Server realm. Auto-detected from environment if omitted.
             secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
+            store: Optional key-value store for replay protection.
+                Automatically wired into intents that accept a store.
         """
         return cls(
             method=method,
             realm=detect_realm() if realm is None else realm,
             secret_key=detect_secret_key() if secret_key is None else secret_key,
+            store=store,
         )
 
     async def charge(

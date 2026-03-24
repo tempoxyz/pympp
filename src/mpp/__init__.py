@@ -399,4 +399,5 @@ class Receipt:
 
 from . import _body_digest as BodyDigest  # noqa: E402
 from . import _expires as Expires  # noqa: E402
+from . import stores  # noqa: E402
 from .store import MemoryStore, Store  # noqa: E402
