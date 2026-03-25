@@ -358,9 +358,15 @@ SAMPLE_REQUEST: dict[str, Any] = {
 
 
 @dataclass
+class FakeLastResponse:
+    headers: dict[str, str] | None = None
+
+
+@dataclass
 class FakePaymentIntent:
     id: str = "pi_test_123"
     status: str = "succeeded"
+    last_response: FakeLastResponse | None = None
 
 
 class FakePaymentIntents:
@@ -499,6 +505,20 @@ class TestChargeIntent:
     def test_no_client_or_secret_key_raises(self):
         with pytest.raises(ValueError, match="Either client or secret_key"):
             ChargeIntent()
+
+    @pytest.mark.asyncio
+    async def test_rejects_replayed_credential_client(self):
+        """Replayed idempotent requests are rejected (client path)."""
+        replayed_pi = FakePaymentIntent(
+            last_response=FakeLastResponse(
+                headers={"idempotent-replayed": "true"}
+            )
+        )
+        intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="already been processed"):
+            await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
     async def test_analytics_metadata(self):
@@ -670,6 +690,24 @@ class TestChargeIntentRawHttp:
         credential = _make_credential()
 
         with pytest.raises(VerificationFailedError, match="Internal Server Error"):
+            await intent.verify(credential, SAMPLE_REQUEST)
+
+    @pytest.mark.asyncio
+    async def test_rejects_replayed_credential_raw_http(self):
+        """Replayed idempotent requests are rejected (raw HTTP path)."""
+        mock_response = httpx.Response(
+            200,
+            json={"id": "pi_replayed", "status": "succeeded"},
+            headers={"idempotent-replayed": "true"},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="already been processed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
