@@ -223,6 +223,14 @@ class ChargeIntent:
                 },
                 options={"idempotency_key": f"mppx_{challenge_id}_{spt}"},
             )
+            # https://docs.stripe.com/error-low-level#idempotency
+            last_response = getattr(result, "last_response", None)
+            if last_response is not None:
+                headers = getattr(last_response, "headers", None) or {}
+                if headers.get("idempotent-replayed") == "true":
+                    raise VerificationFailedError(
+                        "Payment has already been processed."
+                    )
             return {"id": result.id, "status": result.status}
         except (VerificationFailedError, TypeError):
             raise
@@ -273,6 +281,10 @@ class ChargeIntent:
             raise VerificationFailedError(
                 detail or f"Stripe PaymentIntent failed (HTTP {response.status_code})"
             )
+
+        # https://docs.stripe.com/error-low-level#idempotency
+        if response.headers.get("idempotent-replayed") == "true":
+            raise VerificationFailedError("Payment has already been processed.")
 
         result = response.json()
         return {"id": result["id"], "status": result["status"]}
