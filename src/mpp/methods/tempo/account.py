@@ -24,6 +24,9 @@ class TempoAccount:
         # From environment variable
         account = TempoAccount.from_env("TEMPO_PRIVATE_KEY")
 
+        # From OWS encrypted vault (pip install pympp[ows])
+        account = TempoAccount.from_ows("my-wallet")
+
         # Sign a hash
         signature = account.sign_hash(msg_hash)
     """
@@ -43,6 +46,34 @@ class TempoAccount:
         from eth_account import Account
 
         return cls(_account=Account.from_key(private_key))
+
+    @classmethod
+    def from_ows(cls, wallet_name_or_id: str) -> TempoAccount:
+        """Load from an OWS (Open Wallet Standard) encrypted vault.
+
+        Args:
+            wallet_name_or_id: OWS wallet name or UUID.
+
+        Returns:
+            A TempoAccount instance.
+        """
+        from open_wallet_standard import export_wallet, derive_address
+
+        exported = export_wallet(wallet_name_or_id)
+
+        import json
+
+        try:
+            keys = json.loads(exported)
+            private_key = keys.get("secp256k1", "")
+        except (json.JSONDecodeError, TypeError):
+            info = derive_address(exported, "evm")
+            private_key = info.get("private_key", "")
+
+        if not private_key.startswith("0x"):
+            private_key = f"0x{private_key}"
+
+        return cls.from_key(private_key)
 
     @classmethod
     def from_env(cls, var: str = "TEMPO_PRIVATE_KEY") -> TempoAccount:
