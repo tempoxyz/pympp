@@ -38,6 +38,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PaymentOutcomeUnknownError(RuntimeError):
+    """Raised when a paid retry fails after a credential was attached."""
+
+    def __init__(self, challenge: MCPChallenge, cause: Exception) -> None:
+        self.challenge = challenge
+        self.cause = cause
+        super().__init__(
+            "Tool call failed after sending a payment credential; "
+            f"payment outcome is unknown for challenge {challenge.id}. "
+            "Do not blindly retry."
+        )
+
+
 @runtime_checkable
 class Method(Protocol):
     """Payment method interface for MCP client credential creation."""
@@ -62,13 +75,53 @@ def _is_payment_required_error(error: Exception) -> bool:
     if not isinstance(data, dict):
         return False
     challenges = data.get("challenges")
-    return isinstance(challenges, list) and len(challenges) > 0
+    return isinstance(challenges, list) and any(
+        isinstance(challenge, dict) for challenge in challenges
+    )
 
 
-def _extract_challenges(error: Exception) -> list[dict[str, Any]]:
-    """Extract the challenges array from a payment required error."""
-    data = getattr(error, "data", {})
-    return data.get("challenges", []) if isinstance(data, dict) else []
+def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
+    """Parse a server-provided challenge, skipping malformed entries."""
+    if not isinstance(raw_challenge, dict):
+        logger.warning(
+            "Ignoring malformed MCP challenge: expected dict, got %s",
+            type(raw_challenge).__name__,
+        )
+        return None
+
+    for field in ("id", "realm", "method", "intent"):
+        value = raw_challenge.get(field)
+        if not isinstance(value, str) or not value:
+            logger.warning("Ignoring malformed MCP challenge: invalid %s", field)
+            return None
+
+    if not isinstance(raw_challenge.get("request"), dict):
+        logger.warning("Ignoring malformed MCP challenge: invalid request")
+        return None
+
+    try:
+        return MCPChallenge.from_dict(raw_challenge)
+    except (KeyError, TypeError, ValueError):
+        logger.warning("Ignoring malformed MCP challenge payload", exc_info=True)
+        return None
+
+
+def _extract_challenges(error: Exception) -> list[MCPChallenge]:
+    """Extract valid payment challenges from a payment required error."""
+    data = getattr(error, "data", None)
+    if not isinstance(data, dict):
+        return []
+
+    raw_challenges = data.get("challenges")
+    if not isinstance(raw_challenges, list):
+        return []
+
+    challenges: list[MCPChallenge] = []
+    for raw_challenge in raw_challenges:
+        challenge = _parse_challenge(raw_challenge)
+        if challenge is not None:
+            challenges.append(challenge)
+    return challenges
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +133,9 @@ class McpToolResult:
 
     result: Any
     receipt: MCPReceipt | None = None
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.result, name)
 
 
 class McpClient:
@@ -103,6 +159,9 @@ class McpClient:
     def __init__(self, session: Any, methods: list[Method]) -> None:
         self._session = session
         self._methods = methods
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
 
     async def call_tool(
         self,
@@ -129,6 +188,7 @@ class McpClient:
 
         Raises:
             McpError: If the error is not payment-related or no method matches.
+            PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
             ValueError: If no installed method matches the server's challenge.
         """
         from mcp.shared.exceptions import McpError
@@ -148,8 +208,11 @@ class McpClient:
             if not _is_payment_required_error(e):
                 raise
 
-            challenges_data = _extract_challenges(e)
-            challenge, method = self._match_challenge(challenges_data)
+            challenges = _extract_challenges(e)
+            if not challenges:
+                raise ValueError("Server returned malformed payment challenges") from e
+
+            challenge, method = self._match_challenge(challenges)
 
             core_credential = await method.create_credential(challenge.to_core())
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
@@ -161,26 +224,27 @@ class McpClient:
             if timeout is not None:
                 retry_kwargs["read_timeout_seconds"] = timeout
 
-            retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
+            try:
+                retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
+            except Exception as exc:
+                raise PaymentOutcomeUnknownError(challenge, exc) from exc
+
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
 
-    def _match_challenge(
-        self, challenges_data: list[dict[str, Any]]
-    ) -> tuple[MCPChallenge, Method]:
+    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
         """Match a challenge to an installed method.
 
         Iterates installed methods in order (client preference) and returns
         the first match by ``name`` and ``intent``.
         """
         for method in self._methods:
-            for cd in challenges_data:
-                if cd.get("method") == method.name and cd.get("intent") in self._intent_names(
-                    method
-                ):
-                    return MCPChallenge.from_dict(cd), method
+            supported_intents = self._intent_names(method)
+            for challenge in challenges:
+                if challenge.method == method.name and challenge.intent in supported_intents:
+                    return challenge, method
 
-        available = [cd.get("method") for cd in challenges_data]
+        available = [challenge.method for challenge in challenges]
         installed = [m.name for m in self._methods]
         raise ValueError(
             f"No compatible payment method. Server offered: {available}, client has: {installed}"

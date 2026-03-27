@@ -14,8 +14,9 @@ from mpp.extensions.mcp import (
     META_RECEIPT,
     McpClient,
     McpToolResult,
+    PaymentOutcomeUnknownError,
 )
-from mpp.extensions.mcp.client import _is_payment_required_error
+from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,13 @@ def _make_receipt_meta() -> dict[str, Any]:
     }
 
 
+def _make_challenge(
+    method: str = "tempo",
+    intent: str = "charge",
+) -> MCPChallenge:
+    return MCPChallenge.from_dict(_make_challenge_dict(method=method, intent=intent))
+
+
 # ---------------------------------------------------------------------------
 # _is_payment_required_error
 # ---------------------------------------------------------------------------
@@ -118,6 +126,10 @@ class TestIsPaymentRequiredError:
 
     def test_empty_challenges(self) -> None:
         err = FakeMcpError(-32042, data={"challenges": []})
+        assert _is_payment_required_error(err) is False
+
+    def test_no_dict_challenges(self) -> None:
+        err = FakeMcpError(-32042, data={"challenges": ["bad"]})
         assert _is_payment_required_error(err) is False
 
     def test_no_data(self) -> None:
@@ -146,7 +158,7 @@ class TestMcpClientFreeTool:
         result = await client.call_tool("echo", {"message": "hi"})
 
         assert isinstance(result, McpToolResult)
-        assert result.result.content[0]["text"] == "ok"
+        assert result.content[0]["text"] == "ok"
         assert result.receipt is None
         session.call_tool.assert_called_once()
 
@@ -158,10 +170,20 @@ class TestMcpClientFreeTool:
         client = McpClient(session, methods=[FakeMethod()])
         result = await client.call_tool("tool", {})
 
+        assert result.content[0]["text"] == "ok"
         assert result.receipt is not None
         assert isinstance(result.receipt, MCPReceipt)
         assert result.receipt.reference == "0xtxhash"
         assert result.receipt.challenge_id == "ch_test123"
+
+    @pytest.mark.asyncio
+    async def test_session_methods_are_proxied(self) -> None:
+        session = AsyncMock()
+        session.list_tools = AsyncMock(return_value="tools")
+
+        client = McpClient(session, methods=[FakeMethod()])
+
+        assert await client.list_tools() == "tools"
 
 
 class TestMcpClientPaidTool:
@@ -214,7 +236,7 @@ class TestMcpClientPaidTool:
             client = McpClient(session, methods=[FakeMethod()])
             result = await client.call_tool("premium_tool", {"query": "test"})
 
-            assert result.result.content[0]["text"] == "premium result"
+            assert result.content[0]["text"] == "premium result"
             assert result.receipt is not None
             assert result.receipt.status == "success"
             assert result.receipt.reference == "0xtxhash"
@@ -363,6 +385,77 @@ class TestMcpClientPaidTool:
                 else:
                     sys.modules[mod_name] = orig
 
+    @pytest.mark.asyncio
+    async def test_malformed_server_challenges_raise_clean_error(self) -> None:
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            payment_error = FakeMcpError(
+                -32042,
+                data={"challenges": ["bad", {"id": "missing-fields"}]},
+            )
+            session.call_tool = AsyncMock(side_effect=payment_error)
+
+            client = McpClient(session, methods=[FakeMethod()])
+
+            with pytest.raises(ValueError, match="Server returned malformed payment challenges"):
+                await client.call_tool("tool", {})
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
+    @pytest.mark.asyncio
+    async def test_retry_failure_raises_payment_outcome_unknown(self) -> None:
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            payment_error = FakeMcpError(
+                -32042,
+                data={"challenges": [_make_challenge_dict()]},
+            )
+            session.call_tool = AsyncMock(side_effect=[payment_error, TimeoutError("timed out")])
+
+            client = McpClient(session, methods=[FakeMethod()])
+
+            with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+                await client.call_tool("premium_tool", {"query": "test"})
+
+            assert exc_info.value.challenge.id == "ch_test123"
+            assert isinstance(exc_info.value.__cause__, TimeoutError)
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
 
 class TestMcpClientMethodMatching:
     """Tests for challenge-to-method matching logic."""
@@ -371,7 +464,7 @@ class TestMcpClientMethodMatching:
         method = FakeMethod(name="tempo", _intents={"charge": True})
         client = McpClient(AsyncMock(), methods=[method])
 
-        challenge, matched = client._match_challenge([_make_challenge_dict()])
+        challenge, matched = client._match_challenge([_make_challenge()])
         assert isinstance(challenge, MCPChallenge)
         assert matched is method
 
@@ -383,8 +476,8 @@ class TestMcpClientMethodMatching:
         client = McpClient(AsyncMock(), methods=[stripe_method, tempo_method])
 
         challenges = [
-            _make_challenge_dict(method="tempo"),
-            _make_challenge_dict(method="stripe"),
+            _make_challenge(method="tempo"),
+            _make_challenge(method="stripe"),
         ]
         _, matched = client._match_challenge(challenges)
         assert matched is stripe_method
@@ -394,14 +487,30 @@ class TestMcpClientMethodMatching:
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge_dict(method="stripe")])
+            client._match_challenge([_make_challenge(method="stripe")])
 
     def test_intent_mismatch(self) -> None:
         method = FakeMethod(name="tempo", _intents={"session": True})
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge_dict(method="tempo", intent="charge")])
+            client._match_challenge([_make_challenge(method="tempo", intent="charge")])
+
+    def test_extract_challenges_skips_malformed_entries(self) -> None:
+        err = FakeMcpError(
+            -32042,
+            data={
+                "challenges": [
+                    "bad",
+                    {"id": "missing-fields"},
+                    _make_challenge_dict(),
+                ]
+            },
+        )
+
+        challenges = _extract_challenges(err)
+
+        assert challenges == [_make_challenge()]
 
 
 class TestMcpClientReceiptExtraction:
@@ -424,3 +533,10 @@ class TestMcpClientReceiptExtraction:
     def test_malformed_receipt(self) -> None:
         result = FakeCallToolResult(meta={META_RECEIPT: "not a dict"})
         assert McpClient._extract_receipt(result) is None
+
+
+class TestMcpToolResult:
+    def test_proxies_underlying_result_attributes(self) -> None:
+        result = McpToolResult(result=FakeCallToolResult(), receipt=None)
+
+        assert result.content[0]["text"] == "ok"
