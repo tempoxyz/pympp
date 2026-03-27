@@ -377,6 +377,15 @@ class FakePaymentIntents:
         return self._result
 
 
+class FakeAsyncPaymentIntents:
+    def __init__(self, result: FakePaymentIntent | None = None):
+        self._result = result or FakePaymentIntent()
+        self.create_async = AsyncMock(return_value=self._result)
+
+    def create(self, *args: Any, **kwargs: Any) -> FakePaymentIntent:
+        raise AssertionError("create() should not be called when create_async() is available")
+
+
 class FakeStripeClient:
     """Legacy-style client with client.payment_intents."""
 
@@ -394,6 +403,11 @@ class FakeModernStripeClient:
 
     def __init__(self, result: FakePaymentIntent | None = None):
         self.v1 = FakeV1(result)
+
+
+class FakeAsyncStripeClient:
+    def __init__(self, result: FakePaymentIntent | None = None):
+        self.payment_intents = FakeAsyncPaymentIntents(result)
 
 
 class TestResolvePaymentIntents:
@@ -433,6 +447,16 @@ class TestChargeIntent:
         assert receipt.status == "success"
         assert receipt.reference == "pi_test_123"
         assert receipt.method == "stripe"
+
+    @pytest.mark.asyncio
+    async def test_verify_prefers_async_client_method(self):
+        intent = ChargeIntent(client=FakeAsyncStripeClient())
+        credential = _make_credential()
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert intent._client is not None
+        intent._client.payment_intents.create_async.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_verify_with_external_id(self):
@@ -488,6 +512,14 @@ class TestChargeIntent:
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
+    async def test_verify_invalid_method_details(self):
+        intent = ChargeIntent(client=FakeStripeClient())
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="Invalid charge request"):
+            await intent.verify(credential, {**SAMPLE_REQUEST, "methodDetails": "bad"})
+
+    @pytest.mark.asyncio
     async def test_verify_client_exception(self):
         class FailingIntents:
             def create(self, *args: Any, **kwargs: Any) -> Any:
@@ -510,9 +542,7 @@ class TestChargeIntent:
     async def test_rejects_replayed_credential_client(self):
         """Replayed idempotent requests are rejected (client path)."""
         replayed_pi = FakePaymentIntent(
-            last_response=FakeLastResponse(
-                headers={"idempotent-replayed": "true"}
-            )
+            last_response=FakeLastResponse(headers={"idempotent-replayed": "true"})
         )
         intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
         credential = _make_credential()
