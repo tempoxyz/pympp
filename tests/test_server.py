@@ -917,6 +917,109 @@ class TestMppPay:
         with pytest.raises(ValueError, match="does not support nonexistent intent"):
             server.pay(amount="0.50", intent="nonexistent")
 
+    @pytest.mark.asyncio
+    async def test_raises_when_method_has_no_currency(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = None
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        with pytest.raises(
+            ValueError, match=r"currency must be set on the method or passed to pay\(\)"
+        ):
+            await handler(MockRequest())
+
+    @pytest.mark.asyncio
+    async def test_raises_when_method_has_no_recipient(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = None
+            decimals = 6
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        with pytest.raises(
+            ValueError, match=r"recipient must be set on the method or passed to pay\(\)"
+        ):
+            await handler(MockRequest())
+
+    @pytest.mark.asyncio
+    async def test_passes_expires_and_extra_into_challenge(self) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50", extra={"plan": "pro"}, expires_in=timedelta(minutes=1))
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        before = datetime.now(UTC)
+        result = await handler(MockRequest())
+        after = datetime.now(UTC)
+
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
+            www_auth = result.headers["WWW-Authenticate"]
+        else:
+            assert isinstance(result, dict)
+            www_auth = result["headers"]["WWW-Authenticate"]
+
+        challenge = Challenge.from_www_authenticate(www_auth)
+        assert challenge.request["extra"] == {"plan": "pro"}
+        assert challenge.expires is not None
+        expires = datetime.fromisoformat(challenge.expires)
+        assert before + timedelta(seconds=59) < expires < after + timedelta(seconds=61)
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_string_extra_values(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50", extra={"plan": "pro", "attempts": 1})  # type: ignore[dict-item]
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        with pytest.raises(ValueError, match=r"extra must be a dict\[str, str\]"):
+            await handler(MockRequest())
+
 
 class TestMppChainIdAutoEmit:
     """Tests for Mpp auto-emitting chainId from the method's chain_id."""

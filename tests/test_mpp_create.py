@@ -263,3 +263,74 @@ class TestMppCharge:
         )
         with pytest.raises(ValueError, match="recipient must be set"):
             await srv.charge(authorization=None, amount="1.00")
+
+    @pytest.mark.asyncio
+    async def test_charge_missing_currency_raises(self) -> None:
+        class MockMethod:
+            name = "tempo"
+            currency = None
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": ChargeIntent()}
+
+        srv = Mpp(method=MockMethod(), realm="test.com", secret_key="test-secret")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="currency must be set"):
+            await srv.charge(authorization=None, amount="1.00")
+
+    @pytest.mark.asyncio
+    async def test_charge_without_charge_intent_raises(self) -> None:
+        class MockMethod:
+            name = "tempo"
+            currency = "0xCurrency"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents: dict[str, object] = {}
+
+        srv = Mpp(method=MockMethod(), realm="test.com", secret_key="test-secret")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="does not support charge intent"):
+            await srv.charge(authorization=None, amount="1.00")
+
+    @pytest.mark.asyncio
+    async def test_charge_rejects_non_string_extra_values(self) -> None:
+        srv = Mpp.create(
+            method=tempo(
+                currency="0x20c0000000000000000000000000000000000000",
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
+            ),
+            realm="test.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(ValueError, match=r"extra must be a dict\[str, str\]"):
+            await srv.charge(
+                authorization=None,
+                amount="1.00",
+                extra={"attempts": "1", "invalid": 2},  # type: ignore[dict-item]
+            )
+
+    @pytest.mark.asyncio
+    async def test_charge_includes_extra_memo_and_fee_payer(self) -> None:
+        srv = Mpp.create(
+            method=tempo(
+                currency="0x20c0000000000000000000000000000000000000",
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                intents={"charge": ChargeIntent()},
+            ),
+            realm="test.com",
+            secret_key="test-secret",
+        )
+
+        memo = "0x" + "ab" * 32
+        result = await srv.charge(
+            authorization=None,
+            amount="1.00",
+            memo=memo,
+            fee_payer=True,
+            extra={"plan": "pro"},
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.request["extra"] == {"plan": "pro"}
+        assert result.request["methodDetails"]["memo"] == memo
+        assert result.request["methodDetails"]["feePayer"] is True
