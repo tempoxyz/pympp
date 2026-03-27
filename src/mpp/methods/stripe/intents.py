@@ -5,9 +5,10 @@ Implements the charge intent using Stripe's Shared Payment Token (SPT) flow.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
@@ -17,7 +18,7 @@ from mpp.errors import (
     VerificationFailedError,
 )
 from mpp.methods.stripe._defaults import STRIPE_API_BASE
-from mpp.methods.stripe.schemas import StripeCredentialPayload
+from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload
 
 
 def _build_analytics(credential: Credential) -> dict[str, str]:
@@ -163,18 +164,24 @@ class ChargeIntent:
             raise VerificationFailedError(
                 "Invalid credential payload: missing or malformed spt"
             ) from err
+        try:
+            parsed_request = ChargeRequest.model_validate(request)
+        except Exception as err:
+            raise VerificationFailedError(
+                "Invalid charge request: missing or malformed Stripe method details"
+            ) from err
 
         spt = parsed.spt
         credential_external_id = parsed.externalId
 
-        user_metadata = request.get("methodDetails", {}).get("metadata")
+        user_metadata = parsed_request.methodDetails.metadata
         resolved_metadata = {**_build_analytics(credential), **(user_metadata or {})}
 
         if self._client is not None:
             pi = await self._create_with_client(
                 client=self._client,
                 challenge_id=challenge.id,
-                request=request,
+                request=parsed_request,
                 spt=spt,
                 metadata=resolved_metadata,
             )
@@ -182,7 +189,7 @@ class ChargeIntent:
             pi = await self._create_with_secret_key(
                 secret_key=self._secret_key,  # type: ignore[arg-type]
                 challenge_id=challenge.id,
-                request=request,
+                request=parsed_request,
                 spt=spt,
                 metadata=resolved_metadata,
             )
@@ -202,35 +209,37 @@ class ChargeIntent:
         self,
         client: Any,
         challenge_id: str,
-        request: dict[str, Any],
+        request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
     ) -> dict[str, str]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
             payment_intents = _resolve_payment_intents(client)
-            result = payment_intents.create(
-                {
-                    "amount": int(request["amount"]),
-                    "automatic_payment_methods": {
-                        "allow_redirects": "never",
-                        "enabled": True,
-                    },
-                    "confirm": True,
-                    "currency": request["currency"],
-                    "metadata": metadata,
-                    "shared_payment_granted_token": spt,
+            body = {
+                "amount": int(request.amount),
+                "automatic_payment_methods": {
+                    "allow_redirects": "never",
+                    "enabled": True,
                 },
-                options={"idempotency_key": f"mppx_{challenge_id}_{spt}"},
-            )
+                "confirm": True,
+                "currency": request.currency,
+                "metadata": metadata,
+                "shared_payment_granted_token": spt,
+            }
+            options = {"idempotency_key": f"mppx_{challenge_id}_{spt}"}
+
+            create_async = getattr(payment_intents, "create_async", None)
+            if callable(create_async):
+                result = await cast(Any, create_async)(body, options=options)
+            else:
+                result = await asyncio.to_thread(payment_intents.create, body, options=options)
             # https://docs.stripe.com/error-low-level#idempotency
             last_response = getattr(result, "last_response", None)
             if last_response is not None:
                 headers = getattr(last_response, "headers", None) or {}
                 if headers.get("idempotent-replayed") == "true":
-                    raise VerificationFailedError(
-                        "Payment has already been processed."
-                    )
+                    raise VerificationFailedError("Payment has already been processed.")
             return {"id": result.id, "status": result.status}
         except (VerificationFailedError, TypeError):
             raise
@@ -241,7 +250,7 @@ class ChargeIntent:
         self,
         secret_key: str,
         challenge_id: str,
-        request: dict[str, Any],
+        request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
     ) -> dict[str, str]:
@@ -251,11 +260,11 @@ class ChargeIntent:
         auth_value = base64.b64encode(f"{secret_key}:".encode()).decode()
 
         body: dict[str, str] = {
-            "amount": str(request["amount"]),
+            "amount": request.amount,
             "automatic_payment_methods[allow_redirects]": "never",
             "automatic_payment_methods[enabled]": "true",
             "confirm": "true",
-            "currency": str(request["currency"]),
+            "currency": request.currency,
             "shared_payment_granted_token": spt,
         }
         for key, value in metadata.items():
