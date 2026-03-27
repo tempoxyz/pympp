@@ -17,12 +17,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
+NO_TTL_EXPIRES_AT = 253402300799.0
+
 
 class SQLiteStore:
     """Async key-value store backed by a local SQLite file.
 
-    Keys are stored in a ``kv`` table with optional TTL.  Expired rows
-    are lazily pruned on ``get`` and ``put_if_absent``.
+    Keys are stored in a ``kv`` table with optional TTL. Expired rows
+    are pruned globally on writes so one-shot replay keys do not
+    accumulate forever.
 
     ``put_if_absent`` uses ``INSERT OR IGNORE`` — a single atomic SQL
     statement with no TOCTOU race.
@@ -32,7 +35,7 @@ class SQLiteStore:
         self,
         db: Any,
         *,
-        ttl_seconds: int = 300,
+        ttl_seconds: int | None = None,
     ) -> None:
         self._db = db
         self._ttl = ttl_seconds
@@ -42,14 +45,14 @@ class SQLiteStore:
         cls,
         path: str = "mpp.db",
         *,
-        ttl_seconds: int = 300,
+        ttl_seconds: int | None = None,
     ) -> SQLiteStore:
         """Open (or create) a SQLite database and initialize the schema.
 
         Args:
             path: Filesystem path for the database file.
                 Use ``":memory:"`` for an ephemeral in-memory database.
-            ttl_seconds: Seconds before a key expires (default 300).
+            ttl_seconds: Optional key TTL in seconds. Defaults to no expiry.
         """
         import aiosqlite
 
@@ -75,7 +78,12 @@ class SQLiteStore:
         await self.close()
 
     def _expires_at(self) -> float:
+        if self._ttl is None:
+            return NO_TTL_EXPIRES_AT
         return time.time() + self._ttl
+
+    async def _prune_expired(self, now: float) -> None:
+        await self._db.execute("DELETE FROM kv WHERE expires_at <= ?", (now,))
 
     async def get(self, key: str) -> Any | None:
         now = time.time()
@@ -87,6 +95,7 @@ class SQLiteStore:
         return row[0] if row else None
 
     async def put(self, key: str, value: Any) -> None:
+        await self._prune_expired(time.time())
         await self._db.execute(
             "INSERT INTO kv (key, value, expires_at) VALUES (?, ?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
@@ -102,14 +111,13 @@ class SQLiteStore:
     async def put_if_absent(self, key: str, value: Any) -> bool:
         """Atomic conditional insert.
 
-        Deletes any expired row for *key* first, then uses
-        ``INSERT OR IGNORE`` so the write only succeeds when the
-        key does not already exist.
+        Prunes expired rows first, then uses ``INSERT OR IGNORE`` so the
+        write only succeeds when the key does not already exist.
 
         Returns ``True`` if the key was new, ``False`` if it existed.
         """
         now = time.time()
-        await self._db.execute("DELETE FROM kv WHERE key = ? AND expires_at <= ?", (key, now))
+        await self._prune_expired(now)
         cursor = await self._db.execute(
             "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
             (key, value, self._expires_at()),

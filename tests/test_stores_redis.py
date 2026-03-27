@@ -16,7 +16,7 @@ def mock_redis():
 
 @pytest.fixture
 def store(mock_redis):
-    return RedisStore(mock_redis, ttl_seconds=300)
+    return RedisStore(mock_redis)
 
 
 class TestRedisStore:
@@ -36,7 +36,7 @@ class TestRedisStore:
     @pytest.mark.asyncio
     async def test_put(self, store, mock_redis) -> None:
         await store.put("key1", "val1")
-        mock_redis.set.assert_awaited_once_with("mpp:key1", "val1", ex=300)
+        mock_redis.set.assert_awaited_once_with("mpp:key1", "val1")
 
     @pytest.mark.asyncio
     async def test_delete(self, store, mock_redis) -> None:
@@ -48,7 +48,7 @@ class TestRedisStore:
         mock_redis.set.return_value = True  # Redis SET NX returns True on success
         result = await store.put_if_absent("new-key", "val")
         assert result is True
-        mock_redis.set.assert_awaited_once_with("mpp:new-key", "val", nx=True, ex=300)
+        mock_redis.set.assert_awaited_once_with("mpp:new-key", "val", nx=True)
 
     @pytest.mark.asyncio
     async def test_put_if_absent_returns_false_when_key_exists(self, store, mock_redis) -> None:
@@ -68,3 +68,10 @@ class TestRedisStore:
         store = RedisStore(mock_redis, ttl_seconds=60)
         await store.put("k", "v")
         mock_redis.set.assert_awaited_once_with("mpp:k", "v", ex=60)
+
+    @pytest.mark.asyncio
+    async def test_custom_ttl_applies_to_put_if_absent(self, mock_redis) -> None:
+        store = RedisStore(mock_redis, ttl_seconds=60)
+        mock_redis.set.return_value = True
+        await store.put_if_absent("k", "v")
+        mock_redis.set.assert_awaited_once_with("mpp:k", "v", nx=True, ex=60)

@@ -94,6 +94,18 @@ class TestRedisStoreIntegration:
         assert 0 < ttl <= 60
 
     @pytest.mark.asyncio
+    async def test_default_store_has_no_ttl(self, redis_client, store_prefix) -> None:
+        from mpp.stores.redis import RedisStore
+
+        store = RedisStore(redis_client, key_prefix=store_prefix)
+        await store.put("persist-key", "val")
+
+        ttl = await redis_client.ttl(f"{store_prefix}persist-key")
+        assert ttl == -1
+
+        await store.delete("persist-key")
+
+    @pytest.mark.asyncio
     async def test_put_if_absent_is_atomic(self, store) -> None:
         """Two concurrent put_if_absent calls — exactly one wins."""
         import asyncio

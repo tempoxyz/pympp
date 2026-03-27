@@ -12,7 +12,7 @@ from mpp.stores.sqlite import SQLiteStore
 
 @pytest.fixture
 async def store():
-    s = await SQLiteStore.create(":memory:", ttl_seconds=300)
+    s = await SQLiteStore.create(":memory:")
     yield s
     await s.close()
 
@@ -82,6 +82,22 @@ class TestSQLiteStore:
         assert await store.get("reclaim") == "new"
 
     @pytest.mark.asyncio
+    async def test_put_if_absent_prunes_expired_rows_globally(self, store) -> None:
+        far_past = time.time() - 1000
+        await store._db.executemany(
+            "INSERT INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
+            [("expired-a", "old", far_past), ("expired-b", "old", far_past)],
+        )
+        await store._db.commit()
+
+        result = await store.put_if_absent("fresh", "new")
+        assert result is True
+
+        cursor = await store._db.execute("SELECT key FROM kv ORDER BY key")
+        rows = await cursor.fetchall()
+        assert rows == [("fresh",)]
+
+    @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
         async with await SQLiteStore.create(":memory:") as store:
             await store.put("ctx", "val")
@@ -96,6 +112,17 @@ class TestSQLiteStore:
         with patch("mpp.stores.sqlite.time") as mock_time:
             mock_time.time.return_value = time.time() + 2
             assert await store.get("short") is None
+
+        await store.close()
+
+    @pytest.mark.asyncio
+    async def test_default_store_entries_do_not_expire(self) -> None:
+        store = await SQLiteStore.create(":memory:")
+        await store.put("persist", "val")
+
+        with patch("mpp.stores.sqlite.time") as mock_time:
+            mock_time.time.return_value = time.time() + 3600
+            assert await store.get("persist") == "val"
 
         await store.close()
 
