@@ -62,7 +62,22 @@ jobs:
           version: PATH
 
       - name: Run tests
-        run: uv run pytest -v --cov=mpp --cov-report=term-missing --cov-fail-under=90
+        run: |
+          COV_REPORTS="--cov-report=term-missing"
+          if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
+            COV_REPORTS="$COV_REPORTS --cov-report=xml:coverage.xml --cov-report=html:htmlcov"
+          fi
+          uv run pytest -v --cov=mpp $COV_REPORTS --cov-fail-under=90
+
+      - name: Upload coverage artifacts
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
 
   package:
     runs-on: ubuntu-latest

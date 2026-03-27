@@ -1,11 +1,13 @@
 """Tests for header parsing and formatting."""
 
+import base64
+import json
 from datetime import UTC, datetime
 
 import pytest
 
-from mpp import Challenge, Credential, Receipt
-from mpp._parsing import ParseError
+from mpp import Challenge, ChallengeEcho, Credential, Receipt
+from mpp._parsing import MAX_HEADER_PAYLOAD_SIZE, ParseError
 from tests import make_credential
 
 
@@ -103,6 +105,57 @@ class TestChallenge:
         assert parsed.digest == challenge.digest
         assert parsed.description == challenge.description
 
+    def test_roundtrip_with_opaque(self) -> None:
+        challenge = Challenge(
+            id="test-id-opaque",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            opaque={"pi": "pi_123"},
+        )
+
+        header = challenge.to_www_authenticate("api.example.com")
+        parsed = Challenge.from_www_authenticate(header)
+
+        assert parsed.opaque == {"pi": "pi_123"}
+
+    def test_parse_duplicate_param_raises(self) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", intent="session", request="e30"'
+        )
+        with pytest.raises(ParseError, match="Duplicate parameter: intent"):
+            Challenge.from_www_authenticate(header)
+
+    def test_parse_request_too_large(self) -> None:
+        oversized = "a" * (MAX_HEADER_PAYLOAD_SIZE + 1)
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="{oversized}"'
+        )
+        with pytest.raises(ParseError, match="Header payload exceeds maximum size"):
+            Challenge.from_www_authenticate(header)
+
+    def test_parse_invalid_opaque_base64(self) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30", opaque="not!valid!base64"'
+        )
+        with pytest.raises(ParseError, match="Invalid base64 or JSON encoding"):
+            Challenge.from_www_authenticate(header)
+
+    def test_format_rejects_crlf_in_description(self) -> None:
+        challenge = Challenge(
+            id="test-id-123",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            description="bad\nvalue",
+        )
+
+        with pytest.raises(ParseError, match="invalid CRLF"):
+            challenge.to_www_authenticate("api.example.com")
+
 
 class TestCredential:
     def test_roundtrip(self) -> None:
@@ -145,6 +198,67 @@ class TestCredential:
         with pytest.raises(ParseError):
             Credential.from_authorization(header)
 
+    def test_parse_missing_payload(self) -> None:
+        data = {
+            "challenge": {
+                "id": "test-id",
+                "realm": "api.example.com",
+                "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
+            }
+        }
+        header = "Payment " + base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip(
+            "="
+        )
+        with pytest.raises(ParseError, match="Credential missing required field: payload"):
+            Credential.from_authorization(header)
+
+    def test_parse_challenge_not_object(self) -> None:
+        data = {"challenge": "not-an-object", "payload": {}}
+        header = "Payment " + base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip(
+            "="
+        )
+        with pytest.raises(ParseError, match="Credential challenge must be an object"):
+            Credential.from_authorization(header)
+
+    def test_parse_challenge_missing_id(self) -> None:
+        data = {
+            "challenge": {
+                "realm": "api.example.com",
+                "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
+            },
+            "payload": {},
+        }
+        header = "Payment " + base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip(
+            "="
+        )
+        with pytest.raises(ParseError, match="Credential challenge missing required field: id"):
+            Credential.from_authorization(header)
+
+    def test_roundtrip_with_optional_challenge_fields(self) -> None:
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test-id",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request="e30",
+                digest="sha-256=:abc123:",
+                opaque="eyJwaSI6InBpXzEyMyJ9",
+            ),
+            payload={"hash": "0xabc123"},
+            source="did:example:client",
+        )
+
+        header = credential.to_authorization()
+        parsed = Credential.from_authorization(header)
+
+        assert parsed.challenge.digest == credential.challenge.digest
+        assert parsed.challenge.opaque == credential.challenge.opaque
+
 
 class TestReceipt:
     def test_roundtrip(self) -> None:
@@ -179,4 +293,33 @@ class TestReceipt:
             "MFoiLCJyZWZlcmVuY2UiOiIweCJ9"
         )
         with pytest.raises(ParseError):
+            Receipt.from_payment_receipt(b64)
+
+    def test_roundtrip_with_optional_fields(self) -> None:
+        timestamp = datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC)
+        receipt = Receipt(
+            status="success",
+            timestamp=timestamp,
+            reference="0xabc123def456",
+            method="tempo",
+            external_id="order-123",
+            extra={"plan": "pro"},
+        )
+
+        header = receipt.to_payment_receipt()
+        parsed = Receipt.from_payment_receipt(header)
+
+        assert parsed.method == "tempo"
+        assert parsed.external_id == "order-123"
+        assert parsed.extra == {"plan": "pro"}
+
+    def test_parse_invalid_timestamp(self) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": "not-a-timestamp",
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        with pytest.raises(ParseError, match="Invalid timestamp format"):
             Receipt.from_payment_receipt(b64)
