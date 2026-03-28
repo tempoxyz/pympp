@@ -56,10 +56,13 @@ async def create_spt(request: Request):
 
     params = {
         "payment_method": body["paymentMethod"],
+        "seller_details[network_id]": body["networkId"],
         "usage_limits[currency]": body["currency"],
         "usage_limits[max_amount]": body["amount"],
         "usage_limits[expires_at]": str(body["expiresAt"]),
     }
+    if body.get("externalId"):
+        params["seller_details[external_id]"] = body["externalId"]
 
     import httpx
 

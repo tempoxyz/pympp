@@ -34,14 +34,6 @@ class TestStripeCredentialPayload:
     def test_valid_payload(self):
         payload = StripeCredentialPayload.model_validate({"spt": "spt_test_123"})
         assert payload.spt == "spt_test_123"
-        assert payload.externalId is None
-
-    def test_with_external_id(self):
-        payload = StripeCredentialPayload.model_validate(
-            {"spt": "spt_test_123", "externalId": "order-42"}
-        )
-        assert payload.spt == "spt_test_123"
-        assert payload.externalId == "order-42"
 
     def test_missing_spt(self):
         with pytest.raises(ValidationError):
@@ -120,6 +112,7 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             assert params.amount == "150"
             assert params.currency == "usd"
+            assert params.external_id is None
             assert params.network_id == "bn_test"
             assert params.payment_method == "pm_card_visa"
             return "spt_test_abc"
@@ -138,22 +131,32 @@ class TestStripeMethod:
         assert cred.challenge.intent == "charge"
 
     @pytest.mark.asyncio
-    async def test_create_credential_with_external_id(self):
+    async def test_create_credential_passes_request_external_id_to_callback(self):
         async def fake_create_token(params: OnChallengeParameters) -> str:
+            assert params.external_id == "order-42"
             return "spt_test_abc"
 
         method = stripe(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            external_id="order-42",
             intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
-        challenge = _make_challenge()
+        challenge = _make_challenge(
+            request={
+                "amount": "150",
+                "currency": "usd",
+                "externalId": "order-42",
+                "methodDetails": {
+                    "networkId": "bn_test",
+                    "paymentMethodTypes": ["card"],
+                },
+            }
+        )
         cred = await method.create_credential(challenge)
 
         assert cred.payload["spt"] == "spt_test_abc"
-        assert cred.payload["externalId"] == "order-42"
+        assert "externalId" not in cred.payload
 
     @pytest.mark.asyncio
     async def test_create_credential_no_create_token_raises(self):
@@ -234,6 +237,7 @@ class TestStripeMethod:
 
     def test_transform_request(self):
         method = stripe(
+            external_id="order-42",
             network_id="bn_test",
             payment_method_types=["card"],
             intents={"charge": ChargeIntent(secret_key="sk_test_123")},
@@ -242,6 +246,7 @@ class TestStripeMethod:
         request = {"amount": "150", "currency": "usd"}
         result = method.transform_request(request, None)
 
+        assert result["externalId"] == "order-42"
         assert result["methodDetails"]["networkId"] == "bn_test"
         assert result["methodDetails"]["paymentMethodTypes"] == ["card"]
 
@@ -325,12 +330,8 @@ class TestStripeMethod:
 
 def _make_credential(
     spt: str = "spt_test_abc",
-    external_id: str | None = None,
     expires: str | None = None,
 ) -> Credential:
-    payload: dict[str, Any] = {"spt": spt}
-    if external_id:
-        payload["externalId"] = external_id
     if expires is None:
         expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     return Credential(
@@ -342,7 +343,7 @@ def _make_credential(
             request="eyJ0ZXN0IjoidHJ1ZSJ9",
             expires=expires,
         ),
-        payload=payload,
+        payload={"spt": spt},
         source="stripe:test",
     )
 
@@ -461,10 +462,42 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     async def test_verify_with_external_id(self):
         intent = ChargeIntent(client=FakeStripeClient())
-        credential = _make_credential(external_id="order-42")
-        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+        credential = _make_credential()
+        receipt = await intent.verify(
+            credential,
+            {
+                **SAMPLE_REQUEST,
+                "externalId": "order-42",
+            },
+        )
 
         assert receipt.external_id == "order-42"
+
+    @pytest.mark.asyncio
+    async def test_verify_ignores_untrusted_credential_external_id(self):
+        intent = ChargeIntent(client=FakeStripeClient())
+        credential = Credential(
+            challenge=ChallengeEcho(
+                id="test-challenge-id",
+                realm="api.example.com",
+                method="stripe",
+                intent="charge",
+                request="eyJ0ZXN0IjoidHJ1ZSJ9",
+                expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            ),
+            payload={"spt": "spt_test_abc", "externalId": "order-expensive"},
+            source="stripe:test",
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                **SAMPLE_REQUEST,
+                "externalId": "order-cheap",
+            },
+        )
+
+        assert receipt.external_id == "order-cheap"
 
     @pytest.mark.asyncio
     async def test_verify_expired_challenge(self):
