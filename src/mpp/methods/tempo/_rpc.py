@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-DEFAULT_TIMEOUT = 30.0
+from mpp._defaults import DEFAULT_TIMEOUT
 
 
 async def _rpc_call(
