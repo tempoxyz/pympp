@@ -59,6 +59,11 @@ For FastMCP-style frameworks, use the @pay decorator:
 """
 
 from mpp.extensions.mcp.capabilities import payment_capabilities
+from mpp.extensions.mcp.client import (
+    McpClient,
+    McpToolResult,
+    PaymentOutcomeUnknownError,
+)
 from mpp.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,

@@ -6,7 +6,7 @@ Payment-protected MCP tools using Server-Sent Events (SSE).
 
 This example demonstrates:
 - **Server**: SSE-based MCP server with free and paid tools
-- **Client**: Connects to server and handles the payment flow
+- **Client**: Connects to server and handles payment automatically via `McpClient`
 
 The server and client run in separate terminals, communicating via SSE.
 
@@ -73,15 +73,9 @@ Available tools:
 1. Calling free tool (echo)...
    Result: Echo: Hello, world!
 
-2. Calling paid tool without credential (premium_echo)...
-   Got error code: -32042
-   Challenge ID: abc123...
-
-3. Creating payment credential...
-   Credential created for challenge: abc123...
-
-4. Retrying with credential...
+2. Calling paid tool (premium_echo)...
    Result: ✨ Premium Echo ✨: Hello, premium! (paid by 0x..., tx: 0x...)
+   Receipt: success, ref=0x...
 ```
 
 ## Server Implementations
