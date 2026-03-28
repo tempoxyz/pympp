@@ -172,7 +172,6 @@ class ChargeIntent:
             ) from err
 
         spt = parsed.spt
-        credential_external_id = parsed.externalId
 
         user_metadata = parsed_request.methodDetails.metadata
         resolved_metadata = {**_build_analytics(credential), **(user_metadata or {})}
@@ -202,7 +201,7 @@ class ChargeIntent:
         return Receipt.success(
             reference=pi["id"],
             method="stripe",
-            external_id=credential_external_id,
+            external_id=parsed_request.externalId,
         )
 
     async def _create_with_client(

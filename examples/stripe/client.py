@@ -43,6 +43,7 @@ async def run(args: argparse.Namespace) -> int:
                     "paymentMethod": params.payment_method,
                     "amount": params.amount,
                     "currency": params.currency,
+                    "externalId": params.external_id,
                     "expiresAt": params.expires_at,
                     "networkId": params.network_id,
                     "metadata": params.metadata,

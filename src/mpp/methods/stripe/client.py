@@ -26,6 +26,7 @@ class OnChallengeParameters:
         amount: Payment amount in smallest currency unit (e.g. ``"150"`` for $1.50).
         challenge: The full payment challenge from the server.
         currency: Three-letter ISO currency code (e.g. ``"usd"``).
+        external_id: Optional authenticated external identifier from the challenge.
         expires_at: SPT expiration as a Unix timestamp (seconds).
         metadata: Optional metadata from the challenge's methodDetails.
         network_id: Stripe Business Network profile ID.
@@ -35,6 +36,7 @@ class OnChallengeParameters:
     amount: str
     challenge: Challenge
     currency: str
+    external_id: str | None
     expires_at: int
     metadata: dict[str, str] | None
     network_id: str
@@ -81,6 +83,8 @@ class StripeMethod:
         if self.payment_method_types and "paymentMethodTypes" not in method_details:
             method_details["paymentMethodTypes"] = self.payment_method_types
         request = {**request, "methodDetails": method_details}
+        if self.external_id and "externalId" not in request:
+            request["externalId"] = self.external_id
         return request
 
     async def create_credential(self, challenge: Challenge) -> Credential:
@@ -110,13 +114,15 @@ class StripeMethod:
 
         amount = str(request.get("amount", ""))
         currency = str(request.get("currency", ""))
+        raw_external_id = request.get("externalId")
+        external_id = raw_external_id if isinstance(raw_external_id, str) else None
         network_id = method_details.get("networkId") if isinstance(method_details, dict) else None
         if not network_id:
             raise ValueError("networkId is required in challenge.methodDetails")
         metadata = method_details.get("metadata") if isinstance(method_details, dict) else None
         if isinstance(metadata, dict) and "externalId" in metadata:
             raise ValueError(
-                "methodDetails.metadata.externalId is reserved; use credential externalId instead"
+                "methodDetails.metadata.externalId is reserved; use request externalId instead"
             )
 
         if challenge.expires:
@@ -129,6 +135,7 @@ class StripeMethod:
                 amount=amount,
                 challenge=challenge,
                 currency=currency,
+                external_id=external_id,
                 expires_at=expires_at,
                 metadata=metadata,
                 network_id=network_id,
@@ -136,13 +143,9 @@ class StripeMethod:
             )
         )
 
-        payload: dict[str, Any] = {"spt": spt}
-        if self.external_id:
-            payload["externalId"] = self.external_id
-
         return Credential(
             challenge=challenge.to_echo(),
-            payload=payload,
+            payload={"spt": spt},
         )
 
 
@@ -177,7 +180,9 @@ def stripe(
         create_token: Callback to create an SPT (client-side).
             Receives :class:`OnChallengeParameters` and returns the SPT string.
         payment_method: Default Stripe payment method ID (e.g. ``"pm_card_visa"``).
-        external_id: Optional client-side external reference ID.
+        external_id: Optional authenticated external reference ID.
+            Included in the challenge request as ``externalId`` so token grant
+            code can forward it to Stripe seller scoping.
         currency: Default ISO currency code (e.g. ``"usd"``).
         decimals: Decimal places for the currency (default: 2 for USD cents).
         recipient: Optional default recipient.
