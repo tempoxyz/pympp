@@ -154,10 +154,14 @@ class TempoMethod:
             awaiting_fee_payer=use_fee_payer,
         )
 
+        # When signing with an access key, the credential source is the
+        # root account (the smart wallet), not the access key.
+        source_address = self.root_account if self.root_account else self.account.address
+
         return Credential(
             challenge=challenge.to_echo(),
             payload={"type": "transaction", "signature": raw_tx},
-            source=f"did:pkh:eip155:{chain_id}:{self.account.address}",
+            source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
 
     async def _build_tempo_transfer(
@@ -209,8 +213,12 @@ class TempoMethod:
         else:
             transfer_data = self._encode_transfer(recipient, int(amount))
 
+        # When using an access key, fetch nonce from the root account
+        # (smart wallet), not the access key address.
+        nonce_address = self.root_account if self.root_account else self.account.address
+
         chain_id, on_chain_nonce, gas_price = await get_tx_params(
-            resolved_rpc, self.account.address
+            resolved_rpc, nonce_address
         )
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
@@ -231,7 +239,7 @@ class TempoMethod:
         gas_limit = DEFAULT_GAS_LIMIT
         try:
             estimated = await estimate_gas(
-                resolved_rpc, self.account.address, currency, transfer_data
+                resolved_rpc, nonce_address, currency, transfer_data
             )
             gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
@@ -250,7 +258,12 @@ class TempoMethod:
             calls=(Call.create(to=currency, value=0, data=transfer_data),),
         )
 
-        signed_tx = tx.sign(self.account.private_key)
+        if self.root_account:
+            from pytempo import sign_tx_access_key
+
+            signed_tx = sign_tx_access_key(tx, self.account.private_key, self.root_account)
+        else:
+            signed_tx = tx.sign(self.account.private_key)
 
         if awaiting_fee_payer:
             from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope

@@ -1384,6 +1384,121 @@ class TestChainIdPropagation:
             await method.create_credential(challenge)
 
 
+class TestAccessKeySigning:
+    """Tests for access key (root_account) signing flow."""
+
+    @pytest.mark.asyncio
+    async def test_access_key_builds_keychain_signature(self, httpx_mock: HTTPXMock) -> None:
+        """When root_account is set, should use sign_tx_access_key."""
+        access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        root = "0x975937feafc6869a260c176854dda8764a78e122"
+        method = tempo(
+            account=access_key,
+            root_account=root,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+
+        # Mock RPC: chain_id, nonce, gas_price, estimateGas
+        for _ in range(4):
+            httpx_mock.add_response(
+                url="https://rpc.test",
+                json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            )
+
+        challenge = Challenge(
+            id="test-access-key",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+
+        assert credential.payload["type"] == "transaction"
+        # source should be the root account, not the access key
+        assert root.lower() in credential.source.lower()
+        assert access_key.address.lower() not in credential.source.lower()
+
+    @pytest.mark.asyncio
+    async def test_access_key_with_fee_payer(self, httpx_mock: HTTPXMock) -> None:
+        """Access key + feePayer should produce a 0x78 envelope with keychain sig."""
+        access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        root = "0x975937feafc6869a260c176854dda8764a78e122"
+        method = tempo(
+            account=access_key,
+            root_account=root,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+
+        for _ in range(4):
+            httpx_mock.add_response(
+                url="https://rpc.test",
+                json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            )
+
+        challenge = Challenge(
+            id="test-access-key-sponsored",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": True, "chainId": 1},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+
+        assert credential.payload["type"] == "transaction"
+        assert credential.payload["signature"].startswith("0x78")
+        assert root.lower() in credential.source.lower()
+
+    @pytest.mark.asyncio
+    async def test_no_root_account_uses_regular_signing(self, httpx_mock: HTTPXMock) -> None:
+        """Without root_account, should use regular tx.sign()."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+
+        for _ in range(4):
+            httpx_mock.add_response(
+                url="https://rpc.test",
+                json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            )
+
+        challenge = Challenge(
+            id="test-no-root",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        credential = await method.create_credential(challenge)
+
+        assert credential.payload["type"] == "transaction"
+        assert account.address in credential.source
+
+
 class TestMatchTransferCalldataWithMemo:
     """Tests for _match_transfer_calldata with memo field."""
 
