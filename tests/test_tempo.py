@@ -1439,6 +1439,7 @@ class TestAccessKeySigning:
 
         assert credential.payload["type"] == "transaction"
         # source should be the root account, not the access key
+        assert credential.source is not None
         assert root.lower() in credential.source.lower()
         assert access_key.address.lower() not in credential.source.lower()
 
@@ -1478,6 +1479,7 @@ class TestAccessKeySigning:
 
         assert credential.payload["type"] == "transaction"
         assert credential.payload["signature"].startswith("0x78")
+        assert credential.source is not None
         assert root.lower() in credential.source.lower()
 
     @pytest.mark.asyncio
@@ -1512,6 +1514,7 @@ class TestAccessKeySigning:
         credential = await method.create_credential(challenge)
 
         assert credential.payload["type"] == "transaction"
+        assert credential.source is not None
         assert account.address in credential.source
 
 
