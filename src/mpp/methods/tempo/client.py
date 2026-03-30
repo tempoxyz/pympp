@@ -217,9 +217,7 @@ class TempoMethod:
         # (smart wallet), not the access key address.
         nonce_address = self.root_account if self.root_account else self.account.address
 
-        chain_id, on_chain_nonce, gas_price = await get_tx_params(
-            resolved_rpc, nonce_address
-        )
+        chain_id, on_chain_nonce, gas_price = await get_tx_params(resolved_rpc, nonce_address)
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
@@ -238,9 +236,7 @@ class TempoMethod:
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
-            estimated = await estimate_gas(
-                resolved_rpc, nonce_address, currency, transfer_data
-            )
+            estimated = await estimate_gas(resolved_rpc, nonce_address, currency, transfer_data)
             gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
             pass

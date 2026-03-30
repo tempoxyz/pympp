@@ -195,6 +195,22 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
+    async def test_verify_missing_expires_rejected(self) -> None:
+        """Should reject credentials with no expires (fail-closed)."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        credential = make_credential(payload={"type": "hash", "hash": "0x123"}, expires=None)
+
+        with pytest.raises(VerificationError, match="no expires"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x123",
+                    "recipient": "0x456",
+                },
+            )
+
+    @pytest.mark.asyncio
     async def test_verify_invalid_payload(self) -> None:
         """Should reject invalid credential payload."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
@@ -1423,6 +1439,7 @@ class TestAccessKeySigning:
 
         assert credential.payload["type"] == "transaction"
         # source should be the root account, not the access key
+        assert credential.source is not None
         assert root.lower() in credential.source.lower()
         assert access_key.address.lower() not in credential.source.lower()
 
@@ -1462,6 +1479,7 @@ class TestAccessKeySigning:
 
         assert credential.payload["type"] == "transaction"
         assert credential.payload["signature"].startswith("0x78")
+        assert credential.source is not None
         assert root.lower() in credential.source.lower()
 
     @pytest.mark.asyncio
@@ -1496,6 +1514,7 @@ class TestAccessKeySigning:
         credential = await method.create_credential(challenge)
 
         assert credential.payload["type"] == "transaction"
+        assert credential.source is not None
         assert account.address in credential.source
 
 
