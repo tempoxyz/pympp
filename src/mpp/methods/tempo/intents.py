@@ -209,12 +209,13 @@ class ChargeIntent:
         req = ChargeRequest.model_validate(request)
 
         # Expiry is conveyed via the challenge-level expires auth-param,
-        # not inside the request body.
+        # not inside the request body.  Fail closed: reject if missing.
         challenge_expires = credential.challenge.expires
-        if challenge_expires:
-            expires = datetime.fromisoformat(challenge_expires.replace("Z", "+00:00"))
-            if expires < datetime.now(UTC):
-                raise VerificationError("Request has expired")
+        if not challenge_expires:
+            raise VerificationError("Request has expired (no expires)")
+        expires = datetime.fromisoformat(challenge_expires.replace("Z", "+00:00"))
+        if expires < datetime.now(UTC):
+            raise VerificationError("Request has expired")
 
         payload_data = credential.payload
         if not isinstance(payload_data, dict) or "type" not in payload_data:
