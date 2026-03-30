@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0 (2026-03-30)
+
+### Minor Changes
+
+- Added access key signing support for Tempo transactions. When `root_account` is set, nonce and gas estimation now use the root account (smart wallet) address, transactions are signed via `sign_tx_access_key`, and the credential source reflects the root account rather than the access key address. (by @BrendanRyan, [#103](https://github.com/tempoxyz/pympp/pull/103))
+- Added `RedisStore` and `SQLiteStore` backends to `mpp.stores` for replay protection, with optional extras (`pympp[redis]`, `pympp[sqlite]`). Added `store` parameter to `Mpp.__init__` and `Mpp.create()` that automatically wires the store into intents supporting replay protection. (by @BrendanRyan, [#103](https://github.com/tempoxyz/pympp/pull/103))
+
+### Patch Changes
+
+- Raised test coverage by adding tests for edge cases across charge, parsing, server, and store modules, and updated CI to generate and upload XML/HTML coverage reports for Python 3.12. (by @BrendanRyan, [#103](https://github.com/tempoxyz/pympp/pull/103))
+- Fixed fail-closed expiry enforcement in `ChargeIntent.verify`: requests with a missing `expires` challenge parameter are now rejected instead of silently allowed through. (by @BrendanRyan, [#103](https://github.com/tempoxyz/pympp/pull/103))
+
 ## 0.4.2 (2026-03-20)
 
 ### Patch Changes
