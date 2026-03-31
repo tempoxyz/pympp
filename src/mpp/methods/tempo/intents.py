@@ -59,8 +59,8 @@ def _parse_memo_bytes(memo: str | None) -> bytes | None:
     hex_str = memo[2:] if memo.startswith("0x") else memo
     try:
         b = bytes.fromhex(hex_str)
-    except ValueError:
-        raise VerificationError(f"Invalid memo hex: {memo}")
+    except ValueError as err:
+        raise VerificationError(f"Invalid memo hex: {memo}") from err
     if len(b) != 32:
         raise VerificationError(f"Memo must be exactly 32 bytes, got {len(b)}")
     return b
@@ -87,11 +87,13 @@ def get_transfers(
     the top-level memo. Split transfers follow in declaration order.
     """
     if not splits:
-        return [Transfer(
-            amount=total_amount,
-            recipient=primary_recipient,
-            memo=_parse_memo_bytes(primary_memo),
-        )]
+        return [
+            Transfer(
+                amount=total_amount,
+                recipient=primary_recipient,
+                memo=_parse_memo_bytes(primary_memo),
+            )
+        ]
 
     if len(splits) > MAX_SPLITS:
         raise VerificationError(f"Too many splits: {len(splits)} (max {MAX_SPLITS})")
@@ -104,11 +106,13 @@ def get_transfers(
         if amt <= 0:
             raise VerificationError("Split amount must be greater than zero")
         split_sum += amt
-        split_transfers.append(Transfer(
-            amount=amt,
-            recipient=s.recipient,
-            memo=_parse_memo_bytes(s.memo),
-        ))
+        split_transfers.append(
+            Transfer(
+                amount=amt,
+                recipient=s.recipient,
+                memo=_parse_memo_bytes(s.memo),
+            )
+        )
 
     if split_sum >= total_amount:
         raise VerificationError(
@@ -116,11 +120,13 @@ def get_transfers(
         )
 
     primary_amount = total_amount - split_sum
-    transfers = [Transfer(
-        amount=primary_amount,
-        recipient=primary_recipient,
-        memo=_parse_memo_bytes(primary_memo),
-    )]
+    transfers = [
+        Transfer(
+            amount=primary_amount,
+            recipient=primary_recipient,
+            memo=_parse_memo_bytes(primary_memo),
+        )
+    ]
     transfers.extend(split_transfers)
     return transfers
 
@@ -506,12 +512,16 @@ class ChargeIntent:
         if len(expected) == 1:
             t = expected[0]
             return self._verify_single_transfer_log(
-                receipt, request.currency, t.recipient, t.amount, t.memo,
+                receipt,
+                request.currency,
+                t.recipient,
+                t.amount,
+                t.memo,
                 expected_sender,
             )
 
         # Multi-transfer: order-insensitive matching
-        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
         logs = receipt.get("logs", [])
         used_logs: set[int] = set()
 
@@ -547,7 +557,10 @@ class ChargeIntent:
                     amount = int(data[2:66], 16)
                     memo_topic = topics[3]
                     expected_memo_hex = "0x" + transfer.memo.hex()
-                    if amount == transfer.amount and memo_topic.lower() == expected_memo_hex.lower():
+                    if (
+                        amount == transfer.amount
+                        and memo_topic.lower() == expected_memo_hex.lower()
+                    ):
                         used_logs.add(log_idx)
                         found = True
                         break
@@ -778,7 +791,7 @@ class ChargeIntent:
             request.methodDetails.splits,
         )
 
-        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
         used_calls: set[int] = set()
 
         for transfer in sorted_expected:
@@ -830,7 +843,7 @@ class ChargeIntent:
             request.methodDetails.splits,
         )
 
-        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
         used_calls: set[int] = set()
 
         for transfer in sorted_expected:
@@ -843,7 +856,9 @@ class ChargeIntent:
                 call_to_bytes, call_data_bytes = call_item[0], call_item[2]
                 if not call_to_bytes or not call_data_bytes:
                     continue
-                to_hex = call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
+                to_hex = (
+                    call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
+                )
                 if ("0x" + to_hex).lower() != request.currency.lower():
                     continue
                 raw = call_data_bytes
