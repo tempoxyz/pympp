@@ -7,6 +7,14 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, Field
 
 
+class Split(BaseModel):
+    """A single split in a split payment."""
+
+    amount: str
+    recipient: str
+    memo: str | None = None
+
+
 class MethodDetails(BaseModel):
     """Method-specific details for Tempo charge requests."""
 
@@ -14,6 +22,7 @@ class MethodDetails(BaseModel):
     feePayer: bool = False
     feePayerUrl: str | None = None
     memo: str | None = None
+    splits: list[Split] | None = None
 
 
 class ChargeRequest(BaseModel):
