@@ -36,6 +36,9 @@ async def run(args: argparse.Namespace) -> int:
 
     async def create_token(params):
         """Proxy SPT creation through the server."""
+        if "card" not in params.payment_method_types:
+            raise ValueError("This example only supports card payment methods")
+
         async with httpx.AsyncClient() as http:
             response = await http.post(
                 f"{server_url}/api/create-spt",
