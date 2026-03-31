@@ -124,6 +124,7 @@ class Mpp:
         expires: str | None = None,
         description: str | None = None,
         memo: str | None = None,
+        splits: list[dict[str, str]] | None = None,
         fee_payer: bool = False,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
@@ -177,12 +178,14 @@ class Mpp:
         if resolved_chain_id is None:
             resolved_chain_id = getattr(self.method, "chain_id", None)
 
-        if memo or fee_payer or resolved_chain_id is not None:
+        if memo or splits or fee_payer or resolved_chain_id is not None:
             method_details: dict[str, Any] = {}
             if resolved_chain_id is not None:
                 method_details["chainId"] = resolved_chain_id
             if memo:
                 method_details["memo"] = memo
+            if splits:
+                method_details["splits"] = splits
             if fee_payer:
                 method_details["feePayer"] = True
             request["methodDetails"] = method_details

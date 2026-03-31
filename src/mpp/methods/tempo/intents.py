@@ -20,6 +20,7 @@ from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
     HashCredentialPayload,
+    Split,
     TransactionCredentialPayload,
 )
 from mpp.store import Store
@@ -43,6 +44,115 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+MAX_SPLITS = 10
+
+
+def _parse_memo_bytes(memo: str | None) -> bytes | None:
+    """Parse a hex memo string into 32 bytes, or None if invalid."""
+    if memo is None:
+        return None
+    hex_str = memo[2:] if memo.startswith("0x") else memo
+    try:
+        b = bytes.fromhex(hex_str)
+    except ValueError:
+        return None
+    return b if len(b) == 32 else None
+
+
+@dataclass
+class Transfer:
+    """A single transfer in a charge (primary or split)."""
+
+    amount: int
+    recipient: str
+    memo: bytes | None = None
+
+
+def get_transfers(
+    total_amount: int,
+    primary_recipient: str,
+    primary_memo: str | None,
+    splits: list[Split] | None,
+) -> list[Transfer]:
+    """Compute the ordered list of transfers for a charge.
+
+    The primary transfer receives total_amount - sum(splits) and inherits
+    the top-level memo. Split transfers follow in declaration order.
+    """
+    if not splits:
+        return [Transfer(
+            amount=total_amount,
+            recipient=primary_recipient,
+            memo=_parse_memo_bytes(primary_memo),
+        )]
+
+    if len(splits) > MAX_SPLITS:
+        raise VerificationError(f"Too many splits: {len(splits)} (max {MAX_SPLITS})")
+
+    split_sum = 0
+    split_transfers: list[Transfer] = []
+
+    for s in splits:
+        amt = int(s.amount)
+        if amt <= 0:
+            raise VerificationError("Split amount must be greater than zero")
+        split_sum += amt
+        split_transfers.append(Transfer(
+            amount=amt,
+            recipient=s.recipient,
+            memo=_parse_memo_bytes(s.memo),
+        ))
+
+    if split_sum >= total_amount:
+        raise VerificationError(
+            f"Sum of splits ({split_sum}) must be less than total amount ({total_amount})"
+        )
+
+    primary_amount = total_amount - split_sum
+    transfers = [Transfer(
+        amount=primary_amount,
+        recipient=primary_recipient,
+        memo=_parse_memo_bytes(primary_memo),
+    )]
+    transfers.extend(split_transfers)
+    return transfers
+
+
+def _match_single_transfer_calldata(
+    call_data_hex: str,
+    recipient: str,
+    amount: int,
+    memo: bytes | None,
+) -> bool:
+    """Check if ABI-encoded calldata matches a single expected transfer."""
+    if len(call_data_hex) < 136:
+        return False
+
+    selector = call_data_hex[:8].lower()
+
+    if memo is not None:
+        if selector != TRANSFER_WITH_MEMO_SELECTOR:
+            return False
+    elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+        return False
+
+    decoded_to = "0x" + call_data_hex[32:72]
+    decoded_amount = int(call_data_hex[72:136], 16)
+
+    if decoded_to.lower() != recipient.lower():
+        return False
+    if decoded_amount != amount:
+        return False
+
+    if memo is not None:
+        if len(call_data_hex) < 200:
+            return False
+        decoded_memo = bytes.fromhex(call_data_hex[136:200])
+        if decoded_memo != memo:
+            return False
+
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,33 +433,19 @@ class ChargeIntent:
                 "Payment verification failed: memo is not bound to this challenge."
             )
 
-    def _verify_transfer_logs(
+    def _verify_single_transfer_log(
         self,
         receipt: dict[str, Any],
-        request: ChargeRequest,
+        currency: str,
+        recipient: str,
+        amount: int,
+        memo: bytes | None,
         expected_sender: str | None = None,
-    ) -> list[MatchedTransferLog]:
-        """Check if receipt contains matching Transfer or TransferWithMemo logs.
-
-        Args:
-            receipt: Transaction receipt from RPC.
-            request: The charge request with expected amount/currency/recipient.
-            expected_sender: If provided, validates the 'from' address in the
-                Transfer log matches this address (for payer identity verification).
-
-        Returns:
-            Matched logs in priority order, with memo logs before plain
-            transfers so downstream verification can inspect the memo that
-            actually satisfied the payment.
-        """
-        expected_memo = request.methodDetails.memo
-        memo_matches: list[MatchedTransferLog] = []
-        transfer_matches: list[MatchedTransferLog] = []
-
+    ) -> bool:
+        """Check if receipt contains a matching Transfer/TransferWithMemo log."""
         for log in receipt.get("logs", []):
-            if log.get("address", "").lower() != request.currency.lower():
+            if log.get("address", "").lower() != currency.lower():
                 continue
-
             topics = log.get("topics", [])
             if len(topics) < 3:
                 continue
@@ -358,41 +454,112 @@ class ChargeIntent:
             from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
 
-            if to_address.lower() != request.recipient.lower():
+            if to_address.lower() != recipient.lower():
                 continue
-
             if expected_sender and from_address.lower() != expected_sender.lower():
                 continue
 
-            if event_topic == TRANSFER_WITH_MEMO_TOPIC:
-                # TransferWithMemo has 3 indexed params (from, to, memo)
-                # so memo is in topics[3] and only amount is in data
+            if memo is not None:
+                if event_topic != TRANSFER_WITH_MEMO_TOPIC:
+                    continue
                 if len(topics) < 4:
                     continue
                 data = log.get("data", "0x")
                 if len(data) < 66:
                     continue
-                amount = int(data[2:66], 16)
-                if amount != int(request.amount):
+                log_amount = int(data[2:66], 16)
+                memo_topic = topics[3]
+                expected_memo_hex = "0x" + memo.hex()
+                if log_amount == amount and memo_topic.lower() == expected_memo_hex.lower():
+                    return True
+            else:
+                if event_topic not in (TRANSFER_TOPIC, TRANSFER_WITH_MEMO_TOPIC):
                     continue
-                memo = topics[3]
-                if expected_memo:
-                    memo_clean = expected_memo.lower()
-                    if not memo_clean.startswith("0x"):
-                        memo_clean = "0x" + memo_clean
-                    if memo.lower() != memo_clean:
-                        continue
-                memo_matches.append(MatchedTransferLog(kind="memo", memo=memo))
-                continue
-
-            if event_topic == TRANSFER_TOPIC and expected_memo is None:
                 data = log.get("data", "0x")
                 if len(data) >= 66:
-                    amount = int(data, 16)
-                    if amount == int(request.amount):
-                        transfer_matches.append(MatchedTransferLog(kind="transfer"))
+                    log_amount = int(data[2:66], 16) if event_topic == TRANSFER_WITH_MEMO_TOPIC else int(data, 16)
+                    if log_amount == amount:
+                        return True
 
-        return memo_matches + transfer_matches
+        return False
+
+    def _verify_transfer_logs(
+        self,
+        receipt: dict[str, Any],
+        request: ChargeRequest,
+        expected_sender: str | None = None,
+    ) -> bool:
+        """Check if receipt contains matching Transfer or TransferWithMemo logs."""
+        expected = get_transfers(
+            int(request.amount),
+            request.recipient,
+            request.methodDetails.memo,
+            request.methodDetails.splits,
+        )
+
+        if len(expected) == 1:
+            t = expected[0]
+            return self._verify_single_transfer_log(
+                receipt, request.currency, t.recipient, t.amount, t.memo,
+                expected_sender,
+            )
+
+        # Multi-transfer: order-insensitive matching
+        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        logs = receipt.get("logs", [])
+        used_logs: set[int] = set()
+
+        for transfer in sorted_expected:
+            found = False
+            for log_idx, log in enumerate(logs):
+                if log_idx in used_logs:
+                    continue
+                if log.get("address", "").lower() != request.currency.lower():
+                    continue
+
+                topics = log.get("topics", [])
+                if len(topics) < 3:
+                    continue
+
+                event_topic = topics[0]
+                from_address = "0x" + topics[1][-40:]
+                to_address = "0x" + topics[2][-40:]
+
+                if to_address.lower() != transfer.recipient.lower():
+                    continue
+                if expected_sender and from_address.lower() != expected_sender.lower():
+                    continue
+
+                if transfer.memo is not None:
+                    if event_topic != TRANSFER_WITH_MEMO_TOPIC:
+                        continue
+                    if len(topics) < 4:
+                        continue
+                    data = log.get("data", "0x")
+                    if len(data) < 66:
+                        continue
+                    amount = int(data[2:66], 16)
+                    memo_topic = topics[3]
+                    expected_memo_hex = "0x" + transfer.memo.hex()
+                    if amount == transfer.amount and memo_topic.lower() == expected_memo_hex.lower():
+                        used_logs.add(log_idx)
+                        found = True
+                        break
+                else:
+                    if event_topic not in (TRANSFER_TOPIC, TRANSFER_WITH_MEMO_TOPIC):
+                        continue
+                    data = log.get("data", "0x")
+                    if len(data) >= 66:
+                        amount = int(data[2:66], 16) if event_topic == TRANSFER_WITH_MEMO_TOPIC else int(data, 16)
+                        if amount == transfer.amount:
+                            used_logs.add(log_idx)
+                            found = True
+                            break
+
+            if not found:
+                return False
+
+        return True
 
     async def _verify_transaction(
         self,
@@ -597,16 +764,35 @@ class ChargeIntent:
         return "0x" + cosigned.encode().hex()
 
     def _validate_calls(self, calls: tuple, request: ChargeRequest) -> None:
-        """Validate that at least one call matches the expected transfer."""
-        for call in calls:
-            call_to = "0x" + bytes(call.to).hex()
-            if call_to.lower() != request.currency.lower():
-                continue
-            if call.value:
-                continue
-            if _match_transfer_calldata(call.data.hex(), request):
-                return
-        raise VerificationError("Invalid transaction: no matching payment call found")
+        """Validate that calls match all expected transfers."""
+        expected = get_transfers(
+            int(request.amount),
+            request.recipient,
+            request.methodDetails.memo,
+            request.methodDetails.splits,
+        )
+
+        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        used_calls: set[int] = set()
+
+        for transfer in sorted_expected:
+            found = False
+            for call_idx, call in enumerate(calls):
+                if call_idx in used_calls:
+                    continue
+                call_to = "0x" + bytes(call.to).hex()
+                if call_to.lower() != request.currency.lower():
+                    continue
+                if call.value:
+                    continue
+                if _match_single_transfer_calldata(
+                    call.data.hex(), transfer.recipient, transfer.amount, transfer.memo
+                ):
+                    used_calls.add(call_idx)
+                    found = True
+                    break
+            if not found:
+                raise VerificationError("Invalid transaction: no matching payment call found")
 
     def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
         """Best-effort pre-broadcast check. Silently skips if decoding fails."""
@@ -631,18 +817,36 @@ class ChargeIntent:
         if not calls_data:
             raise VerificationError("Transaction contains no calls")
 
-        for call_item in calls_data:
-            if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
-                continue
-            call_to_bytes, call_data_bytes = call_item[0], call_item[2]
-            if not call_to_bytes or not call_data_bytes:
-                continue
-            to_hex = call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
-            if ("0x" + to_hex).lower() != request.currency.lower():
-                continue
-            raw = call_data_bytes
-            data_hex = raw.hex() if isinstance(raw, bytes) else str(raw)
-            if _match_transfer_calldata(data_hex, request):
-                return
+        expected = get_transfers(
+            int(request.amount),
+            request.recipient,
+            request.methodDetails.memo,
+            request.methodDetails.splits,
+        )
 
-        raise VerificationError("Invalid transaction: no matching payment call found")
+        sorted_expected = sorted(expected, key=lambda t: (0 if t.memo else 1))
+        used_calls: set[int] = set()
+
+        for transfer in sorted_expected:
+            found = False
+            for call_idx, call_item in enumerate(calls_data):
+                if call_idx in used_calls:
+                    continue
+                if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
+                    continue
+                call_to_bytes, call_data_bytes = call_item[0], call_item[2]
+                if not call_to_bytes or not call_data_bytes:
+                    continue
+                to_hex = call_to_bytes.hex() if isinstance(call_to_bytes, bytes) else str(call_to_bytes)
+                if ("0x" + to_hex).lower() != request.currency.lower():
+                    continue
+                raw = call_data_bytes
+                data_hex = raw.hex() if isinstance(raw, bytes) else str(raw)
+                if _match_single_transfer_calldata(
+                    data_hex, transfer.recipient, transfer.amount, transfer.memo
+                ):
+                    used_calls.add(call_idx)
+                    found = True
+                    break
+            if not found:
+                raise VerificationError("Invalid transaction: no matching payment call found")
