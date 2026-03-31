@@ -212,6 +212,8 @@ class TempoMethod:
 
         resolved_rpc = rpc_url or self.rpc_url
 
+        gas_estimate_data: str | None = None
+
         if splits:
             from mpp.methods.tempo.intents import get_transfers
             from mpp.methods.tempo.schemas import Split as SplitModel
@@ -264,7 +266,7 @@ class TempoMethod:
                         resolved_rpc, nonce_address, currency, c.data.hex()
                     )
                 gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls_tuple))
-            else:
+            elif gas_estimate_data is not None:
                 estimated = await estimate_gas(
                     resolved_rpc, nonce_address, currency, gas_estimate_data
                 )
