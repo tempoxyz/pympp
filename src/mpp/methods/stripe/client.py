@@ -30,6 +30,7 @@ class OnChallengeParameters:
         expires_at: SPT expiration as a Unix timestamp (seconds).
         metadata: Optional metadata from the challenge's methodDetails.
         network_id: Stripe Business Network profile ID.
+        payment_method_types: Stripe payment method types allowed by the challenge.
         payment_method: Stripe payment method ID (e.g. ``"pm_card_visa"``).
     """
 
@@ -40,6 +41,7 @@ class OnChallengeParameters:
     expires_at: int
     metadata: dict[str, str] | None
     network_id: str
+    payment_method_types: list[str]
     payment_method: str
 
 
@@ -78,9 +80,17 @@ class StripeMethod:
         and ``paymentMethodTypes`` to the request's ``methodDetails``.
         """
         method_details = dict(request.get("methodDetails", {}))
-        if self.network_id and "networkId" not in method_details:
+        if self.network_id and "networkId" in method_details:
+            if method_details["networkId"] != self.network_id:
+                raise ValueError("networkId does not match configured stripe() network_id")
+        if self.network_id:
             method_details["networkId"] = self.network_id
-        if self.payment_method_types and "paymentMethodTypes" not in method_details:
+        if self.payment_method_types and "paymentMethodTypes" in method_details:
+            if method_details["paymentMethodTypes"] != self.payment_method_types:
+                raise ValueError(
+                    "paymentMethodTypes does not match configured stripe() payment_method_types"
+                )
+        if self.payment_method_types:
             method_details["paymentMethodTypes"] = self.payment_method_types
         request = {**request, "methodDetails": method_details}
         if self.external_id and "externalId" not in request:
@@ -119,6 +129,15 @@ class StripeMethod:
         network_id = method_details.get("networkId") if isinstance(method_details, dict) else None
         if not network_id:
             raise ValueError("networkId is required in challenge.methodDetails")
+        payment_method_types = (
+            method_details.get("paymentMethodTypes") if isinstance(method_details, dict) else None
+        )
+        if (
+            not isinstance(payment_method_types, list)
+            or not payment_method_types
+            or not all(isinstance(value, str) for value in payment_method_types)
+        ):
+            raise ValueError("paymentMethodTypes is required in challenge.methodDetails")
         metadata = method_details.get("metadata") if isinstance(method_details, dict) else None
         if isinstance(metadata, dict) and "externalId" in metadata:
             raise ValueError(
@@ -139,6 +158,7 @@ class StripeMethod:
                 expires_at=expires_at,
                 metadata=metadata,
                 network_id=network_id,
+                payment_method_types=payment_method_types,
                 payment_method=payment_method,
             )
         )

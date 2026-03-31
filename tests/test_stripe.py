@@ -114,6 +114,7 @@ class TestStripeMethod:
             assert params.currency == "usd"
             assert params.external_id is None
             assert params.network_id == "bn_test"
+            assert params.payment_method_types == ["card"]
             assert params.payment_method == "pm_card_visa"
             return "spt_test_abc"
 
@@ -209,6 +210,30 @@ class TestStripeMethod:
             await method.create_credential(challenge)
 
     @pytest.mark.asyncio
+    async def test_create_credential_missing_payment_method_types_raises(self):
+        async def fake_create_token(params: OnChallengeParameters) -> str:
+            return "spt_test_abc"
+
+        method = stripe(
+            create_token=fake_create_token,
+            payment_method="pm_card_visa",
+            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+        )
+
+        challenge = _make_challenge(
+            request={
+                "amount": "150",
+                "currency": "usd",
+                "methodDetails": {
+                    "networkId": "bn_test",
+                },
+            }
+        )
+
+        with pytest.raises(ValueError, match="paymentMethodTypes is required"):
+            await method.create_credential(challenge)
+
+    @pytest.mark.asyncio
     async def test_create_credential_rejects_metadata_external_id(self):
         """metadata.externalId is reserved (mppx parity)."""
 
@@ -250,7 +275,7 @@ class TestStripeMethod:
         assert result["methodDetails"]["networkId"] == "bn_test"
         assert result["methodDetails"]["paymentMethodTypes"] == ["card"]
 
-    def test_transform_request_does_not_overwrite(self):
+    def test_transform_request_rejects_network_id_override(self):
         method = stripe(
             network_id="bn_default",
             payment_method_types=["card"],
@@ -262,10 +287,25 @@ class TestStripeMethod:
             "currency": "usd",
             "methodDetails": {"networkId": "bn_override"},
         }
-        result = method.transform_request(request, None)
 
-        assert result["methodDetails"]["networkId"] == "bn_override"
-        assert result["methodDetails"]["paymentMethodTypes"] == ["card"]
+        with pytest.raises(ValueError, match="networkId does not match configured"):
+            method.transform_request(request, None)
+
+    def test_transform_request_rejects_payment_method_types_override(self):
+        method = stripe(
+            network_id="bn_test",
+            payment_method_types=["card"],
+            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+        )
+
+        request = {
+            "amount": "150",
+            "currency": "usd",
+            "methodDetails": {"paymentMethodTypes": ["sepa_debit"]},
+        }
+
+        with pytest.raises(ValueError, match="paymentMethodTypes does not match configured"):
+            method.transform_request(request, None)
 
     def test_method_name(self):
         method = stripe(
@@ -572,16 +612,18 @@ class TestChargeIntent:
             ChargeIntent()
 
     @pytest.mark.asyncio
-    async def test_rejects_replayed_credential_client(self):
-        """Replayed idempotent requests are rejected (client path)."""
+    async def test_accepts_replayed_credential_client(self):
+        """Stripe idempotent retries still return the original successful receipt."""
         replayed_pi = FakePaymentIntent(
             last_response=FakeLastResponse(headers={"idempotent-replayed": "true"})
         )
         intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
-            await intent.verify(credential, SAMPLE_REQUEST)
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_test_123"
 
     @pytest.mark.asyncio
     async def test_analytics_metadata(self):
@@ -651,6 +693,7 @@ class TestChargeIntent:
         assert body["amount"] == 150
         assert body["currency"] == "usd"
         assert body["confirm"] is True
+        assert body["payment_method_types"] == ["card"]
         assert body["shared_payment_granted_token"] == "spt_test_abc"
         assert "options" in captured[0][1]
 
@@ -719,6 +762,7 @@ class TestChargeIntentRawHttp:
         data = call_kwargs.kwargs["data"]
         assert data["amount"] == "150"
         assert data["currency"] == "usd"
+        assert data["payment_method_types[0]"] == "card"
         assert data["shared_payment_granted_token"] == "spt_test_abc"
 
     @pytest.mark.asyncio
@@ -756,8 +800,8 @@ class TestChargeIntentRawHttp:
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
-    async def test_rejects_replayed_credential_raw_http(self):
-        """Replayed idempotent requests are rejected (raw HTTP path)."""
+    async def test_accepts_replayed_credential_raw_http(self):
+        """Stripe idempotent retries still return the original successful receipt."""
         mock_response = httpx.Response(
             200,
             json={"id": "pi_replayed", "status": "succeeded"},
@@ -770,8 +814,10 @@ class TestChargeIntentRawHttp:
         intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
-            await intent.verify(credential, SAMPLE_REQUEST)
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_replayed"
 
     @pytest.mark.asyncio
     async def test_verify_with_secret_key_metadata_in_form(self):

@@ -217,13 +217,10 @@ class ChargeIntent:
             payment_intents = _resolve_payment_intents(client)
             body = {
                 "amount": int(request.amount),
-                "automatic_payment_methods": {
-                    "allow_redirects": "never",
-                    "enabled": True,
-                },
                 "confirm": True,
                 "currency": request.currency,
                 "metadata": metadata,
+                "payment_method_types": list(request.methodDetails.paymentMethodTypes),
                 "shared_payment_granted_token": spt,
             }
             options = {"idempotency_key": f"mppx_{challenge_id}_{spt}"}
@@ -233,12 +230,6 @@ class ChargeIntent:
                 result = await cast(Any, create_async)(body, options=options)
             else:
                 result = await asyncio.to_thread(payment_intents.create, body, options=options)
-            # https://docs.stripe.com/error-low-level#idempotency
-            last_response = getattr(result, "last_response", None)
-            if last_response is not None:
-                headers = getattr(last_response, "headers", None) or {}
-                if headers.get("idempotent-replayed") == "true":
-                    raise VerificationFailedError("Payment has already been processed.")
             return {"id": result.id, "status": result.status}
         except (VerificationFailedError, TypeError):
             raise
@@ -260,12 +251,12 @@ class ChargeIntent:
 
         body: dict[str, str] = {
             "amount": request.amount,
-            "automatic_payment_methods[allow_redirects]": "never",
-            "automatic_payment_methods[enabled]": "true",
             "confirm": "true",
             "currency": request.currency,
             "shared_payment_granted_token": spt,
         }
+        for index, payment_method_type in enumerate(request.methodDetails.paymentMethodTypes):
+            body[f"payment_method_types[{index}]"] = payment_method_type
         for key, value in metadata.items():
             body[f"metadata[{key}]"] = value
 
@@ -289,10 +280,6 @@ class ChargeIntent:
             raise VerificationFailedError(
                 detail or f"Stripe PaymentIntent failed (HTTP {response.status_code})"
             )
-
-        # https://docs.stripe.com/error-low-level#idempotency
-        if response.headers.get("idempotent-replayed") == "true":
-            raise VerificationFailedError("Payment has already been processed.")
 
         result = response.json()
         return {"id": result["id"], "status": result["status"]}
