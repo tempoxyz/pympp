@@ -2178,15 +2178,15 @@ class TestMatchTransferCalldataWithMemo:
         )
         assert _match_transfer_calldata(calldata, request) is True
 
-    def test_no_memo_accepts_either_selector(self) -> None:
-        """When no memo, both transfer and transferWithMemo selectors should be accepted."""
+    def test_no_memo_accepts_only_transfer_selector(self) -> None:
+        """When no memo, only plain transfer selector should be accepted."""
         request = self._make_request(memo=None)
         calldata_plain = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
         calldata_memo = self._build_calldata(
             TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT
         )
         assert _match_transfer_calldata(calldata_plain, request) is True
-        assert _match_transfer_calldata(calldata_memo, request) is True
+        assert _match_transfer_calldata(calldata_memo, request) is False
 
     def test_short_calldata_rejected(self) -> None:
         """Calldata shorter than 136 chars should always be rejected."""

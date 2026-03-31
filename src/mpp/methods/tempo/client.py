@@ -233,7 +233,6 @@ class TempoMethod:
                     td = self._encode_transfer(t.recipient, t.amount)
                 call_list.append(Call.create(to=currency, value=0, data=td))
             calls_tuple = tuple(call_list)
-            gas_estimate_data = call_list[0].data.hex() if call_list else None
         else:
             if memo:
                 transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
@@ -265,8 +264,18 @@ class TempoMethod:
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
-            estimated = await estimate_gas(resolved_rpc, nonce_address, currency, gas_estimate_data)
-            gas_limit = max(gas_limit, estimated + 5_000)
+            if splits:
+                total_estimated = 0
+                for c in calls_tuple:
+                    total_estimated += await estimate_gas(
+                        resolved_rpc, nonce_address, currency, c.data.hex()
+                    )
+                gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls_tuple))
+            else:
+                estimated = await estimate_gas(
+                    resolved_rpc, nonce_address, currency, gas_estimate_data
+                )
+                gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
             pass
 
