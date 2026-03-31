@@ -49,15 +49,21 @@ MAX_SPLITS = 10
 
 
 def _parse_memo_bytes(memo: str | None) -> bytes | None:
-    """Parse a hex memo string into 32 bytes, or None if invalid."""
+    """Parse a hex memo string into 32 bytes.
+
+    Returns None when no memo is supplied. Raises VerificationError when a memo
+    is explicitly provided but cannot be decoded as exactly 32 bytes of hex.
+    """
     if memo is None:
         return None
     hex_str = memo[2:] if memo.startswith("0x") else memo
     try:
         b = bytes.fromhex(hex_str)
     except ValueError:
-        return None
-    return b if len(b) == 32 else None
+        raise VerificationError(f"Invalid memo hex: {memo}")
+    if len(b) != 32:
+        raise VerificationError(f"Memo must be exactly 32 bytes, got {len(b)}")
+    return b
 
 
 @dataclass
@@ -134,7 +140,7 @@ def _match_single_transfer_calldata(
     if memo is not None:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
             return False
-    elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+    elif selector != TRANSFER_SELECTOR:
         return False
 
     decoded_to = "0x" + call_data_hex[32:72]
@@ -176,7 +182,7 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
     if expected_memo:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
             return False
-    elif selector not in (TRANSFER_SELECTOR, TRANSFER_WITH_MEMO_SELECTOR):
+    elif selector != TRANSFER_SELECTOR:
         return False
 
     decoded_to = "0x" + call_data_hex[32:72]
@@ -501,11 +507,11 @@ class ChargeIntent:
                         found = True
                         break
                 else:
-                    if event_topic not in (TRANSFER_TOPIC, TRANSFER_WITH_MEMO_TOPIC):
+                    if event_topic != TRANSFER_TOPIC:
                         continue
                     data = log.get("data", "0x")
                     if len(data) >= 66:
-                        amount = int(data[2:66], 16) if event_topic == TRANSFER_WITH_MEMO_TOPIC else int(data, 16)
+                        amount = int(data, 16)
                         if amount == transfer.amount:
                             used_logs.add(log_idx)
                             found = True

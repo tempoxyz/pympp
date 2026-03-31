@@ -178,6 +178,9 @@ class Mpp:
         if resolved_chain_id is None:
             resolved_chain_id = getattr(self.method, "chain_id", None)
 
+        if splits and fee_payer:
+            raise ValueError("splits and fee_payer cannot be used together")
+
         if memo or splits or fee_payer or resolved_chain_id is not None:
             method_details: dict[str, Any] = {}
             if resolved_chain_id is not None:
