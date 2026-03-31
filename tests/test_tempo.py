@@ -27,13 +27,16 @@ from mpp.methods.tempo.intents import (
     TRANSFER_WITH_MEMO_SELECTOR,
     TRANSFER_WITH_MEMO_TOPIC,
     ChargeIntent,
+    Transfer,
     _match_transfer_calldata,
     _rpc_error_msg,
+    get_transfers,
 )
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     HashCredentialPayload,
     MethodDetails,
+    Split,
     TransactionCredentialPayload,
 )
 from mpp.server.intent import VerificationError
@@ -1842,3 +1845,255 @@ class TestDefaultsImmutability:
         """CHAIN_RPC_URLS should reject mutation."""
         with pytest.raises(TypeError):
             CHAIN_RPC_URLS[9999] = "https://evil.rpc"  # type: ignore[index]
+
+
+class TestGetTransfers:
+    """Tests for get_transfers() split computation."""
+
+    def test_no_splits_returns_single_transfer(self) -> None:
+        transfers = get_transfers(1_000_000, "0x01", None, None)
+        assert len(transfers) == 1
+        assert transfers[0].amount == 1_000_000
+        assert transfers[0].recipient == "0x01"
+        assert transfers[0].memo is None
+
+    def test_empty_splits_returns_single_transfer(self) -> None:
+        transfers = get_transfers(1_000_000, "0x01", None, [])
+        assert len(transfers) == 1
+
+    def test_single_split(self) -> None:
+        splits = [Split(amount="300000", recipient="0x1111111111111111111111111111111111111111")]
+        transfers = get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", None, splits)
+        assert len(transfers) == 2
+        assert transfers[0].amount == 700_000  # primary gets remainder
+        assert transfers[1].amount == 300_000
+
+    def test_primary_inherits_memo(self) -> None:
+        memo = "0x" + "ab" * 32
+        splits = [Split(amount="100000", recipient="0x1111111111111111111111111111111111111111")]
+        transfers = get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", memo, splits)
+        assert transfers[0].memo is not None
+        assert transfers[1].memo is None
+
+    def test_split_with_memo(self) -> None:
+        split_memo = "0x" + "cd" * 32
+        splits = [Split(amount="100000", recipient="0x1111111111111111111111111111111111111111", memo=split_memo)]
+        transfers = get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", None, splits)
+        assert transfers[1].memo is not None
+        assert transfers[1].memo[0] == 0xCD
+
+    def test_multiple_splits_preserve_order(self) -> None:
+        splits = [
+            Split(amount="100000", recipient="0x1111111111111111111111111111111111111111"),
+            Split(amount="200000", recipient="0x2222222222222222222222222222222222222222"),
+            Split(amount="50000", recipient="0x3333333333333333333333333333333333333333"),
+        ]
+        transfers = get_transfers(1_000_000, "0x4444444444444444444444444444444444444444", None, splits)
+        assert len(transfers) == 4
+        assert transfers[0].amount == 650_000  # primary
+        assert transfers[1].amount == 100_000
+        assert transfers[2].amount == 200_000
+        assert transfers[3].amount == 50_000
+
+    def test_rejects_sum_equals_total(self) -> None:
+        splits = [Split(amount="1000000", recipient="0x1111111111111111111111111111111111111111")]
+        with pytest.raises(VerificationError, match="must be less than"):
+            get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", None, splits)
+
+    def test_rejects_sum_exceeds_total(self) -> None:
+        splits = [Split(amount="1500000", recipient="0x1111111111111111111111111111111111111111")]
+        with pytest.raises(VerificationError):
+            get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", None, splits)
+
+    def test_rejects_zero_split_amount(self) -> None:
+        splits = [Split(amount="0", recipient="0x1111111111111111111111111111111111111111")]
+        with pytest.raises(VerificationError, match="greater than zero"):
+            get_transfers(1_000_000, "0x2222222222222222222222222222222222222222", None, splits)
+
+    def test_rejects_too_many_splits(self) -> None:
+        splits = [
+            Split(amount="1000", recipient=f"0x{hex(i + 2)[2:].zfill(40)}")
+            for i in range(11)
+        ]
+        with pytest.raises(VerificationError, match="Too many splits"):
+            get_transfers(1_000_000, "0x0000000000000000000000000000000000000001", None, splits)
+
+    def test_max_splits_allowed(self) -> None:
+        splits = [
+            Split(amount="1000", recipient=f"0x{hex(i + 2)[2:].zfill(40)}")
+            for i in range(10)
+        ]
+        transfers = get_transfers(1_000_000, "0x0000000000000000000000000000000000000001", None, splits)
+        assert len(transfers) == 11
+        assert transfers[0].amount == 990_000
+
+
+class TestVerifyTransferLogsWithSplits:
+    """Tests for _verify_transfer_logs with split payments."""
+
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    SPLIT_RECIPIENT = "0x1111111111111111111111111111111111111111"
+    AMOUNT = 1000000
+    SENDER = "0x" + "ab" * 20
+
+    def _make_transfer_log(self, recipient: str, amount: int, memo: str | None = None) -> dict:
+        to_padded = "0x" + "0" * 24 + recipient[2:].lower()
+        from_padded = "0x" + "0" * 24 + self.SENDER[2:].lower()
+        if memo:
+            return {
+                "address": self.CURRENCY,
+                "topics": [TRANSFER_WITH_MEMO_TOPIC, from_padded, to_padded, memo],
+                "data": "0x" + hex(amount)[2:].zfill(64),
+            }
+        return {
+            "address": self.CURRENCY,
+            "topics": [TRANSFER_TOPIC, from_padded, to_padded],
+            "data": "0x" + hex(amount)[2:].zfill(64),
+        }
+
+    def test_split_logs_accepted(self) -> None:
+        """Receipt with matching split logs should be accepted."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_transfer_log(self.RECIPIENT, 700000),  # primary
+                self._make_transfer_log(self.SPLIT_RECIPIENT, 300000),  # split
+            ],
+        }
+        assert intent._verify_transfer_logs(receipt, request) is True
+
+    def test_split_logs_wrong_amount_rejected(self) -> None:
+        """Receipt with wrong split amount should be rejected."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_transfer_log(self.RECIPIENT, 700000),
+                self._make_transfer_log(self.SPLIT_RECIPIENT, 200000),  # wrong
+            ],
+        }
+        assert intent._verify_transfer_logs(receipt, request) is False
+
+    def test_split_logs_missing_split_rejected(self) -> None:
+        """Receipt missing a split log should be rejected."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [self._make_transfer_log(self.RECIPIENT, 700000)],
+        }
+        assert intent._verify_transfer_logs(receipt, request) is False
+
+    def test_split_with_memo_accepted(self) -> None:
+        """Split with memo should match TransferWithMemo log."""
+        split_memo = "0x" + "dd" * 32
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT, memo=split_memo)]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_transfer_log(self.RECIPIENT, 700000),
+                self._make_transfer_log(self.SPLIT_RECIPIENT, 300000, memo=split_memo),
+            ],
+        }
+        assert intent._verify_transfer_logs(receipt, request) is True
+
+    def test_split_order_insensitive(self) -> None:
+        """Logs in different order from splits should still match."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        split2 = "0x2222222222222222222222222222222222222222"
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[
+                    Split(amount="200000", recipient=self.SPLIT_RECIPIENT),
+                    Split(amount="100000", recipient=split2),
+                ]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_transfer_log(split2, 100000),  # split2 first
+                self._make_transfer_log(self.RECIPIENT, 700000),
+                self._make_transfer_log(self.SPLIT_RECIPIENT, 200000),
+            ],
+        }
+        assert intent._verify_transfer_logs(receipt, request) is True
+
+
+class TestSplitSchemas:
+    """Tests for Split schema."""
+
+    def test_split_model(self) -> None:
+        s = Split(amount="300000", recipient="0x1111111111111111111111111111111111111111")
+        assert s.amount == "300000"
+        assert s.memo is None
+
+    def test_split_with_memo(self) -> None:
+        s = Split(amount="300000", recipient="0x1111", memo="0x" + "ab" * 32)
+        assert s.memo is not None
+
+    def test_method_details_with_splits(self) -> None:
+        md = MethodDetails(
+            splits=[Split(amount="300000", recipient="0x1111111111111111111111111111111111111111")]
+        )
+        assert md.splits is not None
+        assert len(md.splits) == 1
+
+    def test_method_details_splits_serialization(self) -> None:
+        md = MethodDetails(
+            splits=[Split(amount="300000", recipient="0x1111111111111111111111111111111111111111")]
+        )
+        data = md.model_dump()
+        assert "splits" in data
+        assert data["splits"][0]["amount"] == "300000"
+
+    def test_charge_request_with_splits(self) -> None:
+        req = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            methodDetails=MethodDetails(
+                splits=[
+                    Split(amount="300000", recipient="0x1111111111111111111111111111111111111111"),
+                    Split(amount="200000", recipient="0x2222222222222222222222222222222222222222"),
+                ]
+            ),
+        )
+        assert req.methodDetails.splits is not None
+        assert len(req.methodDetails.splits) == 2

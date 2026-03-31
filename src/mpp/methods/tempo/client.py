@@ -118,6 +118,8 @@ class TempoMethod:
         if memo is None:
             memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
 
+        splits = method_details.get("splits") if isinstance(method_details, dict) else None
+
         # Resolve RPC URL from challenge's chainId (like mppx), falling back
         # to the method-level rpc_url.
         rpc_url = self.rpc_url
@@ -152,6 +154,7 @@ class TempoMethod:
             rpc_url=rpc_url,
             expected_chain_id=expected_chain_id,
             awaiting_fee_payer=use_fee_payer,
+            splits=splits,
         )
 
         # When signing with an access key, the credential source is the
@@ -174,6 +177,7 @@ class TempoMethod:
         rpc_url: str | None = None,
         expected_chain_id: int | None = None,
         awaiting_fee_payer: bool = False,
+        splits: list[dict] | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -208,10 +212,28 @@ class TempoMethod:
 
         resolved_rpc = rpc_url or self.rpc_url
 
-        if memo:
-            transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
+        if splits:
+            from mpp.methods.tempo.intents import get_transfers
+            from mpp.methods.tempo.schemas import Split as SplitModel
+
+            parsed_splits = [SplitModel(**s) for s in splits]
+            transfer_list = get_transfers(int(amount), recipient, memo, parsed_splits)
+            call_list = []
+            for t in transfer_list:
+                if t.memo is not None:
+                    td = self._encode_transfer_with_memo(t.recipient, t.amount, "0x" + t.memo.hex())
+                else:
+                    td = self._encode_transfer(t.recipient, t.amount)
+                call_list.append(Call.create(to=currency, value=0, data=td))
+            calls_tuple = tuple(call_list)
+            gas_estimate_data = call_list[0].data.hex() if call_list else None
         else:
-            transfer_data = self._encode_transfer(recipient, int(amount))
+            if memo:
+                transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
+            else:
+                transfer_data = self._encode_transfer(recipient, int(amount))
+            calls_tuple = (Call.create(to=currency, value=0, data=transfer_data),)
+            gas_estimate_data = transfer_data
 
         # When using an access key, fetch nonce from the root account
         # (smart wallet), not the access key address.
@@ -236,7 +258,7 @@ class TempoMethod:
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
-            estimated = await estimate_gas(resolved_rpc, nonce_address, currency, transfer_data)
+            estimated = await estimate_gas(resolved_rpc, nonce_address, currency, gas_estimate_data)
             gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
             pass
@@ -251,7 +273,7 @@ class TempoMethod:
             fee_token=None if awaiting_fee_payer else currency,
             awaiting_fee_payer=awaiting_fee_payer,
             valid_before=valid_before,
-            calls=(Call.create(to=currency, value=0, data=transfer_data),),
+            calls=calls_tuple,
         )
 
         if self.root_account:
