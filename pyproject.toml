@@ -1,6 +1,6 @@
 [project]
 name = "pympp"
-version = "0.5.0"
+version = "0.5.1"
 description = "Python SDK for the Machine Payments Protocol (MPP)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,8 +14,10 @@ license = {text = "MIT OR Apache-2.0"}
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
 ]
 
 [project.urls]
@@ -26,8 +28,12 @@ Documentation = "https://github.com/tempoxyz/pympp#readme"
 tempo = [
     "pytempo>=0.2.1",
     "pydantic>=2.0",
+    "eth-account>=0.11",
+    "eth-hash[pycryptodome]>=0.7",
+    "attrs>=23.0",
+    "rlp>=4.0",
 ]
-server = ["pydantic>=2.0", "python-dotenv>=1.0"]
+server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
 mcp = ["mcp>=1.1.0"]

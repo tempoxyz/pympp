@@ -7,18 +7,18 @@ Available backends:
 - ``SQLiteStore`` – local SQLite file, for single-instance production deployments.
 """
 
+from typing import Any
+
+from mpp._lazy_exports import load_lazy_attr
 from mpp.store import MemoryStore
 
-__all__ = ["MemoryStore", "RedisStore", "SQLiteStore"]
+_EXTRA_INSTALL_HINT = "Install the required store extra for this backend."
+
+_LAZY_EXPORTS = {
+    "mpp.stores.redis": ("RedisStore",),
+    "mpp.stores.sqlite": ("SQLiteStore",),
+}
 
 
-def __getattr__(name: str):  # type: ignore[reportReturnType]
-    if name == "RedisStore":
-        from mpp.stores.redis import RedisStore
-
-        return RedisStore
-    if name == "SQLiteStore":
-        from mpp.stores.sqlite import SQLiteStore
-
-        return SQLiteStore
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+def __getattr__(name: str) -> Any:
+    return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)

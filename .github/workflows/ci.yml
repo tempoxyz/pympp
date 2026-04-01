@@ -14,7 +14,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test, package]
+    needs: [test, package, install-smoke]
     runs-on: ubuntu-latest
     steps:
       - run: |
@@ -100,3 +100,105 @@ jobs:
         run: |
           uv run python -m build
           uv run twine check --strict dist/*
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-dist
+          path: dist/*
+          if-no-files-found: error
+
+  install-smoke:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [base, tempo, mcp]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: package-dist
+          path: dist
+
+      - name: Create clean virtualenv
+        run: uv venv .smoke-venv --python 3.12
+
+      - name: Install built wheel
+        run: |
+          WHEEL=$(echo dist/*.whl)
+          case "${{ matrix.profile }}" in
+            base)
+              INSTALL_TARGET="$WHEEL"
+              ;;
+            tempo)
+              INSTALL_TARGET="${WHEEL}[tempo]"
+              ;;
+            mcp)
+              INSTALL_TARGET="${WHEEL}[mcp]"
+              ;;
+          esac
+          uv pip install --python .smoke-venv/bin/python "$INSTALL_TARGET"
+
+      - name: Smoke test built wheel (base)
+        if: matrix.profile == 'base'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          import mpp
+          import mpp.extensions.mcp as mcp
+          import mpp.methods.tempo as tempo
+
+          assert tempo.CHAIN_ID == 4217
+          assert mcp.CODE_PAYMENT_REQUIRED == -32042
+
+          for expr, hint in (
+              ("tempo.ChargeIntent", "pympp[tempo]"),
+              ("mcp.PaymentRequiredError", "pympp[mcp]"),
+          ):
+              try:
+                  eval(expr)
+              except ImportError as exc:
+                  assert hint in str(exc), str(exc)
+              else:
+                  raise AssertionError(f"{expr} unexpectedly imported in base install")
+
+          print("base install smoke test passed")
+          PY
+
+      - name: Smoke test built wheel (tempo)
+        if: matrix.profile == 'tempo'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.methods.tempo import ChargeIntent, TempoAccount
+
+          assert ChargeIntent.__name__ == "ChargeIntent"
+          assert TempoAccount.__name__ == "TempoAccount"
+
+          print("tempo install smoke test passed")
+          PY
+
+      - name: Smoke test built wheel (mcp)
+        if: matrix.profile == 'mcp'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.extensions.mcp import PaymentRequiredError, pay, verify_or_challenge
+
+          assert PaymentRequiredError.__name__ == "PaymentRequiredError"
+          assert pay.__name__ == "pay"
+          assert verify_or_challenge.__name__ == "verify_or_challenge"
+
+          print("mcp install smoke test passed")
+          PY

@@ -26,6 +26,9 @@ Example:
     )
 """
 
+from typing import Any
+
+from mpp._lazy_exports import load_lazy_attr
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -35,6 +38,15 @@ from mpp.methods.tempo._defaults import (
     default_currency_for_chain,
     escrow_contract_for_chain,
 )
-from mpp.methods.tempo.account import TempoAccount
-from mpp.methods.tempo.client import TempoMethod, TransactionError, tempo
-from mpp.methods.tempo.intents import ChargeIntent
+
+_EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
+
+_LAZY_EXPORTS = {
+    "mpp.methods.tempo.account": ("TempoAccount",),
+    "mpp.methods.tempo.client": ("TempoMethod", "TransactionError", "tempo"),
+    "mpp.methods.tempo.intents": ("ChargeIntent",),
+}
+
+
+def __getattr__(name: str) -> Any:
+    return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)

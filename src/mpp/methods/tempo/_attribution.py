@@ -20,21 +20,39 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from eth_hash.auto import keccak
-
-TAG: bytes = keccak(b"mpp")[:4]
-
 _VERSION = 0x01
 _ANONYMOUS = bytes(10)
 
+_TAG: bytes | None = None
+
+
+def _keccak(data: bytes) -> bytes:
+    from eth_hash.auto import keccak
+
+    return keccak(data)
+
+
+def _get_tag() -> bytes:
+    global _TAG
+    if _TAG is None:
+        _TAG = _keccak(b"mpp")[:4]
+    return _TAG
+
 
 def _fingerprint(value: str) -> bytes:
-    return keccak(value.encode())[:10]
+    return _keccak(value.encode())[:10]
+
+
+def __getattr__(name: str):  # type: ignore[reportReturnType]
+    if name == "TAG":
+        return _get_tag()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def encode(server_id: str, client_id: str | None = None) -> str:
+    tag = _get_tag()
     buf = bytearray(32)
-    buf[0:4] = TAG
+    buf[0:4] = tag
     buf[4] = _VERSION
     buf[5:15] = _fingerprint(server_id)
     if client_id:
@@ -51,7 +69,7 @@ def is_mpp_memo(memo: str) -> bool:
         memo_version = int(memo[10:12], 16)
     except ValueError:
         return False
-    return memo_tag == TAG and memo_version == _VERSION
+    return memo_tag == _get_tag() and memo_version == _VERSION
 
 
 def verify_server(memo: str, server_id: str) -> bool:

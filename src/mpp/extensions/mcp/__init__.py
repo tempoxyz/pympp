@@ -58,12 +58,9 @@ For FastMCP-style frameworks, use the @pay decorator:
         return f"Result for {query}, paid by {credential.source}"
 """
 
-from mpp.extensions.mcp.capabilities import payment_capabilities
-from mpp.extensions.mcp.client import (
-    McpClient,
-    McpToolResult,
-    PaymentOutcomeUnknownError,
-)
+from typing import Any
+
+from mpp._lazy_exports import load_lazy_attr
 from mpp.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -71,11 +68,26 @@ from mpp.extensions.mcp.constants import (
     META_CREDENTIAL,
     META_RECEIPT,
 )
-from mpp.extensions.mcp.decorator import pay
-from mpp.extensions.mcp.errors import (
-    MalformedCredentialError,
-    PaymentRequiredError,
-    PaymentVerificationError,
-)
-from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpp.extensions.mcp.verify import create_challenge, verify_or_challenge
+
+_EXTRA_INSTALL_HINT = 'Install the "mcp" extra to use this module: pip install "pympp[mcp]"'
+
+_LAZY_EXPORTS = {
+    "mpp.extensions.mcp.capabilities": ("payment_capabilities",),
+    "mpp.extensions.mcp.client": (
+        "McpClient",
+        "McpToolResult",
+        "PaymentOutcomeUnknownError",
+    ),
+    "mpp.extensions.mcp.decorator": ("pay",),
+    "mpp.extensions.mcp.errors": (
+        "MalformedCredentialError",
+        "PaymentRequiredError",
+        "PaymentVerificationError",
+    ),
+    "mpp.extensions.mcp.types": ("MCPChallenge", "MCPCredential", "MCPReceipt"),
+    "mpp.extensions.mcp.verify": ("create_challenge", "verify_or_challenge"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)
