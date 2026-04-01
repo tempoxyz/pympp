@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
+    CHAIN_ID,
     CHAIN_RPC_URLS,
     RPC_URL,
     default_currency_for_chain,
@@ -303,7 +304,7 @@ def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
     fee_payer: TempoAccount | None = None,
-    chain_id: int | None = None,
+    chain_id: int = CHAIN_ID,
     rpc_url: str | None = None,
     root_account: str | None = None,
     currency: str | None = None,
@@ -320,8 +321,8 @@ def tempo(
             (server-side). When set, the server signs with domain
             ``0x78`` and broadcasts directly — no external fee payer
             service needed.
-        chain_id: Tempo chain ID (4217 for mainnet, 42431 for testnet).
-            Resolves the RPC URL automatically from known chains.
+        chain_id: Tempo chain ID (default: 4217 for mainnet, use 42431
+            for testnet). Resolves the RPC URL automatically from known chains.
         rpc_url: Tempo RPC endpoint URL. Overrides the URL resolved
             from ``chain_id``. Defaults to mainnet if neither is set.
         root_account: Root account address for access key signing.
@@ -350,7 +351,7 @@ def tempo(
         )
     """
     if rpc_url is None:
-        rpc_url = rpc_url_for_chain(chain_id) if chain_id else RPC_URL
+        rpc_url = rpc_url_for_chain(chain_id)
 
     if currency is None:
         currency = default_currency_for_chain(chain_id)
