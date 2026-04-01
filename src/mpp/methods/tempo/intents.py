@@ -14,7 +14,7 @@ import attrs
 
 from mpp import Credential, Receipt
 from mpp.errors import VerificationError
-from mpp.methods.tempo._defaults import DEFAULT_FEE_PAYER_URL, PATH_USD, rpc_url_for_chain
+from mpp.methods.tempo._defaults import PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -366,7 +366,12 @@ class ChargeIntent:
             if self.fee_payer is not None:
                 raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency, request=request)
             else:
-                fee_payer_url = request.methodDetails.feePayerUrl or DEFAULT_FEE_PAYER_URL
+                fee_payer_url = request.methodDetails.feePayerUrl
+                if not fee_payer_url:
+                    raise VerificationError(
+                        "No fee payer configured: set feePayer on the tempo() method "
+                        "or provide a feePayerUrl in methodDetails"
+                    )
 
                 sign_response = await client.post(
                     fee_payer_url,
