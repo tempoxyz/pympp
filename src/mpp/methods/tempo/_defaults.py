@@ -13,10 +13,6 @@ PATH_USD_DECIMALS = 6
 TESTNET_CHAIN_ID = 42431
 TESTNET_RPC_URL = "https://rpc.moderato.tempo.xyz"
 
-# Testnet only — the fee payer service sponsors gas on testnet.
-# On mainnet, the server itself must pay gas or provide its own fee payer.
-DEFAULT_FEE_PAYER_URL = "https://sponsor.moderato.tempo.xyz"
-
 # Chain ID -> default currency mapping
 # Mainnet defaults to USDC, testnet defaults to pathUSD
 DEFAULT_CURRENCIES: MappingProxyType[int, str] = MappingProxyType(

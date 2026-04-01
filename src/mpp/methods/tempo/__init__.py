@@ -20,7 +20,6 @@ Example:
 
     server = Mpp.create(
         method=tempo(
-            chain_id=42431,
             intents={"charge": ChargeIntent()},
         ),
     )
