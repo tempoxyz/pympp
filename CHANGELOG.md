@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.3 (2026-04-01)
+
+### Patch Changes
+
+- Defaulted `chain_id` to 4217 (mainnet) in the `tempo()` function, removing the need to pass it explicitly. Updated docs and example code accordingly. (by @BrendanRyan, [#108](https://github.com/tempoxyz/pympp/pull/108))
+- Added Python 3.11 support by lowering the `requires-python` constraint from `>=3.12` to `>=3.11`, updating tooling targets accordingly, and replacing PEP 695 generic syntax with `TypeVar` for compatibility. (by @BrendanRyan, [#108](https://github.com/tempoxyz/pympp/pull/108))
+
 ## 0.5.2 (2026-04-01)
 
 ### Patch Changes
