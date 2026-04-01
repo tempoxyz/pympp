@@ -239,12 +239,12 @@ class TestMppCharge:
         assert result.request["recipient"] == "0xother"
 
     @pytest.mark.asyncio
-    async def test_charge_defaults_currency_to_pathusd(self) -> None:
-        """Currency defaults to pathUSD when chain_id is not set."""
-        from mpp.methods.tempo import PATH_USD
+    async def test_charge_defaults_currency_to_usdc(self) -> None:
+        """Currency defaults to USDC when chain_id defaults to mainnet (4217)."""
+        from mpp.methods.tempo import USDC
 
         method = tempo(intents={"charge": ChargeIntent()})
-        assert method.currency == PATH_USD
+        assert method.currency == USDC
 
     @pytest.mark.asyncio
     async def test_charge_defaults_currency_to_usdc_on_mainnet(self) -> None:
