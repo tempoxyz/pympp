@@ -1,5 +1,3 @@
-# pyright: reportUnsupportedDunderAll=false
-
 """Concrete store backends for replay protection.
 
 Available backends:
@@ -16,13 +14,11 @@ from mpp.store import MemoryStore
 
 _EXTRA_INSTALL_HINT = "Install the required store extra for this backend."
 
-_LAZY_IMPORTS = {
-    "RedisStore": "mpp.stores.redis",
-    "SQLiteStore": "mpp.stores.sqlite",
+_LAZY_EXPORTS = {
+    "mpp.stores.redis": ("RedisStore",),
+    "mpp.stores.sqlite": ("SQLiteStore",),
 }
-
-__all__ = ["MemoryStore", *_LAZY_IMPORTS]
 
 
 def __getattr__(name: str) -> Any:
-    return load_lazy_attr(__name__, name, _LAZY_IMPORTS, globals(), _EXTRA_INSTALL_HINT)
+    return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)

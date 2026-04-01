@@ -1,5 +1,3 @@
-# pyright: reportUnsupportedDunderAll=false
-
 """MCP transport support for HTTP 402 Payment Authentication.
 
 This module implements the Payment Authentication Scheme for the Model Context
@@ -62,7 +60,7 @@ For FastMCP-style frameworks, use the @pay decorator:
 
 from typing import Any
 
-from mpp._lazy_exports import build_lazy_imports, load_lazy_attr
+from mpp._lazy_exports import load_lazy_attr
 from mpp.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -90,17 +88,6 @@ _LAZY_EXPORTS = {
     "mpp.extensions.mcp.verify": ("create_challenge", "verify_or_challenge"),
 }
 
-_LAZY_IMPORTS = build_lazy_imports(_LAZY_EXPORTS)
-
-__all__ = [
-    "CODE_MALFORMED_CREDENTIAL",
-    "CODE_PAYMENT_REQUIRED",
-    "CODE_PAYMENT_VERIFICATION_FAILED",
-    "META_CREDENTIAL",
-    "META_RECEIPT",
-    *_LAZY_IMPORTS,
-]
-
 
 def __getattr__(name: str) -> Any:
-    return load_lazy_attr(__name__, name, _LAZY_IMPORTS, globals(), _EXTRA_INSTALL_HINT)
+    return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)

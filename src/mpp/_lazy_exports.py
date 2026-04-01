@@ -7,15 +7,10 @@ from collections.abc import Mapping
 from typing import Any
 
 
-def build_lazy_imports(exports: Mapping[str, tuple[str, ...]]) -> dict[str, str]:
-    """Flatten a module -> names mapping into a name -> module lookup."""
-    return {name: module_path for module_path, names in exports.items() for name in names}
-
-
 def load_lazy_attr(
     module_name: str,
     name: str,
-    lazy_imports: Mapping[str, str],
+    lazy_exports: Mapping[str, tuple[str, ...]],
     namespace: dict[str, Any],
     extra_install_hint: str,
 ) -> Any:
@@ -25,7 +20,10 @@ def load_lazy_attr(
         AttributeError: If the name is not a known lazy export.
         ImportError: If the target module cannot be imported.
     """
-    module_path = lazy_imports.get(name)
+    module_path = next(
+        (module_path for module_path, names in lazy_exports.items() if name in names),
+        None,
+    )
     if module_path is None:
         raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
 
