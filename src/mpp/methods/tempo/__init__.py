@@ -1,3 +1,5 @@
+# pyright: reportUnsupportedDunderAll=false
+
 """Tempo payment method for HTTP 402 authentication.
 
 Example:
@@ -26,9 +28,9 @@ Example:
     )
 """
 
-import importlib
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from mpp._lazy_exports import build_lazy_imports, load_lazy_attr
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -39,20 +41,15 @@ from mpp.methods.tempo._defaults import (
     escrow_contract_for_chain,
 )
 
-if TYPE_CHECKING:
-    from mpp.methods.tempo.account import TempoAccount
-    from mpp.methods.tempo.client import TempoMethod, TransactionError, tempo
-    from mpp.methods.tempo.intents import ChargeIntent
-
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
-_LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    "TempoAccount": ("mpp.methods.tempo.account", "TempoAccount"),
-    "TempoMethod": ("mpp.methods.tempo.client", "TempoMethod"),
-    "TransactionError": ("mpp.methods.tempo.client", "TransactionError"),
-    "tempo": ("mpp.methods.tempo.client", "tempo"),
-    "ChargeIntent": ("mpp.methods.tempo.intents", "ChargeIntent"),
+_LAZY_EXPORTS = {
+    "mpp.methods.tempo.account": ("TempoAccount",),
+    "mpp.methods.tempo.client": ("TempoMethod", "TransactionError", "tempo"),
+    "mpp.methods.tempo.intents": ("ChargeIntent",),
 }
+
+_LAZY_IMPORTS = build_lazy_imports(_LAZY_EXPORTS)
 
 __all__ = [
     "CHAIN_ID",
@@ -62,24 +59,9 @@ __all__ = [
     "USDC",
     "default_currency_for_chain",
     "escrow_contract_for_chain",
-    "TempoAccount",
-    "TempoMethod",
-    "TransactionError",
-    "tempo",
-    "ChargeIntent",
+    *_LAZY_IMPORTS,
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name in _LAZY_IMPORTS:
-        module_path, attr = _LAZY_IMPORTS[name]
-        try:
-            mod = importlib.import_module(module_path)
-        except ImportError as exc:
-            raise ImportError(
-                f"Cannot import {name!r} from mpp.methods.tempo: {exc}. {_EXTRA_INSTALL_HINT}"
-            ) from exc
-        value = getattr(mod, attr)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return load_lazy_attr(__name__, name, _LAZY_IMPORTS, globals(), _EXTRA_INSTALL_HINT)
