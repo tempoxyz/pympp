@@ -20,7 +20,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-
 _VERSION = 0x01
 _ANONYMOUS = bytes(10)
 

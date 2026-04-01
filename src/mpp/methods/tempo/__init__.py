@@ -36,9 +36,7 @@ from mpp.methods.tempo._defaults import (
     escrow_contract_for_chain,
 )
 
-_EXTRA_INSTALL_HINT = (
-    'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
-)
+_EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "TempoAccount": ("mpp.methods.tempo.account", "TempoAccount"),
@@ -72,8 +70,7 @@ def __getattr__(name: str):  # type: ignore[reportReturnType]
             mod = importlib.import_module(module_path)
         except ImportError as exc:
             raise ImportError(
-                f"Cannot import {name!r} from mpp.methods.tempo: {exc}. "
-                f"{_EXTRA_INSTALL_HINT}"
+                f"Cannot import {name!r} from mpp.methods.tempo: {exc}. {_EXTRA_INSTALL_HINT}"
             ) from exc
         return getattr(mod, attr)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

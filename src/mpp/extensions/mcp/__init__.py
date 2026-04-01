@@ -66,9 +66,7 @@ from mpp.extensions.mcp.constants import (
     META_RECEIPT,
 )
 
-_EXTRA_INSTALL_HINT = (
-    'Install the "mcp" extra to use this module: pip install "pympp[mcp]"'
-)
+_EXTRA_INSTALL_HINT = 'Install the "mcp" extra to use this module: pip install "pympp[mcp]"'
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "payment_capabilities": ("mpp.extensions.mcp.capabilities", "payment_capabilities"),
@@ -105,8 +103,7 @@ def __getattr__(name: str):  # type: ignore[reportReturnType]
             mod = importlib.import_module(module_path)
         except ImportError as exc:
             raise ImportError(
-                f"Cannot import {name!r} from mpp.extensions.mcp: {exc}. "
-                f"{_EXTRA_INSTALL_HINT}"
+                f"Cannot import {name!r} from mpp.extensions.mcp: {exc}. {_EXTRA_INSTALL_HINT}"
             ) from exc
         return getattr(mod, attr)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
