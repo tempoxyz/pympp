@@ -58,6 +58,9 @@ For FastMCP-style frameworks, use the @pay decorator:
         return f"Result for {query}, paid by {credential.source}"
 """
 
+import importlib
+from typing import TYPE_CHECKING, Any
+
 from mpp.extensions.mcp.constants import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -65,6 +68,18 @@ from mpp.extensions.mcp.constants import (
     META_CREDENTIAL,
     META_RECEIPT,
 )
+
+if TYPE_CHECKING:
+    from mpp.extensions.mcp.capabilities import payment_capabilities
+    from mpp.extensions.mcp.client import McpClient, McpToolResult, PaymentOutcomeUnknownError
+    from mpp.extensions.mcp.decorator import pay
+    from mpp.extensions.mcp.errors import (
+        MalformedCredentialError,
+        PaymentRequiredError,
+        PaymentVerificationError,
+    )
+    from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
+    from mpp.extensions.mcp.verify import create_challenge, verify_or_challenge
 
 _EXTRA_INSTALL_HINT = 'Install the "mcp" extra to use this module: pip install "pympp[mcp]"'
 
@@ -90,20 +105,32 @@ __all__ = [
     "CODE_PAYMENT_VERIFICATION_FAILED",
     "META_CREDENTIAL",
     "META_RECEIPT",
-    *_LAZY_IMPORTS,
+    "payment_capabilities",
+    "McpClient",
+    "McpToolResult",
+    "PaymentOutcomeUnknownError",
+    "pay",
+    "MalformedCredentialError",
+    "PaymentRequiredError",
+    "PaymentVerificationError",
+    "MCPChallenge",
+    "MCPCredential",
+    "MCPReceipt",
+    "create_challenge",
+    "verify_or_challenge",
 ]
 
 
-def __getattr__(name: str):  # type: ignore[reportReturnType]
+def __getattr__(name: str) -> Any:
     if name in _LAZY_IMPORTS:
         module_path, attr = _LAZY_IMPORTS[name]
         try:
-            import importlib
-
             mod = importlib.import_module(module_path)
         except ImportError as exc:
             raise ImportError(
                 f"Cannot import {name!r} from mpp.extensions.mcp: {exc}. {_EXTRA_INSTALL_HINT}"
             ) from exc
-        return getattr(mod, attr)
+        value = getattr(mod, attr)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

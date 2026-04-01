@@ -26,6 +26,9 @@ Example:
     )
 """
 
+import importlib
+from typing import TYPE_CHECKING, Any
+
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -36,6 +39,11 @@ from mpp.methods.tempo._defaults import (
     escrow_contract_for_chain,
 )
 
+if TYPE_CHECKING:
+    from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.client import TempoMethod, TransactionError, tempo
+    from mpp.methods.tempo.intents import ChargeIntent
+
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
@@ -44,9 +52,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "TransactionError": ("mpp.methods.tempo.client", "TransactionError"),
     "tempo": ("mpp.methods.tempo.client", "tempo"),
     "ChargeIntent": ("mpp.methods.tempo.intents", "ChargeIntent"),
-    "Transfer": ("mpp.methods.tempo.intents", "Transfer"),
-    "get_transfers": ("mpp.methods.tempo.intents", "get_transfers"),
-    "Split": ("mpp.methods.tempo.schemas", "Split"),
 }
 
 __all__ = [
@@ -57,20 +62,24 @@ __all__ = [
     "USDC",
     "default_currency_for_chain",
     "escrow_contract_for_chain",
-    *_LAZY_IMPORTS,
+    "TempoAccount",
+    "TempoMethod",
+    "TransactionError",
+    "tempo",
+    "ChargeIntent",
 ]
 
 
-def __getattr__(name: str):  # type: ignore[reportReturnType]
+def __getattr__(name: str) -> Any:
     if name in _LAZY_IMPORTS:
         module_path, attr = _LAZY_IMPORTS[name]
         try:
-            import importlib
-
             mod = importlib.import_module(module_path)
         except ImportError as exc:
             raise ImportError(
                 f"Cannot import {name!r} from mpp.methods.tempo: {exc}. {_EXTRA_INSTALL_HINT}"
             ) from exc
-        return getattr(mod, attr)
+        value = getattr(mod, attr)
+        globals()[name] = value
+        return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
