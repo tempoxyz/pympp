@@ -153,51 +153,52 @@ jobs:
           esac
           uv pip install --python .smoke-venv/bin/python "$INSTALL_TARGET"
 
-      - name: Smoke test built wheel
+      - name: Smoke test built wheel (base)
+        if: matrix.profile == 'base'
         run: |
-          case "${{ matrix.profile }}" in
-            base)
-              .smoke-venv/bin/python - <<'PY'
-              import mpp
-              import mpp.extensions.mcp as mcp
-              import mpp.methods.tempo as tempo
+          .smoke-venv/bin/python - <<'PY'
+          import mpp
+          import mpp.extensions.mcp as mcp
+          import mpp.methods.tempo as tempo
 
-              assert tempo.CHAIN_ID == 4217
-              assert mcp.CODE_PAYMENT_REQUIRED == -32042
+          assert tempo.CHAIN_ID == 4217
+          assert mcp.CODE_PAYMENT_REQUIRED == -32042
 
-              for expr, hint in (
-                  ("tempo.ChargeIntent", "pympp[tempo]"),
-                  ("mcp.PaymentRequiredError", "pympp[mcp]"),
-              ):
-                  try:
-                      eval(expr)
-                  except ImportError as exc:
-                      assert hint in str(exc), str(exc)
-                  else:
-                      raise AssertionError(f"{expr} unexpectedly imported in base install")
+          for expr, hint in (
+              ("tempo.ChargeIntent", "pympp[tempo]"),
+              ("mcp.PaymentRequiredError", "pympp[mcp]"),
+          ):
+              try:
+                  eval(expr)
+              except ImportError as exc:
+                  assert hint in str(exc), str(exc)
+              else:
+                  raise AssertionError(f"{expr} unexpectedly imported in base install")
 
-              print("base install smoke test passed")
-              PY
-              ;;
-            tempo)
-              .smoke-venv/bin/python - <<'PY'
-              from mpp.methods.tempo import ChargeIntent, TempoAccount
+          print("base install smoke test passed")
+          PY
 
-              assert ChargeIntent.__name__ == "ChargeIntent"
-              assert TempoAccount.__name__ == "TempoAccount"
+      - name: Smoke test built wheel (tempo)
+        if: matrix.profile == 'tempo'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.methods.tempo import ChargeIntent, TempoAccount
 
-              print("tempo install smoke test passed")
-              PY
-              ;;
-            mcp)
-              .smoke-venv/bin/python - <<'PY'
-              from mpp.extensions.mcp import PaymentRequiredError, pay, verify_or_challenge
+          assert ChargeIntent.__name__ == "ChargeIntent"
+          assert TempoAccount.__name__ == "TempoAccount"
 
-              assert PaymentRequiredError.__name__ == "PaymentRequiredError"
-              assert pay.__name__ == "pay"
-              assert verify_or_challenge.__name__ == "verify_or_challenge"
+          print("tempo install smoke test passed")
+          PY
 
-              print("mcp install smoke test passed")
-              PY
-              ;;
-          esac
+      - name: Smoke test built wheel (mcp)
+        if: matrix.profile == 'mcp'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.extensions.mcp import PaymentRequiredError, pay, verify_or_challenge
+
+          assert PaymentRequiredError.__name__ == "PaymentRequiredError"
+          assert pay.__name__ == "pay"
+          assert verify_or_challenge.__name__ == "verify_or_challenge"
+
+          print("mcp install smoke test passed")
+          PY
