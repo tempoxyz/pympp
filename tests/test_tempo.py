@@ -612,9 +612,10 @@ class TestSponsoredTransfer:
             intents={"charge": ChargeIntent()},
         )
 
+        # eth_chainId
         httpx_mock.add_response(
             url="https://rpc.test",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
         httpx_mock.add_response(
             url="https://rpc.test",
@@ -1191,10 +1192,10 @@ class TestChainIdPropagation:
         method = tempo(chain_id=42431, intents={"charge": ChargeIntent()})
         assert method.chain_id == 42431
 
-    def test_tempo_factory_chain_id_defaults_none(self) -> None:
-        """tempo() without chain_id should default to None."""
+    def test_tempo_factory_chain_id_defaults_mainnet(self) -> None:
+        """tempo() without chain_id should default to 4217 (mainnet)."""
         method = tempo(intents={"charge": ChargeIntent()})
-        assert method.chain_id is None
+        assert method.chain_id == 4217
 
     def test_tempo_factory_chain_id_resolves_rpc(self) -> None:
         """tempo(chain_id=42431) should resolve testnet RPC URL."""
@@ -1275,9 +1276,10 @@ class TestChainIdPropagation:
             intents={"charge": ChargeIntent()},
         )
 
+        # eth_chainId
         httpx_mock.add_response(
             url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
         httpx_mock.add_response(
             url="https://rpc.custom",
@@ -1323,9 +1325,10 @@ class TestChainIdPropagation:
             intents={"charge": ChargeIntent()},
         )
 
+        # eth_chainId
         httpx_mock.add_response(
             url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
         httpx_mock.add_response(
             url="https://rpc.custom",
@@ -1415,8 +1418,12 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        # Mock RPC: chain_id, nonce, gas_price, estimateGas
-        for _ in range(4):
+        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
+        )
+        for _ in range(3):
             httpx_mock.add_response(
                 url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
@@ -1455,9 +1462,15 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        for _ in range(4):
+        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        # Challenge chainId=4217 resolves to rpc.tempo.xyz
+        httpx_mock.add_response(
+            url="https://rpc.tempo.xyz",
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
+        )
+        for _ in range(3):
             httpx_mock.add_response(
-                url="https://rpc.test",
+                url="https://rpc.tempo.xyz",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
             )
 
@@ -1469,7 +1482,7 @@ class TestAccessKeySigning:
                 "amount": "1000000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {"feePayer": True, "chainId": 1},
+                "methodDetails": {"feePayer": True, "chainId": 4217},
             },
             realm="test.example.com",
             request_b64="e30",
@@ -1492,7 +1505,12 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        for _ in range(4):
+        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
+        )
+        for _ in range(3):
             httpx_mock.add_response(
                 url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
