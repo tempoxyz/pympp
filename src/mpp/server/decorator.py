@@ -6,7 +6,7 @@ import inspect
 import json as _json
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import PaymentRequiredError
@@ -15,6 +15,8 @@ from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent
+
+R = TypeVar("R")
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 
@@ -63,7 +65,7 @@ def make_challenge_response(challenge: Challenge, realm: str) -> Any:
         }
 
 
-def wrap_payment_handler[R](
+def wrap_payment_handler(
     handler: Callable[..., Awaitable[R]],
     verify_fn: Callable[[str | None, Any], Awaitable[Challenge | tuple[Credential, Receipt]]],
     realm_fn: Callable[[], str],
@@ -117,7 +119,7 @@ def wrap_payment_handler[R](
     return wrapper
 
 
-def pay[R](
+def pay(
     *,
     intent: Intent,
     request: RequestParamsType,
