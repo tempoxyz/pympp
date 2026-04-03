@@ -500,6 +500,11 @@ class ChargeIntent:
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
+        if self._store is not None:
+            store_key = f"mpp:charge:{tx_hash.lower()}"
+            if not await self._store.put_if_absent(store_key, tx_hash):
+                raise VerificationError("Transaction hash already used")
+
         return Receipt.success(tx_hash)
 
     def _cosign_as_fee_payer(

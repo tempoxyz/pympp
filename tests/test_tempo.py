@@ -1044,6 +1044,110 @@ class TestChargeIntent:
         assert receipt.reference == "0xtxhash123"
 
     @pytest.mark.asyncio
+    async def test_verify_transaction_records_hash_and_blocks_hash_reuse(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        memo = encode_attribution(
+            challenge_id="challenge-123",
+            server_id="api.example.com",
+        )
+        receipt_with_logs = {
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + destination[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1000),
+                }
+            ],
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0xabc123", "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
+            ]
+        )
+        intent._http_client = mock_client
+
+        transaction_credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+        request = {
+            "amount": "1000",
+            "currency": asset,
+            "recipient": destination,
+        }
+
+        receipt = await intent.verify(transaction_credential, request)
+        assert receipt.status == "success"
+        assert receipt.reference == "0xabc123"
+        assert await store.get("mpp:charge:0xabc123") is not None
+
+        hash_credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(hash_credential, request)
+
+    @pytest.mark.asyncio
+    async def test_verify_transaction_does_not_record_hash_on_failure(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}),
+                mock_response(
+                    200,
+                    {"jsonrpc": "2.0", "result": {"status": "0x0", "logs": []}, "id": 1},
+                ),
+            ]
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
+        )
+
+        with pytest.raises(VerificationError, match="Transaction reverted"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        assert await store.get("mpp:charge:0xtxhash123") is None
+
+    @pytest.mark.asyncio
     async def test_verify_transaction_rpc_error(self) -> None:
         """Should raise on RPC error."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
