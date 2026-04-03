@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import attrs
 
@@ -42,6 +43,12 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+@dataclass(frozen=True, slots=True)
+class MatchedTransferLog:
+    kind: Literal["memo", "transfer"]
+    memo: str | None = None
 
 
 def _rpc_error_msg(result: dict) -> str:
@@ -230,7 +237,12 @@ class ChargeIntent:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
         if isinstance(payload, HashCredentialPayload):
-            return await self._verify_hash(payload, req)
+            return await self._verify_hash(
+                payload,
+                req,
+                challenge_id=credential.challenge.id,
+                realm=credential.challenge.realm,
+            )
         else:
             return await self._verify_transaction(payload, req)
 
@@ -238,6 +250,8 @@ class ChargeIntent:
         self,
         payload: HashCredentialPayload,
         request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
         if self._store is not None:
@@ -270,19 +284,47 @@ class ChargeIntent:
         if receipt_data.get("status") != "0x1":
             raise VerificationError("Transaction reverted")
 
-        if not self._verify_transfer_logs(receipt_data, request):
+        matched_logs = self._verify_transfer_logs(receipt_data, request)
+        if not matched_logs:
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
+        if request.methodDetails.memo is None:
+            self._assert_challenge_bound_memo(
+                matched_logs,
+                challenge_id=challenge_id,
+                realm=realm,
+            )
+
         return Receipt.success(payload.hash)
+
+    def _assert_challenge_bound_memo(
+        self,
+        matched_logs: list[MatchedTransferLog],
+        challenge_id: str,
+        realm: str,
+    ) -> None:
+        from mpp.methods.tempo._attribution import verify_challenge_binding, verify_server
+
+        bound = any(
+            matched_log.kind == "memo"
+            and matched_log.memo is not None
+            and verify_server(matched_log.memo, realm)
+            and verify_challenge_binding(matched_log.memo, challenge_id)
+            for matched_log in matched_logs
+        )
+        if not bound:
+            raise VerificationError(
+                "Payment verification failed: memo is not bound to this challenge."
+            )
 
     def _verify_transfer_logs(
         self,
         receipt: dict[str, Any],
         request: ChargeRequest,
         expected_sender: str | None = None,
-    ) -> bool:
+    ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer or TransferWithMemo logs.
 
         Args:
@@ -292,10 +334,13 @@ class ChargeIntent:
                 Transfer log matches this address (for payer identity verification).
 
         Returns:
-            True if a matching Transfer/TransferWithMemo log is found,
-            False otherwise.
+            Matched logs in priority order, with memo logs before plain
+            transfers so downstream verification can inspect the memo that
+            actually satisfied the payment.
         """
         expected_memo = request.methodDetails.memo
+        memo_matches: list[MatchedTransferLog] = []
+        transfer_matches: list[MatchedTransferLog] = []
 
         for log in receipt.get("logs", []):
             if log.get("address", "").lower() != request.currency.lower():
@@ -315,9 +360,7 @@ class ChargeIntent:
             if expected_sender and from_address.lower() != expected_sender.lower():
                 continue
 
-            if expected_memo:
-                if event_topic != TRANSFER_WITH_MEMO_TOPIC:
-                    continue
+            if event_topic == TRANSFER_WITH_MEMO_TOPIC:
                 # TransferWithMemo has 3 indexed params (from, to, memo)
                 # so memo is in topics[3] and only amount is in data
                 if len(topics) < 4:
@@ -326,22 +369,26 @@ class ChargeIntent:
                 if len(data) < 66:
                     continue
                 amount = int(data[2:66], 16)
-                memo = topics[3]
-                memo_clean = expected_memo.lower()
-                if not memo_clean.startswith("0x"):
-                    memo_clean = "0x" + memo_clean
-                if amount == int(request.amount) and memo.lower() == memo_clean:
-                    return True
-            else:
-                if event_topic != TRANSFER_TOPIC:
+                if amount != int(request.amount):
                     continue
+                memo = topics[3]
+                if expected_memo:
+                    memo_clean = expected_memo.lower()
+                    if not memo_clean.startswith("0x"):
+                        memo_clean = "0x" + memo_clean
+                    if memo.lower() != memo_clean:
+                        continue
+                memo_matches.append(MatchedTransferLog(kind="memo", memo=memo))
+                continue
+
+            if event_topic == TRANSFER_TOPIC and expected_memo is None:
                 data = log.get("data", "0x")
                 if len(data) >= 66:
                     amount = int(data, 16)
                     if amount == int(request.amount):
-                        return True
+                        transfer_matches.append(MatchedTransferLog(kind="transfer"))
 
-        return False
+        return memo_matches + transfer_matches
 
     async def _verify_transaction(
         self,

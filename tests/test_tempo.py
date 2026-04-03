@@ -19,6 +19,7 @@ from mpp.methods.tempo import (
     escrow_contract_for_chain,
     tempo,
 )
+from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
 from mpp.methods.tempo.intents import (
@@ -48,6 +49,10 @@ def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Res
     request = httpx.Request("POST", "https://rpc.test")
     response = httpx.Response(status_code, json=json, request=request)
     return response
+
+
+def amount_data(amount: int) -> str:
+    return "0x" + hex(amount)[2:].zfill(64)
 
 
 class TestTempoAccount:
@@ -160,6 +165,41 @@ class TestTempoMethod:
         assert data.startswith("0xa9059cbb")
         assert len(data) == 138
 
+    @pytest.mark.asyncio
+    async def test_create_credential_binds_auto_memo_to_challenge(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
+        challenge = Challenge(
+            id="challenge-123",
+            method="tempo",
+            intent="charge",
+            realm="api.example.com",
+            request={
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        with patch(
+            "mpp.methods.tempo.client.encode_attribution",
+            return_value="0x" + "11" * 32,
+        ) as encode_mock, patch.object(
+            method,
+            "_build_tempo_transfer",
+            AsyncMock(return_value=("0xdeadbeef", 4217)),
+        ) as build_mock:
+            await method.create_credential(challenge)
+
+        encode_mock.assert_called_once_with(
+            challenge_id="challenge-123",
+            server_id="api.example.com",
+            client_id="client-app",
+        )
+        await_args = build_mock.await_args
+        assert await_args is not None
+        assert await_args.kwargs["memo"] == "0x" + "11" * 32
+
 
 class TestChargeIntent:
     @pytest.mark.asyncio
@@ -249,9 +289,11 @@ class TestChargeIntent:
         """Should verify hash credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
+        realm = "api.example.com"
+        challenge_id = "challenge-123"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
 
         mock_client = AsyncMock()
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         mock_client.post = AsyncMock(
             return_value=mock_response(
                 200,
@@ -263,13 +305,12 @@ class TestChargeIntent:
                             {
                                 "address": "0x20c0000000000000000000000000000000000000",
                                 "topics": [
-                                    transfer_topic,
+                                    TRANSFER_WITH_MEMO_TOPIC,
                                     "0x0000000000000000000000001234567890123456789012345678901234567890",
                                     "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    memo,
                                 ],
-                                "data": "0x"
-                                + "00000000000000000000000000000000"
-                                + "00000000000000000000000000000000000003e8",
+                                "data": amount_data(1000),
                             }
                         ],
                     },
@@ -279,13 +320,281 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
         receipt = await intent.verify(
             credential,
             {
                 "amount": "1000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_rejects_plain_transfer_without_challenge_bound_memo(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                ],
+                                "data": amount_data(1000),
+                            }
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_rejects_wrong_challenge_nonce(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        memo = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    memo,
+                                ],
+                                "data": amount_data(1000),
+                            }
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-b",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_rejects_non_mpp_memo(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    "0x" + "ab" * 32,
+                                ],
+                                "data": amount_data(1000),
+                            }
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_rejects_binding_on_dust_transfer(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        realm = "api.example.com"
+        challenge_id = "challenge-123"
+        correct_memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+        wrong_memo = encode_attribution(challenge_id="challenge-other", server_id=realm)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x0000000000000000000000001111111111111111111111111111111111111111",
+                                    correct_memo,
+                                ],
+                                "data": amount_data(1),
+                            },
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    wrong_memo,
+                                ],
+                                "data": amount_data(1000),
+                            },
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_accepts_explicit_memo_without_challenge_binding(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        explicit_memo = "0x" + "ab" * 32
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    explicit_memo,
+                                ],
+                                "data": amount_data(1000),
+                            }
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"memo": explicit_memo},
             },
         )
 
@@ -300,9 +609,9 @@ class TestChargeIntent:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         store = MemoryStore()
         intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        memo = encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
 
         mock_client = AsyncMock()
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         mock_client.post = AsyncMock(
             return_value=mock_response(
                 200,
@@ -314,13 +623,12 @@ class TestChargeIntent:
                             {
                                 "address": "0x20c0000000000000000000000000000000000000",
                                 "topics": [
-                                    transfer_topic,
+                                    TRANSFER_WITH_MEMO_TOPIC,
                                     "0x0000000000000000000000001234567890123456789012345678901234567890",
                                     "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    memo,
                                 ],
-                                "data": "0x"
-                                + "00000000000000000000000000000000"
-                                + "00000000000000000000000000000000000003e8",
+                                "data": amount_data(1000),
                             }
                         ],
                     },
@@ -330,7 +638,12 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
         request = {
             "amount": "1000",
             "currency": "0x20c0000000000000000000000000000000000000",
@@ -350,9 +663,9 @@ class TestChargeIntent:
         """Should allow same hash twice when no store is configured."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")  # no store
+        memo = encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
 
         mock_client = AsyncMock()
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         mock_client.post = AsyncMock(
             return_value=mock_response(
                 200,
@@ -364,13 +677,12 @@ class TestChargeIntent:
                             {
                                 "address": "0x20c0000000000000000000000000000000000000",
                                 "topics": [
-                                    transfer_topic,
+                                    TRANSFER_WITH_MEMO_TOPIC,
                                     "0x0000000000000000000000001234567890123456789012345678901234567890",
                                     "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    memo,
                                 ],
-                                "data": "0x"
-                                + "00000000000000000000000000000000"
-                                + "00000000000000000000000000000000000003e8",
+                                "data": amount_data(1000),
                             }
                         ],
                     },
@@ -380,7 +692,12 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
         request = {
             "amount": "1000",
             "currency": "0x20c0000000000000000000000000000000000000",
@@ -401,9 +718,9 @@ class TestChargeIntent:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         store = MemoryStore()
         intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        memo = encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
 
         mock_client = AsyncMock()
-        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
         mock_client.post = AsyncMock(
             return_value=mock_response(
                 200,
@@ -415,13 +732,12 @@ class TestChargeIntent:
                             {
                                 "address": "0x20c0000000000000000000000000000000000000",
                                 "topics": [
-                                    transfer_topic,
+                                    TRANSFER_WITH_MEMO_TOPIC,
                                     "0x0000000000000000000000001234567890123456789012345678901234567890",
                                     "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    memo,
                                 ],
-                                "data": "0x"
-                                + "00000000000000000000000000000000"
-                                + "00000000000000000000000000000000000003e8",
+                                "data": amount_data(1000),
                             }
                         ],
                     },
@@ -431,7 +747,12 @@ class TestChargeIntent:
         )
         intent._http_client = mock_client
 
-        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
         request = {
             "amount": "1000",
             "currency": "0x20c0000000000000000000000000000000000000",
@@ -541,6 +862,56 @@ class TestChargeIntent:
                 {
                     "address": asset,
                     "topics": [transfer_topic, from_topic, to_topic],
+                    "data": "0x" + hex(amount)[2:].zfill(64),
+                }
+            ],
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
+            ]
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
+        )
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": str(amount),
+                "currency": asset,
+                "recipient": destination,
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == "0xtxhash123"
+
+    @pytest.mark.asyncio
+    async def test_verify_transaction_accepts_transfer_with_memo_logs(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        amount = 1000
+
+        receipt_with_logs = {
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + destination[2:],
+                        "0x" + "ab" * 32,
+                    ],
                     "data": "0x" + hex(amount)[2:].zfill(64),
                 }
             ],
@@ -1666,7 +2037,10 @@ class TestVerifyTransferLogsWithMemo:
                 }
             ]
         )
-        assert intent._verify_transfer_logs(receipt, request) is True
+        matched_logs = intent._verify_transfer_logs(receipt, request)
+        assert len(matched_logs) == 1
+        assert matched_logs[0].kind == "memo"
+        assert matched_logs[0].memo == self.MEMO
 
     def test_memo_log_wrong_memo_rejected(self) -> None:
         """TransferWithMemo log with wrong memo should be rejected."""
@@ -1686,7 +2060,7 @@ class TestVerifyTransferLogsWithMemo:
                 }
             ]
         )
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert intent._verify_transfer_logs(receipt, request) == []
 
     def test_memo_log_too_few_topics_rejected(self) -> None:
         """TransferWithMemo log with < 4 topics should be skipped."""
@@ -1705,14 +2079,13 @@ class TestVerifyTransferLogsWithMemo:
                 }
             ]
         )
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert intent._verify_transfer_logs(receipt, request) == []
 
-    def test_no_memo_requires_transfer_topic(self) -> None:
-        """When no memo expected, only TRANSFER_TOPIC should be accepted."""
+    def test_no_memo_accepts_transfer_and_transfer_with_memo_logs(self) -> None:
+        """When no memo is configured, both matching log types should be accepted."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = self._make_request(memo=None)
 
-        # TRANSFER_WITH_MEMO_TOPIC should be skipped when no memo expected
         receipt_memo_topic = self._make_receipt(
             [
                 {
@@ -1721,14 +2094,16 @@ class TestVerifyTransferLogsWithMemo:
                         TRANSFER_WITH_MEMO_TOPIC,
                         "0x" + "0" * 24 + "abcd" * 10,
                         "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        self.MEMO,
                     ],
                     "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
                 }
             ]
         )
-        assert intent._verify_transfer_logs(receipt_memo_topic, request) is False
+        matched_memo_logs = intent._verify_transfer_logs(receipt_memo_topic, request)
+        assert len(matched_memo_logs) == 1
+        assert matched_memo_logs[0].kind == "memo"
 
-        # TRANSFER_TOPIC should be accepted
         receipt_plain = self._make_receipt(
             [
                 {
@@ -1742,7 +2117,39 @@ class TestVerifyTransferLogsWithMemo:
                 }
             ]
         )
-        assert intent._verify_transfer_logs(receipt_plain, request) is True
+        matched_plain_logs = intent._verify_transfer_logs(receipt_plain, request)
+        assert len(matched_plain_logs) == 1
+        assert matched_plain_logs[0].kind == "transfer"
+
+    def test_no_memo_prefers_matching_memo_logs_over_plain_transfer_logs(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request(memo=None)
+        receipt = self._make_receipt(
+            [
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                },
+                {
+                    "address": self.CURRENCY,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
+                        self.MEMO,
+                    ],
+                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
+                },
+            ]
+        )
+
+        matched_logs = intent._verify_transfer_logs(receipt, request)
+        assert [matched_log.kind for matched_log in matched_logs] == ["memo", "transfer"]
 
 
 class TestValidateTransactionPayload0x76:

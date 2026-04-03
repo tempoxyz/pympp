@@ -117,7 +117,11 @@ class TempoMethod:
 
         memo = method_details.get("memo") if isinstance(method_details, dict) else None
         if memo is None:
-            memo = encode_attribution(server_id=challenge.realm, client_id=self.client_id)
+            memo = encode_attribution(
+                challenge_id=challenge.id,
+                server_id=challenge.realm,
+                client_id=self.client_id,
+            )
 
         # Resolve RPC URL from challenge's chainId (like mppx), falling back
         # to the method-level rpc_url.
