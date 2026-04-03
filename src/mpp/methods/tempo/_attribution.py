@@ -12,12 +12,11 @@ Byte Layout (32 bytes)
 | 4      | 1    | version (0x01)                            |
 | 5..14  | 10   | serverId = keccak256(serverId)[0..9]       |
 | 15..24 | 10   | clientId = keccak256(clientId)[0..9] or 0s |
-| 25..31 | 7    | nonce (random bytes)                      |
+| 25..31 | 7    | nonce = keccak256(challengeId)[0..6]       |
 """
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 _VERSION = 0x01
@@ -43,13 +42,17 @@ def _fingerprint(value: str) -> bytes:
     return _keccak(value.encode())[:10]
 
 
+def challenge_nonce(challenge_id: str) -> bytes:
+    return _keccak(challenge_id.encode())[:7]
+
+
 def __getattr__(name: str):  # type: ignore[reportReturnType]
     if name == "TAG":
         return _get_tag()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def encode(server_id: str, client_id: str | None = None) -> str:
+def encode(challenge_id: str, server_id: str, client_id: str | None = None) -> str:
     tag = _get_tag()
     buf = bytearray(32)
     buf[0:4] = tag
@@ -57,7 +60,7 @@ def encode(server_id: str, client_id: str | None = None) -> str:
     buf[5:15] = _fingerprint(server_id)
     if client_id:
         buf[15:25] = _fingerprint(client_id)
-    buf[25:32] = os.urandom(7)
+    buf[25:32] = challenge_nonce(challenge_id)
     return "0x" + buf.hex()
 
 
@@ -80,6 +83,16 @@ def verify_server(memo: str, server_id: str) -> bool:
     except ValueError:
         return False
     return memo_server == _fingerprint(server_id)
+
+
+def verify_challenge_binding(memo: str, challenge_id: str) -> bool:
+    if not is_mpp_memo(memo):
+        return False
+    try:
+        memo_nonce = bytes.fromhex(memo[52:66])
+    except ValueError:
+        return False
+    return memo_nonce == challenge_nonce(challenge_id)
 
 
 @dataclass(frozen=True, slots=True)
