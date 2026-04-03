@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class MethodDetails(BaseModel):
@@ -14,6 +14,11 @@ class MethodDetails(BaseModel):
     feePayer: bool = False
     feePayerUrl: str | None = None
     memo: str | None = None
+
+    @field_validator("memo", mode="before")
+    @classmethod
+    def normalize_empty_memo(cls, value: Any) -> Any:
+        return None if value == "" else value
 
 
 class ChargeRequest(BaseModel):

@@ -254,11 +254,6 @@ class ChargeIntent:
         realm: str,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
-        if self._store is not None:
-            store_key = f"mpp:charge:{payload.hash.lower()}"
-            if not await self._store.put_if_absent(store_key, payload.hash):
-                raise VerificationError("Transaction hash already used")
-
         client = await self._get_client()
 
         rpc_url = self._get_rpc_url()
@@ -290,12 +285,21 @@ class ChargeIntent:
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
+        # Only verify challenge binding when using auto-generated attribution memos.
+        # Explicit memos (set by the server) are strictly matched by _verify_transfer_logs
+        # but are NOT challenge-bound. Callers that set explicit memos are responsible
+        # for ensuring memo uniqueness per challenge to prevent cross-challenge hash reuse.
         if request.methodDetails.memo is None:
             self._assert_challenge_bound_memo(
                 matched_logs,
                 challenge_id=challenge_id,
                 realm=realm,
             )
+
+        if self._store is not None:
+            store_key = f"mpp:charge:{payload.hash.lower()}"
+            if not await self._store.put_if_absent(store_key, payload.hash):
+                raise VerificationError("Transaction hash already used")
 
         return Receipt.success(payload.hash)
 

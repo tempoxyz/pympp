@@ -181,14 +181,17 @@ class TestTempoMethod:
             },
         )
 
-        with patch(
-            "mpp.methods.tempo.client.encode_attribution",
-            return_value="0x" + "11" * 32,
-        ) as encode_mock, patch.object(
-            method,
-            "_build_tempo_transfer",
-            AsyncMock(return_value=("0xdeadbeef", 4217)),
-        ) as build_mock:
+        with (
+            patch(
+                "mpp.methods.tempo.client.encode_attribution",
+                return_value="0x" + "11" * 32,
+            ) as encode_mock,
+            patch.object(
+                method,
+                "_build_tempo_transfer",
+                AsyncMock(return_value=("0xdeadbeef", 4217)),
+            ) as build_mock,
+        ):
             await method.create_credential(challenge)
 
         encode_mock.assert_called_once_with(
@@ -199,6 +202,45 @@ class TestTempoMethod:
         await_args = build_mock.await_args
         assert await_args is not None
         assert await_args.kwargs["memo"] == "0x" + "11" * 32
+
+    @pytest.mark.asyncio
+    async def test_create_credential_treats_empty_memo_as_absent(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
+        challenge = Challenge(
+            id="challenge-123",
+            method="tempo",
+            intent="charge",
+            realm="api.example.com",
+            request={
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"memo": ""},
+            },
+        )
+
+        with (
+            patch(
+                "mpp.methods.tempo.client.encode_attribution",
+                return_value="0x" + "22" * 32,
+            ) as encode_mock,
+            patch.object(
+                method,
+                "_build_tempo_transfer",
+                AsyncMock(return_value=("0xdeadbeef", 4217)),
+            ) as build_mock,
+        ):
+            await method.create_credential(challenge)
+
+        encode_mock.assert_called_once_with(
+            challenge_id="challenge-123",
+            server_id="api.example.com",
+            client_id="client-app",
+        )
+        await_args = build_mock.await_args
+        assert await_args is not None
+        assert await_args.kwargs["memo"] == "0x" + "22" * 32
 
 
 class TestChargeIntent:
@@ -768,10 +810,67 @@ class TestChargeIntent:
         assert await store.get("mpp:charge:0xabc123") is not None
 
     @pytest.mark.asyncio
+    async def test_verify_hash_does_not_record_hash_on_binding_failure(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "status": "0x1",
+                        "logs": [
+                            {
+                                "address": "0x20c0000000000000000000000000000000000000",
+                                "topics": [
+                                    TRANSFER_WITH_MEMO_TOPIC,
+                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
+                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                                    "0x" + "ab" * 32,
+                                ],
+                                "data": amount_data(1000),
+                            }
+                        ],
+                    },
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            expires=future,
+            realm="api.example.com",
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
+
+        assert await store.get("mpp:charge:0xabc123") is None
+
+    @pytest.mark.asyncio
     async def test_verify_hash_tx_not_found(self) -> None:
         """Should reject when transaction not found."""
+        from mpp.store import MemoryStore
+
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
@@ -789,6 +888,8 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+
+        assert await store.get("mpp:charge:0xabc") is None
 
     @pytest.mark.asyncio
     async def test_verify_hash_tx_failed(self) -> None:
@@ -2018,6 +2119,10 @@ class TestVerifyTransferLogsWithMemo:
             recipient=self.RECIPIENT,
             methodDetails=MethodDetails(memo=memo),
         )
+
+    def test_empty_memo_normalizes_to_none(self) -> None:
+        request = self._make_request(memo="")
+        assert request.methodDetails.memo is None
 
     def test_memo_log_accepted(self) -> None:
         """TransferWithMemo log with correct memo should be accepted."""

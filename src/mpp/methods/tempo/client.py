@@ -116,6 +116,8 @@ class TempoMethod:
                 nonce_key = int(nonce_key)
 
         memo = method_details.get("memo") if isinstance(method_details, dict) else None
+        if memo == "":
+            memo = None
         if memo is None:
             memo = encode_attribution(
                 challenge_id=challenge.id,
