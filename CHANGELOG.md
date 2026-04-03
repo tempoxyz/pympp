@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 (2026-04-03)
+
+### Patch Changes
+
+- Fixed Tempo attribution memos to be deterministically bound to challenge IDs using a keccak256-derived nonce instead of random bytes. Added `verify_challenge_binding` to enforce that verified payments carry a memo matching the specific challenge being redeemed. (by @BrendanRyan, [#111](https://github.com/tempoxyz/pympp/pull/111))
+
 ## 0.5.3 (2026-04-01)
 
 ### Patch Changes
