@@ -43,7 +43,8 @@ _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install
 _LAZY_EXPORTS = {
     "mpp.methods.tempo.account": ("TempoAccount",),
     "mpp.methods.tempo.client": ("TempoMethod", "TransactionError", "tempo"),
-    "mpp.methods.tempo.intents": ("ChargeIntent",),
+    "mpp.methods.tempo.intents": ("ChargeIntent", "Transfer", "get_transfers"),
+    "mpp.methods.tempo.schemas": ("Split",),
 }
 
 
