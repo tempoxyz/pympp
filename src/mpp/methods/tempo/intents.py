@@ -453,8 +453,15 @@ class ChargeIntent:
         amount: int,
         memo: bytes | None,
         expected_sender: str | None = None,
-    ) -> bool:
-        """Check if receipt contains a matching Transfer/TransferWithMemo log."""
+    ) -> list[MatchedTransferLog]:
+        """Check if receipt contains matching Transfer/TransferWithMemo logs.
+
+        Returns matched logs in priority order, with memo logs before plain
+        transfers so downstream verification can inspect the memo.
+        """
+        memo_matches: list[MatchedTransferLog] = []
+        transfer_matches: list[MatchedTransferLog] = []
+
         for log in receipt.get("logs", []):
             if log.get("address", "").lower() != currency.lower():
                 continue
@@ -471,37 +478,46 @@ class ChargeIntent:
             if expected_sender and from_address.lower() != expected_sender.lower():
                 continue
 
-            if memo is not None:
-                if event_topic != TRANSFER_WITH_MEMO_TOPIC:
-                    continue
+            if event_topic == TRANSFER_WITH_MEMO_TOPIC:
                 if len(topics) < 4:
                     continue
                 data = log.get("data", "0x")
                 if len(data) < 66:
                     continue
                 log_amount = int(data[2:66], 16)
-                memo_topic = topics[3]
-                expected_memo_hex = "0x" + memo.hex()
-                if log_amount == amount and memo_topic.lower() == expected_memo_hex.lower():
-                    return True
-            else:
-                if event_topic not in (TRANSFER_TOPIC, TRANSFER_WITH_MEMO_TOPIC):
+                if log_amount != amount:
+                    continue
+                log_memo = topics[3]
+                if memo is not None:
+                    expected_memo_hex = "0x" + memo.hex()
+                    if log_memo.lower() != expected_memo_hex.lower():
+                        continue
+                memo_matches.append(
+                    MatchedTransferLog(kind="memo", memo=log_memo)
+                )
+            elif event_topic == TRANSFER_TOPIC:
+                if memo is not None:
                     continue
                 data = log.get("data", "0x")
                 if len(data) >= 66:
-                    log_amount = int(data[2:66], 16) if event_topic == TRANSFER_WITH_MEMO_TOPIC else int(data, 16)
+                    log_amount = int(data, 16)
                     if log_amount == amount:
-                        return True
+                        transfer_matches.append(
+                            MatchedTransferLog(kind="transfer")
+                        )
 
-        return False
+        return memo_matches + transfer_matches
 
     def _verify_transfer_logs(
         self,
         receipt: dict[str, Any],
         request: ChargeRequest,
         expected_sender: str | None = None,
-    ) -> bool:
-        """Check if receipt contains matching Transfer or TransferWithMemo logs."""
+    ) -> list[MatchedTransferLog]:
+        """Check if receipt contains matching Transfer or TransferWithMemo logs.
+
+        Returns matched logs. Empty list means no match.
+        """
         expected = get_transfers(
             int(request.amount),
             request.recipient,
@@ -521,16 +537,22 @@ class ChargeIntent:
             )
 
         # Multi-transfer: order-insensitive matching
-        sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
+        sorted_expected = sorted(
+            expected, key=lambda t: 0 if t.memo else 1
+        )
         logs = receipt.get("logs", [])
         used_logs: set[int] = set()
+        all_matches: list[MatchedTransferLog] = []
 
         for transfer in sorted_expected:
             found = False
             for log_idx, log in enumerate(logs):
                 if log_idx in used_logs:
                     continue
-                if log.get("address", "").lower() != request.currency.lower():
+                if (
+                    log.get("address", "").lower()
+                    != request.currency.lower()
+                ):
                     continue
 
                 topics = log.get("topics", [])
@@ -538,12 +560,15 @@ class ChargeIntent:
                     continue
 
                 event_topic = topics[0]
-                from_address = "0x" + topics[1][-40:]
-                to_address = "0x" + topics[2][-40:]
+                from_addr = "0x" + topics[1][-40:]
+                to_addr = "0x" + topics[2][-40:]
 
-                if to_address.lower() != transfer.recipient.lower():
+                if to_addr.lower() != transfer.recipient.lower():
                     continue
-                if expected_sender and from_address.lower() != expected_sender.lower():
+                if (
+                    expected_sender
+                    and from_addr.lower() != expected_sender.lower()
+                ):
                     continue
 
                 if transfer.memo is not None:
@@ -554,14 +579,19 @@ class ChargeIntent:
                     data = log.get("data", "0x")
                     if len(data) < 66:
                         continue
-                    amount = int(data[2:66], 16)
+                    log_amount = int(data[2:66], 16)
                     memo_topic = topics[3]
-                    expected_memo_hex = "0x" + transfer.memo.hex()
+                    expected_hex = "0x" + transfer.memo.hex()
                     if (
-                        amount == transfer.amount
-                        and memo_topic.lower() == expected_memo_hex.lower()
+                        log_amount == transfer.amount
+                        and memo_topic.lower() == expected_hex.lower()
                     ):
                         used_logs.add(log_idx)
+                        all_matches.append(
+                            MatchedTransferLog(
+                                kind="memo", memo=memo_topic
+                            )
+                        )
                         found = True
                         break
                 else:
@@ -569,16 +599,19 @@ class ChargeIntent:
                         continue
                     data = log.get("data", "0x")
                     if len(data) >= 66:
-                        amount = int(data, 16)
-                        if amount == transfer.amount:
+                        log_amount = int(data, 16)
+                        if log_amount == transfer.amount:
                             used_logs.add(log_idx)
+                            all_matches.append(
+                                MatchedTransferLog(kind="transfer")
+                            )
                             found = True
                             break
 
             if not found:
-                return False
+                return []
 
-        return True
+        return all_matches
 
     async def _verify_transaction(
         self,
