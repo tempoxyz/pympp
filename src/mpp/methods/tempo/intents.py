@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import attrs
 
 from mpp import Credential, Receipt
+from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.schemas import (
@@ -29,8 +30,6 @@ if TYPE_CHECKING:
 
     from mpp.methods.tempo.account import TempoAccount
 
-
-DEFAULT_TIMEOUT = 30.0
 
 # Receipt polling: 20 * 0.5s = ~10s, enough for testnet block times (~2-4s).
 MAX_RECEIPT_RETRY_ATTEMPTS = 20
