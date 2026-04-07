@@ -2644,7 +2644,7 @@ class TestVerifyTransferLogsWithSplits:
                 self._make_transfer_log(self.SPLIT_RECIPIENT, 300000),  # split
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is True
+        assert intent._verify_transfer_logs(receipt, request)
 
     def test_split_logs_wrong_amount_rejected(self) -> None:
         """Receipt with wrong split amount should be rejected."""
@@ -2664,7 +2664,7 @@ class TestVerifyTransferLogsWithSplits:
                 self._make_transfer_log(self.SPLIT_RECIPIENT, 200000),  # wrong
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert not intent._verify_transfer_logs(receipt, request)
 
     def test_split_logs_missing_split_rejected(self) -> None:
         """Receipt missing a split log should be rejected."""
@@ -2681,7 +2681,7 @@ class TestVerifyTransferLogsWithSplits:
             "status": "0x1",
             "logs": [self._make_transfer_log(self.RECIPIENT, 700000)],
         }
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert not intent._verify_transfer_logs(receipt, request)
 
     def test_split_with_memo_accepted(self) -> None:
         """Split with memo should match TransferWithMemo log."""
@@ -2702,7 +2702,7 @@ class TestVerifyTransferLogsWithSplits:
                 self._make_transfer_log(self.SPLIT_RECIPIENT, 300000, memo=split_memo),
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is True
+        assert intent._verify_transfer_logs(receipt, request)
 
     def test_split_order_insensitive(self) -> None:
         """Logs in different order from splits should still match."""
@@ -2727,7 +2727,7 @@ class TestVerifyTransferLogsWithSplits:
                 self._make_transfer_log(self.SPLIT_RECIPIENT, 200000),
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is True
+        assert intent._verify_transfer_logs(receipt, request)
 
 
 class TestSplitSchemas:
@@ -2892,8 +2892,12 @@ class TestSplitLogMemoStrictness:
             "data": "0x" + hex(amount)[2:].zfill(64),
         }
 
-    def test_single_transfer_rejects_transfer_with_memo_log(self) -> None:
-        """A memo-less single transfer must reject TransferWithMemo logs."""
+    def test_single_transfer_accepts_transfer_with_memo_log(self) -> None:
+        """A memo-less single transfer accepts TransferWithMemo logs.
+
+        When memo=None the single-transfer path matches TransferWithMemo
+        events (memo binding is checked later by _assert_challenge_bound_memo).
+        """
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = ChargeRequest(
             amount=str(self.AMOUNT),
@@ -2911,7 +2915,7 @@ class TestSplitLogMemoStrictness:
                 )
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert intent._verify_transfer_logs(receipt, request)
 
     def test_multi_split_rejects_transfer_with_memo_log_for_memoless(self) -> None:
         """Memo-less split legs must reject TransferWithMemo logs."""
@@ -2937,7 +2941,7 @@ class TestSplitLogMemoStrictness:
                 ),
             ],
         }
-        assert intent._verify_transfer_logs(receipt, request) is False
+        assert not intent._verify_transfer_logs(receipt, request)
 
 
 class TestSplitsFeePayerRejection:
