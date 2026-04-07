@@ -492,9 +492,7 @@ class ChargeIntent:
                     expected_memo_hex = "0x" + memo.hex()
                     if log_memo.lower() != expected_memo_hex.lower():
                         continue
-                memo_matches.append(
-                    MatchedTransferLog(kind="memo", memo=log_memo)
-                )
+                memo_matches.append(MatchedTransferLog(kind="memo", memo=log_memo))
             elif event_topic == TRANSFER_TOPIC:
                 if memo is not None:
                     continue
@@ -502,9 +500,7 @@ class ChargeIntent:
                 if len(data) >= 66:
                     log_amount = int(data, 16)
                     if log_amount == amount:
-                        transfer_matches.append(
-                            MatchedTransferLog(kind="transfer")
-                        )
+                        transfer_matches.append(MatchedTransferLog(kind="transfer"))
 
         return memo_matches + transfer_matches
 
@@ -537,9 +533,7 @@ class ChargeIntent:
             )
 
         # Multi-transfer: order-insensitive matching
-        sorted_expected = sorted(
-            expected, key=lambda t: 0 if t.memo else 1
-        )
+        sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
         logs = receipt.get("logs", [])
         used_logs: set[int] = set()
         all_matches: list[MatchedTransferLog] = []
@@ -549,10 +543,7 @@ class ChargeIntent:
             for log_idx, log in enumerate(logs):
                 if log_idx in used_logs:
                     continue
-                if (
-                    log.get("address", "").lower()
-                    != request.currency.lower()
-                ):
+                if log.get("address", "").lower() != request.currency.lower():
                     continue
 
                 topics = log.get("topics", [])
@@ -565,10 +556,7 @@ class ChargeIntent:
 
                 if to_addr.lower() != transfer.recipient.lower():
                     continue
-                if (
-                    expected_sender
-                    and from_addr.lower() != expected_sender.lower()
-                ):
+                if expected_sender and from_addr.lower() != expected_sender.lower():
                     continue
 
                 if transfer.memo is not None:
@@ -582,16 +570,9 @@ class ChargeIntent:
                     log_amount = int(data[2:66], 16)
                     memo_topic = topics[3]
                     expected_hex = "0x" + transfer.memo.hex()
-                    if (
-                        log_amount == transfer.amount
-                        and memo_topic.lower() == expected_hex.lower()
-                    ):
+                    if log_amount == transfer.amount and memo_topic.lower() == expected_hex.lower():
                         used_logs.add(log_idx)
-                        all_matches.append(
-                            MatchedTransferLog(
-                                kind="memo", memo=memo_topic
-                            )
-                        )
+                        all_matches.append(MatchedTransferLog(kind="memo", memo=memo_topic))
                         found = True
                         break
                 else:
@@ -602,9 +583,7 @@ class ChargeIntent:
                         log_amount = int(data, 16)
                         if log_amount == transfer.amount:
                             used_logs.add(log_idx)
-                            all_matches.append(
-                                MatchedTransferLog(kind="transfer")
-                            )
+                            all_matches.append(MatchedTransferLog(kind="transfer"))
                             found = True
                             break
 
