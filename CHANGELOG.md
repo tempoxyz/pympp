@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 (2026-04-07)
+
+### Minor Changes
+
+- Added split payments support for Tempo charges, allowing a single charge to be split across multiple recipients. Port of [mpp-rs PR #180](https://github.com/tempoxyz/mpp-rs/pull/180). (by @BrendanRyan, [#104](https://github.com/tempoxyz/pympp/pull/104))
+- Added Stripe payment method (`mpp.methods.stripe`) supporting the Shared Payment Token (SPT) flow for HTTP 402 authentication. Includes client-side `StripeMethod` and `stripe()` factory, server-side `ChargeIntent` for PaymentIntent verification via Stripe SDK or raw HTTP, Pydantic schemas, and a `stripe` optional dependency group. (by @BrendanRyan, [#104](https://github.com/tempoxyz/pympp/pull/104))
+- Added split payments support for Tempo charges, allowing a single charge to be split across multiple recipients. Port of [mpp-rs PR #180](https://github.com/tempoxyz/mpp-rs/pull/180). (by @BrendanRyan, [#104](https://github.com/tempoxyz/pympp/pull/104))
+
 ## 0.5.4 (2026-04-03)
 
 ### Patch Changes
