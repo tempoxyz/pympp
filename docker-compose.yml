@@ -1,6 +1,6 @@
 services:
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.8-alpine
     ports:
       - "6379:6379"
     healthcheck:
@@ -10,7 +10,7 @@ services:
       retries: 10
 
   tempo:
-    image: ghcr.io/tempoxyz/tempo:latest
+    image: ghcr.io/tempoxyz/tempo:v1.5.2
     ports:
       - "8545:8545"
     command: >
