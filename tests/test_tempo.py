@@ -1093,6 +1093,7 @@ class TestChargeIntent:
         to_topic = "0x" + "0" * 24 + destination[2:]
 
         receipt_with_logs = {
+            "transactionHash": "0xtxhash123",
             "status": "0x1",
             "logs": [
                 {
@@ -1105,10 +1106,9 @@ class TestChargeIntent:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
-            side_effect=[
-                mock_response(200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}),
-                mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
-            ]
+            return_value=mock_response(
+                200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
+            )
         )
         intent._http_client = mock_client
 
@@ -1127,6 +1127,8 @@ class TestChargeIntent:
 
         assert receipt.status == "success"
         assert receipt.reference == "0xtxhash123"
+        assert mock_client.post.await_args is not None
+        assert mock_client.post.await_args.kwargs["json"]["method"] == "eth_sendRawTransactionSync"
 
     @pytest.mark.asyncio
     async def test_verify_transaction_accepts_transfer_with_memo_logs(self) -> None:
@@ -1138,6 +1140,7 @@ class TestChargeIntent:
         amount = 1000
 
         receipt_with_logs = {
+            "transactionHash": "0xtxhash123",
             "status": "0x1",
             "logs": [
                 {
@@ -1155,10 +1158,9 @@ class TestChargeIntent:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
-            side_effect=[
-                mock_response(200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}),
-                mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
-            ]
+            return_value=mock_response(
+                200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
+            )
         )
         intent._http_client = mock_client
 
@@ -1193,6 +1195,7 @@ class TestChargeIntent:
             server_id="api.example.com",
         )
         receipt_with_logs = {
+            "transactionHash": "0xabc123",
             "status": "0x1",
             "logs": [
                 {
@@ -1211,7 +1214,6 @@ class TestChargeIntent:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
             side_effect=[
-                mock_response(200, {"jsonrpc": "2.0", "result": "0xabc123", "id": 1}),
                 mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
                 mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
             ]
@@ -1255,13 +1257,14 @@ class TestChargeIntent:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(
-            side_effect=[
-                mock_response(200, {"jsonrpc": "2.0", "result": "0xtxhash123", "id": 1}),
-                mock_response(
-                    200,
-                    {"jsonrpc": "2.0", "result": {"status": "0x0", "logs": []}, "id": 1},
-                ),
-            ]
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "result": {"transactionHash": "0xtxhash123", "status": "0x0", "logs": []},
+                    "id": 1,
+                },
+            )
         )
         intent._http_client = mock_client
 
@@ -1302,6 +1305,32 @@ class TestChargeIntent:
             expires=future,
         )
         with pytest.raises(VerificationError, match="Transaction submission failed"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_transaction_missing_receipt(self) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(200, {"jsonrpc": "2.0", "result": None, "id": 1})
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
+        )
+
+        with pytest.raises(VerificationError, match="No transaction receipt returned"):
             await intent.verify(
                 credential,
                 {
@@ -1376,18 +1405,13 @@ class TestSponsoredTransfer:
             json={"jsonrpc": "2.0", "result": "0x76cosigned", "id": 1},
         )
 
-        # eth_sendRawTransaction to RPC
-        httpx_mock.add_response(
-            url="https://rpc.test",
-            json={"jsonrpc": "2.0", "result": "0xsponsored_hash", "id": 1},
-        )
-
-        # eth_getTransactionReceipt
+        # eth_sendRawTransactionSync to RPC
         httpx_mock.add_response(
             url="https://rpc.test",
             json={
                 "jsonrpc": "2.0",
                 "result": {
+                    "transactionHash": "0xsponsored_hash",
                     "status": "0x1",
                     "logs": [
                         {
@@ -1429,6 +1453,11 @@ class TestSponsoredTransfer:
 
         assert receipt.status == "success"
         assert receipt.reference == "0xsponsored_hash"
+
+        requests = httpx_mock.get_requests()
+        assert len(requests) == 2
+        body = requests[1].read().decode()
+        assert '"method":"eth_sendRawTransactionSync"' in body
 
     @pytest.mark.asyncio
     async def test_server_fee_payer_error(self, httpx_mock: HTTPXMock) -> None:
