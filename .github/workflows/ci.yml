@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,8 +20,10 @@ jobs:
     needs: [test, package, install-smoke]
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+      - env:
+          ANY_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          if [[ "$ANY_FAILED" == "true" ]]; then
             echo "One or more required jobs failed or were cancelled"
             exit 1
           fi
@@ -31,16 +36,20 @@ jobs:
         python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
 
       - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+        run: uv python install "$PYTHON_VERSION"
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: uv sync --all-extras --dev
@@ -57,21 +66,23 @@ jobs:
 
       - name: Type check
         if: matrix.python-version == '3.12'
-        uses: jakebailey/pyright-action@v3
+        uses: jakebailey/pyright-action@8ec14b5cfe41f26e5f41686a31eb6012758217ef # v3
         with:
           version: PATH
 
       - name: Run tests
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
           COV_REPORTS="--cov-report=term-missing"
-          if [[ "${{ matrix.python-version }}" == "3.12" ]]; then
+          if [[ "$PYTHON_VERSION" == "3.12" ]]; then
             COV_REPORTS="$COV_REPORTS --cov-report=xml:coverage.xml --cov-report=html:htmlcov"
           fi
           uv run pytest -v --cov=mpp $COV_REPORTS --cov-fail-under=90
 
       - name: Upload coverage artifacts
         if: always() && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: |
@@ -82,10 +93,12 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -102,7 +115,7 @@ jobs:
           uv run twine check --strict dist/*
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-dist
           path: dist/*
@@ -117,10 +130,12 @@ jobs:
         profile: [base, tempo, mcp]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -129,7 +144,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Download package artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: package-dist
           path: dist
@@ -138,9 +153,11 @@ jobs:
         run: uv venv .smoke-venv --python 3.12
 
       - name: Install built wheel
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
           WHEEL=$(echo dist/*.whl)
-          case "${{ matrix.profile }}" in
+          case "$PROFILE" in
             base)
               INSTALL_TARGET="$WHEEL"
               ;;

@@ -14,11 +14,11 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: true
 
-      - uses: wevm/changelogs@master
+      - uses: wevm/changelogs@a160c1637ff9cf1529cddedd17cca47a276423e8 # changelogs@0.6.3
         with:
           ecosystem: python
           python-version: '3.12'
