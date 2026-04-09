@@ -5,7 +5,6 @@ Implements the charge intent for Tempo payments.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,11 +29,6 @@ if TYPE_CHECKING:
     import httpx
 
     from mpp.methods.tempo.account import TempoAccount
-
-
-# Receipt polling: 20 * 0.5s = ~10s, enough for testnet block times (~2-4s).
-MAX_RECEIPT_RETRY_ATTEMPTS = 20
-RECEIPT_RETRY_DELAY_SECONDS = 0.5
 
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
@@ -647,7 +641,7 @@ class ChargeIntent:
             rpc_url,
             json={
                 "jsonrpc": "2.0",
-                "method": "eth_sendRawTransaction",
+                "method": "eth_sendRawTransactionSync",
                 "params": [raw_tx],
                 "id": 1,
             },
@@ -658,36 +652,9 @@ class ChargeIntent:
         if "error" in result:
             raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
 
-        tx_hash = result.get("result")
-        if not tx_hash:
-            raise VerificationError("No transaction hash returned")
-
-        receipt_data = None
-        for attempt in range(MAX_RECEIPT_RETRY_ATTEMPTS):
-            receipt_response = await client.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_getTransactionReceipt",
-                    "params": [tx_hash],
-                    "id": 1,
-                },
-            )
-            receipt_response.raise_for_status()
-            receipt_result = receipt_response.json()
-
-            if "error" in receipt_result:
-                raise VerificationError("Failed to fetch transaction receipt")
-
-            receipt_data = receipt_result.get("result")
-            if receipt_data:
-                break
-
-            if attempt < MAX_RECEIPT_RETRY_ATTEMPTS - 1:
-                await asyncio.sleep(RECEIPT_RETRY_DELAY_SECONDS)
-
+        receipt_data = result.get("result")
         if not receipt_data:
-            raise VerificationError("Transaction receipt not found after retries")
+            raise VerificationError("No transaction receipt returned")
 
         if receipt_data.get("status") != "0x1":
             raise VerificationError("Transaction reverted")
@@ -696,6 +663,10 @@ class ChargeIntent:
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
             )
+
+        tx_hash = receipt_data.get("transactionHash")
+        if not tx_hash:
+            raise VerificationError("No transaction hash returned")
 
         if self._store is not None:
             store_key = f"mpp:charge:{tx_hash.lower()}"
