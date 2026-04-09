@@ -5,6 +5,7 @@ Implements the charge (TempoMethod) client method.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -18,7 +19,7 @@ from mpp.methods.tempo._defaults import (
     default_currency_for_chain,
     rpc_url_for_chain,
 )
-from mpp.methods.tempo._rpc import estimate_gas, get_tx_params
+from mpp.methods.tempo._rpc import _rpc_call, estimate_gas
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
@@ -73,11 +74,32 @@ class TempoMethod:
     decimals: int = 6
     client_id: str | None = None
     _intents: dict[str, Intent] = field(default_factory=dict)
+    _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
 
     @property
     def intents(self) -> dict[str, Intent]:
         """Available intents for this method."""
         return self._intents
+
+    async def _get_chain_id(self, rpc_url: str) -> int:
+        """Fetch the chain ID once per RPC URL and reuse it for later requests."""
+        cached = self._cached_chain_ids.get(rpc_url)
+        if cached is not None:
+            return cached
+
+        if self._chain_id_lock is None:
+            self._chain_id_lock = asyncio.Lock()
+
+        async with self._chain_id_lock:
+            cached = self._cached_chain_ids.get(rpc_url)
+            if cached is not None:
+                return cached
+
+            chain_id_hex = await _rpc_call(rpc_url, "eth_chainId", [])
+            chain_id = int(chain_id_hex, 16)
+            self._cached_chain_ids[rpc_url] = chain_id
+            return chain_id
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
@@ -247,7 +269,13 @@ class TempoMethod:
         # (smart wallet), not the access key address.
         nonce_address = self.root_account if self.root_account else self.account.address
 
-        chain_id, on_chain_nonce, gas_price = await get_tx_params(resolved_rpc, nonce_address)
+        chain_id = await self._get_chain_id(resolved_rpc)
+        nonce_hex, gas_price_hex = await asyncio.gather(
+            _rpc_call(resolved_rpc, "eth_getTransactionCount", [nonce_address, "pending"]),
+            _rpc_call(resolved_rpc, "eth_gasPrice", []),
+        )
+        on_chain_nonce = int(nonce_hex, 16)
+        gas_price = int(gas_price_hex, 16)
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(

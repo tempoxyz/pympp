@@ -170,6 +170,137 @@ class TestTempoMethod:
         assert len(data) == 138
 
     @pytest.mark.asyncio
+    async def test_create_credential_caches_chain_id_per_rpc_url(self) -> None:
+        """Should reuse eth_chainId results for repeated calls to the same RPC URL."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="test-cache-chain-id",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        rpc_methods: list[str] = []
+        nonces = iter(["0x1", "0x2"])
+
+        async def fake_rpc_call(
+            rpc_url: str,
+            method_name: str,
+            params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del params, client
+            assert rpc_url == "https://rpc.test"
+            rpc_methods.append(method_name)
+            if method_name == "eth_chainId":
+                return "0x1079"
+            if method_name == "eth_getTransactionCount":
+                return next(nonces)
+            if method_name == "eth_gasPrice":
+                return "0x1"
+            raise AssertionError(f"Unexpected RPC method: {method_name}")
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=0x186A0)),
+        ):
+            first = await method.create_credential(challenge)
+            second = await method.create_credential(challenge)
+
+        assert first.payload["type"] == "transaction"
+        assert second.payload["type"] == "transaction"
+        assert rpc_methods.count("eth_chainId") == 1
+        assert rpc_methods.count("eth_getTransactionCount") == 2
+        assert rpc_methods.count("eth_gasPrice") == 2
+
+    @pytest.mark.asyncio
+    async def test_create_credential_caches_chain_id_separately_per_rpc_url(self) -> None:
+        """Should keep separate chain ID caches for different resolved RPC URLs."""
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.main",
+            intents={"charge": ChargeIntent()},
+        )
+        mainnet_challenge = Challenge(
+            id="test-mainnet-cache",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+        testnet_challenge = Challenge(
+            id="test-testnet-cache",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 42431},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        rpc_calls: list[tuple[str, str]] = []
+        mainnet_nonces = iter(["0x1", "0x2"])
+        testnet_nonces = iter(["0x5", "0x6"])
+
+        async def fake_rpc_call(
+            rpc_url: str,
+            method_name: str,
+            params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del params, client
+            rpc_calls.append((rpc_url, method_name))
+            if method_name == "eth_chainId":
+                if rpc_url == "https://rpc.main":
+                    return "0x1079"
+                if rpc_url == CHAIN_RPC_URLS[TESTNET_CHAIN_ID]:
+                    return hex(TESTNET_CHAIN_ID)
+            if method_name == "eth_getTransactionCount":
+                if rpc_url == "https://rpc.main":
+                    return next(mainnet_nonces)
+                if rpc_url == CHAIN_RPC_URLS[TESTNET_CHAIN_ID]:
+                    return next(testnet_nonces)
+            if method_name == "eth_gasPrice":
+                return "0x1"
+            raise AssertionError(f"Unexpected RPC call: {rpc_url} {method_name}")
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=0x186A0)),
+        ):
+            await method.create_credential(mainnet_challenge)
+            await method.create_credential(mainnet_challenge)
+            await method.create_credential(testnet_challenge)
+            await method.create_credential(testnet_challenge)
+
+        chain_id_calls = [call for call in rpc_calls if call[1] == "eth_chainId"]
+        assert chain_id_calls.count(("https://rpc.main", "eth_chainId")) == 1
+        assert chain_id_calls.count((CHAIN_RPC_URLS[TESTNET_CHAIN_ID], "eth_chainId")) == 1
+
+    @pytest.mark.asyncio
     async def test_create_credential_binds_auto_memo_to_challenge(self) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
