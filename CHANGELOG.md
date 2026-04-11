@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.1 (2026-04-09)
+
+### Patch Changes
+
+- Cached Tempo chain IDs per RPC URL to avoid redundant `eth_chainId` calls. Also parallelized `eth_getTransactionCount` and `eth_gasPrice` fetches using `asyncio.gather`. (by @BrendanRyan, [#115](https://github.com/tempoxyz/pympp/pull/115))
+- Replaced `eth_sendRawTransaction` + polling loop with `eth_sendRawTransactionSync` in Tempo's verify flow, eliminating the separate receipt polling step and extracting the transaction hash directly from the receipt response. (by @BrendanRyan, [#115](https://github.com/tempoxyz/pympp/pull/115))
+
 ## 0.6.0 (2026-04-07)
 
 ### Minor Changes
