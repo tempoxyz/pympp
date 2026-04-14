@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import rlp
 
 if TYPE_CHECKING:
-    from pytempo import TempoTransaction
+    from pytempo import SignedKeyAuthorization, TempoTransaction
 
 FEE_PAYER_ENVELOPE_TYPE_ID = 0x78
 
@@ -67,7 +67,9 @@ def encode_fee_payer_envelope(signed_tx: TempoTransaction) -> bytes:
     return bytes([FEE_PAYER_ENVELOPE_TYPE_ID]) + rlp.encode(fields)
 
 
-def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, bytes | None]:
+def decode_fee_payer_envelope(
+    data: bytes,
+) -> tuple[list, bytes, bytes, SignedKeyAuthorization | None]:
     """Decode a 0x78 fee payer envelope.
 
     Args:
@@ -75,7 +77,7 @@ def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, bytes | 
 
     Returns:
         Tuple of (decoded RLP fields, sender_address bytes,
-        sender_signature bytes, key_authorization RLP bytes or None).
+        sender_signature bytes, SignedKeyAuthorization or None).
 
     Raises:
         ValueError: If the data doesn't start with ``0x78`` or is malformed.
@@ -93,8 +95,38 @@ def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, bytes | 
     # 15 fields = key_authorization present (index 13), signature at 14
     # 14 fields = no key_authorization, signature at 13
     if len(decoded) == 15:
-        key_authorization = rlp.encode(decoded[13])
+        key_authorization = _decode_signed_key_authorization(decoded[13])
     else:
         key_authorization = None
 
     return decoded, bytes(sender_address), bytes(sender_signature), key_authorization  # type: ignore[arg-type]
+
+
+def _decode_signed_key_authorization(rlp_fields: list) -> SignedKeyAuthorization:
+    """Reconstruct a SignedKeyAuthorization from decoded RLP fields."""
+    from pytempo import KeyAuthorization, SignatureType, SignedKeyAuthorization
+    from pytempo.models import Signature
+
+    auth_fields = rlp_fields[0]
+    sig_bytes = bytes(rlp_fields[1])
+
+    chain_id = int.from_bytes(auth_fields[0], "big") if auth_fields[0] else 0
+    key_type = SignatureType(int.from_bytes(auth_fields[1], "big") if auth_fields[1] else 0)
+    key_id = bytes(auth_fields[2])
+
+    expiry = (
+        int.from_bytes(auth_fields[3], "big") if len(auth_fields) > 3 and auth_fields[3] else None
+    )
+
+    authorization = KeyAuthorization(
+        key_id=key_id,
+        chain_id=chain_id,
+        key_type=key_type,
+        expiry=expiry,
+    )
+
+    r = int.from_bytes(sig_bytes[:32], "big")
+    s = int.from_bytes(sig_bytes[32:64], "big")
+    v = sig_bytes[64]
+
+    return SignedKeyAuthorization(authorization=authorization, signature=Signature(r=r, s=s, v=v))
