@@ -685,7 +685,7 @@ class ChargeIntent:
         Returns the fully co-signed 0x76 transaction hex.
         """
         from pytempo import Call, TempoTransaction
-        from pytempo.models import as_address
+        from pytempo.models import Signature, as_address
 
         from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
@@ -752,7 +752,11 @@ class ChargeIntent:
 
         tx_to_sign = attrs.evolve(
             tx_for_recovery,
-            sender_signature=sender_sig,
+            sender_signature=Signature(
+                r=int.from_bytes(sender_sig[:32], "big"),
+                s=int.from_bytes(sender_sig[32:64], "big"),
+                v=sender_sig[64],
+            ),
             sender_address=as_address(recovered_address),
             fee_token=fee_token or PATH_USD,
         )

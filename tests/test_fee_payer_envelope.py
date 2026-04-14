@@ -1,8 +1,10 @@
 """Tests for fee payer envelope encoding/decoding (0x78 wire format)."""
 
+import attrs
 import pytest
 import rlp
 from pytempo import Call, TempoTransaction
+from pytempo.models import Signature
 
 from mpp.methods.tempo.fee_payer_envelope import (
     decode_fee_payer_envelope,
@@ -117,13 +119,11 @@ class TestEncodeFeePayerEnvelope:
 
     def test_differs_from_0x76_encode(self) -> None:
         """0x78 envelope must differ from standard 0x76 encode."""
-        import attrs
-
         signed = _make_signed_tx()
         envelope = encode_fee_payer_envelope(signed)
 
         # For 0x76 we need a fee_payer_signature
-        tx_76 = attrs.evolve(signed, fee_payer_signature=b"\x00")
+        tx_76 = attrs.evolve(signed, fee_payer_signature=Signature(r=1, s=1, v=27))
         encoded_76 = tx_76.encode()
 
         assert envelope[0] == 0x78
@@ -168,10 +168,8 @@ class TestDecodeFeePayerEnvelope:
 
     def test_rejects_0x76_prefix(self) -> None:
         """Should reject a standard 0x76 transaction."""
-        import attrs
-
         signed = _make_signed_tx()
-        tx_76 = attrs.evolve(signed, fee_payer_signature=b"\x00")
+        tx_76 = attrs.evolve(signed, fee_payer_signature=Signature(r=1, s=1, v=27))
         encoded_76 = tx_76.encode()
         with pytest.raises(ValueError, match="expected 0x78 prefix"):
             decode_fee_payer_envelope(encoded_76)
