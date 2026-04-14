@@ -1701,6 +1701,7 @@ class TestValidateTransactionPayload:
         """Build a standard 0x76 transaction."""
         import attrs
         from pytempo import Call, TempoTransaction
+        from pytempo.models import Signature
 
         selector = "a9059cbb"
         to_padded = recipient[2:].lower().zfill(64)
@@ -1718,7 +1719,7 @@ class TestValidateTransactionPayload:
             calls=(Call.create(to=currency, value=0, data=transfer_data),),
         )
         signed = tx.sign(TEST_PRIVATE_KEY)
-        signed = attrs.evolve(signed, fee_payer_signature=b"\x00")
+        signed = attrs.evolve(signed, fee_payer_signature=Signature(r=1, s=1, v=27))
         return "0x" + signed.encode().hex()
 
     def test_accepts_0x78_with_matching_call(self) -> None:
