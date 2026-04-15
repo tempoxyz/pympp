@@ -4,6 +4,8 @@ on:
   pull_request:
     types: [opened]
 
+permissions: {}
+
 jobs:
   changelog:
     runs-on: ubuntu-latest
