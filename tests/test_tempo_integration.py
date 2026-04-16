@@ -423,6 +423,139 @@ class TestChargeIntegration:
         with pytest.raises(VerificationError, match="Transfer log"):
             await charge_intent.verify(credential, request_dict)
 
+    async def test_verify_hash_replay_rejected_with_store(
+        self, rpc_url, funded_payer, funded_recipient, currency
+    ):
+        """Same hash submitted twice with a store should fail the second time."""
+        from mpp.store import MemoryStore
+
+        tx_hash = await _send_transfer(
+            rpc_url, funded_payer, currency, funded_recipient.address, 1000000
+        )
+
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url=rpc_url, store=store)
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash})
+
+        receipt = await intent.verify(credential, request_dict)
+        assert receipt.status == "success"
+
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(credential, request_dict)
+
+    async def test_verify_hash_replay_allowed_without_store(
+        self, rpc_url, funded_payer, funded_recipient, currency
+    ):
+        """Same hash submitted twice without a store should succeed both times."""
+        tx_hash = await _send_transfer(
+            rpc_url, funded_payer, currency, funded_recipient.address, 1000000
+        )
+
+        intent = ChargeIntent(rpc_url=rpc_url)  # no store
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash})
+
+        receipt1 = await intent.verify(credential, request_dict)
+        assert receipt1.status == "success"
+        receipt2 = await intent.verify(credential, request_dict)
+        assert receipt2.status == "success"
+
+    async def test_verify_hash_store_records_on_success(
+        self, rpc_url, funded_payer, funded_recipient, currency
+    ):
+        """After successful verification, the hash should be recorded in the store."""
+        from mpp.store import MemoryStore
+
+        tx_hash = await _send_transfer(
+            rpc_url, funded_payer, currency, funded_recipient.address, 1000000
+        )
+
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url=rpc_url, store=store)
+
+        store_key = f"mpp:charge:{tx_hash.lower()}"
+        assert await store.get(store_key) is None
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash})
+        await intent.verify(credential, request_dict)
+
+        assert await store.get(store_key) is not None
+
+    async def test_verify_hash_tx_not_found(
+        self, rpc_url, funded_recipient, currency, charge_intent
+    ):
+        """A fabricated hash that doesn't exist on-chain should be rejected."""
+        bogus_hash = "0x" + "00" * 32
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(payload={"type": "hash", "hash": bogus_hash})
+
+        with pytest.raises(VerificationError, match="Transaction not found"):
+            await charge_intent.verify(credential, request_dict)
+
+    async def test_verify_external_id_propagated(
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
+    ):
+        """externalId in request should be parseable and not break verification."""
+        method = tempo(
+            account=funded_payer,
+            rpc_url=rpc_url,
+            intents={"charge": ChargeIntent()},
+        )
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+            "externalId": "order-42",
+            "methodDetails": {
+                "feePayer": False,
+                "chainId": chain_id,
+            },
+        }
+        challenge = Challenge(
+            id="integ-ext-id",
+            method="tempo",
+            intent="charge",
+            request=request_dict,
+        )
+
+        credential = await method.create_credential(challenge)
+        intent = ChargeIntent(rpc_url=rpc_url)
+        receipt = await intent.verify(credential, request_dict)
+
+        assert receipt.status == "success"
+        assert receipt.reference.startswith("0x")
+
     async def test_fee_payer_wrong_recipient_rejected(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
