@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2 (2026-04-19)
+
+### Patch Changes
+
+- Defaulted `chain_id` to 4217 (mainnet) in the `tempo()` function, removing the need to pass it explicitly. Removed the hardcoded testnet fee payer URL fallback, requiring explicit fee payer configuration on mainnet. Updated tests and docs accordingly. (by @BrendanRyan, [#127](https://github.com/tempoxyz/pympp/pull/127))
+- Defaulted `chain_id` to 4217 (mainnet) in the `tempo()` function, removing the need to pass it explicitly. Updated docs and example code accordingly. (by @BrendanRyan, [#127](https://github.com/tempoxyz/pympp/pull/127))
+- Fixed `decode_fee_payer_envelope` to return a `SignedKeyAuthorization` object instead of raw RLP bytes when a key authorization is present in the fee payer envelope. (by @BrendanRyan, [#127](https://github.com/tempoxyz/pympp/pull/127))
+
 ## 0.6.1 (2026-04-09)
 
 ### Patch Changes
