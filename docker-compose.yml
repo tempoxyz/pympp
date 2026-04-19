@@ -10,7 +10,7 @@ services:
       retries: 10
 
   tempo:
-    image: ghcr.io/tempoxyz/tempo:v1.5.2
+    image: ghcr.io/tempoxyz/tempo:${TEMPO_TAG:-latest}
     ports:
       - "8545:8545"
     command: >
@@ -32,7 +32,7 @@ services:
       --faucet.address 0x20c0000000000000000000000000000000000002
       --faucet.address 0x20c0000000000000000000000000000000000003
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\",\"params\":[],\"id\":1}' http://localhost:8545 || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'echo >/dev/tcp/localhost/8545' 2>/dev/null || exit 1"]
       interval: 2s
       timeout: 5s
-      retries: 15
+      retries: 30
