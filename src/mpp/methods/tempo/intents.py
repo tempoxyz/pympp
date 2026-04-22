@@ -537,9 +537,9 @@ class ChargeIntent:
         # Prefer memo logs so memo-less transfers still preserve attribution
         # memos for challenge binding verification when both log types exist.
         indexed_logs.sort(
-            key=lambda item: 0
-            if item[1].get("topics", [None])[0] == TRANSFER_WITH_MEMO_TOPIC
-            else 1
+            key=lambda item: (
+                0 if item[1].get("topics", [None])[0] == TRANSFER_WITH_MEMO_TOPIC else 1
+            )
         )
         used_logs: set[int] = set()
         all_matches: list[MatchedTransferLog] = []
