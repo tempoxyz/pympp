@@ -533,13 +533,20 @@ class ChargeIntent:
 
         # Multi-transfer: order-insensitive matching
         sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
-        logs = receipt.get("logs", [])
+        indexed_logs = list(enumerate(receipt.get("logs", [])))
+        # Prefer memo logs so memo-less transfers still preserve attribution
+        # memos for challenge binding verification when both log types exist.
+        indexed_logs.sort(
+            key=lambda item: 0
+            if item[1].get("topics", [None])[0] == TRANSFER_WITH_MEMO_TOPIC
+            else 1
+        )
         used_logs: set[int] = set()
         all_matches: list[MatchedTransferLog] = []
 
         for transfer in sorted_expected:
             found = False
-            for log_idx, log in enumerate(logs):
+            for log_idx, log in indexed_logs:
                 if log_idx in used_logs:
                     continue
                 if log.get("address", "").lower() != request.currency.lower():
@@ -575,10 +582,21 @@ class ChargeIntent:
                         found = True
                         break
                 else:
-                    if event_topic != TRANSFER_TOPIC:
-                        continue
                     data = log.get("data", "0x")
-                    if len(data) >= 66:
+                    if event_topic == TRANSFER_WITH_MEMO_TOPIC:
+                        if len(topics) < 4:
+                            continue
+                        if len(data) < 66:
+                            continue
+                        log_amount = int(data[2:66], 16)
+                        if log_amount == transfer.amount:
+                            used_logs.add(log_idx)
+                            all_matches.append(MatchedTransferLog(kind="memo", memo=topics[3]))
+                            found = True
+                            break
+                    elif event_topic == TRANSFER_TOPIC:
+                        if len(data) < 66:
+                            continue
                         log_amount = int(data, 16)
                         if log_amount == transfer.amount:
                             used_logs.add(log_idx)

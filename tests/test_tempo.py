@@ -2839,7 +2839,7 @@ class TestMatchSingleTransferCalldata:
 
 
 class TestSplitLogMemoStrictness:
-    """Tests that memo-less split logs reject transferWithMemo events."""
+    """Tests that memo-less split logs can still preserve attribution memos."""
 
     CURRENCY = "0x20c0000000000000000000000000000000000000"
     RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
@@ -2884,8 +2884,8 @@ class TestSplitLogMemoStrictness:
         }
         assert intent._verify_transfer_logs(receipt, request)
 
-    def test_multi_split_rejects_transfer_with_memo_log_for_memoless(self) -> None:
-        """Memo-less split legs must reject TransferWithMemo logs."""
+    def test_multi_split_accepts_transfer_with_memo_log_for_memoless(self) -> None:
+        """Memo-less split legs should accept TransferWithMemo logs."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
         request = ChargeRequest(
             amount=str(self.AMOUNT),
@@ -2899,7 +2899,7 @@ class TestSplitLogMemoStrictness:
             "logs": [
                 # primary as Transfer (correct)
                 self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 700000),
-                # split as TransferWithMemo (should be rejected)
+                # split as TransferWithMemo (accepted; challenge binding is checked later)
                 self._make_log(
                     TRANSFER_WITH_MEMO_TOPIC,
                     self.SPLIT_RECIPIENT,
@@ -2908,7 +2908,34 @@ class TestSplitLogMemoStrictness:
                 ),
             ],
         }
-        assert not intent._verify_transfer_logs(receipt, request)
+        matched_logs = intent._verify_transfer_logs(receipt, request)
+        assert [matched_log.kind for matched_log in matched_logs] == ["transfer", "memo"]
+
+    def test_multi_split_prefers_transfer_with_memo_log_for_memoless(self) -> None:
+        """Memo-less split legs should prefer memo logs over plain transfers when both exist."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+        receipt = {
+            "logs": [
+                self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 700000),
+                self._make_log(TRANSFER_TOPIC, self.SPLIT_RECIPIENT, 300000),
+                self._make_log(
+                    TRANSFER_WITH_MEMO_TOPIC,
+                    self.SPLIT_RECIPIENT,
+                    300000,
+                    memo="0x" + "ee" * 32,
+                ),
+            ],
+        }
+        matched_logs = intent._verify_transfer_logs(receipt, request)
+        assert [matched_log.kind for matched_log in matched_logs] == ["transfer", "memo"]
 
 
 class TestSplitsFeePayerRejection:
