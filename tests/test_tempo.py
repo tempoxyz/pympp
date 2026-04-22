@@ -1418,16 +1418,19 @@ class TestValidateTransactionPayload:
         currency: str = "0x20c0000000000000000000000000000000000000",
         recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         amount: int = 1000000,
+        memo: str | None = None,
     ) -> str:
         """Build a 0x78 fee payer envelope."""
         from pytempo import Call, TempoTransaction
 
         from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
 
-        selector = "a9059cbb"
+        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
         to_padded = recipient[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+        if memo is not None:
+            transfer_data += memo[2:] if memo.startswith("0x") else memo
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -1449,16 +1452,19 @@ class TestValidateTransactionPayload:
         currency: str = "0x20c0000000000000000000000000000000000000",
         recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         amount: int = 1000000,
+        memo: str | None = None,
     ) -> str:
         """Build a standard 0x76 transaction."""
         import attrs
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature
 
-        selector = "a9059cbb"
+        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
         to_padded = recipient[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+        if memo is not None:
+            transfer_data += memo[2:] if memo.startswith("0x") else memo
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -1484,6 +1490,19 @@ class TestValidateTransactionPayload:
         )
         sig = self._build_0x78_envelope()
         # Should not raise
+        intent._validate_transaction_payload(sig, request)
+
+    def test_accepts_0x78_with_transfer_with_memo_when_no_server_memo(self) -> None:
+        """Should accept 0x78 envelopes with client attribution memos."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+        memo = encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
+        sig = self._build_0x78_envelope(memo=memo)
+
         intent._validate_transaction_payload(sig, request)
 
     def test_rejects_0x78_with_wrong_amount(self) -> None:
@@ -2092,15 +2111,21 @@ class TestMatchTransferCalldataWithMemo:
         )
         assert _match_transfer_calldata(calldata, request) is True
 
-    def test_no_memo_accepts_only_transfer_selector(self) -> None:
-        """When no memo, only plain transfer selector should be accepted."""
+    def test_no_memo_accepts_plain_transfer_and_transfer_with_memo(self) -> None:
+        """When no memo, plain transfer and transferWithMemo should be accepted."""
         request = self._make_request(memo=None)
         calldata_plain = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
         calldata_memo = self._build_calldata(
-            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT
+            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
         )
         assert _match_transfer_calldata(calldata_plain, request) is True
-        assert _match_transfer_calldata(calldata_memo, request) is False
+        assert _match_transfer_calldata(calldata_memo, request) is True
+
+    def test_no_memo_rejects_short_transfer_with_memo_calldata(self) -> None:
+        """When no memo, truncated transferWithMemo calldata should still be rejected."""
+        request = self._make_request(memo=None)
+        calldata = self._build_calldata(TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT)
+        assert _match_transfer_calldata(calldata, request) is False
 
     def test_short_calldata_rejected(self) -> None:
         """Calldata shorter than 136 chars should always be rejected."""
@@ -2326,6 +2351,25 @@ class TestValidateTransactionPayload0x76:
         to_padded = bytes.fromhex(self.RECIPIENT[2:].lower().zfill(64))
         amount_padded = bytes.fromhex(hex(1000000)[2:].zfill(64))
         call_data = selector + to_padded + amount_padded
+
+        currency_bytes = bytes.fromhex(self.CURRENCY[2:])
+        call = [currency_bytes, b"", call_data]
+        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
+        sig = "0x" + payload.hex()
+
+        intent._validate_transaction_payload(sig, request)
+
+    def test_valid_tx_with_transfer_with_memo_passes_when_no_server_memo(self) -> None:
+        """Transaction credentials should allow client attribution memos."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = self._make_request()
+        memo = encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
+
+        selector = bytes.fromhex(TRANSFER_WITH_MEMO_SELECTOR)
+        to_padded = bytes.fromhex(self.RECIPIENT[2:].lower().zfill(64))
+        amount_padded = bytes.fromhex(hex(1000000)[2:].zfill(64))
+        call_data = selector + to_padded + amount_padded + bytes.fromhex(memo[2:])
 
         currency_bytes = bytes.fromhex(self.CURRENCY[2:])
         call = [currency_bytes, b"", call_data]
@@ -2774,8 +2818,18 @@ class TestMatchSingleTransferCalldata:
             is True
         )
 
-    def test_no_memo_rejects_transfer_with_memo_selector(self) -> None:
-        """When no memo expected, transferWithMemo calldata must be rejected."""
+    def test_no_memo_accepts_transfer_with_memo_selector(self) -> None:
+        """When no memo expected, transferWithMemo calldata should be accepted."""
+        calldata = self._build_calldata(
+            TRANSFER_WITH_MEMO_SELECTOR,
+            self.RECIPIENT,
+            self.AMOUNT,
+            "ab" * 32,
+        )
+        assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is True
+
+    def test_no_memo_rejects_short_transfer_with_memo_calldata(self) -> None:
+        """When no memo expected, truncated transferWithMemo calldata should be rejected."""
         calldata = self._build_calldata(TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT)
         assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is False
 

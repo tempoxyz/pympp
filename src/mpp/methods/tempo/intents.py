@@ -139,6 +139,9 @@ def _match_single_transfer_calldata(
     if memo is not None:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
             return False
+    elif selector == TRANSFER_WITH_MEMO_SELECTOR:
+        if len(call_data_hex) < 200:
+            return False
     elif selector != TRANSFER_SELECTOR:
         return False
 
@@ -186,6 +189,9 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
 
     if expected_memo:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
+            return False
+    elif selector == TRANSFER_WITH_MEMO_SELECTOR:
+        if len(call_data_hex) < 200:
             return False
     elif selector != TRANSFER_SELECTOR:
         return False
