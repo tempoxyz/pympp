@@ -23,7 +23,7 @@ jobs:
           persist-credentials: true
 
       - id: changelogs
-        uses: wevm/changelogs@54f693643e1bd8469293bdfcbfb647bceb559490 # changelogs@0.6.3
+        uses: wevm/changelogs@a5032a56dabbb6e8bd7dc1847bde11d755be4c52 # changelogs@0.6.3
         with:
           ecosystem: python
           python-version: '3.12'
