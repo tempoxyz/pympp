@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.3 (2026-04-22)
+
+### Patch Changes
+
+- Allowed Tempo pull-mode validation to accept client attribution memos in both preflight calldata checks and split receipt matching while still rejecting truncated `transferWithMemo` calldata. (by @BrendanRyan, [#130](https://github.com/tempoxyz/pympp/pull/130))
+
 ## 0.6.2 (2026-04-19)
 
 ### Patch Changes
