@@ -8,13 +8,12 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
-    CHAIN_RPC_URLS,
     RPC_URL,
     default_currency_for_chain,
     rpc_url_for_chain,
@@ -32,6 +31,7 @@ if TYPE_CHECKING:
 DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 FEE_PAYER_VALID_BEFORE_SECS = 25
+_CHAIN_ID_UNSET = object()
 
 
 class TransactionError(Exception):
@@ -75,7 +75,9 @@ class TempoMethod:
     client_id: str | None = None
     _intents: dict[str, Intent] = field(default_factory=dict)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
+    _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
 
     @property
     def intents(self) -> dict[str, Intent]:
@@ -100,6 +102,21 @@ class TempoMethod:
             chain_id = int(chain_id_hex, 16)
             self._cached_chain_ids[rpc_url] = chain_id
             return chain_id
+
+    async def _resolve_expected_chain_id(self) -> int | None:
+        """Return the chain ID pinned by local client configuration.
+
+        A client may pin the chain explicitly via ``chain_id`` or implicitly by
+        supplying a custom ``rpc_url``. In the latter case, trust the chain
+        reported by that RPC instead of the server challenge.
+        """
+        if self._rpc_url_explicit and not self._chain_id_explicit:
+            return await self._get_chain_id(self.rpc_url)
+        if self.chain_id is not None:
+            return self.chain_id
+        if self.rpc_url:
+            return await self._get_chain_id(self.rpc_url)
+        return None
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
@@ -149,10 +166,8 @@ class TempoMethod:
 
         splits = method_details.get("splits") if isinstance(method_details, dict) else None
 
-        # Resolve RPC URL from challenge's chainId (like mppx), falling back
-        # to the method-level rpc_url.
         rpc_url = self.rpc_url
-        expected_chain_id: int | None = None
+        expected_chain_id = await self._resolve_expected_chain_id()
         challenge_chain_id = (
             method_details.get("chainId") if isinstance(method_details, dict) else None
         )
@@ -162,17 +177,13 @@ class TempoMethod:
             except (TypeError, ValueError):
                 pass
             else:
-                resolved = CHAIN_RPC_URLS.get(parsed_chain_id)
-                if resolved is not None:
-                    rpc_url = resolved
-                    # Only enforce mismatch check when we resolved to a known
-                    # RPC URL — for unknown chains we fall back to the user's
-                    # custom rpc_url and can't verify the chain ID.
+                if expected_chain_id is not None and parsed_chain_id != expected_chain_id:
+                    raise ValueError(
+                        f"Challenge requests chain ID {parsed_chain_id}, "
+                        f"but client is restricted to {expected_chain_id}"
+                    )
+                if expected_chain_id is None:
                     expected_chain_id = parsed_chain_id
-
-        # Also check against the method-level chain_id if set.
-        if expected_chain_id is None and self.chain_id is not None:
-            expected_chain_id = self.chain_id
 
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
@@ -280,7 +291,7 @@ class TempoMethod:
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
                 f"Chain ID mismatch: RPC returned {chain_id}, "
-                f"expected {expected_chain_id} from challenge"
+                f"expected {expected_chain_id} from client policy"
             )
 
         if awaiting_fee_payer:
@@ -371,7 +382,7 @@ def tempo(
     intents: dict[str, Intent],
     account: TempoAccount | None = None,
     fee_payer: TempoAccount | None = None,
-    chain_id: int = CHAIN_ID,
+    chain_id: int | None | object = _CHAIN_ID_UNSET,
     rpc_url: str | None = None,
     root_account: str | None = None,
     currency: str | None = None,
@@ -391,7 +402,9 @@ def tempo(
         chain_id: Tempo chain ID (default: 4217 for mainnet, use 42431
             for testnet). Resolves the RPC URL automatically from known chains.
         rpc_url: Tempo RPC endpoint URL. Overrides the URL resolved
-            from ``chain_id``. Defaults to mainnet if neither is set.
+            from ``chain_id``. When provided without ``chain_id``, the client
+            pins itself to whatever chain that RPC reports. Defaults to mainnet
+            if neither is set.
         root_account: Root account address for access key signing.
         currency: Default currency address for charges.
         recipient: Default recipient address for charges.
@@ -417,23 +430,35 @@ def tempo(
             intents={"charge": ChargeIntent()},
         )
     """
+    chain_id_explicit = chain_id is not _CHAIN_ID_UNSET
+    resolved_chain_id: int | None
+    if chain_id is _CHAIN_ID_UNSET:
+        resolved_chain_id = CHAIN_ID
+    else:
+        resolved_chain_id = cast("int | None", chain_id)
+
+    rpc_url_explicit = rpc_url is not None
     if rpc_url is None:
-        rpc_url = rpc_url_for_chain(chain_id)
+        if resolved_chain_id is None:
+            raise ValueError("chain_id or rpc_url is required")
+        rpc_url = rpc_url_for_chain(resolved_chain_id)
 
     if currency is None:
-        currency = default_currency_for_chain(chain_id)
+        currency = default_currency_for_chain(resolved_chain_id)
 
     method = TempoMethod(
         account=account,
         fee_payer=fee_payer,
         rpc_url=rpc_url,
-        chain_id=chain_id,
+        chain_id=resolved_chain_id,
         root_account=root_account,
         currency=currency,
         recipient=recipient,
         decimals=decimals,
         client_id=client_id,
     )
+    method._chain_id_explicit = chain_id_explicit
+    method._rpc_url_explicit = rpc_url_explicit
     for intent in intents.values():
         if hasattr(intent, "rpc_url") and intent.rpc_url is None:  # type: ignore[union-attr]
             intent.rpc_url = rpc_url  # type: ignore[union-attr]

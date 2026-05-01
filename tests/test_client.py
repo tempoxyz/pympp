@@ -216,6 +216,37 @@ class TestPaymentTransport:
         assert len(inner.requests) == 2
         method.create_credential.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_does_not_retry_when_method_rejects_challenge(self) -> None:
+        """Should not send an Authorization retry when the method rejects the challenge."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000", "methodDetails": {"chainId": 42431}},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+            ]
+        )
+
+        method = MockMethod()
+        method.create_credential.side_effect = ValueError(
+            "Challenge requests chain ID 42431, but client is restricted to 4217"
+        )
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        request = httpx.Request("GET", "https://example.com")
+
+        with pytest.raises(ValueError, match="client is restricted to 4217"):
+            await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 1
+        method.create_credential.assert_called_once()
+
 
 class TestClient:
     @pytest.mark.asyncio
