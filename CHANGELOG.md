@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.0 (2026-05-01)
+
+### Minor Changes
+
+- Added fee payer policy enforcement for sponsored Tempo transactions, validating gas limits, fee caps, total fee budgets, validity windows, and access lists against per-chain policy defaults. Added call pattern validation to restrict sponsored transactions to approved selectors (transfers, and optionally an approve+swap prefix via the stablecoin DEX). (by @BrendanRyan, [#135](https://github.com/tempoxyz/pympp/pull/135))
+
+### Patch Changes
+
+- Fixed client chain policy enforcement to reject challenges that attempt to switch the client to a different chain. Clients pinned to a chain (via `chain_id` or `rpc_url`) now raise a `ValueError` immediately instead of silently following the challenge's `chainId`. (by @BrendanRyan, [#135](https://github.com/tempoxyz/pympp/pull/135))
+
 ## 0.6.3 (2026-04-22)
 
 ### Patch Changes
