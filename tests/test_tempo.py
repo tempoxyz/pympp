@@ -226,15 +226,15 @@ class TestTempoMethod:
         assert rpc_methods.count("eth_gasPrice") == 2
 
     @pytest.mark.asyncio
-    async def test_create_credential_caches_chain_id_separately_per_rpc_url(self) -> None:
-        """Should keep separate chain ID caches for different resolved RPC URLs."""
+    async def test_create_credential_reuses_cached_rpc_chain_id_for_rejected_switch(self) -> None:
+        """Should reject switched chains without refetching an already-cached RPC chain ID."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(
             account=account,
             rpc_url="https://rpc.main",
             intents={"charge": ChargeIntent()},
         )
-        mainnet_challenge = Challenge(
+        initial_challenge = Challenge(
             id="test-mainnet-cache",
             method="tempo",
             intent="charge",
@@ -246,7 +246,7 @@ class TestTempoMethod:
             realm="test.example.com",
             request_b64="e30",
         )
-        testnet_challenge = Challenge(
+        switched_challenge = Challenge(
             id="test-testnet-cache",
             method="tempo",
             intent="charge",
@@ -261,8 +261,7 @@ class TestTempoMethod:
         )
 
         rpc_calls: list[tuple[str, str]] = []
-        mainnet_nonces = iter(["0x1", "0x2"])
-        testnet_nonces = iter(["0x5", "0x6"])
+        nonces = iter(["0x1"])
 
         async def fake_rpc_call(
             rpc_url: str,
@@ -274,15 +273,9 @@ class TestTempoMethod:
             del params, client
             rpc_calls.append((rpc_url, method_name))
             if method_name == "eth_chainId":
-                if rpc_url == "https://rpc.main":
-                    return "0x1079"
-                if rpc_url == CHAIN_RPC_URLS[TESTNET_CHAIN_ID]:
-                    return hex(TESTNET_CHAIN_ID)
+                return "0x1079"
             if method_name == "eth_getTransactionCount":
-                if rpc_url == "https://rpc.main":
-                    return next(mainnet_nonces)
-                if rpc_url == CHAIN_RPC_URLS[TESTNET_CHAIN_ID]:
-                    return next(testnet_nonces)
+                return next(nonces)
             if method_name == "eth_gasPrice":
                 return "0x1"
             raise AssertionError(f"Unexpected RPC call: {rpc_url} {method_name}")
@@ -291,14 +284,12 @@ class TestTempoMethod:
             patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
             patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=0x186A0)),
         ):
-            await method.create_credential(mainnet_challenge)
-            await method.create_credential(mainnet_challenge)
-            await method.create_credential(testnet_challenge)
-            await method.create_credential(testnet_challenge)
+            await method.create_credential(initial_challenge)
+            with pytest.raises(ValueError, match="client is restricted to 4217"):
+                await method.create_credential(switched_challenge)
 
         chain_id_calls = [call for call in rpc_calls if call[1] == "eth_chainId"]
-        assert chain_id_calls.count(("https://rpc.main", "eth_chainId")) == 1
-        assert chain_id_calls.count((CHAIN_RPC_URLS[TESTNET_CHAIN_ID], "eth_chainId")) == 1
+        assert chain_id_calls == [("https://rpc.main", "eth_chainId")]
 
     @pytest.mark.asyncio
     async def test_create_credential_binds_auto_memo_to_challenge(self) -> None:
@@ -1953,37 +1944,17 @@ class TestChainIdPropagation:
         assert method.rpc_url == "https://custom.rpc"
 
     @pytest.mark.asyncio
-    async def test_client_resolves_rpc_from_challenge_chain_id(self, httpx_mock: HTTPXMock) -> None:
-        """Client should use RPC URL matching challenge's methodDetails.chainId."""
+    async def test_client_rejects_challenge_chain_id_that_switches_default_network(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Client should reject challenges that try to switch away from its default chain."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        # Method defaults to mainnet RPC
         method = tempo(
             account=account,
             intents={"charge": ChargeIntent()},
         )
-        assert method.rpc_url == "https://rpc.tempo.xyz"
-
-        # Mock testnet RPC responses (chain_id, nonce, gas_price, estimateGas)
-        httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
-            json={"jsonrpc": "2.0", "result": "0xa5bf", "id": 1},  # chain_id 42431
-        )
-        httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
-            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
-        )
-
-        # Challenge says chainId=42431 in methodDetails
         challenge = Challenge(
-            id="test-chain-resolve",
+            id="test-chain-switch-default",
             method="tempo",
             intent="charge",
             request={
@@ -1996,65 +1967,43 @@ class TestChainIdPropagation:
             request_b64="e30",
         )
 
-        credential = await method.create_credential(challenge)
+        with pytest.raises(ValueError, match="client is restricted to 4217"):
+            await method.create_credential(challenge)
 
-        # Should have called testnet RPC, not mainnet
-        requests = httpx_mock.get_requests()
-        assert len(requests) > 0
-        for r in requests:
-            assert "rpc.moderato.tempo.xyz" in str(r.url)
-        assert credential.payload["type"] == "transaction"
+        assert httpx_mock.get_requests() == []
 
     @pytest.mark.asyncio
-    async def test_client_falls_back_to_method_rpc_for_unknown_chain(
-        self, httpx_mock: HTTPXMock
+    async def test_client_rejects_challenge_chain_id_that_switches_explicit_rpc(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Client should fall back to method's rpc_url for unknown chainIds."""
+        """Client should reject challenges that try to switch away from a pinned RPC."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(
             account=account,
             rpc_url="https://rpc.custom",
             intents={"charge": ChargeIntent()},
         )
-
-        # eth_chainId
-        httpx_mock.add_response(
-            url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
-        )
+        get_chain_id = AsyncMock(return_value=TESTNET_CHAIN_ID)
+        monkeypatch.setattr(method, "_get_chain_id", get_chain_id)
 
         challenge = Challenge(
-            id="test-unknown-chain",
+            id="test-chain-switch-explicit-rpc",
             method="tempo",
             intent="charge",
             request={
                 "amount": "1000000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {"chainId": 99999},
+                "methodDetails": {"chainId": CHAIN_ID},
             },
             realm="test.example.com",
             request_b64="e30",
         )
 
-        credential = await method.create_credential(challenge)
-        requests = httpx_mock.get_requests()
-        assert len(requests) > 0
-        for r in requests:
-            assert "rpc.custom" in str(r.url)
-        assert credential.payload["type"] == "transaction"
+        with pytest.raises(ValueError, match=rf"client is restricted to {TESTNET_CHAIN_ID}"):
+            await method.create_credential(challenge)
+
+        get_chain_id.assert_awaited_once_with("https://rpc.custom")
 
     @pytest.mark.asyncio
     async def test_client_ignores_non_numeric_chain_id(self, httpx_mock: HTTPXMock) -> None:
@@ -2109,20 +2058,21 @@ class TestChainIdPropagation:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(
             account=account,
+            chain_id=TESTNET_CHAIN_ID,
+            rpc_url="https://rpc.custom",
             intents={"charge": ChargeIntent()},
         )
 
-        # RPC returns chain_id=4217 (mainnet) but challenge says 42431 (testnet)
         httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
+            url="https://rpc.custom",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},  # 4217, wrong!
         )
         httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
+            url="https://rpc.custom",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
         httpx_mock.add_response(
-            url="https://rpc.moderato.tempo.xyz",
+            url="https://rpc.custom",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
 
@@ -2134,7 +2084,7 @@ class TestChainIdPropagation:
                 "amount": "1000000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {"chainId": 42431},
+                "methodDetails": {"chainId": TESTNET_CHAIN_ID},
             },
             realm="test.example.com",
             request_b64="e30",
@@ -2204,14 +2154,13 @@ class TestAccessKeySigning:
         )
 
         # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
-        # Challenge chainId=4217 resolves to rpc.tempo.xyz
         httpx_mock.add_response(
-            url="https://rpc.tempo.xyz",
+            url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
         for _ in range(3):
             httpx_mock.add_response(
-                url="https://rpc.tempo.xyz",
+                url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
             )
 
