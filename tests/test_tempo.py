@@ -23,6 +23,9 @@ from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
 from mpp.methods.tempo.intents import (
+    APPROVE_SELECTOR,
+    STABLECOIN_DEX,
+    SWAP_EXACT_AMOUNT_OUT_SELECTOR,
     TRANSFER_SELECTOR,
     TRANSFER_TOPIC,
     TRANSFER_WITH_MEMO_SELECTOR,
@@ -1249,40 +1252,87 @@ class TestSponsoredTransfer:
 class TestCosignAsFeePayer:
     """Tests for local fee payer co-signing."""
 
+    def _make_intent(self) -> ChargeIntent:
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        return intent
+
+    def _encode_transfer_data(
+        self,
+        recipient: str,
+        amount: int,
+        memo: str | None = None,
+    ) -> str:
+        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
+        to_padded = recipient[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        data = f"0x{selector}{to_padded}{amount_padded}"
+        if memo is not None:
+            data += memo[2:] if memo.startswith("0x") else memo
+        return data
+
+    def _encode_approve_data(self, spender: str, amount: int) -> str:
+        spender_padded = spender[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        return f"0x{APPROVE_SELECTOR}{spender_padded}{amount_padded}"
+
+    def _encode_swap_data(
+        self,
+        token_in: str,
+        token_out: str,
+        amount_out: int,
+        max_amount_in: int,
+    ) -> str:
+        return (
+            f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
+            f"{token_in[2:].lower().zfill(64)}"
+            f"{token_out[2:].lower().zfill(64)}"
+            f"{hex(amount_out)[2:].zfill(64)}"
+            f"{hex(max_amount_in)[2:].zfill(64)}"
+        )
+
     def _build_client_tx(
         self,
         currency: str = "0x20c0000000000000000000000000000000000000",
         recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         amount: int = 1000000,
         chain_id: int = 42431,
+        calls: tuple | None = None,
+        access_list: tuple = (),
+        gas_limit: int = 100000,
+        max_fee_per_gas: int = 1,
+        max_priority_fee_per_gas: int = 1,
+        valid_before: int | None = None,
         with_memo: str | None = None,
     ) -> str:
         """Build a client-signed fee-payer-awaiting transaction."""
         from pytempo import Call, TempoTransaction
 
-        if with_memo:
-            selector = "95777d59"
-            to_padded = recipient[2:].lower().zfill(64)
-            amount_padded = hex(amount)[2:].zfill(64)
-            memo_clean = with_memo[2:] if with_memo.startswith("0x") else with_memo
-            transfer_data = f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
-        else:
-            selector = "a9059cbb"
-            to_padded = recipient[2:].lower().zfill(64)
-            amount_padded = hex(amount)[2:].zfill(64)
-            transfer_data = f"0x{selector}{to_padded}{amount_padded}"
+        if calls is None:
+            calls = (
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(recipient, amount, with_memo),
+                ),
+            )
+
+        if valid_before is None:
+            valid_before = int(datetime.now(UTC).timestamp()) + 300
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
-            gas_limit=100000,
-            max_fee_per_gas=1,
-            max_priority_fee_per_gas=1,
+            gas_limit=gas_limit,
+            max_fee_per_gas=max_fee_per_gas,
+            max_priority_fee_per_gas=max_priority_fee_per_gas,
             nonce=0,
             nonce_key=(1 << 256) - 1,
             fee_token=None,
             awaiting_fee_payer=True,
-            valid_before=9999999999,
-            calls=(Call.create(to=currency, value=0, data=transfer_data),),
+            valid_before=valid_before,
+            calls=calls,
+            access_list=access_list,
         )
 
         signed = tx.sign(TEST_PRIVATE_KEY)
@@ -1293,15 +1343,7 @@ class TestCosignAsFeePayer:
 
     def test_cosign_roundtrip(self) -> None:
         """Should successfully co-sign a valid client transaction."""
-        fee_payer_key = "0x" + "ab" * 32
-        fee_payer = TempoAccount.from_key(fee_payer_key)
-
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(
-            fee_payer=fee_payer,
-            rpc_url="https://rpc.test",
-            intents={"charge": intent},
-        )
+        intent = self._make_intent()
 
         raw_tx = self._build_client_tx()
         result = intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
@@ -1311,18 +1353,14 @@ class TestCosignAsFeePayer:
 
     def test_cosign_rejects_wrong_tx_type(self) -> None:
         """Should reject transactions that aren't type 0x78."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         with pytest.raises(VerificationError, match="Failed to deserialize"):
             intent._cosign_as_fee_payer("0x02abcdef", "0x20c0000000000000000000000000000000000000")
 
     def test_cosign_rejects_malformed_hex(self) -> None:
         """Should reject non-hex input."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         with pytest.raises(VerificationError, match="Failed to deserialize"):
             intent._cosign_as_fee_payer("0xZZZZ", "0x20c0000000000000000000000000000000000000")
@@ -1336,9 +1374,7 @@ class TestCosignAsFeePayer:
 
     def test_cosign_validates_call_target(self) -> None:
         """Should reject tx targeting wrong currency when request is provided."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         raw_tx = self._build_client_tx(
             currency="0x20c0000000000000000000000000000000000000",
@@ -1356,9 +1392,7 @@ class TestCosignAsFeePayer:
 
     def test_cosign_validates_amount(self) -> None:
         """Should reject tx with wrong amount when request is provided."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         raw_tx = self._build_client_tx(amount=1000000)
 
@@ -1373,9 +1407,7 @@ class TestCosignAsFeePayer:
 
     def test_cosign_validates_recipient(self) -> None:
         """Should reject tx with wrong recipient when request is provided."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         raw_tx = self._build_client_tx(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00")
 
@@ -1390,9 +1422,7 @@ class TestCosignAsFeePayer:
 
     def test_cosign_accepts_matching_request(self) -> None:
         """Should succeed when tx matches request parameters."""
-        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        intent = self._make_intent()
 
         raw_tx = self._build_client_tx(
             currency="0x20c0000000000000000000000000000000000000",
@@ -1409,9 +1439,248 @@ class TestCosignAsFeePayer:
         result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
 
+    def test_cosign_rejects_extra_trailing_call(self) -> None:
+        """Should reject sponsored transactions with extra trailing calls."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x1111111111111111111111111111111111111111", 1
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="unauthorized extra calls"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_rejects_extra_leading_call(self) -> None:
+        """Should reject sponsored transactions with extra leading calls."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x1111111111111111111111111111111111111111", 1
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="unauthorized extra calls"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_rejects_disallowed_selector(self) -> None:
+        """Should reject sponsored transactions with non-payment selectors."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data="0xdeadbeef",
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="disallowed call pattern"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_rejects_approve_binding_mismatch(self) -> None:
+        """Should reject swap prefixes whose approval is bound to the wrong token."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x0000000000000000000000000000000000000004",
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, 2000000),
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        "0x0000000000000000000000000000000000000003",
+                        "0x20c0000000000000000000000000000000000000",
+                        1000000,
+                        2000000,
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="approve target does not match"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_rejects_gas_over_policy(self) -> None:
+        """Should reject sponsored transactions above the gas limit policy."""
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(gas_limit=2_000_001)
+
+        with pytest.raises(VerificationError, match="gas limit exceeds sponsor policy"):
+            intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_max_fee_over_policy(self) -> None:
+        """Should reject sponsored transactions above the max fee per gas policy."""
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(max_fee_per_gas=100_000_000_001)
+
+        with pytest.raises(VerificationError, match="max fee per gas exceeds sponsor policy"):
+            intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_priority_fee_above_max_fee(self) -> None:
+        """Should reject inconsistent fee caps."""
+        intent = self._make_intent()
+        with patch("pytempo.models.TempoTransaction.validate", return_value=None):
+            raw_tx = self._build_client_tx(max_fee_per_gas=5, max_priority_fee_per_gas=6)
+
+        with pytest.raises(VerificationError, match="max priority fee per gas exceeds max fee"):
+            intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_total_fee_budget_over_policy(self) -> None:
+        """Should reject sponsored transactions above the total fee budget."""
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(gas_limit=1_000_000, max_fee_per_gas=60_000_000_000)
+
+        with pytest.raises(VerificationError, match="total fee budget exceeds sponsor policy"):
+            intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_validity_window_over_policy(self) -> None:
+        """Should reject sponsored transactions whose validity window is too long."""
+        intent = self._make_intent()
+        with patch("mpp.methods.tempo.intents.time.time", return_value=1_700_000_000):
+            raw_tx = self._build_client_tx(valid_before=1_700_000_000 + 901)
+            with pytest.raises(VerificationError, match="validity window exceeds sponsor policy"):
+                intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_rejects_non_empty_access_list(self) -> None:
+        """Should reject sponsored transactions with access lists."""
+        from pytempo import AccessListItem
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            access_list=(
+                AccessListItem.create(
+                    address="0x1111111111111111111111111111111111111111",
+                    storage_keys=(b"\x00" * 32,),
+                ),
+            )
+        )
+
+        with pytest.raises(VerificationError, match="access list is not allowed"):
+            intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+
+    def test_cosign_accepts_swap_prefix_when_bound_correctly(self) -> None:
+        """Should accept approve + swap + transfer when the swap is bound correctly."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x0000000000000000000000000000000000000003",
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, 2000000),
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        "0x0000000000000000000000000000000000000003",
+                        "0x20c0000000000000000000000000000000000000",
+                        1000000,
+                        2000000,
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+        assert result.startswith("0x76")
+
 
 class TestValidateTransactionPayload:
     """Tests for _validate_transaction_payload with both 0x76 and 0x78."""
+
+    def _encode_transfer_data(
+        self,
+        recipient: str,
+        amount: int,
+        memo: str | None = None,
+    ) -> str:
+        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
+        to_padded = recipient[2:].lower().zfill(64)
+        amount_padded = hex(amount)[2:].zfill(64)
+        data = f"0x{selector}{to_padded}{amount_padded}"
+        if memo is not None:
+            data += memo[2:] if memo.startswith("0x") else memo
+        return data
 
     def _build_0x78_envelope(
         self,
@@ -1425,12 +1694,7 @@ class TestValidateTransactionPayload:
 
         from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
 
-        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
-        to_padded = recipient[2:].lower().zfill(64)
-        amount_padded = hex(amount)[2:].zfill(64)
-        transfer_data = f"0x{selector}{to_padded}{amount_padded}"
-        if memo is not None:
-            transfer_data += memo[2:] if memo.startswith("0x") else memo
+        transfer_data = self._encode_transfer_data(recipient, amount, memo)
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -1459,12 +1723,7 @@ class TestValidateTransactionPayload:
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature
 
-        selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
-        to_padded = recipient[2:].lower().zfill(64)
-        amount_padded = hex(amount)[2:].zfill(64)
-        transfer_data = f"0x{selector}{to_padded}{amount_padded}"
-        if memo is not None:
-            transfer_data += memo[2:] if memo.startswith("0x") else memo
+        transfer_data = self._encode_transfer_data(recipient, amount, memo)
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -1527,6 +1786,48 @@ class TestValidateTransactionPayload:
         )
         sig = self._build_0x78_envelope()
         with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
+
+    def test_rejects_0x78_with_extra_call(self) -> None:
+        """Should reject a 0x78 envelope with unauthorized extra calls."""
+        from pytempo import Call, TempoTransaction
+
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+        tx = TempoTransaction.create(
+            chain_id=42431,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            fee_token=None,
+            awaiting_fee_payer=True,
+            valid_before=9999999999,
+            calls=(
+                Call.create(
+                    to=request.currency,
+                    value=0,
+                    data=self._encode_transfer_data(request.recipient, 1000000),
+                ),
+                Call.create(
+                    to=request.currency,
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x1111111111111111111111111111111111111111", 1
+                    ),
+                ),
+            ),
+        )
+        sig = "0x" + encode_fee_payer_envelope(tx.sign(TEST_PRIVATE_KEY)).hex()
+
+        with pytest.raises(VerificationError, match="unauthorized extra calls"):
             intent._validate_transaction_payload(sig, request)
 
     def test_accepts_0x76_with_matching_call(self) -> None:
