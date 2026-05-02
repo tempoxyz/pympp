@@ -132,7 +132,6 @@ class TestChargeIntegration:
         assert credential.payload["signature"].startswith("0x76")
         assert funded_payer.address in credential.source
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_verify_transaction_credential(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
@@ -193,6 +192,59 @@ class TestChargeIntegration:
 
         assert receipt.status == "success"
         assert receipt.reference == tx_hash
+
+    async def test_verify_hash_rejects_plain_transfer_without_challenge_bound_memo(
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+    ):
+        challenge_id = "test-hash-no-memo"
+        tx_hash = await _send_transfer(
+            rpc_url, funded_payer, currency, funded_recipient.address, 1000000
+        )
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(
+            payload={"type": "hash", "hash": tx_hash},
+            challenge_id=challenge_id,
+            expires=expires,
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await charge_intent.verify(credential, request_dict)
+
+    async def test_verify_hash_rejects_wrong_challenge_binding(
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+    ):
+        challenge_id = "test-hash-wrong-binding"
+        tx_hash = await _send_transfer(
+            rpc_url,
+            funded_payer,
+            currency,
+            funded_recipient.address,
+            1000000,
+            memo=encode_attribution(challenge_id="different-challenge", server_id=TEST_REALM),
+        )
+
+        expires = _future_expires()
+        request_dict = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": funded_recipient.address,
+            "expires": expires,
+        }
+        credential = make_credential(
+            payload={"type": "hash", "hash": tx_hash},
+            challenge_id=challenge_id,
+            expires=expires,
+        )
+
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await charge_intent.verify(credential, request_dict)
 
     async def test_verify_rejects_insufficient_transfer(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
@@ -571,7 +623,6 @@ class TestChargeIntegration:
         with pytest.raises(VerificationError, match="Transaction not found"):
             await charge_intent.verify(credential, request_dict)
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_verify_external_id_propagated(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
