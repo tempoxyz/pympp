@@ -1,5 +1,7 @@
 """Tests for fee payer envelope encoding/decoding (0x78 wire format)."""
 
+import time
+
 import attrs
 import pytest
 import rlp
@@ -195,7 +197,7 @@ class TestEncoderDecoderIntegration:
         from mpp.methods.tempo import TempoAccount, tempo
         from mpp.methods.tempo.intents import ChargeIntent
 
-        signed = _make_signed_tx()
+        signed = _make_signed_tx(valid_before=int(time.time()) + 300)
         envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
 
         fee_payer_key = "0x" + "ab" * 32
@@ -221,7 +223,7 @@ class TestEncoderDecoderIntegration:
         from mpp.methods.tempo.intents import ChargeIntent
         from mpp.server.intent import VerificationError
 
-        signed = _make_signed_tx()
+        signed = _make_signed_tx(valid_before=int(time.time()) + 300)
         encoded = encode_fee_payer_envelope(signed)
 
         # Tamper with sender_address (index 11) by replacing it
