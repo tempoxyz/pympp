@@ -301,9 +301,7 @@ class TempoMethod:
             resolved_nonce = 0
             valid_before = int(time.time()) + FEE_PAYER_VALID_BEFORE_SECS
             # Keep sponsored envelopes inside the server's default policy.
-            max_priority_fee_per_gas = min(
-                gas_price, get_policy(chain_id).max_priority_fee_per_gas
-            )
+            max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
         else:
             resolved_nonce_key = nonce_key
             resolved_nonce = on_chain_nonce
