@@ -285,10 +285,10 @@ class TestChargeIntegration:
         with pytest.raises(VerificationError):
             await charge_intent.verify(credential, request_dict)
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_verify_premium_charge(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
+        premium_amount = "900000000"
         method = tempo(
             account=funded_payer,
             chain_id=chain_id,
@@ -297,7 +297,9 @@ class TestChargeIntegration:
         )
         expires = _future_expires()
         request_dict = {
-            "amount": "1000000000",
+            # The dev faucet funds exactly 1_000_000_000 units, and gas is paid
+            # in the same token. Leave headroom so the payment can settle.
+            "amount": premium_amount,
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
@@ -322,7 +324,6 @@ class TestChargeIntegration:
         assert receipt.reference.startswith("0x")
         assert len(receipt.reference) >= 66
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_e2e_charge_with_fee_payer(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
@@ -410,7 +411,6 @@ class TestChargeIntegration:
         assert receipt.status == "success"
         assert receipt.reference.startswith("0x")
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_verify_rejects_wrong_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
@@ -458,21 +458,13 @@ class TestChargeIntegration:
                 "memo": server_memo,
             },
         }
-        with pytest.raises(VerificationError, match="Transfer log"):
+        with pytest.raises(VerificationError, match="no matching payment call found"):
             await charge_intent.verify(credential, server_request)
 
-    @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_default_memo_accepted_when_server_omits_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
-        """Verification fails when client defaults a memo but server omits one.
-
-        Known incompatibility: the client always adds a memo (via
-        encode_attribution) when the server doesn't specify one, so the tx
-        emits TRANSFER_WITH_MEMO_TOPIC. The server's _verify_transfer_logs
-        without memo requires TRANSFER_TOPIC, causing a topic mismatch and
-        verification failure.
-        """
+        """Auto-generated attribution memos should still verify without a server memo."""
         method = tempo(
             account=funded_payer,
             chain_id=chain_id,
@@ -501,11 +493,10 @@ class TestChargeIntegration:
         )
 
         credential = await method.create_credential(challenge)
+        receipt = await charge_intent.verify(credential, request_dict)
 
-        # Verification must fail: server looks for TRANSFER_TOPIC but the tx
-        # emits TRANSFER_WITH_MEMO_TOPIC due to the client-defaulted memo.
-        with pytest.raises(VerificationError, match="Transfer log"):
-            await charge_intent.verify(credential, request_dict)
+        assert receipt.status == "success"
+        assert receipt.reference.startswith("0x")
 
     async def test_verify_hash_replay_rejected_with_store(
         self, rpc_url, funded_payer, funded_recipient, currency
