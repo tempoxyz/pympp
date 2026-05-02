@@ -22,6 +22,8 @@ from mpp.methods.tempo import (
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo.client import TempoMethod
+from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
+from mpp.methods.tempo.fee_payer_policy import get_policy
 from mpp.methods.tempo.intents import (
     APPROVE_SELECTOR,
     STABLECOIN_DEX,
@@ -370,6 +372,58 @@ class TestTempoMethod:
         await_args = build_mock.await_args
         assert await_args is not None
         assert await_args.kwargs["memo"] == "0x" + "22" * 32
+
+    @pytest.mark.asyncio
+    async def test_create_credential_caps_fee_payer_priority_fee_to_policy(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=1337,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="test-sponsored-priority-cap",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": True, "chainId": 1337},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+
+        async def fake_rpc_call(
+            rpc_url: str,
+            method_name: str,
+            params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del params, client
+            assert rpc_url == "https://rpc.test"
+            if method_name == "eth_chainId":
+                return hex(1337)
+            if method_name == "eth_getTransactionCount":
+                return "0x1"
+            if method_name == "eth_gasPrice":
+                return hex(20_000_000_000)
+            raise AssertionError(f"Unexpected RPC method: {method_name}")
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=0x186A0)),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded, _, _, _ = decode_fee_payer_envelope(
+            bytes.fromhex(credential.payload["signature"][2:])
+        )
+        max_priority_fee_per_gas = int.from_bytes(decoded[1], "big") if decoded[1] else 0
+        assert max_priority_fee_per_gas == get_policy(1337).max_priority_fee_per_gas
 
 
 class TestChargeIntent:

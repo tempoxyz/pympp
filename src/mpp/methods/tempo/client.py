@@ -19,6 +19,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, estimate_gas
+from mpp.methods.tempo.fee_payer_policy import get_policy
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
@@ -287,6 +288,7 @@ class TempoMethod:
         )
         on_chain_nonce = int(nonce_hex, 16)
         gas_price = int(gas_price_hex, 16)
+        max_priority_fee_per_gas = gas_price
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
@@ -298,6 +300,8 @@ class TempoMethod:
             resolved_nonce_key = EXPIRING_NONCE_KEY
             resolved_nonce = 0
             valid_before = int(time.time()) + FEE_PAYER_VALID_BEFORE_SECS
+            # Keep sponsored envelopes inside the server's default policy.
+            max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
         else:
             resolved_nonce_key = nonce_key
             resolved_nonce = on_chain_nonce
@@ -324,7 +328,7 @@ class TempoMethod:
             chain_id=chain_id,
             gas_limit=gas_limit,
             max_fee_per_gas=gas_price,
-            max_priority_fee_per_gas=gas_price,
+            max_priority_fee_per_gas=max_priority_fee_per_gas,
             nonce=resolved_nonce,
             nonce_key=resolved_nonce_key,
             fee_token=None if awaiting_fee_payer else currency,
