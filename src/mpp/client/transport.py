@@ -149,6 +149,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         if not challenge or not matched_method:
             if parse_error is not None or challenges:
+                # Surface parse/method-selection failures to observers while
+                # preserving the original 402 response for the caller.
                 await self._events.emit(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
@@ -187,6 +189,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 pass  # If we can't parse, let server validate
 
         try:
+            # challenge.received is the one client event that can override the
+            # default credential creation path by returning a Credential.
             event_credential = await self._events.emit(
                 CHALLENGE_RECEIVED,
                 {

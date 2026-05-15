@@ -104,6 +104,8 @@ async def verify_or_challenge(
         return challenge
 
     async def fail(error: Exception, credential: Credential | None = None) -> Challenge:
+        # Preserve the existing challenge-on-failure flow while giving hooks a
+        # typed reason for why the submitted credential was rejected.
         challenge = await new_challenge()
         if events is not None:
             await events.emit(
@@ -156,7 +158,9 @@ async def verify_or_challenge(
             credential,
         )
 
-    # Assert echoed challenge fields match server's values
+    # Reject credentials minted for a different realm, method, or intent.
+    # This still returns a new Challenge; the only new behavior is the
+    # payment.failed hook emitted by fail().
     if echo.realm != realm or echo.method != method_name or echo.intent != intent.name:
         return await fail(
             InvalidChallengeError(echo.id, "credential does not match this route's requirements"),

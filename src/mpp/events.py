@@ -29,6 +29,8 @@ class PaymentEventName(StrEnum):
     WILDCARD = "*"
 
 
+# Public aliases preserve the string-like event API while avoiding duplicated
+# literals throughout the client and server implementations.
 CHALLENGE_RECEIVED: Final = PaymentEventName.CHALLENGE_RECEIVED
 CREDENTIAL_CREATED: Final = PaymentEventName.CREDENTIAL_CREATED
 PAYMENT_RESPONSE: Final = PaymentEventName.PAYMENT_RESPONSE
