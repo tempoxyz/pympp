@@ -13,7 +13,7 @@ from mpp.errors import (
     MalformedCredentialError,
     PaymentExpiredError,
 )
-from mpp.events import EventDispatcher
+from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -93,7 +93,7 @@ async def verify_or_challenge(
         )
         if events is not None:
             await events.emit(
-                "challenge.created",
+                CHALLENGE_CREATED,
                 {
                     "challenge": challenge,
                     "intent": intent.name,
@@ -107,7 +107,7 @@ async def verify_or_challenge(
         challenge = await new_challenge()
         if events is not None:
             await events.emit(
-                "payment.failed",
+                PAYMENT_FAILED,
                 {
                     "challenge": challenge,
                     "credential": credential,
@@ -177,25 +177,6 @@ async def verify_or_challenge(
             credential,
         )
 
-    # Reject expired challenges at the transport layer as defense-in-depth
-    if echo.expires:
-        try:
-            expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
-            if expires_dt < datetime.now(UTC):
-                return await fail(PaymentExpiredError(echo.expires), credential)
-        except (ValueError, TypeError):
-            pass
-
-    # Verify the echoed request parameters match this endpoint's expected
-    # request to prevent cross-endpoint replay when two endpoints share
-    # the same intent name but differ in amount, recipient, or currency.
-    for key, value in request.items():
-        if echo_request.get(key) != value:
-            return await fail(
-                InvalidChallengeError(echo.id, f"credential {key} does not match this route"),
-                credential,
-            )
-
     # Enforce challenge expiry — fail closed.  Credentials without an
     # expires field or with an unparseable value are rejected outright.
     if not echo.expires:
@@ -212,7 +193,7 @@ async def verify_or_challenge(
     except Exception as error:
         if events is not None:
             await events.emit(
-                "payment.failed",
+                PAYMENT_FAILED,
                 {
                     "challenge": _challenge_from_echo(echo, echo_request, echo_opaque),
                     "credential": credential,
@@ -226,7 +207,7 @@ async def verify_or_challenge(
 
     if events is not None:
         await events.emit(
-            "payment.success",
+            PAYMENT_SUCCESS,
             {
                 "challenge": _challenge_from_echo(echo, echo_request, echo_opaque),
                 "credential": credential,

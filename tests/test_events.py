@@ -40,6 +40,32 @@ class TestEventDispatcher:
         assert events == []
 
     @pytest.mark.asyncio
+    async def test_unsubscribe_is_idempotent(self) -> None:
+        dispatcher = EventDispatcher()
+
+        unsubscribe = dispatcher.on("payment.failed", lambda payload: None)
+        unsubscribe()
+        unsubscribe()
+
+    @pytest.mark.asyncio
+    async def test_first_result_stops_named_handlers(self) -> None:
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+
+        async def first(payload: object) -> str:
+            events.append("first")
+            return "credential"
+
+        dispatcher.on("challenge.received", first)
+        dispatcher.on("challenge.received", lambda payload: events.append("second"))
+        dispatcher.on("*", lambda event: events.append(f"*:{event.name}"))
+
+        result = await dispatcher.emit("challenge.received", {}, first_result=True)
+
+        assert result == "credential"
+        assert events == ["first", "*:challenge.received"]
+
+    @pytest.mark.asyncio
     async def test_handler_errors_are_swallowed(self) -> None:
         events: list[str] = []
         dispatcher = EventDispatcher()
@@ -56,3 +82,14 @@ class TestEventDispatcher:
         await dispatcher.emit("payment.success", {})
 
         assert events == ["payment.success"]
+
+    @pytest.mark.asyncio
+    async def test_wildcard_handler_errors_are_swallowed(self) -> None:
+        dispatcher = EventDispatcher()
+
+        async def fail(event: PaymentEvent) -> None:
+            raise RuntimeError("listener failed")
+
+        dispatcher.on("*", fail)
+
+        await dispatcher.emit("payment.success", {})

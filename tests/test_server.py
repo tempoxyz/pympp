@@ -253,6 +253,39 @@ class TestVerificationError:
         assert events == [f"failed:{result.id}:MalformedCredentialError"]
 
     @pytest.mark.asyncio
+    async def test_emits_payment_failed_on_invalid_hmac(self) -> None:
+        """Should emit payment.failed when the challenge ID is not server-issued."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed",
+            lambda payload: events.append(type(payload["error"]).__name__),
+        )
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="wrong-secret",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+
+        assert isinstance(result, Challenge)
+        assert events == ["InvalidChallengeError"]
+
+    @pytest.mark.asyncio
     async def test_intent_can_raise_verification_error(self) -> None:
         """VerificationError should propagate from intent."""
 
@@ -457,6 +490,26 @@ class TestChallengeExpiryEnforcement:
 
         assert isinstance(result, Challenge)
 
+    @pytest.mark.asyncio
+    async def test_non_string_challenge_expires_falls_back_to_default(self) -> None:
+        """Untyped callers passing bad expires values should still receive a challenge."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        result = await verify_or_challenge(
+            authorization=None,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires=123,  # type: ignore[arg-type]
+        )
+
+        assert isinstance(result, Challenge)
+        assert isinstance(result.expires, str)
+
 
 class TestCrossEndpointReplay:
     @pytest.mark.asyncio
@@ -509,6 +562,39 @@ class DjangoStyleRequest:
 
 
 class TestWrapPaymentHandler:
+    def test_get_authorization_returns_none_without_known_request_headers(self) -> None:
+        from mpp.server.decorator import get_authorization
+
+        assert get_authorization(object()) is None
+
+    def test_make_challenge_response_without_starlette(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import builtins
+
+        from mpp.server.decorator import make_challenge_response
+
+        real_import = builtins.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "starlette.responses":
+                raise ImportError("starlette unavailable")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", fake_import)
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+
+        result = make_challenge_response(challenge, "api.example.com")
+
+        assert result["_mpp_challenge"] is True
+        assert result["status"] == 402
+
     @pytest.mark.asyncio
     async def test_raises_type_error_when_request_is_none(self) -> None:
         """wrap_payment_handler should raise TypeError when request arg is missing."""
@@ -560,6 +646,31 @@ class TestPay:
             assert result["status"] == 402
             assert "WWW-Authenticate" in result["headers"]
             assert "Payment" in result["headers"]["WWW-Authenticate"]
+
+    @pytest.mark.asyncio
+    async def test_forwards_events_to_verify(self) -> None:
+        """Standalone pay() should forward configured event handlers."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on("challenge.created", lambda payload: events.append(payload["intent"]))
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid content"}
+
+        await handler(MockRequest())
+
+        assert events == ["charge"]
 
     @pytest.mark.asyncio
     async def test_calls_handler_with_valid_credential(self) -> None:
@@ -805,6 +916,7 @@ class TestMppPay:
         server.on_payment_success(
             lambda payload: events.append(f"success:{payload['receipt'].reference}")
         )
+        assert callable(server.on_payment_failed(lambda payload: events.append("failed")))
         server.on("*", lambda event: events.append(f"*:{event.name}"))
 
         @server.pay(amount="0.50")
@@ -1192,6 +1304,167 @@ class TestMppPay:
 
         with pytest.raises(ValueError, match=r"extra must be a dict\[str, str\]"):
             await handler(MockRequest())
+
+
+class TestMppCharge:
+    def test_store_wiring_ignores_non_dict_intents(self) -> None:
+        from mpp.store import MemoryStore
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents: list[object] = []
+
+        Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+            store=MemoryStore(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_raises_for_missing_charge_intent(self) -> None:
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(ValueError, match="does not support charge intent"):
+            await server.charge(authorization=None, amount="0.50")
+
+    @pytest.mark.asyncio
+    async def test_raises_when_charge_has_no_currency(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = None
+            recipient = "0xRecipient"
+            decimals = 6
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"currency must be set on the method or passed to charge\(\)"
+        ):
+            await server.charge(authorization=None, amount="0.50")
+
+    @pytest.mark.asyncio
+    async def test_raises_when_charge_has_no_recipient(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        class MockMethod:
+            name = "tempo"
+            currency = "0xUSD"
+            recipient = None
+            decimals = 6
+            intents = {"charge": test_intent}
+
+        server = Mpp(
+            method=MockMethod(),  # type: ignore[arg-type]
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"recipient must be set on the method or passed to charge\(\)"
+        ):
+            await server.charge(authorization=None, amount="0.50")
+
+    @pytest.mark.asyncio
+    async def test_charge_rejects_invalid_extra(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        with pytest.raises(ValueError, match=r"extra must be a dict\[str, str\]"):
+            await server.charge(
+                authorization=None,
+                amount="0.50",
+                extra={"attempts": "1", "bad": 1},  # type: ignore[dict-item]
+            )
+
+    @pytest.mark.asyncio
+    async def test_charge_includes_valid_extra(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        result = await server.charge(
+            authorization=None,
+            amount="0.50",
+            extra={"plan": "pro"},
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.request["extra"] == {"plan": "pro"}
+
+    @pytest.mark.asyncio
+    async def test_charge_rejects_splits_with_fee_payer(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        with pytest.raises(ValueError, match="splits and fee_payer cannot be used together"):
+            await server.charge(
+                authorization=None,
+                amount="0.50",
+                splits=[{"recipient": "0xRecipient", "amount": "1"}],
+                fee_payer=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_charge_includes_method_details(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        server = _make_server(test_intent)
+
+        with_splits = await server.charge(
+            authorization=None,
+            amount="0.50",
+            memo="0xabc",
+            splits=[{"recipient": "0xRecipient", "amount": "1"}],
+        )
+        with_fee_payer = await server.charge(
+            authorization=None,
+            amount="0.50",
+            fee_payer=True,
+        )
+
+        assert isinstance(with_splits, Challenge)
+        assert with_splits.request["methodDetails"]["memo"] == "0xabc"
+        assert with_splits.request["methodDetails"]["splits"] == [
+            {"recipient": "0xRecipient", "amount": "1"}
+        ]
+        assert isinstance(with_fee_payer, Challenge)
+        assert with_fee_payer.request["methodDetails"]["feePayer"] is True
 
 
 class TestMppChainIdAutoEmit:

@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpp import Challenge
+from mpp import Challenge, Credential
 from mpp.client import Client, PaymentTransport, get, post, request
 from tests import make_credential
 
@@ -162,8 +162,47 @@ class TestPaymentTransport:
         method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_challenge_received_uses_first_returned_credential(self) -> None:
+        """Should stop challenge.received handlers after a credential is returned."""
+        events: list[str] = []
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        first_credential = make_credential(payload={"hash": "0xfirst"}, challenge_id="first")
+        second_credential = make_credential(payload={"hash": "0xsecond"}, challenge_id="second")
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        def first(payload: object) -> Credential:
+            events.append("first")
+            return first_credential
+
+        def second(payload: object) -> Credential:
+            events.append("second")
+            return second_credential
+
+        transport.on_challenge_received(first)
+        transport.on_challenge_received(second)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        assert events == ["first"]
+        assert inner.requests[1].headers["Authorization"] == first_credential.to_authorization()
+
+    @pytest.mark.asyncio
     async def test_returns_402_when_no_matching_method(self) -> None:
         """Should return 402 when no matching method found."""
+        failed_payloads: list[dict] = []
         challenge = Challenge(
             id="test-id",
             method="stripe",  # No stripe method configured
@@ -180,12 +219,24 @@ class TestPaymentTransport:
 
         tempo_method = MockMethod()  # Only tempo configured
         transport = PaymentTransport(methods=[tempo_method], inner=inner)
+        transport.on_payment_failed(lambda payload: failed_payloads.append(payload))
 
         request = httpx.Request("GET", "https://example.com")
         response = await transport.handle_async_request(request)
 
         assert response.status_code == 402
         assert len(inner.requests) == 1
+        assert len(failed_payloads) == 1
+        payload = failed_payloads[0]
+        assert payload["challenge"] is None
+        assert len(payload["challenges"]) == 1
+        assert payload["challenges"][0].id == challenge.id
+        assert payload["challenges"][0].method == challenge.method
+        assert payload["credential"] is None
+        assert isinstance(payload["error"], ValueError)
+        assert payload["method"] is None
+        assert payload["request"] is request
+        assert payload["response"] is response
 
     @pytest.mark.asyncio
     async def test_returns_402_without_payment_header(self) -> None:
@@ -253,6 +304,32 @@ class TestPaymentTransport:
         assert response.status_code == 402
         assert len(inner.requests) == 1
         method.create_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unparseable_expiry_still_lets_server_validate(self) -> None:
+        """Should continue when client-side expiry parsing fails."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires="not-a-date",
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402, headers={"www-authenticate": challenge.to_www_authenticate("x")}
+                ),
+                httpx.Response(200),
+            ]
+        )
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        method.create_credential.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_handles_multiple_www_authenticate_headers(self) -> None:
@@ -346,6 +423,39 @@ class TestPaymentTransport:
 
         assert events == ["failed:test-id:ValueError"]
 
+    @pytest.mark.asyncio
+    async def test_emits_payment_failed_when_retry_raises(self) -> None:
+        """Should emit payment.failed when paid retry raises."""
+        events: list[str] = []
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+
+        class FailingRetryTransport(MockTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return httpx.Response(
+                        402,
+                        headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                    )
+                raise RuntimeError("network failed")
+
+        transport = PaymentTransport(methods=[MockMethod()], inner=FailingRetryTransport([]))
+        transport.on_payment_failed(
+            lambda payload: events.append(
+                f"failed:{payload['challenge'].id}:{type(payload['error']).__name__}"
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="network failed"):
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert events == ["failed:test-id:RuntimeError"]
+
 
 class TestClient:
     @pytest.mark.asyncio
@@ -404,6 +514,10 @@ class TestClient:
             unsubscribe = client.on_payment_failed(lambda payload: events.append("failed"))
 
             assert callable(unsubscribe)
+
+            assert callable(client.on_challenge_received(lambda payload: None))
+            assert callable(client.on_credential_created(lambda payload: None))
+            assert callable(client.on_payment_response(lambda payload: None))
 
 
 class TestConvenienceFunctions:

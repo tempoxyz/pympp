@@ -18,4 +18,13 @@ Example:
 
 from mpp import _expires as Expires
 from mpp.client.transport import Client, PaymentTransport, get, post, request
-from mpp.events import EventDispatcher, PaymentEvent
+from mpp.events import (
+    CHALLENGE_RECEIVED,
+    CREDENTIAL_CREATED,
+    PAYMENT_FAILED,
+    PAYMENT_RESPONSE,
+    WILDCARD_EVENT,
+    EventDispatcher,
+    PaymentEvent,
+    PaymentEventName,
+)
