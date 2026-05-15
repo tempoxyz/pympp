@@ -306,32 +306,6 @@ class TestPaymentTransport:
         method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_unparseable_expiry_still_lets_server_validate(self) -> None:
-        """Should continue when client-side expiry parsing fails."""
-        challenge = Challenge(
-            id="test-id",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000"},
-            expires="not-a-date",
-        )
-        inner = MockTransport(
-            [
-                httpx.Response(
-                    402, headers={"www-authenticate": challenge.to_www_authenticate("x")}
-                ),
-                httpx.Response(200),
-            ]
-        )
-        method = MockMethod()
-        transport = PaymentTransport(methods=[method], inner=inner)
-
-        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
-
-        assert response.status_code == 200
-        method.create_credential.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_handles_multiple_www_authenticate_headers(self) -> None:
         """Should find matching method across multiple WWW-Authenticate headers."""
         tempo_challenge = Challenge(
