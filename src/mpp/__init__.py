@@ -35,6 +35,7 @@ from mpp.errors import (
     PaymentRequiredError,
     VerificationFailedError,
 )
+from mpp.events import EventDispatcher, PaymentEvent
 
 
 def _b64url_encode(data: str) -> str:

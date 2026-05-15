@@ -3,6 +3,7 @@
 import pytest
 
 from mpp import Challenge, Credential, Receipt
+from mpp.events import EventDispatcher
 from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
 from tests import make_bound_credential, make_credential
@@ -38,6 +39,35 @@ class TestVerifyOrChallenge:
         assert result.intent == "charge"
         assert result.request["amount"] == "1000"
         assert result.expires is not None  # default expires is a challenge-level auth-param
+
+    @pytest.mark.asyncio
+    async def test_emits_challenge_created(self) -> None:
+        """Should emit challenge.created before returning a 402 challenge."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "challenge.created",
+            lambda payload: events.append(
+                f"challenge:{payload['challenge'].id}:{payload['request']['amount']}"
+            ),
+        )
+        dispatcher.on("*", lambda event: events.append(f"*:{event.name}"))
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        result = await verify_or_challenge(
+            authorization=None,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+
+        assert isinstance(result, Challenge)
+        assert events == [f"challenge:{result.id}:1000", "*:challenge.created"]
 
     @pytest.mark.asyncio
     async def test_returns_challenge_when_invalid_scheme(self) -> None:
@@ -85,6 +115,41 @@ class TestVerifyOrChallenge:
         assert isinstance(result, tuple)
         _, receipt = result
         assert receipt.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_emits_payment_success(self) -> None:
+        """Should emit payment.success after intent verification."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.success",
+            lambda payload: events.append(
+                f"success:{payload['challenge'].id}:{payload['receipt'].reference}"
+            ),
+        )
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+
+        assert isinstance(result, tuple)
+        assert events == [f"success:{credential.challenge.id}:0x123"]
 
 
 class TestFunctionalIntent:
@@ -160,6 +225,34 @@ class TestVerificationError:
         assert isinstance(result, Challenge)
 
     @pytest.mark.asyncio
+    async def test_emits_payment_failed_on_parse_error(self) -> None:
+        """Should emit payment.failed for rejected Payment credentials."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed",
+            lambda payload: events.append(
+                f"failed:{payload['challenge'].id}:{type(payload['error']).__name__}"
+            ),
+        )
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        result = await verify_or_challenge(
+            authorization="Payment not-valid-base64!!",
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+
+        assert isinstance(result, Challenge)
+        assert events == [f"failed:{result.id}:MalformedCredentialError"]
+
+    @pytest.mark.asyncio
     async def test_intent_can_raise_verification_error(self) -> None:
         """VerificationError should propagate from intent."""
 
@@ -183,6 +276,41 @@ class TestVerificationError:
                 realm="api.example.com",
                 secret_key="test-secret",
             )
+
+    @pytest.mark.asyncio
+    async def test_emits_payment_failed_when_intent_raises(self) -> None:
+        """Should emit payment.failed when method verification raises."""
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed",
+            lambda payload: events.append(
+                f"failed:{payload['challenge'].id}:{type(payload['error']).__name__}"
+            ),
+        )
+
+        @intent(name="charge")
+        async def failing_intent(credential: Credential, request: dict) -> Receipt:
+            raise VerificationError("Payment verification failed")
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(VerificationError, match="Payment verification failed"):
+            await verify_or_challenge(
+                authorization=credential.to_authorization(),
+                intent=failing_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+                events=dispatcher,
+            )
+
+        assert events == [f"failed:{credential.challenge.id}:VerificationError"]
 
     @pytest.mark.asyncio
     async def test_returns_receipt_for_success(self) -> None:
@@ -660,6 +788,51 @@ class TestMppPay:
             assert isinstance(result, dict)
             assert result["_mpp_challenge"] is True
             assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    async def test_exposes_server_event_helpers(self) -> None:
+        """Mpp should expose mppx-compatible server event helper methods."""
+        events: list[str] = []
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+        server.on_challenge_created(
+            lambda payload: events.append(f"challenge:{payload['request']['amount']}")
+        )
+        server.on_payment_success(
+            lambda payload: events.append(f"success:{payload['receipt'].reference}")
+        )
+        server.on("*", lambda event: events.append(f"*:{event.name}"))
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"receipt_ref": receipt.reference}
+
+        challenge_result = await handler(MockRequest())
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(challenge_result, StarletteResponse)
+        else:
+            assert isinstance(challenge_result, dict)
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        success_result = await handler(MockRequest(authorization=credential.to_authorization()))
+
+        assert success_result == {"receipt_ref": "tx-ref-456"}
+        assert events == [
+            "challenge:500000",
+            "*:challenge.created",
+            "success:tx-ref-456",
+            "*:payment.success",
+        ]
 
     @pytest.mark.asyncio
     async def test_calls_handler_with_valid_credential(self) -> None:

@@ -31,6 +31,7 @@ from mpp.errors import (
     PaymentRequiredError,
     VerificationFailedError,
 )
+from mpp.events import EventDispatcher, PaymentEvent
 from mpp.server.decorator import pay
 from mpp.server.intent import Intent, VerificationError, intent
 from mpp.server.method import Method, transform_request

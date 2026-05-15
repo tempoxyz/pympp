@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp._units import parse_units
+from mpp.events import EventDispatcher, EventHandler, Unsubscribe
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.decorator import wrap_payment_handler
 from mpp.server.method import transform_request
@@ -77,9 +78,26 @@ class Mpp:
         self.realm = realm
         self.secret_key = secret_key
         self.defaults = defaults or {}
+        self._events = EventDispatcher()
 
         if store is not None:
             self._wire_store(store)
+
+    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
+        """Register a server payment event handler."""
+        return self._events.on(name, handler)
+
+    def on_challenge_created(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for issued payment challenges."""
+        return self.on("challenge.created", handler)
+
+    def on_payment_success(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for successful payment verification."""
+        return self.on("payment.success", handler)
+
+    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for failed payment verification."""
+        return self.on("payment.failed", handler)
 
     def _wire_store(self, store: Store) -> None:
         """Inject *store* into intents that have a ``_store`` attribute set to None."""
@@ -204,6 +222,7 @@ class Mpp:
             method=self.method.name,
             description=description,
             expires=expires,
+            events=self._events,
         )
 
     def pay(
@@ -309,6 +328,7 @@ class Mpp:
                     method=self.method.name,
                     description=description,
                     expires=challenge_expires,
+                    events=self._events,
                 )
 
             return wrap_payment_handler(handler, _verify, lambda: self.realm)

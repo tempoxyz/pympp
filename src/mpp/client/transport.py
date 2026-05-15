@@ -17,6 +17,7 @@ import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
+from mpp.events import EventDispatcher, EventHandler, Unsubscribe
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +59,31 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self,
         methods: Sequence[Method],
         inner: httpx.AsyncBaseTransport | None = None,
+        events: EventDispatcher | None = None,
     ) -> None:
         self._methods = {m.name: m for m in methods}
         self._inner = inner or httpx.AsyncHTTPTransport()
+        self._events = events or EventDispatcher()
+
+    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
+        """Register a client payment event handler."""
+        return self._events.on(name, handler)
+
+    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for selected payment challenges."""
+        return self.on("challenge.received", handler)
+
+    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for created credentials."""
+        return self.on("credential.created", handler)
+
+    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for successful paid retry responses."""
+        return self.on("payment.response", handler)
+
+    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for failed automatic payment handling."""
+        return self.on("payment.failed", handler)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
@@ -74,21 +97,38 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         # Handle multiple WWW-Authenticate headers (per RFC 9110)
         www_auth_headers = response.headers.get_list("www-authenticate")
 
-        challenge = None
-        matched_method = None
+        challenges: list[Challenge] = []
+        parse_error: ParseError | None = None
         for header in www_auth_headers:
             if not header.lower().startswith("payment "):
                 continue
             try:
                 parsed = Challenge.from_www_authenticate(header)
-                if parsed.method in self._methods:
-                    challenge = parsed
-                    matched_method = self._methods[parsed.method]
-                    break
-            except ParseError:
+            except ParseError as error:
+                parse_error = error
                 continue
+            challenges.append(parsed)
+
+        challenge = None
+        matched_method = None
+        for parsed in challenges:
+            if parsed.method in self._methods:
+                challenge = parsed
+                matched_method = self._methods[parsed.method]
+                break
 
         if not challenge or not matched_method:
+            if parse_error is not None or challenges:
+                await self._events.emit(
+                    "payment.failed",
+                    {
+                        "challenges": challenges or None,
+                        "error": parse_error
+                        or ValueError("No compatible payment method for challenges"),
+                        "request": request,
+                        "response": response,
+                    },
+                )
             return response
 
         # Check expiry before paying (client-side guardrail)
@@ -97,12 +137,61 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 expires_dt = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
                 if expires_dt < datetime.now(UTC):
                     logger.warning("Challenge expired at %s, not paying", challenge.expires)
+                    await self._events.emit(
+                        "payment.failed",
+                        {
+                            "challenge": challenge,
+                            "challenges": challenges,
+                            "error": ValueError(f"Challenge expired at {challenge.expires}"),
+                            "method": matched_method,
+                            "request": request,
+                            "response": response,
+                        },
+                    )
                     return response
             except ValueError:
                 pass  # If we can't parse, let server validate
 
-        credential = await matched_method.create_credential(challenge)
-        auth_header = credential.to_authorization()
+        try:
+            event_credential = await self._events.emit(
+                "challenge.received",
+                {
+                    "challenge": challenge,
+                    "challenges": challenges,
+                    "method": matched_method,
+                    "request": request,
+                    "response": response,
+                },
+            )
+            credential = (
+                event_credential
+                if isinstance(event_credential, Credential)
+                else await matched_method.create_credential(challenge)
+            )
+            await self._events.emit(
+                "credential.created",
+                {
+                    "challenge": challenge,
+                    "credential": credential,
+                    "method": matched_method,
+                    "request": request,
+                    "response": response,
+                },
+            )
+            auth_header = credential.to_authorization()
+        except Exception as error:
+            await self._events.emit(
+                "payment.failed",
+                {
+                    "challenge": challenge,
+                    "challenges": challenges,
+                    "error": error,
+                    "method": matched_method,
+                    "request": request,
+                    "response": response,
+                },
+            )
+            raise
 
         headers = httpx.Headers(request.headers)
         headers["Authorization"] = auth_header
@@ -115,7 +204,36 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             extensions=request.extensions,
         )
 
-        return await self._inner.handle_async_request(retry_request)
+        try:
+            payment_response = await self._inner.handle_async_request(retry_request)
+        except Exception as error:
+            await self._events.emit(
+                "payment.failed",
+                {
+                    "challenge": challenge,
+                    "challenges": challenges,
+                    "credential": credential,
+                    "error": error,
+                    "method": matched_method,
+                    "request": request,
+                    "response": response,
+                },
+            )
+            raise
+
+        if payment_response.is_success:
+            await self._events.emit(
+                "payment.response",
+                {
+                    "challenge": challenge,
+                    "credential": credential,
+                    "method": matched_method,
+                    "request": request,
+                    "response": payment_response,
+                },
+            )
+
+        return payment_response
 
     async def aclose(self) -> None:
         """Close the inner transport."""
@@ -133,6 +251,26 @@ class Client:
     def __init__(self, methods: Sequence[Method]) -> None:
         self._transport = PaymentTransport(methods)
         self._client = httpx.AsyncClient(transport=self._transport)
+
+    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
+        """Register a client payment event handler."""
+        return self._transport.on(name, handler)
+
+    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for selected payment challenges."""
+        return self.on("challenge.received", handler)
+
+    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for created credentials."""
+        return self.on("credential.created", handler)
+
+    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for successful paid retry responses."""
+        return self.on("payment.response", handler)
+
+    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
+        """Register a handler for failed automatic payment handling."""
+        return self.on("payment.failed", handler)
 
     async def __aenter__(self) -> Client:
         await self._client.__aenter__()

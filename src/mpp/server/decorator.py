@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import PaymentRequiredError
+from mpp.events import EventDispatcher
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
@@ -127,6 +128,7 @@ def pay(
     secret_key: str | None = None,
     method: str | None = None,
     description: str | None = None,
+    events: EventDispatcher | None = None,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
     Callable[[Any], Awaitable[R | Any]],
@@ -185,6 +187,7 @@ def pay(
                 secret_key=resolved_secret_key,
                 method=method,
                 description=description,
+                events=events,
             )
 
         return wrap_payment_handler(handler, _verify, lambda: resolved_realm)
