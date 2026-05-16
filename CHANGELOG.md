@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 (2026-05-16)
+
+### Minor Changes
+
+- Added client and server payment lifecycle hooks (`EventDispatcher`, `PaymentEvent`) for observing challenge selection, credential creation, payment responses, successes, and failures. Both `PaymentTransport`/`Client` and `Mpp`/`pay` now expose typed `on_*` registration methods with unsubscribe callbacks. (by @BrendanRyan, [#140](https://github.com/tempoxyz/pympp/pull/140))
+
 ## 0.7.0 (2026-05-01)
 
 ### Minor Changes
