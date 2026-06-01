@@ -880,6 +880,66 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
+    async def test_verify_hash_duplicate_rejects_without_receipt_fetch(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        tx_hash = "0xabc123"
+        await store.put_if_absent(f"mpp:charge:{tx_hash}", tx_hash)
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock()
+        intent._http_client = mock_client
+
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=future)
+
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        mock_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_verify_hash_releases_reservation_on_validation_error(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        tx_hash = "0xabc123"
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {"jsonrpc": "2.0", "result": {"status": "0x0", "logs": []}, "id": 1},
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=future)
+
+        with pytest.raises(VerificationError, match="Transaction reverted"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        assert await store.get(f"mpp:charge:{tx_hash}") is None
+
+    @pytest.mark.asyncio
     async def test_verify_transaction_success(self) -> None:
         """Should verify transaction credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()

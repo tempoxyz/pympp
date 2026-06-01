@@ -500,18 +500,24 @@ class ChargeIntent:
         """Verify a credential with a transaction hash."""
         client = await self._get_client()
 
-        receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-        self._verify_receipt_transfers(
-            receipt_data,
-            request,
-            challenge_id=challenge_id,
-            realm=realm,
-        )
-
+        store_key: str | None = None
         if self._store is not None:
             store_key = f"mpp:charge:{payload.hash.lower()}"
             if not await self._store.put_if_absent(store_key, payload.hash):
                 raise VerificationError("Transaction hash already used")
+
+        try:
+            receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
+            self._verify_receipt_transfers(
+                receipt_data,
+                request,
+                challenge_id=challenge_id,
+                realm=realm,
+            )
+        except Exception:
+            if self._store is not None and store_key is not None:
+                await self._store.delete(store_key)
+            raise
 
         return Receipt.success(payload.hash)
 
