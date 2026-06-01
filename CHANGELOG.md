@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 (2026-06-01)
+
+### Patch Changes
+
+- Added strict validation for payment method IDs, requiring them to match `1*LOWERALPHA` (lowercase letters only). Updated `Receipt` default method from empty string to `"tempo"` and fixed test fixtures to use valid method IDs. (by @EmmaJamieson-Hoare, [#142](https://github.com/tempoxyz/pympp/pull/142))
+
 ## 0.8.0 (2026-05-16)
 
 ### Minor Changes
