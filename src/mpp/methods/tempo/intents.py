@@ -46,6 +46,18 @@ MAX_SPLITS = 10
 MAX_TRANSFERS = MAX_SPLITS + 1
 
 
+def _raw_transaction_hash(raw_tx: str) -> str:
+    """Return the transaction hash for a raw signed transaction."""
+    from eth_hash.auto import keccak
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
+    except ValueError as err:
+        raise VerificationError("Invalid transaction signature") from err
+
+    return "0x" + keccak(tx_bytes).hex()
+
+
 def _parse_memo_bytes(memo: str | None) -> bytes | None:
     """Parse a hex memo string into 32 bytes.
 
@@ -461,7 +473,12 @@ class ChargeIntent:
                 realm=credential.challenge.realm,
             )
         else:
-            return await self._verify_transaction(payload, req)
+            return await self._verify_transaction(
+                payload,
+                req,
+                challenge_id=credential.challenge.id,
+                realm=credential.challenge.realm,
+            )
 
     async def _verify_hash(
         self,
@@ -473,45 +490,13 @@ class ChargeIntent:
         """Verify a credential with a transaction hash."""
         client = await self._get_client()
 
-        rpc_url = self._get_rpc_url()
-        response = await client.post(
-            rpc_url,
-            json={
-                "jsonrpc": "2.0",
-                "method": "eth_getTransactionReceipt",
-                "params": [payload.hash],
-                "id": 1,
-            },
+        receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
+        self._verify_receipt_transfers(
+            receipt_data,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
         )
-        response.raise_for_status()
-        result = response.json()
-
-        if "error" in result:
-            raise VerificationError("RPC request failed")
-
-        receipt_data = result.get("result")
-        if not receipt_data:
-            raise VerificationError("Transaction not found")
-
-        if receipt_data.get("status") != "0x1":
-            raise VerificationError("Transaction reverted")
-
-        matched_logs = self._verify_transfer_logs(receipt_data, request)
-        if not matched_logs:
-            raise VerificationError(
-                "Transaction must contain a Transfer log matching request parameters"
-            )
-
-        # Only verify challenge binding when using auto-generated attribution memos.
-        # Explicit memos (set by the server) are strictly matched by _verify_transfer_logs
-        # but are NOT challenge-bound. Callers that set explicit memos are responsible
-        # for ensuring memo uniqueness per challenge to prevent cross-challenge hash reuse.
-        if request.methodDetails.memo is None:
-            self._assert_challenge_bound_memo(
-                matched_logs,
-                challenge_id=challenge_id,
-                realm=realm,
-            )
 
         if self._store is not None:
             store_key = f"mpp:charge:{payload.hash.lower()}"
@@ -539,6 +524,60 @@ class ChargeIntent:
             raise VerificationError(
                 "Payment verification failed: memo is not bound to this challenge."
             )
+
+    async def _fetch_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any]:
+        rpc_url = self._get_rpc_url()
+        response = await client.post(
+            rpc_url,
+            json={
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionReceipt",
+                "params": [tx_hash],
+                "id": 1,
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        if "error" in result:
+            raise VerificationError("RPC request failed")
+
+        receipt_data = result.get("result")
+        if not receipt_data:
+            raise VerificationError("Transaction not found")
+        if not isinstance(receipt_data, dict):
+            raise VerificationError("Invalid transaction receipt")
+
+        return receipt_data
+
+    def _verify_receipt_transfers(
+        self,
+        receipt_data: dict[str, Any],
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+    ) -> list[MatchedTransferLog]:
+        if receipt_data.get("status") != "0x1":
+            raise VerificationError("Transaction reverted")
+
+        matched_logs = self._verify_transfer_logs(receipt_data, request)
+        if not matched_logs:
+            raise VerificationError(
+                "Transaction must contain a Transfer log matching request parameters"
+            )
+
+        # Only verify challenge binding when using auto-generated attribution memos.
+        # Explicit memos (set by the server) are strictly matched by _verify_transfer_logs
+        # but are NOT challenge-bound. Callers that set explicit memos are responsible
+        # for ensuring memo uniqueness per challenge to prevent cross-challenge hash reuse.
+        if request.methodDetails.memo is None:
+            self._assert_challenge_bound_memo(
+                matched_logs,
+                challenge_id=challenge_id,
+                realm=realm,
+            )
+
+        return matched_logs
 
     def _verify_single_transfer_log(
         self,
@@ -709,6 +748,8 @@ class ChargeIntent:
         self,
         payload: TransactionCredentialPayload,
         request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -757,43 +798,66 @@ class ChargeIntent:
                     raise VerificationError("Fee payer returned no signed transaction")
 
         rpc_url = self._get_rpc_url()
-        response = await client.post(
-            rpc_url,
-            json={
-                "jsonrpc": "2.0",
-                "method": "eth_sendRawTransactionSync",
-                "params": [raw_tx],
-                "id": 1,
-            },
-        )
-        response.raise_for_status()
-        result = response.json()
+        reserved_tx_hash: str | None = None
+        store_key: str | None = None
+        if self._store is not None:
+            reserved_tx_hash = _raw_transaction_hash(raw_tx)
+            store_key = f"mpp:charge:{reserved_tx_hash.lower()}"
+            if not await self._store.put_if_absent(store_key, reserved_tx_hash):
+                receipt_data = await self._fetch_transaction_receipt(client, reserved_tx_hash)
+                self._verify_receipt_transfers(
+                    receipt_data,
+                    request,
+                    challenge_id=challenge_id,
+                    realm=realm,
+                )
+                return Receipt.success(reserved_tx_hash)
+
+        try:
+            response = await client.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_sendRawTransactionSync",
+                    "params": [raw_tx],
+                    "id": 1,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception:
+            if self._store is not None and store_key is not None:
+                await self._store.delete(store_key)
+            raise
 
         if "error" in result:
+            if self._store is not None and store_key is not None:
+                await self._store.delete(store_key)
             raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
 
         receipt_data = result.get("result")
         if not receipt_data:
             raise VerificationError("No transaction receipt returned")
+        if not isinstance(receipt_data, dict):
+            raise VerificationError("Invalid transaction receipt")
 
-        if receipt_data.get("status") != "0x1":
-            raise VerificationError("Transaction reverted")
+        self._verify_receipt_transfers(
+            receipt_data,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+        )
 
-        if not self._verify_transfer_logs(receipt_data, request):
-            raise VerificationError(
-                "Transaction must contain a Transfer log matching request parameters"
-            )
-
-        tx_hash = receipt_data.get("transactionHash")
-        if not tx_hash:
+        receipt_tx_hash = receipt_data.get("transactionHash")
+        if not receipt_tx_hash:
             raise VerificationError("No transaction hash returned")
+        if not isinstance(receipt_tx_hash, str):
+            raise VerificationError("Invalid transaction hash returned")
 
-        if self._store is not None:
-            store_key = f"mpp:charge:{tx_hash.lower()}"
-            if not await self._store.put_if_absent(store_key, tx_hash):
-                raise VerificationError("Transaction hash already used")
+        if reserved_tx_hash is not None and receipt_tx_hash.lower() != reserved_tx_hash.lower():
+            raise VerificationError("Receipt transaction hash does not match submitted transaction")
 
-        return Receipt.success(tx_hash)
+        return Receipt.success(receipt_tx_hash)
 
     def _cosign_as_fee_payer(
         self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
