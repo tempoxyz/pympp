@@ -27,6 +27,7 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
 _AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
+# Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
 _PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
 
 
