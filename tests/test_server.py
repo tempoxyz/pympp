@@ -186,7 +186,7 @@ class TestClassBasedIntent:
             request={},
             realm="test",
             secret_key="test-secret",
-            method="custom-method",
+            method="custompay",
             intent="custom",
         )
         auth_header = credential.to_authorization()
@@ -197,7 +197,7 @@ class TestClassBasedIntent:
             request={},
             realm="test",
             secret_key="test-secret",
-            method="custom-method",
+            method="custompay",
         )
 
         assert isinstance(result, tuple)
@@ -779,7 +779,7 @@ class TestPay:
             request={"amount": "1000"},
             realm="api.example.com",
             secret_key="test-secret",
-            method="custom-method",
+            method="custompay",
         )
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
@@ -796,7 +796,7 @@ class TestPay:
             assert result["_mpp_challenge"] is True
             www_auth = result["headers"]["WWW-Authenticate"]
         challenge = Challenge.from_www_authenticate(www_auth)
-        assert challenge.method == "custom-method"
+        assert challenge.method == "custompay"
 
 
 def _make_server(test_intent):

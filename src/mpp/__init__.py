@@ -378,7 +378,7 @@ class Receipt:
     status: Literal["success"]
     timestamp: datetime
     reference: str
-    method: str = ""
+    method: str = "tempo"
     external_id: str | None = None
     extra: dict[str, Any] | None = None
 
