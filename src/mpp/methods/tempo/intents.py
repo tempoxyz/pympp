@@ -196,6 +196,14 @@ def _rpc_error_msg(result: dict) -> str:
     return str(error_obj)
 
 
+def _is_already_known_transaction_error(result: dict[str, Any]) -> bool:
+    """Return true when an RPC send error means the tx was already accepted."""
+    if "error" not in result:
+        return False
+    msg = _rpc_error_msg(result).lower()
+    return "already known" in msg or "known transaction" in msg
+
+
 def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
     """Check if ABI-encoded calldata matches the expected transfer parameters."""
     if len(call_data_hex) < 136:
@@ -831,6 +839,17 @@ class ChargeIntent:
             raise
 
         if "error" in result:
+            if _is_already_known_transaction_error(result):
+                tx_hash = reserved_tx_hash or _raw_transaction_hash(raw_tx)
+                receipt_data = await self._fetch_transaction_receipt(client, tx_hash)
+                self._verify_receipt_transfers(
+                    receipt_data,
+                    request,
+                    challenge_id=challenge_id,
+                    realm=realm,
+                )
+                return Receipt.success(tx_hash)
+
             if self._store is not None and store_key is not None:
                 await self._store.delete(store_key)
             raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
