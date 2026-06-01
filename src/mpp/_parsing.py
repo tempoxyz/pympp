@@ -27,6 +27,7 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
 _AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
+_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
 
 
 class ParseError(Exception):
@@ -75,6 +76,12 @@ def _unescape_quoted(s: str) -> str:
     return re.sub(r"\\(.)", r"\1", s)
 
 
+def _validate_payment_method_id(method: str) -> None:
+    """Validate payment-method-id = 1*LOWERALPHA."""
+    if not _PAYMENT_METHOD_ID_RE.fullmatch(method):
+        raise ParseError(f"Invalid payment method id: {method!r}")
+
+
 def _parse_auth_params(params_str: str) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
     params: dict[str, str] = {}
@@ -119,6 +126,7 @@ def parse_www_authenticate(header: str) -> Challenge:
     method = params.get("method")
     if not method:
         raise ParseError("Missing 'method' field")
+    _validate_payment_method_id(method)
 
     intent = params.get("intent")
     if not intent:
@@ -214,10 +222,13 @@ def parse_authorization(header: str) -> Credential:
     if "id" not in challenge_data:
         raise ParseError("Credential challenge missing required field: id")
 
+    method = str(challenge_data.get("method", ""))
+    _validate_payment_method_id(method)
+
     echo = ChallengeEcho(
         id=str(challenge_data["id"]),
         realm=str(challenge_data.get("realm", "")),
-        method=str(challenge_data.get("method", "")),
+        method=method,
         intent=str(challenge_data.get("intent", "")),
         request=str(challenge_data.get("request", "")),
         expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
@@ -302,6 +313,8 @@ def parse_payment_receipt(header: str) -> Receipt:
         raise ParseError("Invalid receipt status")
 
     timestamp = _parse_timestamp(str(data["timestamp"]))
+    method = str(data["method"])
+    _validate_payment_method_id(method)
 
     extra = data.get("extra")
 
@@ -309,7 +322,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         status=status,
         timestamp=timestamp,
         reference=str(data["reference"]),
-        method=str(data.get("method", "")),
+        method=method,
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         extra=extra if isinstance(extra, dict) else None,
     )

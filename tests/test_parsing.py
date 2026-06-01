@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
@@ -9,6 +10,12 @@ import pytest
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
 from mpp._parsing import MAX_HEADER_PAYLOAD_SIZE, ParseError
 from tests import make_credential
+
+INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo2", "tempo-pay", "tempo_pay", "tempo.pay")
+
+
+def _b64_json(data: Mapping[str, object]) -> str:
+    return base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
 
 
 class TestChallenge:
@@ -80,6 +87,16 @@ class TestChallenge:
         # Missing method field
         header = 'Payment id="test", realm="test", intent="charge", request="e30"'
         with pytest.raises(ParseError, match="Missing 'method' field"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_parse_rejects_invalid_method_id(self, method: str) -> None:
+        header = (
+            f'Payment id="test", realm="api.example.com", method="{method}", '
+            'intent="charge", request="e30"'
+        )
+
+        with pytest.raises(ParseError, match="Invalid payment method id"):
             Challenge.from_www_authenticate(header)
 
     def test_roundtrip_with_optional_fields(self) -> None:
@@ -238,6 +255,23 @@ class TestCredential:
         with pytest.raises(ParseError, match="Credential challenge missing required field: id"):
             Credential.from_authorization(header)
 
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_parse_rejects_invalid_challenge_method_id(self, method: str) -> None:
+        data = {
+            "challenge": {
+                "id": "test-id",
+                "realm": "api.example.com",
+                "method": method,
+                "intent": "charge",
+                "request": "e30",
+            },
+            "payload": {},
+        }
+        header = "Payment " + _b64_json(data)
+
+        with pytest.raises(ParseError, match="Invalid payment method id"):
+            Credential.from_authorization(header)
+
     def test_roundtrip_with_optional_challenge_fields(self) -> None:
         credential = Credential(
             challenge=ChallengeEcho(
@@ -322,4 +356,17 @@ class TestReceipt:
         }
         b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         with pytest.raises(ParseError, match="Invalid timestamp format"):
+            Receipt.from_payment_receipt(b64)
+
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_parse_rejects_invalid_method_id(self, method: str) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": "2024-01-20T12:00:00Z",
+            "reference": "0xabc",
+            "method": method,
+        }
+        b64 = _b64_json(payload)
+
+        with pytest.raises(ParseError, match="Invalid payment method id"):
             Receipt.from_payment_receipt(b64)
