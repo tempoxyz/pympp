@@ -5,6 +5,7 @@ Implements the charge intent for Tempo payments.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -44,6 +45,7 @@ STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 
 MAX_SPLITS = 10
 MAX_TRANSFERS = MAX_SPLITS + 1
+ALREADY_KNOWN_TRANSACTION_RE = re.compile(r"\b(?:already known|known transaction)\b")
 
 
 def _raw_transaction_hash(raw_tx: str) -> str:
@@ -201,7 +203,7 @@ def _is_already_known_transaction_error(result: dict[str, Any]) -> bool:
     if "error" not in result:
         return False
     msg = _rpc_error_msg(result).lower()
-    return "already known" in msg or "known transaction" in msg
+    return ALREADY_KNOWN_TRANSACTION_RE.search(msg) is not None
 
 
 def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:

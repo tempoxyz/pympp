@@ -1329,6 +1329,48 @@ class TestChargeIntent:
         assert await store.get(f"mpp:charge:{tx_hash}") is None
 
     @pytest.mark.asyncio
+    async def test_verify_transaction_unknown_type_error_releases_reservation(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        raw_signature = "0xabcdef1234567890"
+        tx_hash = _raw_transaction_hash(raw_signature)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200,
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"message": "unknown transaction type"},
+                    "id": 1,
+                },
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_signature},
+            expires=future,
+        )
+
+        with pytest.raises(VerificationError, match="Transaction submission failed"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        assert await store.get(f"mpp:charge:{tx_hash}") is None
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["eth_sendRawTransactionSync"]
+
+    @pytest.mark.asyncio
     async def test_verify_transaction_already_known_error_fetches_receipt(self) -> None:
         from mpp.store import MemoryStore
 
