@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 (2026-06-02)
+
+### Patch Changes
+
+- Hardened Tempo transaction credential verification by enforcing challenge-bound attribution memos and reserving transaction hashes before broadcast to avoid duplicate rebroadcasts. (by @EmmaJamieson-Hoare, [#144](https://github.com/tempoxyz/pympp/pull/144))
+
 ## 0.8.1 (2026-06-01)
 
 ### Patch Changes
