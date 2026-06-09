@@ -1048,6 +1048,43 @@ class TestMppPay:
         assert result["receipt_ref"] == "tx-ref-456"
 
     @pytest.mark.asyncio
+    async def test_body_callback_binds_and_verifies_actual_request_body(self) -> None:
+        """server.pay() should use the configured body callback for digest verification."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50", body=lambda req: req.body)
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"receipt_ref": receipt.reference}
+
+        original_body = b'{"query":"paid"}'
+        challenge_result = await handler(MockRequest(body=original_body))
+        headers = challenge_result.headers if HAS_STARLETTE else challenge_result["headers"]
+        challenge = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
+        assert challenge.digest == BodyDigest.compute(original_body)
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            digest=challenge.digest,
+        )
+
+        result = await handler(
+            MockRequest(
+                authorization=credential.to_authorization(),
+                body=original_body,
+            )
+        )
+
+        assert result == {"receipt_ref": "tx-ref-456"}
+
+    @pytest.mark.asyncio
     async def test_converts_human_amount_to_base_units(self) -> None:
         """server.pay() should convert human-readable amount via charge()."""
 
