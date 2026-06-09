@@ -776,6 +776,53 @@ class TestPay:
         assert result["data"] == "paid content"
         assert result["receipt_ref"] == "tx-ref-123"
 
+    def test_starlette_route_scope_binds_real_framework_abi(self) -> None:
+        """Standalone pay() should bind Starlette route/resource/query scope."""
+        pytest.importorskip("starlette")
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(request, credential: Credential, receipt: Receipt):
+            return JSONResponse({"data": "paid", "receipt_ref": receipt.reference})
+
+        app = Starlette(routes=[Route("/paid/{id}", handler)])
+
+        with TestClient(app) as client:
+            challenge_response = client.get("/paid/one?view=full")
+            assert challenge_response.status_code == 402
+
+            challenge = Challenge.from_www_authenticate(
+                challenge_response.headers["WWW-Authenticate"]
+            )
+            assert challenge.request["_mppx_scope"] == {
+                "route": "/paid/{id}",
+                "resource": "/paid/one",
+                "query": "view=full",
+            }
+
+            credential = Credential(
+                challenge=challenge.to_echo(),
+                payload={"hash": "0xabc"},
+            )
+            replay_response = client.get(
+                "/paid/two?view=full",
+                headers={"Authorization": credential.to_authorization()},
+            )
+
+            assert replay_response.status_code == 402
+
     @pytest.mark.asyncio
     async def test_rejects_paid_retry_with_different_auto_route_scope(self) -> None:
         """Standalone pay() should bind credentials to framework route scope."""

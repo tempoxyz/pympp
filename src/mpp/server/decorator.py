@@ -47,6 +47,17 @@ def framework_scope(request: Any) -> dict[str, str]:
         route_path = getattr(route, "path", None)
         if isinstance(route_path, str) and route_path:
             scope["route"] = route_path
+        if "route" not in scope:
+            endpoint = raw_scope.get("endpoint")
+            router = raw_scope.get("router")
+            routes = getattr(router, "routes", None)
+            if isinstance(routes, list):
+                for candidate in routes:
+                    if getattr(candidate, "endpoint", None) is endpoint:
+                        matched_path = getattr(candidate, "path", None)
+                        if isinstance(matched_path, str) and matched_path:
+                            scope["route"] = matched_path
+                        break
         path = raw_scope.get("path")
         if isinstance(path, str) and path:
             scope["resource"] = path

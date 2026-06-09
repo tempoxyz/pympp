@@ -46,6 +46,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "hypothesis>=6.0",
     "ruff>=0.4",
+    "starlette>=0.37",
 ]
 
 [dependency-groups]
@@ -61,6 +62,7 @@ dev = [
     "twine>=6.0",
     "aiosqlite>=0.20",
     "redis>=5.0",
+    "starlette>=0.37",
 ]
 
 [build-system]
