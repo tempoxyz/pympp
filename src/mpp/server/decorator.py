@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
+BodyType = str | bytes | dict[str, Any]
+BodyParamsType = BodyType | Callable[[Any], BodyType | Awaitable[BodyType]] | None
 
 
 def get_authorization(request: Any) -> str | None:
@@ -64,6 +66,18 @@ def make_challenge_response(challenge: Challenge, realm: str) -> Any:
             "headers": headers,
             "body": body,
         }
+
+
+async def resolve_body_param(body: BodyParamsType, request_obj: Any) -> BodyType | None:
+    """Resolve a static or request-derived body value for digest verification."""
+    if body is None:
+        return None
+    if callable(body):
+        value = body(request_obj)
+        if inspect.isawaitable(value):
+            value = await value
+        return value
+    return body
 
 
 def wrap_payment_handler(
@@ -128,6 +142,7 @@ def pay(
     secret_key: str | None = None,
     method: str | None = None,
     description: str | None = None,
+    body: BodyParamsType = None,
     events: EventDispatcher | None = None,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
@@ -187,6 +202,7 @@ def pay(
                 secret_key=resolved_secret_key,
                 method=method,
                 description=description,
+                body=await resolve_body_param(body, request_obj),
                 events=events,
             )
 

@@ -17,7 +17,7 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.decorator import wrap_payment_handler
+from mpp.server.decorator import BodyParamsType, resolve_body_param, wrap_payment_handler
 from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 from mpp.store import Store
@@ -153,6 +153,7 @@ class Mpp:
         fee_payer: bool = False,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
+        body: str | bytes | dict[str, Any] | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
@@ -229,6 +230,7 @@ class Mpp:
             method=self.method.name,
             description=description,
             expires=expires,
+            body=body,
             events=self._events,
         )
 
@@ -243,6 +245,7 @@ class Mpp:
         expires_in: timedelta | None = None,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
+        body: BodyParamsType = None,
     ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
         Callable[[Any], Awaitable[R | Any]],
@@ -335,6 +338,7 @@ class Mpp:
                     method=self.method.name,
                     description=description,
                     expires=challenge_expires,
+                    body=await resolve_body_param(body, _request_obj),
                     events=self._events,
                 )
 
