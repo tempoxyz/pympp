@@ -164,6 +164,9 @@ class TestVerifyOrChallenge:
         )
 
         assert isinstance(result, tuple)
+        _credential, receipt = result
+        assert receipt.status == "success"
+        assert receipt.reference == "0x123"
 
     @pytest.mark.asyncio
     async def test_rejects_mismatched_body_digest(self) -> None:
@@ -191,6 +194,33 @@ class TestVerifyOrChallenge:
         )
 
         assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_rejects_digest_bound_credential_without_body(self) -> None:
+        """Should reject a digest-bound credential when no body is supplied."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            digest=BodyDigest.compute(b'{"query":"paid"}'),
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+        assert result.digest is None
 
     @pytest.mark.asyncio
     async def test_emits_payment_success(self) -> None:
@@ -618,6 +648,11 @@ class DjangoStyleRequest:
         self.META = {"HTTP_AUTHORIZATION": authorization} if authorization else {}
 
 
+def challenge_from_402(result) -> Challenge:
+    headers = result.headers if HAS_STARLETTE else result["headers"]
+    return Challenge.from_www_authenticate(headers["WWW-Authenticate"])
+
+
 class TestWrapPaymentHandler:
     @pytest.mark.asyncio
     async def test_raises_type_error_when_request_is_none(self) -> None:
@@ -806,6 +841,49 @@ class TestPay:
         else:
             assert isinstance(result, dict)
             assert result["status"] == 402
+        replacement = challenge_from_402(result)
+        assert replacement.digest == BodyDigest.compute(b'{"query":"tampered"}')
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body_value",
+        [
+            '{"query":"paid"}',
+            {"query": "paid"},
+        ],
+    )
+    async def test_body_callback_supports_str_and_dict_values(self, body_value) -> None:
+        """Standalone pay() should accept non-bytes body callback values."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            body=lambda _req: body_value,
+        )
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"receipt_ref": receipt.reference}
+
+        challenge_result = await handler(MockRequest())
+        challenge = challenge_from_402(challenge_result)
+        assert challenge.digest == BodyDigest.compute(body_value)
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            digest=challenge.digest,
+        )
+
+        result = await handler(MockRequest(authorization=credential.to_authorization()))
+
+        assert result == {"receipt_ref": "tx-ref-123"}
 
     @pytest.mark.asyncio
     async def test_supports_django_style_requests(self) -> None:
@@ -1081,6 +1159,77 @@ class TestMppPay:
                 body=original_body,
             )
         )
+
+        assert result == {"receipt_ref": "tx-ref-456"}
+
+    @pytest.mark.asyncio
+    async def test_charge_binds_and_verifies_body_digest(self) -> None:
+        """Mpp.charge(body=...) should bind and verify the actual request body."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+        body = b'{"query":"paid"}'
+
+        challenge = await server.charge(authorization=None, amount="0.50", body=body)
+        assert isinstance(challenge, Challenge)
+        assert challenge.digest == BodyDigest.compute(body)
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            digest=challenge.digest,
+        )
+
+        result = await server.charge(
+            authorization=credential.to_authorization(),
+            amount="0.50",
+            body=body,
+        )
+
+        assert isinstance(result, tuple)
+        _credential, receipt = result
+        assert receipt.status == "success"
+        assert receipt.reference == "tx-ref-456"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body_value",
+        [
+            '{"query":"paid"}',
+            {"query": "paid"},
+        ],
+    )
+    async def test_body_callback_supports_str_and_dict_values(self, body_value) -> None:
+        """server.pay() should accept non-bytes body callback values."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50", body=lambda _req: body_value)
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"receipt_ref": receipt.reference}
+
+        challenge_result = await handler(MockRequest())
+        challenge = challenge_from_402(challenge_result)
+        assert challenge.digest == BodyDigest.compute(body_value)
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            digest=challenge.digest,
+        )
+
+        result = await handler(MockRequest(authorization=credential.to_authorization()))
 
         assert result == {"receipt_ref": "tx-ref-456"}
 

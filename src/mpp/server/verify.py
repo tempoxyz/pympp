@@ -63,7 +63,13 @@ async def verify_or_challenge(
             Enables stateless challenge verification by computing challenge IDs
             as HMAC-SHA256 over the challenge parameters.
         method: The payment method name (defaults to "tempo").
+        description: Optional human-readable description for newly issued challenges.
+        meta: Optional opaque challenge metadata.
         expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
+        body: Actual request body bytes, string, or JSON-like dict to bind with
+            a SHA-256 digest. If provided, new challenges include a digest and
+            submitted credentials must echo a matching digest.
+        events: Optional dispatcher for challenge/payment lifecycle events.
 
     Returns:
         If no valid Authorization header:

@@ -167,8 +167,13 @@ class Mpp:
                 Defaults to now + 5 minutes. Not included in the request body.
             description: Optional human-readable description.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
+            splits: Optional split recipients/amounts for multi-transfer charges.
             fee_payer: Whether to use a fee payer for gas sponsorship.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            extra: Optional string metadata embedded in the charge request.
+            body: Actual request body bytes, string, or JSON-like dict to bind
+                with a SHA-256 digest. If provided, new challenges include a
+                digest and submitted credentials must echo a matching digest.
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -266,6 +271,10 @@ class Mpp:
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            extra: Optional string metadata embedded in the charge request.
+            body: Optional static body bytes/string/dict or callback receiving
+                the request object. The resolved value is bound into issued
+                challenges via digest and used to verify paid retries.
 
         Example:
             server = Mpp.create(method=tempo(currency=..., recipient=...))

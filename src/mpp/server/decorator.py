@@ -169,6 +169,9 @@ def pay(
             Required unless `MPP_SECRET_KEY` is set.
         method: The payment method name (defaults to "tempo").
         description: Human-readable description of what the payment is for.
+        body: Optional static body bytes/string/dict or callback receiving the
+            request object. The resolved value is bound into issued challenges
+            via digest and used to verify paid retries.
 
     Example:
         @app.get("/resource")
