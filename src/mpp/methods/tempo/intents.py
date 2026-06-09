@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -186,6 +187,45 @@ def _match_single_transfer_calldata(
 class MatchedTransferLog:
     kind: Literal["memo", "transfer"]
     memo: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SenderValidation:
+    """Arguments passed to a ``validate_sender`` callback on a sender mismatch."""
+
+    expected_sender: str
+    """The expected sender (source address, or receipt sender if no source)."""
+    sender: str
+    """The actual ``from`` address on the transfer log."""
+    source: str | None
+    """The raw credential source DID, if provided."""
+
+
+# Authorizes a transfer whose sender differs from the expected sender;
+# return ``True`` to accept.
+ValidateSender = Callable[[SenderValidation], bool]
+
+
+_PKH_SOURCE_RE = re.compile(r"did:pkh:eip155:(0|[1-9][0-9]*):(.+)")
+_PKH_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+
+
+def _parse_pkh_source(source: str) -> tuple[str, int] | None:
+    """Parse a ``did:pkh:eip155:<chainId>:<address>`` DID.
+
+    Returns ``(address, chain_id)`` or ``None`` if malformed.
+    """
+    match = _PKH_SOURCE_RE.fullmatch(source)
+    if match is None:
+        return None
+    address = match.group(2)
+    if _PKH_ADDRESS_RE.fullmatch(address) is None:
+        return None
+    try:
+        chain_id = int(match.group(1))
+    except ValueError:
+        return None
+    return address, chain_id
 
 
 def _rpc_error_msg(result: dict) -> str:
@@ -377,6 +417,7 @@ class ChargeIntent:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         store: Store | None = None,
+        validate_sender: ValidateSender | None = None,
     ) -> None:
         """Initialize the charge intent.
 
@@ -391,6 +432,9 @@ class ChargeIntent:
             store: Optional key-value store for tx hash replay protection.
                 When provided, each verified hash is recorded and subsequent
                 attempts to reuse it are rejected.
+            validate_sender: Optional callback invoked when a hash-credential
+                transfer's sender differs from the expected sender; return
+                ``True`` to accept (e.g. smart-account / relayer flows).
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -400,6 +444,7 @@ class ChargeIntent:
         self._owns_client = http_client is None
         self._timeout = timeout
         self._store = store
+        self._validate_sender = validate_sender
 
     @property
     def fee_payer(self) -> TempoAccount | None:
@@ -481,6 +526,7 @@ class ChargeIntent:
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
+                source=credential.source,
             )
         else:
             return await self._verify_transaction(
@@ -490,14 +536,59 @@ class ChargeIntent:
                 realm=credential.challenge.realm,
             )
 
+    def _parse_hash_credential_source(
+        self, source: str | None, expected_chain_id: int
+    ) -> str | None:
+        """Parse a hash credential source.
+
+        Returns ``None`` if absent, the address for a ``did:pkh:eip155`` DID
+        matching ``expected_chain_id``, else raises ``VerificationError``.
+        """
+        if source is None:
+            return None
+        parsed = _parse_pkh_source(source)
+        if parsed is None or parsed[1] != expected_chain_id:
+            raise VerificationError("Hash credential source is invalid.")
+        return parsed[0]
+
+    def _sender_authorized(
+        self,
+        from_address: str,
+        expected_sender: str | None,
+        source: str | None,
+        validate_sender: ValidateSender | None,
+    ) -> bool:
+        """Whether ``from_address`` is an acceptable transfer sender.
+
+        Matches when no expected sender is set or it equals ``from_address``.
+        On a mismatch, an optional ``validate_sender`` callback may authorize it.
+        """
+        if not expected_sender or from_address.lower() == expected_sender.lower():
+            return True
+        if validate_sender is None:
+            return False
+        return bool(
+            validate_sender(
+                SenderValidation(
+                    expected_sender=expected_sender,
+                    sender=from_address,
+                    source=source,
+                )
+            )
+        )
+
     async def _verify_hash(
         self,
         payload: HashCredentialPayload,
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        source: str | None = None,
     ) -> Receipt:
         """Verify a credential with a transaction hash."""
+        # Validate the source before reserving the hash.
+        source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
+
         client = await self._get_client()
 
         store_key: str | None = None
@@ -513,6 +604,9 @@ class ChargeIntent:
                 request,
                 challenge_id=challenge_id,
                 realm=realm,
+                source=source,
+                source_address=source_address,
+                validate_sender=self._validate_sender,
             )
         except Exception:
             if self._store is not None and store_key is not None:
@@ -572,11 +666,22 @@ class ChargeIntent:
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        source: str | None = None,
+        source_address: str | None = None,
+        validate_sender: ValidateSender | None = None,
     ) -> list[MatchedTransferLog]:
         if receipt_data.get("status") != "0x1":
             raise VerificationError("Transaction reverted")
 
-        matched_logs = self._verify_transfer_logs(receipt_data, request)
+        # Use the source address if present, otherwise the receipt sender.
+        expected_sender = source_address or receipt_data.get("from")
+        matched_logs = self._verify_transfer_logs(
+            receipt_data,
+            request,
+            expected_sender=expected_sender,
+            source=source,
+            validate_sender=validate_sender,
+        )
         if not matched_logs:
             raise VerificationError(
                 "Transaction must contain a Transfer log matching request parameters"
@@ -603,6 +708,8 @@ class ChargeIntent:
         amount: int,
         memo: bytes | None,
         expected_sender: str | None = None,
+        source: str | None = None,
+        validate_sender: ValidateSender | None = None,
     ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer/TransferWithMemo logs.
 
@@ -625,8 +732,6 @@ class ChargeIntent:
 
             if to_address.lower() != recipient.lower():
                 continue
-            if expected_sender and from_address.lower() != expected_sender.lower():
-                continue
 
             if event_topic == TRANSFER_WITH_MEMO_TOPIC:
                 if len(topics) < 4:
@@ -642,6 +747,10 @@ class ChargeIntent:
                     expected_memo_hex = "0x" + memo.hex()
                     if log_memo.lower() != expected_memo_hex.lower():
                         continue
+                if not self._sender_authorized(
+                    from_address, expected_sender, source, validate_sender
+                ):
+                    continue
                 memo_matches.append(MatchedTransferLog(kind="memo", memo=log_memo))
             elif event_topic == TRANSFER_TOPIC:
                 if memo is not None:
@@ -649,7 +758,9 @@ class ChargeIntent:
                 data = log.get("data", "0x")
                 if len(data) >= 66:
                     log_amount = int(data, 16)
-                    if log_amount == amount:
+                    if log_amount == amount and self._sender_authorized(
+                        from_address, expected_sender, source, validate_sender
+                    ):
                         transfer_matches.append(MatchedTransferLog(kind="transfer"))
 
         return memo_matches + transfer_matches
@@ -659,6 +770,8 @@ class ChargeIntent:
         receipt: dict[str, Any],
         request: ChargeRequest,
         expected_sender: str | None = None,
+        source: str | None = None,
+        validate_sender: ValidateSender | None = None,
     ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer or TransferWithMemo logs.
 
@@ -680,6 +793,8 @@ class ChargeIntent:
                 t.amount,
                 t.memo,
                 expected_sender,
+                source,
+                validate_sender,
             )
 
         # Multi-transfer: order-insensitive matching
@@ -713,8 +828,6 @@ class ChargeIntent:
 
                 if to_addr.lower() != transfer.recipient.lower():
                     continue
-                if expected_sender and from_addr.lower() != expected_sender.lower():
-                    continue
 
                 if transfer.memo is not None:
                     if event_topic != TRANSFER_WITH_MEMO_TOPIC:
@@ -727,7 +840,13 @@ class ChargeIntent:
                     log_amount = int(data[2:66], 16)
                     memo_topic = topics[3]
                     expected_hex = "0x" + transfer.memo.hex()
-                    if log_amount == transfer.amount and memo_topic.lower() == expected_hex.lower():
+                    if (
+                        log_amount == transfer.amount
+                        and memo_topic.lower() == expected_hex.lower()
+                        and self._sender_authorized(
+                            from_addr, expected_sender, source, validate_sender
+                        )
+                    ):
                         used_logs.add(log_idx)
                         all_matches.append(MatchedTransferLog(kind="memo", memo=memo_topic))
                         found = True
@@ -740,7 +859,9 @@ class ChargeIntent:
                         if len(data) < 66:
                             continue
                         log_amount = int(data[2:66], 16)
-                        if log_amount == transfer.amount:
+                        if log_amount == transfer.amount and self._sender_authorized(
+                            from_addr, expected_sender, source, validate_sender
+                        ):
                             used_logs.add(log_idx)
                             all_matches.append(MatchedTransferLog(kind="memo", memo=topics[3]))
                             found = True
@@ -749,7 +870,9 @@ class ChargeIntent:
                         if len(data) < 66:
                             continue
                         log_amount = int(data, 16)
-                        if log_amount == transfer.amount:
+                        if log_amount == transfer.amount and self._sender_authorized(
+                            from_addr, expected_sender, source, validate_sender
+                        ):
                             used_logs.add(log_idx)
                             all_matches.append(MatchedTransferLog(kind="transfer"))
                             found = True
