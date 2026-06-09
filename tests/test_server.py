@@ -636,9 +636,22 @@ class TestCrossEndpointReplay:
 class MockRequest:
     """Mock request object for testing."""
 
-    def __init__(self, authorization: str | None = None, body: bytes | None = None) -> None:
+    def __init__(
+        self,
+        authorization: str | None = None,
+        body: bytes | None = None,
+        path: str | None = None,
+        route: str | None = None,
+        query_string: str | None = None,
+    ) -> None:
         self.headers = {"authorization": authorization} if authorization else {}
         self.body = body
+        if path is not None:
+            self.path = path
+        if route is not None:
+            self.route = route
+        if query_string is not None:
+            self.query_string = query_string
 
 
 class DjangoStyleRequest:
@@ -762,6 +775,54 @@ class TestPay:
 
         assert result["data"] == "paid content"
         assert result["receipt_ref"] == "tx-ref-123"
+
+    @pytest.mark.asyncio
+    async def test_rejects_paid_retry_with_different_auto_route_scope(self) -> None:
+        """Standalone pay() should bind credentials to framework route scope."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-123")
+
+        @pay(
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        challenge_result = await handler(
+            MockRequest(path="/paid/one", route="/paid/{id}", query_string="view=full")
+        )
+        challenge = challenge_from_402(challenge_result)
+        assert challenge.request["_mppx_scope"] == {
+            "route": "/paid/{id}",
+            "resource": "/paid/one",
+            "query": "view=full",
+        }
+        credential = Credential(
+            challenge=challenge.to_echo(),
+            payload={"hash": "0xabc"},
+        )
+
+        result = await handler(
+            MockRequest(
+                authorization=credential.to_authorization(),
+                path="/paid/two",
+                route="/paid/{id}",
+                query_string="view=full",
+            )
+        )
+
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+        else:
+            assert isinstance(result, dict)
+            assert result["status"] == 402
 
     @pytest.mark.asyncio
     async def test_supports_dynamic_request_params(self) -> None:
@@ -1124,6 +1185,51 @@ class TestMppPay:
 
         assert result["data"] == "paid content"
         assert result["receipt_ref"] == "tx-ref-456"
+
+    @pytest.mark.asyncio
+    async def test_rejects_paid_retry_with_different_auto_route_scope(self) -> None:
+        """server.pay() should bind credentials to framework route scope."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+
+        @server.pay(amount="0.50")
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"receipt_ref": receipt.reference}
+
+        challenge_result = await handler(
+            MockRequest(path="/paid/one", route="/paid/{id}", query_string="view=full")
+        )
+        challenge = challenge_from_402(challenge_result)
+        assert challenge.request["_mppx_scope"] == {
+            "route": "/paid/{id}",
+            "resource": "/paid/one",
+            "query": "view=full",
+        }
+        credential = Credential(
+            challenge=challenge.to_echo(),
+            payload={"hash": "0xabc"},
+        )
+
+        result = await handler(
+            MockRequest(
+                authorization=credential.to_authorization(),
+                path="/paid/two",
+                route="/paid/{id}",
+                query_string="view=full",
+            )
+        )
+
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
+            assert result.status_code == 402
+        else:
+            assert isinstance(result, dict)
+            assert result["status"] == 402
 
     @pytest.mark.asyncio
     async def test_body_callback_binds_and_verifies_actual_request_body(self) -> None:

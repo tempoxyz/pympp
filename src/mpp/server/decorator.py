@@ -37,6 +37,77 @@ def get_authorization(request: Any) -> str | None:
     return None
 
 
+def framework_scope(request: Any) -> dict[str, str]:
+    """Extract route/resource/query scope from common framework request objects."""
+    scope: dict[str, str] = {}
+
+    raw_scope = getattr(request, "scope", None)
+    if isinstance(raw_scope, dict):
+        route = raw_scope.get("route")
+        route_path = getattr(route, "path", None)
+        if isinstance(route_path, str) and route_path:
+            scope["route"] = route_path
+        path = raw_scope.get("path")
+        if isinstance(path, str) and path:
+            scope["resource"] = path
+        query_string = raw_scope.get("query_string")
+        if isinstance(query_string, bytes):
+            query_string = query_string.decode()
+        if isinstance(query_string, str) and query_string:
+            scope["query"] = query_string
+
+    resolver_match = getattr(request, "resolver_match", None)
+    route = getattr(resolver_match, "route", None)
+    if isinstance(route, str) and route:
+        scope.setdefault("route", route)
+
+    url_rule = getattr(request, "url_rule", None)
+    rule = getattr(url_rule, "rule", None)
+    if isinstance(rule, str) and rule:
+        scope.setdefault("route", rule)
+
+    for attr in ("route", "path_template"):
+        value = getattr(request, attr, None)
+        if isinstance(value, str) and value:
+            scope.setdefault("route", value)
+
+    path = getattr(request, "path", None)
+    if isinstance(path, str) and path:
+        scope.setdefault("resource", path)
+
+    url = getattr(request, "url", None)
+    url_path = getattr(url, "path", None)
+    if isinstance(url_path, str) and url_path:
+        scope.setdefault("resource", url_path)
+    url_query = getattr(url, "query", None)
+    if isinstance(url_query, str) and url_query:
+        scope.setdefault("query", url_query)
+
+    query_string = getattr(request, "query_string", None)
+    if isinstance(query_string, bytes):
+        query_string = query_string.decode()
+    if isinstance(query_string, str) and query_string:
+        scope.setdefault("query", query_string)
+
+    meta = getattr(request, "META", None)
+    if isinstance(meta, dict):
+        query = meta.get("QUERY_STRING")
+        if isinstance(query, str) and query:
+            scope.setdefault("query", query)
+
+    return scope
+
+
+def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
+    """Return request params with automatic framework scope when available."""
+    if "_mppx_scope" in request_params:
+        return request_params
+    scope = framework_scope(request_obj)
+    if not scope:
+        return request_params
+    return {**request_params, "_mppx_scope": scope}
+
+
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
     """Build a 402 response for a payment challenge with RFC 9457 problem details body.
 
@@ -196,6 +267,7 @@ def pay(
                 request_params = request(request_obj)
             else:
                 request_params = request
+            request_params = bind_framework_scope(request_params, request_obj)
 
             return await verify_or_challenge(
                 authorization=authorization,

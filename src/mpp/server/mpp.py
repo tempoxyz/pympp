@@ -17,7 +17,12 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.decorator import BodyParamsType, resolve_body_param, wrap_payment_handler
+from mpp.server.decorator import (
+    BodyParamsType,
+    bind_framework_scope,
+    resolve_body_param,
+    wrap_payment_handler,
+)
 from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 from mpp.store import Store
@@ -337,6 +342,7 @@ class Mpp:
                     request,
                     None,
                 )
+                request = bind_framework_scope(request, _request_obj)
 
                 return await verify_or_challenge(
                     authorization=authorization,
