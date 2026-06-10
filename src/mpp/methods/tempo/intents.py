@@ -194,7 +194,7 @@ class SenderValidation:
     """Arguments passed to a ``validate_sender`` callback on a sender mismatch."""
 
     expected_sender: str
-    """The expected sender (source address, or receipt sender if no source)."""
+    """The expected sender: the address declared in the credential source."""
     sender: str
     """The actual ``from`` address on the transfer log."""
     source: str | None
@@ -673,8 +673,9 @@ class ChargeIntent:
         if receipt_data.get("status") != "0x1":
             raise VerificationError("Transaction reverted")
 
-        # Use the source address if present, otherwise the receipt sender.
-        expected_sender = source_address or receipt_data.get("from")
+        # Bind the transfer sender only when a credential source is present;
+        # no source means no sender filtering.
+        expected_sender = source_address
         matched_logs = self._verify_transfer_logs(
             receipt_data,
             request,

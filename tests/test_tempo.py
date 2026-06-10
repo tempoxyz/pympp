@@ -3931,9 +3931,13 @@ class TestHashCredentialSourceValidation:
         assert validation.expected_sender == self.SOURCE_ADDR
 
     @pytest.mark.asyncio
-    async def test_broadcast_path_does_not_use_validate_sender(self) -> None:
-        # The validate_sender callback applies to hash credentials only; on the
-        # broadcast path a sender mismatch is rejected without consulting it.
+    async def test_broadcast_path_does_not_bind_sender(self) -> None:
+        # No source is threaded through the broadcast path, so a transfer whose
+        # `from` differs from the receipt sender still passes and the
+        # validate_sender callback is never consulted.
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called on the broadcast path")
+
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         receipt = {
             "transactionHash": "0xtxhash123",
@@ -3941,15 +3945,31 @@ class TestHashCredentialSourceValidation:
             "from": self.SOURCE_ADDR,
             "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
         }
-        intent = self._intent(receipt, validate_sender=lambda v: True)
+        intent = self._intent(receipt, validate_sender=boom)
         credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
             challenge_id="challenge-123",
             realm="api.example.com",
             expires=future,
         )
-        with pytest.raises(VerificationError, match="must contain a Transfer log"):
-            await intent.verify(
-                credential,
-                {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT},
-            )
+        result = await intent.verify(
+            credential,
+            {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT},
+        )
+        assert result.reference == "0xtxhash123"
+
+    @pytest.mark.asyncio
+    async def test_hash_without_source_does_not_bind_sender(self) -> None:
+        # Hash credential with no source: the transfer sender differs from the
+        # receipt sender but there is nothing to bind against, so it passes.
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called without a source")
+
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=boom)
+        result = await self._verify(intent, source=None)
+        assert result.reference == "0xabc123"
