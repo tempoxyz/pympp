@@ -2117,8 +2117,52 @@ class TestCosignAsFeePayer:
         assert sig["yParity"] in ("0x0", "0x1")
         assert tx_request["nonceKey"].startswith("0x")
         assert tx_request["validBefore"].startswith("0x")
-        assert len(tx_request["calls"]) == 1
-        assert tx_request["calls"][0]["to"].lower() == currency.lower()
+        # Top-level payment call (with `data`, not `input`) so it isn't a CREATE.
+        assert tx_request["to"].lower() == currency.lower()
+        assert tx_request["data"].startswith("0x")
+        assert tx_request["value"].startswith("0x")
+        # A single-call charge needs no nested batch.
+        assert "calls" not in tx_request
+
+    # The node appends the top-level call after `calls[]`, so the final call
+    # goes top-level and the leading calls in `calls`, preserving order.
+    def test_build_simulate_payload_multi_call_preserves_order(self) -> None:
+        from types import SimpleNamespace
+
+        intent = self._make_intent()
+
+        def _call(byte: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                to=bytes([byte]) * 20,
+                value=0,
+                data=bytes([byte]) * 4,
+            )
+
+        calls = (_call(0xA1), _call(0xB2), _call(0xC3))
+        tx = SimpleNamespace(
+            fee_payer_signature=SimpleNamespace(r=1, s=2, v=27),
+            chain_id=42431,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            fee_token=bytes(20),
+            calls=calls,
+            valid_before=None,
+            valid_after=None,
+        )
+
+        payload = intent._build_simulate_payload(tx, "0x" + "11" * 20)
+        tx_request = payload["blockStateCalls"][0]["calls"][0]
+
+        assert tx_request["to"] == "0x" + "c3" * 20
+        assert tx_request["data"] == "0x" + "c3" * 4
+        assert [c["to"] for c in tx_request["calls"]] == [
+            "0x" + "a1" * 20,
+            "0x" + "b2" * 20,
+        ]
+        assert all("data" in c and "input" not in c for c in tx_request["calls"])
 
     def _cosign_payload(self, intent: ChargeIntent) -> dict:
         currency = "0x20c0000000000000000000000000000000000000"
@@ -2146,7 +2190,9 @@ class TestCosignAsFeePayer:
 
         with pytest.raises(VerificationError, match="would revert"):
             await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
-        assert mock_client.post.await_args.kwargs["json"]["method"] == "tempo_simulateV1"
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert sent["method"] == "tempo_simulateV1"
+        assert sent["params"][1] == "latest"
 
     # A successful simulation must let the broadcast proceed.
     @pytest.mark.asyncio

@@ -1028,6 +1028,14 @@ class ChargeIntent:
         """
         sig = tx.fee_payer_signature
         parity = sig.v if sig.v in (0, 1) else sig.v - 27
+
+        # The node rebuilds the batch as ``calls[]`` followed by the top-level
+        # call appended last; an absent top-level ``to`` is read as a CREATE and
+        # rejected. So we put the final call top-level and the rest in ``calls``
+        # to preserve order.
+        last_call = tx.calls[-1]
+        leading_calls = tx.calls[:-1]
+
         tx_request: dict[str, Any] = {
             "from": sender,
             "type": "0x76",
@@ -1044,15 +1052,20 @@ class ChargeIntent:
                 "s": f"0x{sig.s:064x}",
                 "yParity": hex(parity),
             },
-            "calls": [
+            # Top-level payment call so the node does not read this as a CREATE.
+            "to": "0x" + bytes(last_call.to).hex(),
+            "value": hex(last_call.value),
+            "data": "0x" + last_call.data.hex(),
+        }
+        if leading_calls:
+            tx_request["calls"] = [
                 {
                     "to": "0x" + bytes(c.to).hex(),
                     "value": hex(c.value),
-                    "input": "0x" + c.data.hex(),
+                    "data": "0x" + c.data.hex(),
                 }
-                for c in tx.calls
-            ],
-        }
+                for c in leading_calls
+            ]
         if tx.valid_before is not None:
             tx_request["validBefore"] = hex(tx.valid_before)
         if tx.valid_after is not None:
@@ -1079,7 +1092,7 @@ class ChargeIntent:
                 json={
                     "jsonrpc": "2.0",
                     "method": "tempo_simulateV1",
-                    "params": [simulate_payload],
+                    "params": [simulate_payload, "latest"],
                     "id": 1,
                 },
             )
