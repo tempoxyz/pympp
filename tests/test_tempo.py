@@ -3685,3 +3685,291 @@ class TestGetTransfersInvalidMemo:
         ]
         with pytest.raises(VerificationError, match="exactly 32 bytes"):
             get_transfers(1_000_000, "0x01", None, splits)
+
+
+class TestHashCredentialSourceValidation:
+    """Hash credential source validation (did:pkh) and validate_sender hook."""
+
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    CHAIN_ID = 4217
+    SOURCE_ADDR = "0x00000000000000000000000000000000000000aa"
+    RELAYER = "0x00000000000000000000000000000000000000bb"
+
+    def _topic(self, address: str) -> str:
+        return "0x" + address.lower().removeprefix("0x").zfill(64)
+
+    def _memo_log(self, frm: str, memo: str, amount: int = 1000) -> dict:
+        return {
+            "address": self.CURRENCY,
+            "topics": [
+                TRANSFER_WITH_MEMO_TOPIC,
+                self._topic(frm),
+                self._topic(self.RECIPIENT),
+                memo,
+            ],
+            "data": amount_data(amount),
+        }
+
+    def _did(self, chain_id: int, address: str) -> str:
+        return f"did:pkh:eip155:{chain_id}:{address}"
+
+    def _intent(self, receipt: dict, *, validate_sender=None, store=None) -> ChargeIntent:
+        intent = ChargeIntent(
+            rpc_url="https://rpc.test", validate_sender=validate_sender, store=store
+        )
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(200, {"jsonrpc": "2.0", "result": receipt, "id": 1})
+        )
+        intent._http_client = mock_client
+        return intent
+
+    async def _verify(self, intent: ChargeIntent, source: str | None, memo_value=None):
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        request: dict = {
+            "amount": "1000",
+            "currency": self.CURRENCY,
+            "recipient": self.RECIPIENT,
+        }
+        if memo_value is not None:
+            request["methodDetails"] = {"memo": memo_value}
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            realm="api.example.com",
+            expires=future,
+            source=source,
+        )
+        return await intent.verify(credential, request)
+
+    @property
+    def _bound_memo(self) -> str:
+        return encode_attribution(challenge_id="challenge-123", server_id="api.example.com")
+
+    # ---- parse unit tests ----
+
+    def test_parse_absent_is_none(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        assert intent._parse_hash_credential_source(None, self.CHAIN_ID) is None
+
+    def test_parse_valid_returns_address(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        source = self._did(self.CHAIN_ID, self.SOURCE_ADDR)
+        assert intent._parse_hash_credential_source(source, self.CHAIN_ID) == self.SOURCE_ADDR
+
+    def test_parse_chain_mismatch_raises(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+            intent._parse_hash_credential_source(self._did(1, self.SOURCE_ADDR), self.CHAIN_ID)
+
+    def test_parse_malformed_variants_raise(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        cases = [
+            "not-a-valid-did",
+            f"did:pkh:solana:{self.CHAIN_ID}:{self.SOURCE_ADDR}",
+            f"did:pkh:eip155:04217:{self.SOURCE_ADDR}",
+            f"did:pkh:eip155:not-a-number:{self.SOURCE_ADDR}",
+            f"did:pkh:eip155:{self.CHAIN_ID}:extra:{self.SOURCE_ADDR}",
+            f"did:pkh:eip155:{self.CHAIN_ID}:not-an-address",
+        ]
+        for source in cases:
+            with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+                intent._parse_hash_credential_source(source, self.CHAIN_ID)
+
+    def test_parse_rejects_non_ascii_chain_digits(self) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        source = f"did:pkh:eip155:4\uff1217:{self.SOURCE_ADDR}"  # full-width digits
+        with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+            intent._parse_hash_credential_source(source, self.CHAIN_ID)
+
+    # ---- end-to-end verify tests ----
+
+    @pytest.mark.asyncio
+    async def test_hash_accepts_source_matching_transfer_sender(self) -> None:
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.SOURCE_ADDR, self._bound_memo)],
+        }
+        intent = self._intent(receipt)
+        result = await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+        assert result.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    async def test_hash_accepts_source_when_receipt_sender_differs(self) -> None:
+        # Relayer submitted the tx (receipt.from = RELAYER) but the transfer is
+        # from the declared source.
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER,
+            "logs": [self._memo_log(self.SOURCE_ADDR, self._bound_memo)],
+        }
+        intent = self._intent(receipt)
+        result = await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+        assert result.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    async def test_hash_rejects_source_differing_from_transfer_sender(self) -> None:
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt)
+        with pytest.raises(VerificationError, match="must contain a Transfer log"):
+            await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+
+    @pytest.mark.asyncio
+    async def test_hash_validate_sender_override_allows_mismatch(self) -> None:
+        seen: dict = {}
+
+        def validate_sender(v) -> bool:
+            seen["v"] = v
+            return True
+
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=validate_sender)
+        source = self._did(self.CHAIN_ID, self.SOURCE_ADDR)
+        result = await self._verify(intent, source=source)
+
+        assert result.reference == "0xabc123"
+        assert seen["v"].expected_sender.lower() == self.SOURCE_ADDR.lower()
+        assert seen["v"].sender.lower() == self.RELAYER.lower()
+        assert seen["v"].source == source
+
+    @pytest.mark.asyncio
+    async def test_hash_validate_sender_returning_false_rejects(self) -> None:
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=lambda v: False)
+        with pytest.raises(VerificationError, match="must contain a Transfer log"):
+            await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+
+    @pytest.mark.asyncio
+    async def test_hash_validate_sender_not_called_when_sender_matches(self) -> None:
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called")
+
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.SOURCE_ADDR, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=boom)
+        result = await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+        assert result.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    async def test_hash_validate_sender_not_called_for_non_candidate_logs(self) -> None:
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called")
+
+        explicit_memo = "0x" + "ab" * 32
+        other_memo = "0x" + "cd" * 32
+        # First log has a wrong sender and a non-matching memo (non-candidate);
+        # second log matches fully, so the callback is never reached.
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [
+                self._memo_log(self.RELAYER, other_memo),
+                self._memo_log(self.SOURCE_ADDR, explicit_memo),
+            ],
+        }
+        intent = self._intent(receipt, validate_sender=boom)
+        result = await self._verify(
+            intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR), memo_value=explicit_memo
+        )
+        assert result.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    async def test_hash_rejects_source_from_different_chain(self) -> None:
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.SOURCE_ADDR, self._bound_memo)],
+        }
+        intent = self._intent(receipt)
+        with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+            await self._verify(intent, source=self._did(1, self.SOURCE_ADDR))
+
+    @pytest.mark.asyncio
+    async def test_hash_malformed_source_does_not_consume_hash(self) -> None:
+        from mpp.store import MemoryStore
+
+        store = MemoryStore()
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.SOURCE_ADDR, self._bound_memo)],
+        }
+        intent = self._intent(receipt, store=store)
+
+        # Malformed source is rejected before the hash is reserved.
+        with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+            await self._verify(intent, source="not-a-valid-did")
+        assert await store.get("mpp:charge:0xabc123") is None
+
+        # A valid retry then succeeds.
+        result = await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
+        assert result.reference == "0xabc123"
+
+    def test_public_types_are_exported(self) -> None:
+        from mpp.methods.tempo import SenderValidation, ValidateSender  # noqa: F401
+
+        validation = SenderValidation(
+            expected_sender=self.SOURCE_ADDR, sender=self.RELAYER, source=None
+        )
+        assert validation.expected_sender == self.SOURCE_ADDR
+
+    @pytest.mark.asyncio
+    async def test_broadcast_path_does_not_bind_sender(self) -> None:
+        # No source is threaded through the broadcast path, so a transfer whose
+        # `from` differs from the receipt sender still passes and the
+        # validate_sender callback is never consulted.
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called on the broadcast path")
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        receipt = {
+            "transactionHash": "0xtxhash123",
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=boom)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            challenge_id="challenge-123",
+            realm="api.example.com",
+            expires=future,
+        )
+        result = await intent.verify(
+            credential,
+            {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT},
+        )
+        assert result.reference == "0xtxhash123"
+
+    @pytest.mark.asyncio
+    async def test_hash_without_source_does_not_bind_sender(self) -> None:
+        # Hash credential with no source: the transfer sender differs from the
+        # receipt sender but there is nothing to bind against, so it passes.
+        def boom(v) -> bool:
+            raise AssertionError("validate_sender must not be called without a source")
+
+        receipt = {
+            "status": "0x1",
+            "from": self.SOURCE_ADDR,
+            "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
+        }
+        intent = self._intent(receipt, validate_sender=boom)
+        result = await self._verify(intent, source=None)
+        assert result.reference == "0xabc123"

@@ -10,7 +10,9 @@ from mpp.methods.tempo.client import TempoMethod as _TempoMethod
 from mpp.methods.tempo.client import TransactionError as _TransactionError
 from mpp.methods.tempo.client import tempo as _tempo
 from mpp.methods.tempo.intents import ChargeIntent as _ChargeIntent
+from mpp.methods.tempo.intents import SenderValidation as _SenderValidation
 from mpp.methods.tempo.intents import Transfer as _Transfer
+from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
 from mpp.methods.tempo.schemas import Split as _Split
 
@@ -26,6 +28,8 @@ TempoMethod = _TempoMethod
 TransactionError = _TransactionError
 tempo = _tempo
 ChargeIntent = _ChargeIntent
+SenderValidation = _SenderValidation
 Transfer = _Transfer
+ValidateSender = _ValidateSender
 get_transfers = _get_transfers
 Split = _Split
