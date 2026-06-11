@@ -1,5 +1,6 @@
 """Tests for Tempo payment method."""
 
+import json
 import os
 import re
 from datetime import UTC, datetime, timedelta
@@ -2222,6 +2223,56 @@ class TestCosignAsFeePayer:
 
         with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
             await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+
+    # End-to-end: a reverting simulation for a locally co-signed sponsored charge
+    # must abort `verify` before the tx is broadcast, so the sponsor never pays
+    # gas. We register only the simulate response; if the code wrongly attempted
+    # eth_sendRawTransactionSync, no response would match and the test would fail.
+    @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_revert_does_not_broadcast(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        # tempo_simulateV1 reports the co-signed tx would revert.
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={
+                "jsonrpc": "2.0",
+                "result": {
+                    "blocks": [
+                        {"calls": [{"status": "0x0", "error": {"message": "execution reverted"}}]}
+                    ]
+                },
+                "id": 1,
+            },
+        )
+
+        with pytest.raises(VerificationError, match="would revert"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True},
+                },
+            )
+
+        # Exactly one RPC call (the simulation); no broadcast was attempted.
+        requests = httpx_mock.get_requests()
+        methods = [json.loads(r.read().decode())["method"] for r in requests]
+        assert methods == ["tempo_simulateV1"]
+        assert "eth_sendRawTransactionSync" not in methods
 
 
 class TestValidateTransactionPayload:
