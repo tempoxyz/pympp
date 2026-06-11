@@ -17,7 +17,12 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.decorator import wrap_payment_handler
+from mpp.server.decorator import (
+    BodyParamsType,
+    bind_framework_scope,
+    resolve_body_param,
+    wrap_payment_handler,
+)
 from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 from mpp.store import Store
@@ -153,6 +158,7 @@ class Mpp:
         fee_payer: bool = False,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
+        body: str | bytes | dict[str, Any] | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
 
@@ -166,8 +172,13 @@ class Mpp:
                 Defaults to now + 5 minutes. Not included in the request body.
             description: Optional human-readable description.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
+            splits: Optional split recipients/amounts for multi-transfer charges.
             fee_payer: Whether to use a fee payer for gas sponsorship.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            extra: Optional string metadata embedded in the charge request.
+            body: Actual request body bytes, string, or JSON-like dict to bind
+                with a SHA-256 digest. If provided, new challenges include a
+                digest and submitted credentials must echo a matching digest.
 
         Returns:
             Challenge if payment required, or (Credential, Receipt) if verified.
@@ -229,6 +240,7 @@ class Mpp:
             method=self.method.name,
             description=description,
             expires=expires,
+            body=body,
             events=self._events,
         )
 
@@ -243,6 +255,7 @@ class Mpp:
         expires_in: timedelta | None = None,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
+        body: BodyParamsType = None,
     ) -> Callable[  # noqa: UP047
         [Callable[[Any, Credential, Receipt], Awaitable[R]]],
         Callable[[Any], Awaitable[R | Any]],
@@ -263,6 +276,10 @@ class Mpp:
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
+            extra: Optional string metadata embedded in the charge request.
+            body: Optional static body bytes/string/dict or callback receiving
+                the request object. The resolved value is bound into issued
+                challenges via digest and used to verify paid retries.
 
         Example:
             server = Mpp.create(method=tempo(currency=..., recipient=...))
@@ -325,6 +342,7 @@ class Mpp:
                     request,
                     None,
                 )
+                request = bind_framework_scope(request, _request_obj)
 
                 return await verify_or_challenge(
                     authorization=authorization,
@@ -335,6 +353,7 @@ class Mpp:
                     method=self.method.name,
                     description=description,
                     expires=challenge_expires,
+                    body=await resolve_body_param(body, _request_obj),
                     events=self._events,
                 )
 

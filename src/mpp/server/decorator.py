@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
+BodyType = str | bytes | dict[str, Any]
+BodyParamsType = BodyType | Callable[[Any], BodyType | Awaitable[BodyType]] | None
 
 
 def get_authorization(request: Any) -> str | None:
@@ -33,6 +35,88 @@ def get_authorization(request: Any) -> str | None:
     if hasattr(request, "META"):
         return request.META.get("HTTP_AUTHORIZATION")
     return None
+
+
+def framework_scope(request: Any) -> dict[str, str]:
+    """Extract route/resource/query scope from common framework request objects."""
+    scope: dict[str, str] = {}
+
+    raw_scope = getattr(request, "scope", None)
+    if isinstance(raw_scope, dict):
+        route = raw_scope.get("route")
+        route_path = getattr(route, "path", None)
+        if isinstance(route_path, str) and route_path:
+            scope["route"] = route_path
+        if "route" not in scope:
+            endpoint = raw_scope.get("endpoint")
+            router = raw_scope.get("router")
+            routes = getattr(router, "routes", None)
+            if isinstance(routes, list):
+                for candidate in routes:
+                    if getattr(candidate, "endpoint", None) is endpoint:
+                        matched_path = getattr(candidate, "path", None)
+                        if isinstance(matched_path, str) and matched_path:
+                            scope["route"] = matched_path
+                        break
+        path = raw_scope.get("path")
+        if isinstance(path, str) and path:
+            scope["resource"] = path
+        query_string = raw_scope.get("query_string")
+        if isinstance(query_string, bytes):
+            query_string = query_string.decode("latin-1")
+        if isinstance(query_string, str) and query_string:
+            scope["query"] = query_string
+
+    resolver_match = getattr(request, "resolver_match", None)
+    route = getattr(resolver_match, "route", None)
+    if isinstance(route, str) and route:
+        scope.setdefault("route", route)
+
+    url_rule = getattr(request, "url_rule", None)
+    rule = getattr(url_rule, "rule", None)
+    if isinstance(rule, str) and rule:
+        scope.setdefault("route", rule)
+
+    for attr in ("route", "path_template"):
+        value = getattr(request, attr, None)
+        if isinstance(value, str) and value:
+            scope.setdefault("route", value)
+
+    path = getattr(request, "path", None)
+    if isinstance(path, str) and path:
+        scope.setdefault("resource", path)
+
+    url = getattr(request, "url", None)
+    url_path = getattr(url, "path", None)
+    if isinstance(url_path, str) and url_path:
+        scope.setdefault("resource", url_path)
+    url_query = getattr(url, "query", None)
+    if isinstance(url_query, str) and url_query:
+        scope.setdefault("query", url_query)
+
+    query_string = getattr(request, "query_string", None)
+    if isinstance(query_string, bytes):
+        query_string = query_string.decode("latin-1")
+    if isinstance(query_string, str) and query_string:
+        scope.setdefault("query", query_string)
+
+    meta = getattr(request, "META", None)
+    if isinstance(meta, dict):
+        query = meta.get("QUERY_STRING")
+        if isinstance(query, str) and query:
+            scope.setdefault("query", query)
+
+    return scope
+
+
+def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
+    """Return request params with automatic framework scope when available."""
+    if "_mppx_scope" in request_params:
+        return request_params
+    scope = framework_scope(request_obj)
+    if not scope:
+        return request_params
+    return {**request_params, "_mppx_scope": scope}
 
 
 def make_challenge_response(challenge: Challenge, realm: str) -> Any:
@@ -64,6 +148,18 @@ def make_challenge_response(challenge: Challenge, realm: str) -> Any:
             "headers": headers,
             "body": body,
         }
+
+
+async def resolve_body_param(body: BodyParamsType, request_obj: Any) -> BodyType | None:
+    """Resolve a static or request-derived body value for digest verification."""
+    if body is None:
+        return None
+    if callable(body):
+        value = body(request_obj)
+        if inspect.isawaitable(value):
+            value = await value
+        return value
+    return body
 
 
 def wrap_payment_handler(
@@ -128,6 +224,7 @@ def pay(
     secret_key: str | None = None,
     method: str | None = None,
     description: str | None = None,
+    body: BodyParamsType = None,
     events: EventDispatcher | None = None,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
@@ -154,6 +251,9 @@ def pay(
             Required unless `MPP_SECRET_KEY` is set.
         method: The payment method name (defaults to "tempo").
         description: Human-readable description of what the payment is for.
+        body: Optional static body bytes/string/dict or callback receiving the
+            request object. The resolved value is bound into issued challenges
+            via digest and used to verify paid retries.
 
     Example:
         @app.get("/resource")
@@ -178,6 +278,7 @@ def pay(
                 request_params = request(request_obj)
             else:
                 request_params = request
+            request_params = bind_framework_scope(request_params, request_obj)
 
             return await verify_or_challenge(
                 authorization=authorization,
@@ -187,6 +288,7 @@ def pay(
                 secret_key=resolved_secret_key,
                 method=method,
                 description=description,
+                body=await resolve_body_param(body, request_obj),
                 events=events,
             )
 

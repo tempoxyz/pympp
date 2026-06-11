@@ -5,7 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from mpp import Challenge, Credential, Receipt, _constant_time_equal, generate_challenge_id
+from mpp import (
+    Challenge,
+    Credential,
+    Receipt,
+    _body_digest,
+    _constant_time_equal,
+    generate_challenge_id,
+)
 from mpp._parsing import ParseError, _b64_decode
 from mpp._units import transform_units
 from mpp.errors import (
@@ -32,6 +39,7 @@ async def verify_or_challenge(
     description: str | None = None,
     meta: dict[str, str] | None = None,
     expires: str | None = None,
+    body: str | bytes | dict[str, Any] | None = None,
     events: EventDispatcher | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
@@ -55,7 +63,13 @@ async def verify_or_challenge(
             Enables stateless challenge verification by computing challenge IDs
             as HMAC-SHA256 over the challenge parameters.
         method: The payment method name (defaults to "tempo").
+        description: Optional human-readable description for newly issued challenges.
+        meta: Optional opaque challenge metadata.
         expires: Challenge expiration (ISO 8601). Defaults to now + 5 minutes.
+        body: Actual request body bytes, string, or JSON-like dict to bind with
+            a SHA-256 digest. If provided, new challenges include a digest and
+            submitted credentials must echo a matching digest.
+        events: Optional dispatcher for challenge/payment lifecycle events.
 
     Returns:
         If no valid Authorization header:
@@ -89,7 +103,7 @@ async def verify_or_challenge(
 
     async def new_challenge() -> Challenge:
         challenge = _create_challenge(
-            method_name, intent.name, request, realm, secret_key, description, meta, expires
+            method_name, intent.name, request, realm, secret_key, description, meta, expires, body
         )
         if events is not None:
             await events.emit(
@@ -181,6 +195,9 @@ async def verify_or_challenge(
             credential,
         )
 
+    if digest_error := _body_digest_error(echo.digest, body):
+        return await fail(InvalidChallengeError(echo.id, digest_error), credential)
+
     # Enforce challenge expiry — fail closed.  Credentials without an
     # expires field or with an unparseable value are rejected outright.
     if not echo.expires:
@@ -234,6 +251,7 @@ def _create_challenge(
     description: str | None = None,
     meta: dict[str, str] | None = None,
     expires: str | None = None,
+    body: str | bytes | dict[str, Any] | None = None,
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID.
 
@@ -249,6 +267,8 @@ def _create_challenge(
         expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
         expires = expires_dt.isoformat().replace("+00:00", "Z")
 
+    digest = _body_digest.compute(body) if body is not None else None
+
     return Challenge.create(
         secret_key=secret_key,
         realm=realm,
@@ -256,9 +276,25 @@ def _create_challenge(
         intent=intent_name,
         request=request,
         expires=expires,
+        digest=digest,
         description=description,
         meta=meta,
     )
+
+
+def _body_digest_error(
+    digest: str | None,
+    body: str | bytes | dict[str, Any] | None,
+) -> str | None:
+    if body is None:
+        if digest is not None:
+            return "body digest present but request body was not provided"
+        return None
+    if not digest:
+        return "missing body digest"
+    if not _body_digest.verify(digest, body):
+        return "body digest mismatch"
+    return None
 
 
 def _challenge_from_echo(
