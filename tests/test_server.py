@@ -923,7 +923,11 @@ class TestPay:
 
         original_body = b'{"query":"paid"}'
         challenge_result = await handler(MockRequest(body=original_body))
-        headers = challenge_result.headers if HAS_STARLETTE else challenge_result["headers"]
+        headers = (
+            challenge_result["headers"]
+            if isinstance(challenge_result, dict)
+            else challenge_result.headers
+        )
         challenge = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
         assert challenge.digest == BodyDigest.compute(original_body)
 
@@ -1294,7 +1298,11 @@ class TestMppPay:
 
         original_body = b'{"query":"paid"}'
         challenge_result = await handler(MockRequest(body=original_body))
-        headers = challenge_result.headers if HAS_STARLETTE else challenge_result["headers"]
+        headers = (
+            challenge_result["headers"]
+            if isinstance(challenge_result, dict)
+            else challenge_result.headers
+        )
         challenge = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
         assert challenge.digest == BodyDigest.compute(original_body)
 
