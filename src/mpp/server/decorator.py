@@ -63,7 +63,7 @@ def framework_scope(request: Any) -> dict[str, str]:
             scope["resource"] = path
         query_string = raw_scope.get("query_string")
         if isinstance(query_string, bytes):
-            query_string = query_string.decode()
+            query_string = query_string.decode("latin-1")
         if isinstance(query_string, str) and query_string:
             scope["query"] = query_string
 
@@ -96,7 +96,7 @@ def framework_scope(request: Any) -> dict[str, str]:
 
     query_string = getattr(request, "query_string", None)
     if isinstance(query_string, bytes):
-        query_string = query_string.decode()
+        query_string = query_string.decode("latin-1")
     if isinstance(query_string, str) and query_string:
         scope.setdefault("query", query_string)
 

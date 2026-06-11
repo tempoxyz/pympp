@@ -687,6 +687,23 @@ class TestWrapPaymentHandler:
 
 
 class TestPay:
+    def test_framework_scope_handles_non_utf8_query_string(self) -> None:
+        """framework_scope must not crash on non-UTF-8 query bytes from the wire."""
+        from mpp.server.decorator import framework_scope
+
+        class AsgiRequest:
+            def __init__(self, query_string: bytes) -> None:
+                self.scope = {
+                    "type": "http",
+                    "path": "/paid",
+                    "query_string": query_string,
+                }
+
+        scope = framework_scope(AsgiRequest(b"\xff\xfe"))
+
+        assert scope["resource"] == "/paid"
+        assert scope["query"] == b"\xff\xfe".decode("latin-1")
+
     @pytest.mark.asyncio
     async def test_returns_402_when_no_authorization(self) -> None:
         """Should return 402 dict when no Authorization header."""
