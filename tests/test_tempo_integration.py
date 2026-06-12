@@ -364,6 +364,18 @@ class TestChargeIntegration:
             expires=expires,
         )
 
+        # Spy on the simulate payload to catch request-shape regressions that
+        # mocked-RPC unit tests cannot.
+        captured: list[dict] = []
+        original_build = intent._build_simulate_payload
+
+        def _spy(tx, sender):
+            payload = original_build(tx, sender)
+            captured.append(payload)
+            return payload
+
+        intent._build_simulate_payload = _spy  # type: ignore[method-assign]
+
         credential = await client_method.create_credential(challenge)
         receipt = await intent.verify(credential, request_dict)
 
@@ -371,6 +383,13 @@ class TestChargeIntegration:
         assert receipt.method == "tempo"
         assert receipt.reference.startswith("0x")
         assert len(receipt.reference) >= 66
+
+        # Simulation must carry a top-level `to` (not a CREATE) or the node rejects it.
+        assert captured, "pre-broadcast simulation payload was never built"
+        tx_request = captured[0]["blockStateCalls"][0]["calls"][0]
+        assert tx_request.get("to"), "simulate payload missing top-level `to` (CREATE)"
+        assert tx_request["to"].lower() == currency.lower()
+        assert tx_request["data"].startswith("0x")
 
     async def test_verify_with_server_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id

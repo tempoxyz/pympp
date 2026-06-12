@@ -905,9 +905,14 @@ class ChargeIntent:
 
         raw_tx = payload.signature
 
+        # Simulation payload for the locally co-signed tx, if we sponsor it.
+        simulate_payload: dict[str, Any] | None = None
+
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
-                raw_tx = self._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+                raw_tx, simulate_payload = self._cosign_as_fee_payer(
+                    raw_tx, request.currency, request=request
+                )
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
                 if not fee_payer_url:
@@ -938,6 +943,12 @@ class ChargeIntent:
                     raise VerificationError("Fee payer returned no signed transaction")
 
         rpc_url = self._get_rpc_url()
+
+        # We pay the gas, so simulate the co-signed tx first and bail if it
+        # would revert. Fails closed: no simulation, no broadcast.
+        if simulate_payload is not None:
+            await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+
         reserved_tx_hash: str | None = None
         store_key: str | None = None
         if self._store is not None:
@@ -1012,12 +1023,13 @@ class ChargeIntent:
 
     def _cosign_as_fee_payer(
         self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         """Co-sign a client-signed transaction as fee payer.
 
         Deserializes the client's 0x78 fee payer envelope, optionally validates
         the payment calls against ``request``, sets the fee token, and co-signs.
-        Returns the fully co-signed 0x76 transaction hex.
+        Returns ``(raw_0x76_hex, simulate_payload)`` where ``simulate_payload``
+        is the ``tempo_simulateV1`` request for the co-signed tx.
         """
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature, as_address
@@ -1128,7 +1140,112 @@ class ChargeIntent:
         except Exception as err:
             raise VerificationError("Fee payer signing failed") from err
 
-        return "0x" + cosigned.encode().hex()
+        raw_cosigned = "0x" + cosigned.encode().hex()
+        return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
+
+    def _build_simulate_payload(self, tx: Any, sender: str) -> dict[str, Any]:
+        """Build a ``tempo_simulateV1`` payload for the co-signed 0x76 tx.
+
+        Carries the recovered sender as ``from`` (the node needs it to model the
+        sender) plus the sponsor fields (``feeToken``, ``feePayerSignature``) so
+        the node simulates the same tx we are about to broadcast.
+        """
+        sig = tx.fee_payer_signature
+        parity = sig.v if sig.v in (0, 1) else sig.v - 27
+
+        # The node rebuilds the batch as ``calls[]`` followed by the top-level
+        # call appended last; an absent top-level ``to`` is read as a CREATE and
+        # rejected. So we put the final call top-level and the rest in ``calls``
+        # to preserve order.
+        last_call = tx.calls[-1]
+        leading_calls = tx.calls[:-1]
+
+        tx_request: dict[str, Any] = {
+            "from": sender,
+            "type": "0x76",
+            "chainId": hex(tx.chain_id),
+            "nonce": hex(tx.nonce),
+            "nonceKey": hex(tx.nonce_key),
+            "gas": hex(tx.gas_limit),
+            "maxFeePerGas": hex(tx.max_fee_per_gas),
+            "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
+            "feeToken": "0x" + bytes(tx.fee_token).hex(),
+            "feePayerSignature": {
+                # Fixed 32-byte r/s so leading zeros are not dropped.
+                "r": f"0x{sig.r:064x}",
+                "s": f"0x{sig.s:064x}",
+                "yParity": hex(parity),
+            },
+            # Top-level payment call so the node does not read this as a CREATE.
+            "to": "0x" + bytes(last_call.to).hex(),
+            "value": hex(last_call.value),
+            "data": "0x" + last_call.data.hex(),
+        }
+        if leading_calls:
+            tx_request["calls"] = [
+                {
+                    "to": "0x" + bytes(c.to).hex(),
+                    "value": hex(c.value),
+                    "data": "0x" + c.data.hex(),
+                }
+                for c in leading_calls
+            ]
+        if tx.valid_before is not None:
+            tx_request["validBefore"] = hex(tx.valid_before)
+        if tx.valid_after is not None:
+            tx_request["validAfter"] = hex(tx.valid_after)
+
+        return {
+            "blockStateCalls": [{"calls": [tx_request]}],
+            # We only care about execution outcome, not mempool admission.
+            "validation": False,
+            "traceTransfers": False,
+            "returnFullTransactions": False,
+        }
+
+    async def _simulate_before_broadcast(
+        self, client: Any, simulate_payload: dict[str, Any], rpc_url: str
+    ) -> None:
+        """Simulate the co-signed tx and raise if it would revert.
+
+        Fails closed: any RPC/transport error is treated as a failed check.
+        """
+        try:
+            response = await client.post(
+                rpc_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "tempo_simulateV1",
+                    "params": [simulate_payload, "latest"],
+                    "id": 1,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+        except Exception as err:
+            raise VerificationError("Pre-broadcast simulation failed") from err
+
+        if "error" in result:
+            raise VerificationError(f"Pre-broadcast simulation failed: {_rpc_error_msg(result)}")
+
+        rpc_result = result.get("result")
+        blocks = rpc_result.get("blocks") if isinstance(rpc_result, dict) else None
+        block0 = blocks[0] if isinstance(blocks, list) and blocks else None
+        calls = block0.get("calls") if isinstance(block0, dict) else None
+        call = None
+        if isinstance(calls, list) and calls and isinstance(calls[0], dict):
+            call = calls[0]
+        if call is None:
+            raise VerificationError("Pre-broadcast simulation returned no call results")
+
+        status = call.get("status")
+        if status in ("0x1", 1, True):
+            return
+
+        detail = (call.get("error") or {}).get("message") or "no revert reason returned"
+        raise VerificationError(
+            f"Sponsored transaction would revert in pre-broadcast simulation: {detail}"
+        )
 
     def _validate_calls(self, calls: tuple, request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""
