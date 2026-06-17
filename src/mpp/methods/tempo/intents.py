@@ -820,17 +820,13 @@ class ChargeIntent:
 
         rpc_url = self._get_rpc_url()
 
-        # We pay the gas, so simulate the co-signed tx first and bail if it
-        # would revert. Fails closed: no simulation, no broadcast.
-        if simulate_payload is not None:
-            await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
-
         reserved_tx_hash: str | None = None
         store_key: str | None = None
         if self._store is not None:
             reserved_tx_hash = _raw_transaction_hash(raw_tx)
             store_key = f"mpp:charge:{reserved_tx_hash.lower()}"
             if not await self._store.put_if_absent(store_key, reserved_tx_hash):
+                # Already reserved: return the existing receipt without re-broadcasting.
                 receipt_data = await self._fetch_transaction_receipt(client, reserved_tx_hash)
                 self._verify_receipt_transfers(
                     receipt_data,
@@ -841,6 +837,11 @@ class ChargeIntent:
                 return Receipt.success(reserved_tx_hash)
 
         try:
+            # We pay the gas, so simulate the co-signed tx and bail if it would
+            # revert. Fails closed: any error releases the reservation below.
+            if simulate_payload is not None:
+                await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+
             response = await client.post(
                 rpc_url,
                 json={

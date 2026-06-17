@@ -2274,6 +2274,126 @@ class TestCosignAsFeePayer:
         assert methods == ["tempo_simulateV1"]
         assert "eth_sendRawTransactionSync" not in methods
 
+    # An already-reserved charge fetches the existing receipt without simulating.
+    @pytest.mark.asyncio
+    async def test_verify_duplicate_skips_simulation_and_fetches_receipt(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        challenge_id = "challenge-dup"
+        realm = "api.example.com"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+
+        # Reserve the co-signed tx hash that verify() will compute.
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+        await store.put_if_absent(f"mpp:charge:{tx_hash.lower()}", tx_hash)
+
+        receipt_with_logs = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": currency,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + recipient[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1000000),
+                }
+            ],
+        }
+
+        def _post(*_args: object, **kwargs: object) -> httpx.Response:
+            method = cast(dict, kwargs["json"])["method"]
+            if method == "tempo_simulateV1":
+                return mock_response(200, {"jsonrpc": "2.0", "error": {"message": "node busy"}})
+            if method == "eth_getTransactionReceipt":
+                return mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1})
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=_post)
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000000",
+                "currency": currency,
+                "recipient": recipient,
+                "methodDetails": {"feePayer": True},
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == tx_hash
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["eth_getTransactionReceipt"]
+        assert "tempo_simulateV1" not in methods
+
+    # A simulation failure releases the reservation and does not broadcast.
+    @pytest.mark.asyncio
+    async def test_verify_simulation_failure_releases_reservation(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200, {"jsonrpc": "2.0", "error": {"message": "node busy"}, "id": 1}
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True},
+                },
+            )
+
+        assert await store.get(f"mpp:charge:{tx_hash.lower()}") is None
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["tempo_simulateV1"]
+        assert "eth_sendRawTransactionSync" not in methods
+
 
 class TestValidateTransactionPayload:
     """Tests for _validate_transaction_payload with both 0x76 and 0x78."""
