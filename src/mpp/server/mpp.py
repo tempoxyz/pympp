@@ -158,6 +158,7 @@ class Mpp:
         fee_payer: bool = False,
         chain_id: int | None = None,
         extra: dict[str, str] | None = None,
+        mppx_scope: dict[str, str] | None = None,
         body: str | bytes | dict[str, Any] | None = None,
     ) -> Challenge | tuple[Credential, Receipt]:
         """Handle a charge intent.
@@ -176,6 +177,10 @@ class Mpp:
             fee_payer: Whether to use a fee payer for gas sponsorship.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
             extra: Optional string metadata embedded in the charge request.
+            mppx_scope: Optional route/resource/query scope to bind into the
+                challenge request. Framework handlers can pass
+                ``framework_scope(request)`` to prevent same-price credential
+                replay across different resources.
             body: Actual request body bytes, string, or JSON-like dict to bind
                 with a SHA-256 digest. If provided, new challenges include a
                 digest and submitted credentials must echo a matching digest.
@@ -230,6 +235,10 @@ class Mpp:
             request["methodDetails"] = method_details
 
         request = transform_request(self.method, request, None)
+        if mppx_scope is not None:
+            if any(not isinstance(k, str) or not isinstance(v, str) for k, v in mppx_scope.items()):
+                raise ValueError("mppx_scope must be a dict[str, str]")
+            request = {**request, "_mppx_scope": dict(mppx_scope)}
 
         return await verify_or_challenge(
             authorization=authorization,

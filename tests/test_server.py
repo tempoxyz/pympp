@@ -1375,6 +1375,61 @@ class TestMppPay:
         assert receipt.reference == "tx-ref-456"
 
     @pytest.mark.asyncio
+    async def test_charge_binds_and_verifies_explicit_framework_scope(self) -> None:
+        """Mpp.charge(mppx_scope=...) should reject cross-resource credential replay."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+        first_scope = {"route": "/paid/{id}", "resource": "/paid/one", "query": "view=full"}
+        second_scope = {"route": "/paid/{id}", "resource": "/paid/two", "query": "view=full"}
+
+        challenge = await server.charge(
+            authorization=None,
+            amount="0.50",
+            mppx_scope=first_scope,
+        )
+        assert isinstance(challenge, Challenge)
+        assert challenge.request["_mppx_scope"] == first_scope
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={
+                "amount": "500000",
+                "currency": "0xUSD",
+                "recipient": "0xRecipient",
+                "_mppx_scope": first_scope,
+            },
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await server.charge(
+            authorization=credential.to_authorization(),
+            amount="0.50",
+            mppx_scope=second_scope,
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    async def test_charge_rejects_invalid_explicit_framework_scope(self) -> None:
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("tx-ref-456")
+
+        server = _make_server(test_intent)
+
+        with pytest.raises(ValueError, match=r"mppx_scope must be a dict\[str, str\]"):
+            await server.charge(
+                authorization=None,
+                amount="0.50",
+                mppx_scope={"resource": 42},  # type: ignore[dict-item]
+            )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "body_value",
         [
