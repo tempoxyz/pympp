@@ -1033,6 +1033,20 @@ class ChargeIntent:
         except Exception as err:
             raise VerificationError("Failed to deserialize client transaction") from err
 
+        # Cosigning recovers the sender via secp256k1 ECDSA, so only a raw
+        # 65-byte signature is supported; other envelopes (keychain, P256,
+        # WebAuthn) are rejected up front.
+        if len(sender_sig) != 65:
+            if sender_sig and sender_sig[0] in (0x03, 0x04):
+                raise VerificationError(
+                    "Access-key (keychain) signed fee-payer envelopes are not "
+                    "supported by local cosigning"
+                )
+            raise VerificationError(
+                "Only 65-byte secp256k1 sender signatures are supported by local "
+                "fee-payer cosigning"
+            )
+
         def _int(b: bytes) -> int:
             return int.from_bytes(b, "big") if b else 0
 
@@ -1099,14 +1113,19 @@ class ChargeIntent:
             valid_before=_int(decoded[8]) if decoded[8] else None,
             valid_after=_int(decoded[9]) if decoded[9] else None,
             fee_token=decoded[10] if decoded[10] else None,
+            # Part of the sender's signing hash; must be carried through.
+            tempo_authorization_list=tuple(decoded[12]),
             awaiting_fee_payer=True,
-            key_authorization=key_auth,
+            key_authorization=key_auth,  # type: ignore[arg-type]
         )
         sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
 
         from eth_account import Account
 
-        recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        try:
+            recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        except Exception as err:
+            raise VerificationError("Invalid sender signature") from err
         envelope_address = "0x" + sender_addr_bytes.hex()
 
         if recovered_address.lower() != envelope_address.lower():
