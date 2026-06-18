@@ -205,7 +205,7 @@ class TestEncoderDecoderIntegration:
         intent = ChargeIntent(rpc_url="https://rpc.test")
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
-        result = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        result, _ = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
         assert result.startswith("0x76")
 
         # The co-signed tx should be valid RLP with 0x76 prefix
