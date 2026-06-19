@@ -391,8 +391,11 @@ class TestKeyAuthorizationRoundtrip:
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
         # Succeeds only if the sender hash matched -> the full payload round-tripped.
-        result = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
         assert result.startswith("0x76")
+        # keyAuthorization cannot be faithfully serialized into the simulate JSON,
+        # so pre-broadcast simulation is skipped rather than run on a divergent tx.
+        assert simulate_payload is None
 
         # keyAuthorization sits at index 13 in the 0x76 encoding (before sender sig).
         decoded = rlp.decode(bytes.fromhex(result[2:])[1:])
@@ -472,11 +475,31 @@ class TestTempoAuthorizationListRoundtrip:
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
         # Succeeds only if the auth list was preserved into the recovery hash.
-        result = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
         assert result.startswith("0x76")
+        # aaAuthorizationList cannot be faithfully serialized into the simulate
+        # JSON, so pre-broadcast simulation is skipped for this tx.
+        assert simulate_payload is None
 
         decoded = rlp.decode(bytes.fromhex(result[2:])[1:])
         assert decoded[12] == [b"\x77" * 20, b"\x88" * 32]
+
+    def test_cosign_plain_tx_still_builds_simulate_payload(self) -> None:
+        """A tx without authorization fields keeps the pre-broadcast simulation."""
+        from mpp.methods.tempo import TempoAccount, tempo
+        from mpp.methods.tempo.intents import ChargeIntent
+
+        signed = _make_signed_tx(valid_before=int(time.time()) + 300)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+
+        result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        assert result.startswith("0x76")
+        assert simulate_payload is not None
+        assert "blockStateCalls" in simulate_payload
 
 
 class TestKeychainSignatureRejected:

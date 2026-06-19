@@ -1734,6 +1734,7 @@ class TestCosignAsFeePayer:
         max_priority_fee_per_gas: int = 1,
         valid_before: int | None = None,
         with_memo: str | None = None,
+        tempo_authorization_list: tuple[bytes, ...] = (),
     ) -> str:
         """Build a client-signed fee-payer-awaiting transaction."""
         from pytempo import Call, TempoTransaction
@@ -1762,6 +1763,7 @@ class TestCosignAsFeePayer:
             valid_before=valid_before,
             calls=calls,
             access_list=access_list,
+            tempo_authorization_list=tempo_authorization_list,
         )
 
         signed = tx.sign(TEST_PRIVATE_KEY)
@@ -2104,6 +2106,7 @@ class TestCosignAsFeePayer:
 
         raw_tx = self._build_client_tx(currency=currency)
         _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
+        assert payload is not None
         tx_request = payload["blockStateCalls"][0]["calls"][0]
 
         sender = TempoAccount.from_key(TEST_PRIVATE_KEY).address
@@ -2169,6 +2172,7 @@ class TestCosignAsFeePayer:
         currency = "0x20c0000000000000000000000000000000000000"
         raw_tx = self._build_client_tx(currency=currency)
         _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
+        assert payload is not None
         return payload
 
     # A reverting simulation must block the broadcast so the sponsor never pays
@@ -2273,6 +2277,82 @@ class TestCosignAsFeePayer:
         methods = [json.loads(r.read().decode())["method"] for r in requests]
         assert methods == ["tempo_simulateV1"]
         assert "eth_sendRawTransactionSync" not in methods
+
+    # A locally co-signed sponsored charge whose tx carries an authorization
+    # field cannot be faithfully simulated, so verify() must skip
+    # tempo_simulateV1 and broadcast directly (rather than simulate a divergent
+    # tx). It still succeeds end-to-end against a matching receipt.
+    @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_auth_bearing_skips_simulation(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        amount = 1000000
+        challenge_id = "challenge-auth-bearing"
+        realm = "api.example.com"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+
+        intent = self._make_intent()
+        # tempo_authorization_list makes the cosigned tx auth-bearing, so the
+        # simulate payload cannot be built and is skipped.
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=amount,
+            with_memo=memo,
+            tempo_authorization_list=(b"\x77" * 20, b"\x88" * 32),
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+
+        from_topic = "0x" + "0" * 24 + "abcd" * 10
+        to_topic = "0x" + "0" * 24 + recipient[2:]
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={
+                "jsonrpc": "2.0",
+                "result": {
+                    "transactionHash": "0xtxhash123",
+                    "status": "0x1",
+                    "logs": [
+                        {
+                            "address": currency,
+                            "topics": [TRANSFER_WITH_MEMO_TOPIC, from_topic, to_topic, memo],
+                            "data": "0x" + hex(amount)[2:].zfill(64),
+                        }
+                    ],
+                },
+                "id": 1,
+            },
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": str(amount),
+                "currency": currency,
+                "recipient": recipient,
+                "methodDetails": {"feePayer": True},
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == "0xtxhash123"
+
+        # Simulation was skipped; only the broadcast was attempted, and the
+        # broadcast tx is the auth-bearing co-signed 0x76 (auth list preserved).
+        bodies = [json.loads(r.read().decode()) for r in httpx_mock.get_requests()]
+        assert [b["method"] for b in bodies] == ["eth_sendRawTransactionSync"]
+        broadcast_raw = bodies[0]["params"][0]
+        assert broadcast_raw.startswith("0x76")
+        decoded = rlp.decode(bytes.fromhex(broadcast_raw[2:])[1:])
+        assert decoded[12] == [b"\x77" * 20, b"\x88" * 32]
 
     # An already-reserved charge fetches the existing receipt without simulating.
     @pytest.mark.asyncio

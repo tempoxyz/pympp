@@ -8,3 +8,5 @@ Preserve all sender-signed fields when decoding and re-signing fee-payer (0x78) 
 - **`tempo_authorization_list`**: was dropped entirely during cosigning; it is now carried through.
 
 Access-key (keychain) and other non-secp256k1 sender signatures, which a fee payer cannot verify offline, are now rejected with a clear error instead of an opaque ECDSA recovery failure, and the envelope decoder fails closed on unexpected field counts.
+
+Pre-broadcast simulation (`tempo_simulateV1`) is skipped for locally co-signed transactions that carry a `keyAuthorization` or a non-empty `tempo_authorization_list`. These fields are preserved verbatim as opaque RLP for the broadcast transaction but cannot yet be faithfully re-serialized into the simulation JSON (`keyAuthorization` / `aaAuthorizationList`), so the transaction is broadcast without the extra revert check rather than simulated as a different transaction.
