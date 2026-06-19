@@ -1,6 +1,8 @@
 """Tests for Tempo payment method."""
 
+import json
 import os
+import re
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -1773,7 +1775,9 @@ class TestCosignAsFeePayer:
         intent = self._make_intent()
 
         raw_tx = self._build_client_tx()
-        result = intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+        result, _ = intent._cosign_as_fee_payer(
+            raw_tx, "0x20c0000000000000000000000000000000000000"
+        )
 
         assert result.startswith("0x76")
         assert len(result) > len(raw_tx)
@@ -1863,7 +1867,7 @@ class TestCosignAsFeePayer:
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         )
 
-        result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+        result, _ = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
 
     def test_cosign_rejects_extra_trailing_call(self) -> None:
@@ -2088,8 +2092,307 @@ class TestCosignAsFeePayer:
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         )
 
-        result = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+        result, _ = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
+
+    # The simulate payload must target the co-signed tx: the recovered sender as
+    # `from`, the sponsor fields the node needs (feeToken, feePayerSignature), the
+    # payment calls, the expiring nonceKey, the validity window, and validation off.
+    def test_cosign_returns_simulate_payload_with_sponsor_abi(self) -> None:
+        intent = self._make_intent()
+        currency = "0x20c0000000000000000000000000000000000000"
+
+        raw_tx = self._build_client_tx(currency=currency)
+        _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
+        tx_request = payload["blockStateCalls"][0]["calls"][0]
+
+        sender = TempoAccount.from_key(TEST_PRIVATE_KEY).address
+        assert payload["validation"] is False
+        assert tx_request["type"] == "0x76"
+        assert tx_request["from"].lower() == sender.lower()
+        assert tx_request["feeToken"].lower() == currency.lower()
+        sig = tx_request["feePayerSignature"]
+        assert set(sig) == {"r", "s", "yParity"}
+        assert re.fullmatch(r"0x[0-9a-f]{64}", sig["r"])
+        assert re.fullmatch(r"0x[0-9a-f]{64}", sig["s"])
+        assert sig["yParity"] in ("0x0", "0x1")
+        assert tx_request["nonceKey"].startswith("0x")
+        assert tx_request["validBefore"].startswith("0x")
+        # Top-level payment call (with `data`, not `input`) so it isn't a CREATE.
+        assert tx_request["to"].lower() == currency.lower()
+        assert tx_request["data"].startswith("0x")
+        assert tx_request["value"].startswith("0x")
+        # A single-call charge needs no nested batch.
+        assert "calls" not in tx_request
+
+    # The node appends the top-level call after `calls[]`, so the final call
+    # goes top-level and the leading calls in `calls`, preserving order.
+    def test_build_simulate_payload_multi_call_preserves_order(self) -> None:
+        from types import SimpleNamespace
+
+        intent = self._make_intent()
+
+        def _call(byte: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                to=bytes([byte]) * 20,
+                value=0,
+                data=bytes([byte]) * 4,
+            )
+
+        calls = (_call(0xA1), _call(0xB2), _call(0xC3))
+        tx = SimpleNamespace(
+            fee_payer_signature=SimpleNamespace(r=1, s=2, v=27),
+            chain_id=42431,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            fee_token=bytes(20),
+            calls=calls,
+            valid_before=None,
+            valid_after=None,
+        )
+
+        payload = intent._build_simulate_payload(tx, "0x" + "11" * 20)
+        tx_request = payload["blockStateCalls"][0]["calls"][0]
+
+        assert tx_request["to"] == "0x" + "c3" * 20
+        assert tx_request["data"] == "0x" + "c3" * 4
+        assert [c["to"] for c in tx_request["calls"]] == [
+            "0x" + "a1" * 20,
+            "0x" + "b2" * 20,
+        ]
+        assert all("data" in c and "input" not in c for c in tx_request["calls"])
+
+    def _cosign_payload(self, intent: ChargeIntent) -> dict:
+        currency = "0x20c0000000000000000000000000000000000000"
+        raw_tx = self._build_client_tx(currency=currency)
+        _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
+        return payload
+
+    # A reverting simulation must block the broadcast so the sponsor never pays
+    # gas for a failing transaction.
+    @pytest.mark.asyncio
+    async def test_simulate_before_broadcast_rejects_revert(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        revert = {
+            "jsonrpc": "2.0",
+            "result": {
+                "blocks": [
+                    {"calls": [{"status": "0x0", "error": {"message": "execution reverted"}}]}
+                ]
+            },
+            "id": 1,
+        }
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response(200, revert))
+
+        with pytest.raises(VerificationError, match="would revert"):
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        sent = mock_client.post.await_args.kwargs["json"]
+        assert sent["method"] == "tempo_simulateV1"
+        assert sent["params"][1] == "latest"
+
+    # A successful simulation must let the broadcast proceed.
+    @pytest.mark.asyncio
+    async def test_simulate_before_broadcast_accepts_success(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        success = {
+            "jsonrpc": "2.0",
+            "result": {"blocks": [{"calls": [{"status": "0x1"}]}]},
+            "id": 1,
+        }
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response(200, success))
+
+        assert (
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+            is None
+        )
+
+    # If the simulation RPC itself errors, fail closed.
+    @pytest.mark.asyncio
+    async def test_simulate_before_broadcast_fails_closed_on_rpc_error(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=RuntimeError("node unavailable"))
+
+        with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+
+    # End-to-end: a reverting simulation for a locally co-signed sponsored charge
+    # must abort `verify` before the tx is broadcast, so the sponsor never pays
+    # gas. We register only the simulate response; if the code wrongly attempted
+    # eth_sendRawTransactionSync, no response would match and the test would fail.
+    @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_revert_does_not_broadcast(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        # tempo_simulateV1 reports the co-signed tx would revert.
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={
+                "jsonrpc": "2.0",
+                "result": {
+                    "blocks": [
+                        {"calls": [{"status": "0x0", "error": {"message": "execution reverted"}}]}
+                    ]
+                },
+                "id": 1,
+            },
+        )
+
+        with pytest.raises(VerificationError, match="would revert"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True},
+                },
+            )
+
+        # Exactly one RPC call (the simulation); no broadcast was attempted.
+        requests = httpx_mock.get_requests()
+        methods = [json.loads(r.read().decode())["method"] for r in requests]
+        assert methods == ["tempo_simulateV1"]
+        assert "eth_sendRawTransactionSync" not in methods
+
+    # An already-reserved charge fetches the existing receipt without simulating.
+    @pytest.mark.asyncio
+    async def test_verify_duplicate_skips_simulation_and_fetches_receipt(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        challenge_id = "challenge-dup"
+        realm = "api.example.com"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+
+        # Reserve the co-signed tx hash that verify() will compute.
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+        await store.put_if_absent(f"mpp:charge:{tx_hash.lower()}", tx_hash)
+
+        receipt_with_logs = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": currency,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + recipient[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1000000),
+                }
+            ],
+        }
+
+        def _post(*_args: object, **kwargs: object) -> httpx.Response:
+            method = cast(dict, kwargs["json"])["method"]
+            if method == "tempo_simulateV1":
+                return mock_response(200, {"jsonrpc": "2.0", "error": {"message": "node busy"}})
+            if method == "eth_getTransactionReceipt":
+                return mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1})
+            raise AssertionError(f"unexpected RPC method: {method}")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=_post)
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000000",
+                "currency": currency,
+                "recipient": recipient,
+                "methodDetails": {"feePayer": True},
+            },
+        )
+
+        assert receipt.status == "success"
+        assert receipt.reference == tx_hash
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["eth_getTransactionReceipt"]
+        assert "tempo_simulateV1" not in methods
+
+    # A simulation failure releases the reservation and does not broadcast.
+    @pytest.mark.asyncio
+    async def test_verify_simulation_failure_releases_reservation(self) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(
+                200, {"jsonrpc": "2.0", "error": {"message": "node busy"}, "id": 1}
+            )
+        )
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True},
+                },
+            )
+
+        assert await store.get(f"mpp:charge:{tx_hash.lower()}") is None
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["tempo_simulateV1"]
+        assert "eth_sendRawTransactionSync" not in methods
 
 
 class TestValidateTransactionPayload:
