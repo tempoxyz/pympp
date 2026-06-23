@@ -961,8 +961,12 @@ class ChargeIntent:
                 return Receipt.success(reserved_tx_hash)
 
         try:
-            # We pay the gas, so simulate the co-signed tx and bail if it would
-            # revert. Fails closed: any error releases the reservation below.
+            # We pay the gas, so when we can faithfully build a simulate payload,
+            # simulate the co-signed tx and bail if it would revert (any error
+            # releases the reservation below). Auth-bearing txs return
+            # simulate_payload=None because simulating them without their
+            # authorization fields would be a divergent transaction; those are
+            # broadcast without the pre-broadcast revert check.
             if simulate_payload is not None:
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
 
@@ -1024,13 +1028,21 @@ class ChargeIntent:
 
     def _cosign_as_fee_payer(
         self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any] | None]:
         """Co-sign a client-signed transaction as fee payer.
 
         Deserializes the client's 0x78 fee payer envelope, optionally validates
         the payment calls against ``request``, sets the fee token, and co-signs.
         Returns ``(raw_0x76_hex, simulate_payload)`` where ``simulate_payload``
         is the ``tempo_simulateV1`` request for the co-signed tx.
+
+        ``simulate_payload`` is ``None`` when the tx carries a
+        ``key_authorization`` or a non-empty ``tempo_authorization_list``: those
+        sender-signed fields are preserved verbatim as opaque RLP for the
+        broadcast tx, but cannot yet be faithfully re-serialized into the
+        ``tempo_simulateV1`` JSON (``keyAuthorization`` / ``aaAuthorizationList``,
+        possibly with P256/WebAuthn signatures). Skipping is preferable to
+        simulating a transaction that differs from the one we broadcast.
         """
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature, as_address
@@ -1045,6 +1057,20 @@ class ChargeIntent:
             decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(all_bytes)
         except Exception as err:
             raise VerificationError("Failed to deserialize client transaction") from err
+
+        # Cosigning recovers the sender via secp256k1 ECDSA, so only a raw
+        # 65-byte signature is supported; other envelopes (keychain, P256,
+        # WebAuthn) are rejected up front.
+        if len(sender_sig) != 65:
+            if sender_sig and sender_sig[0] in (0x03, 0x04):
+                raise VerificationError(
+                    "Access-key (keychain) signed fee-payer envelopes are not "
+                    "supported by local cosigning"
+                )
+            raise VerificationError(
+                "Only 65-byte secp256k1 sender signatures are supported by local "
+                "fee-payer cosigning"
+            )
 
         def _int(b: bytes) -> int:
             return int.from_bytes(b, "big") if b else 0
@@ -1112,14 +1138,19 @@ class ChargeIntent:
             valid_before=_int(decoded[8]) if decoded[8] else None,
             valid_after=_int(decoded[9]) if decoded[9] else None,
             fee_token=decoded[10] if decoded[10] else None,
+            # Part of the sender's signing hash; must be carried through.
+            tempo_authorization_list=tuple(decoded[12]),
             awaiting_fee_payer=True,
-            key_authorization=key_auth,
+            key_authorization=key_auth,  # type: ignore[arg-type]
         )
         sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
 
         from eth_account import Account
 
-        recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        try:
+            recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
+        except Exception as err:
+            raise VerificationError("Invalid sender signature") from err
         envelope_address = "0x" + sender_addr_bytes.hex()
 
         if recovered_address.lower() != envelope_address.lower():
@@ -1142,6 +1173,14 @@ class ChargeIntent:
             raise VerificationError("Fee payer signing failed") from err
 
         raw_cosigned = "0x" + cosigned.encode().hex()
+
+        # Skip pre-broadcast simulation when the tx carries sender-signed
+        # authorization fields we cannot faithfully serialize into the
+        # tempo_simulateV1 JSON; simulating a divergent tx would be worse than
+        # not simulating at all.
+        if cosigned.key_authorization is not None or cosigned.tempo_authorization_list:
+            return raw_cosigned, None
+
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
 
     def _build_simulate_payload(self, tx: Any, sender: str) -> dict[str, Any]:
@@ -1150,7 +1189,21 @@ class ChargeIntent:
         Carries the recovered sender as ``from`` (the node needs it to model the
         sender) plus the sponsor fields (``feeToken``, ``feePayerSignature``) so
         the node simulates the same tx we are about to broadcast.
+
+        Must not be called for a tx that carries a ``key_authorization`` or a
+        non-empty ``tempo_authorization_list``: those fields cannot yet be
+        faithfully serialized here, so the resulting payload would describe a
+        different transaction than the one broadcast (``_cosign_as_fee_payer``
+        returns ``None`` for such txs instead of calling this).
         """
+        if getattr(tx, "key_authorization", None) is not None or getattr(
+            tx, "tempo_authorization_list", ()
+        ):
+            raise VerificationError(
+                "Cannot build a faithful tempo_simulateV1 payload for an "
+                "authorization-bearing transaction"
+            )
+
         sig = tx.fee_payer_signature
         parity = sig.v if sig.v in (0, 1) else sig.v - 27
 
