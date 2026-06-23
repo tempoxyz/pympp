@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0 (2026-06-23)
+
+### Minor Changes
+
+- Validate the credential `source` on the Tempo hash-credential verification path. The server now parses the `did:pkh:eip155` source before reserving the transaction hash, requires TIP-20 transfers to originate from the declared source address (falling back to the receipt sender when no source is provided), and rejects malformed or chain-mismatched sources with a uniform error. Adds a `validate_sender` callback (with `SenderValidation` / `ValidateSender`) to `ChargeIntent` to authorize smart-account / relayer flows where the on-chain transfer sender differs from the declared source. (by @stevencartavia, [#154](https://github.com/tempoxyz/pympp/pull/154))
+- Sponsored (fee-payer) charges now dry-run the co-signed transaction via `tempo_simulateV1` before broadcasting. If the transaction would revert on-chain, the sponsor rejects it instead of paying gas for a failing transaction. The check fails closed: if the simulation RPC is unavailable, the charge is rejected. (by @stevencartavia, [#154](https://github.com/tempoxyz/pympp/pull/154))
+
+### Patch Changes
+
+- Preserve all sender-signed fields when decoding and re-signing fee-payer (0x78) envelopes. Two fields that are part of the sender's signing hash were being lost when the fee payer reconstructed the transaction to cosign it, causing valid transactions to be rejected ("Sender address does not match recovered signer") or mis-attributed:
+- **`keyAuthorization`**: the decoder rebuilt it from only `chain_id`, `key_type`, `key_id`, and `expiry`, dropping `limits` and the T6 (TIP-1049) `allowed_calls`, `witness`, `is_admin`, and `account` fields. It now round-trips the authorization RLP verbatim (decode and encode), so it works for both legacy and T6 authorizations — including non-secp256k1 root signatures — without requiring a T6-aware `pytempo`.
+- **`tempo_authorization_list`**: was dropped entirely during cosigning; it is now carried through.
+- Access-key (keychain) and other non-secp256k1 sender signatures, which a fee payer cannot verify offline, are now rejected with a clear error instead of an opaque ECDSA recovery failure, and the envelope decoder fails closed on unexpected field counts.
+- Pre-broadcast simulation (`tempo_simulateV1`) is skipped for locally co-signed transactions that carry a `keyAuthorization` or a non-empty `tempo_authorization_list`. These fields are preserved verbatim as opaque RLP for the broadcast transaction but cannot yet be faithfully re-serialized into the simulation JSON (`keyAuthorization` / `aaAuthorizationList`), so the transaction is broadcast without the extra revert check rather than simulated as a different transaction. (by @stevencartavia, [#154](https://github.com/tempoxyz/pympp/pull/154))
+
 ## 0.8.2 (2026-06-02)
 
 ### Patch Changes
