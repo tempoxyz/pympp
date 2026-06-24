@@ -117,6 +117,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        # Buffer the request body up front. Request bodies (e.g. a POST payload)
+        # are streamed and one-shot: the inner transport consumes the stream when
+        # it sends the initial request, so a paid retry that reused the original
+        # stream would transmit an empty/garbled body. Reading here replaces the
+        # stream with a replayable ByteStream, so the retry carries the real body.
+        await request.aread()
+
         response = await self._inner.handle_async_request(request)
 
         if response.status_code != 402:
@@ -240,7 +247,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             method=request.method,
             url=request.url,
             headers=headers,
-            stream=request.stream,
+            content=request.content,
             extensions=request.extensions,
         )
 
