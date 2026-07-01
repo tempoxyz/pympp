@@ -50,6 +50,19 @@ class TestToProblemDetails:
         with_cid = err.to_problem_details(challenge_id="ch-1")
         assert set(with_cid.keys()) == {"type", "title", "status", "detail", "challengeId"}
 
+    def test_hint_included_when_present(self) -> None:
+        """to_problem_details() should include hint when the error class defines one."""
+        err = PaymentRequiredError()
+        details = err.to_problem_details()
+        assert "hint" in details
+        assert "wallet" in details["hint"].lower()
+
+    def test_hint_excluded_when_none(self) -> None:
+        """to_problem_details() should not include hint when not set."""
+        err = PaymentError("test")
+        details = err.to_problem_details()
+        assert "hint" not in details
+
 
 class TestAutoSlug:
     @pytest.mark.parametrize(
@@ -177,6 +190,49 @@ class TestSubclassInstantiation:
     def test_payment_action_required_no_reason(self) -> None:
         err = PaymentActionRequiredError()
         assert "requires action" in str(err)
+
+
+class TestHintDefaults:
+    def test_payment_required_has_wallet_hint(self) -> None:
+        err = PaymentRequiredError()
+        details = err.to_problem_details()
+        assert details["hint"] == (
+            "Use a supported wallet to pay for this resource using one of the supported "
+            "payment methods returned in the WWW-Authenticate header. "
+            "See https://mpp.dev/tools/wallet.md"
+        )
+
+    def test_malformed_credential_has_hint(self) -> None:
+        err = MalformedCredentialError()
+        details = err.to_problem_details()
+        assert details["hint"] == (
+            "Use a supported wallet to construct valid credentials for one of the supported "
+            "payment methods returned in the WWW-Authenticate header. "
+            "See https://mpp.dev/tools/wallet.md"
+        )
+
+    def test_method_unsupported_has_wallet_hint(self) -> None:
+        err = PaymentMethodUnsupportedError()
+        details = err.to_problem_details()
+        assert details["hint"] == (
+            "Use a supported wallet to pay for this resource using one of the supported "
+            "payment methods returned in the WWW-Authenticate header. "
+            "See https://mpp.dev/tools/wallet.md"
+        )
+
+    def test_other_errors_have_no_hint(self) -> None:
+        for cls in (
+            InvalidChallengeError,
+            VerificationFailedError,
+            PaymentExpiredError,
+            InvalidPayloadError,
+            BadRequestError,
+            PaymentInsufficientError,
+            PaymentActionRequiredError,
+        ):
+            err = cls()
+            details = err.to_problem_details()
+            assert "hint" not in details, f"{cls.__name__} should not have a hint"
 
 
 class TestSubclassProblemDetails:
