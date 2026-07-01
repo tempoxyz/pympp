@@ -11,6 +11,21 @@ from typing import Any
 
 _BASE_URI = "https://paymentauth.org/problems"
 
+class Hints:
+    """Default hint messages for payment errors."""
+
+    payment_required = (
+        "Use a supported wallet to pay for this resource using one of the supported "
+        "payment methods returned in the WWW-Authenticate header. "
+        "See https://mpp.dev/tools/wallet.md"
+    )
+    malformed_credential = (
+        "Use a supported wallet to construct valid credentials for one of the supported "
+        "payment methods returned in the WWW-Authenticate header. "
+        "See https://mpp.dev/tools/wallet.md"
+    )
+    method_unsupported = payment_required
+
 
 def _to_slug(name: str) -> str:
     """CamelCaseError → kebab-case slug (e.g. InvalidPayloadError → invalid-payload)."""
@@ -29,6 +44,7 @@ class PaymentError(Exception):
 
     status: int = 402
     title: str = "Payment Error"
+    hint: str | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -49,11 +65,15 @@ class PaymentError(Exception):
         }
         if challenge_id is not None:
             details["challengeId"] = challenge_id
+        if self.hint is not None:
+            details["hint"] = self.hint
         return details
 
 
 class PaymentRequiredError(PaymentError):
     """No credential was provided but payment is required."""
+
+    hint = Hints.payment_required
 
     def __init__(self, realm: str | None = None, description: str | None = None) -> None:
         parts = ["Payment is required"]
@@ -66,6 +86,8 @@ class PaymentRequiredError(PaymentError):
 
 class MalformedCredentialError(PaymentError):
     """Credential is malformed (invalid base64url, bad JSON structure)."""
+
+    hint = Hints.malformed_credential
 
     def __init__(self, reason: str | None = None) -> None:
         msg = f"Credential is malformed: {reason}." if reason else "Credential is malformed."
@@ -135,6 +157,7 @@ class PaymentMethodUnsupportedError(PaymentError):
     status = 400
     type = f"{_BASE_URI}/method-unsupported"
     title = "Method Unsupported"
+    hint = Hints.method_unsupported
 
     def __init__(self, method: str | None = None) -> None:
         msg = (
