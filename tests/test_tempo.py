@@ -1692,6 +1692,7 @@ class TestCosignAsFeePayer:
         recipient: str,
         amount: int,
         memo: str | None = None,
+        padding: str = "",
     ) -> str:
         selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
         to_padded = recipient[2:].lower().zfill(64)
@@ -1699,6 +1700,7 @@ class TestCosignAsFeePayer:
         data = f"0x{selector}{to_padded}{amount_padded}"
         if memo is not None:
             data += memo[2:] if memo.startswith("0x") else memo
+        data += padding
         return data
 
     def _encode_approve_data(self, spender: str, amount: int) -> str:
@@ -1871,6 +1873,27 @@ class TestCosignAsFeePayer:
 
         result, _ = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
+
+    def test_cosign_rejects_padded_transfer_calldata(self) -> None:
+        """Should reject padded calldata before fee payer signing."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(recipient, 1000000, padding="01" * 5500),
+                ),
+            )
+        )
+        request = ChargeRequest(amount="1000000", currency=currency, recipient=recipient)
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
 
     def test_cosign_rejects_extra_trailing_call(self) -> None:
         """Should reject sponsored transactions with extra trailing calls."""
@@ -2483,6 +2506,7 @@ class TestValidateTransactionPayload:
         recipient: str,
         amount: int,
         memo: str | None = None,
+        padding: str = "",
     ) -> str:
         selector = TRANSFER_WITH_MEMO_SELECTOR if memo is not None else TRANSFER_SELECTOR
         to_padded = recipient[2:].lower().zfill(64)
@@ -2490,6 +2514,7 @@ class TestValidateTransactionPayload:
         data = f"0x{selector}{to_padded}{amount_padded}"
         if memo is not None:
             data += memo[2:] if memo.startswith("0x") else memo
+        data += padding
         return data
 
     def _build_0x78_envelope(
@@ -2498,13 +2523,14 @@ class TestValidateTransactionPayload:
         recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         amount: int = 1000000,
         memo: str | None = None,
+        padding: str = "",
     ) -> str:
         """Build a 0x78 fee payer envelope."""
         from pytempo import Call, TempoTransaction
 
         from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
 
-        transfer_data = self._encode_transfer_data(recipient, amount, memo)
+        transfer_data = self._encode_transfer_data(recipient, amount, memo, padding)
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -2527,13 +2553,14 @@ class TestValidateTransactionPayload:
         recipient: str = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         amount: int = 1000000,
         memo: str | None = None,
+        padding: str = "",
     ) -> str:
         """Build a standard 0x76 transaction."""
         import attrs
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature
 
-        transfer_data = self._encode_transfer_data(recipient, amount, memo)
+        transfer_data = self._encode_transfer_data(recipient, amount, memo, padding)
 
         tx = TempoTransaction.create(
             chain_id=42431,
@@ -2573,6 +2600,32 @@ class TestValidateTransactionPayload:
         sig = self._build_0x78_envelope(memo=memo)
 
         intent._validate_transaction_payload(sig, request)
+
+    def test_rejects_0x78_with_padded_transfer_calldata(self) -> None:
+        """Should reject ABI calldata with trailing bytes."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+        sig = self._build_0x78_envelope(padding="01" * 5500)
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
+
+    def test_rejects_0x76_with_padded_transfer_calldata(self) -> None:
+        """Should reject padded calldata for standard Tempo transactions too."""
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+        sig = self._build_0x76_tx(padding="01" * 5500)
+
+        with pytest.raises(VerificationError, match="no matching payment call"):
+            intent._validate_transaction_payload(sig, request)
 
     def test_rejects_0x78_with_wrong_amount(self) -> None:
         """Should reject a 0x78 envelope with mismatched amount."""
@@ -3153,6 +3206,17 @@ class TestMatchTransferCalldataWithMemo:
         )
         assert _match_transfer_calldata(calldata, request) is True
 
+    def test_memo_rejects_trailing_padding(self) -> None:
+        """transferWithMemo calldata must be exactly selector + 3 ABI words."""
+        request = self._make_request(memo=self.MEMO)
+        calldata = (
+            self._build_calldata(
+                TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
+            )
+            + "01"
+        )
+        assert _match_transfer_calldata(calldata, request) is False
+
     def test_memo_wrong_memo_value(self) -> None:
         """Wrong memo value should be rejected."""
         request = self._make_request(memo=self.MEMO)
@@ -3189,6 +3253,12 @@ class TestMatchTransferCalldataWithMemo:
         )
         assert _match_transfer_calldata(calldata_plain, request) is True
         assert _match_transfer_calldata(calldata_memo, request) is True
+
+    def test_no_memo_rejects_plain_transfer_trailing_padding(self) -> None:
+        """Plain transfer calldata must be exactly selector + 2 ABI words."""
+        request = self._make_request(memo=None)
+        calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT) + "01"
+        assert _match_transfer_calldata(calldata, request) is False
 
     def test_no_memo_rejects_short_transfer_with_memo_calldata(self) -> None:
         """When no memo, truncated transferWithMemo calldata should still be rejected."""
@@ -3887,6 +3957,26 @@ class TestMatchSingleTransferCalldata:
             is True
         )
 
+    def test_memo_rejects_trailing_padding(self) -> None:
+        calldata = (
+            self._build_calldata(
+                TRANSFER_WITH_MEMO_SELECTOR,
+                self.RECIPIENT,
+                self.AMOUNT,
+                "ab" * 32,
+            )
+            + "01"
+        )
+        assert (
+            _match_single_transfer_calldata(
+                calldata,
+                self.RECIPIENT,
+                self.AMOUNT,
+                self.MEMO,
+            )
+            is False
+        )
+
     def test_no_memo_accepts_transfer_with_memo_selector(self) -> None:
         """When no memo expected, transferWithMemo calldata should be accepted."""
         calldata = self._build_calldata(
@@ -3905,6 +3995,10 @@ class TestMatchSingleTransferCalldata:
     def test_no_memo_accepts_plain_transfer(self) -> None:
         calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
         assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is True
+
+    def test_no_memo_rejects_plain_transfer_trailing_padding(self) -> None:
+        calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT) + "01"
+        assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is False
 
 
 class TestSplitLogMemoStrictness:
