@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 (2026-07-01)
+
+### Patch Changes
+
+- Fixed rejection of ABI-encoded calldata with trailing padding bytes in Tempo transfer, approve, and swap calls. Added exact-length validation constants and updated `_match_single_transfer_calldata`, `_match_transfer_calldata`, and `_validate_call_scope` to reject any calldata that does not match the expected byte length precisely. (by @BrendanRyan, [#160](https://github.com/tempoxyz/pympp/pull/160))
+
 ## 0.9.0 (2026-06-23)
 
 ### Minor Changes
