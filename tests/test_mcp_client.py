@@ -133,15 +133,6 @@ class TestIsPaymentRequiredError:
         err = FakeMcpError(-32042, data={"challenges": [_make_challenge_dict()]})
         assert _is_payment_required_error(err) is True
 
-    def test_current_sdk_nested_error_data(self) -> None:
-        err = FakeCurrentMcpError(
-            FakeMcpErrorData(
-                -32042,
-                data={"challenges": [_make_challenge_dict()]},
-            )
-        )
-        assert _is_payment_required_error(err) is True
-
     def test_real_current_mcp_sdk_error_data(self) -> None:
         exceptions = pytest.importorskip("mcp.shared.exceptions")
         types = pytest.importorskip("mcp.types")
