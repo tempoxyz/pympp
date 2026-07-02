@@ -62,16 +62,31 @@ class Method(Protocol):
         ...
 
 
+def _error_code(error: Exception) -> int | None:
+    code = getattr(error, "code", None)
+    if code is not None:
+        return code
+    nested = getattr(error, "error", None)
+    return getattr(nested, "code", None)
+
+
+def _error_data(error: Exception) -> Any:
+    data = getattr(error, "data", None)
+    if data is not None:
+        return data
+    nested = getattr(error, "error", None)
+    return getattr(nested, "data", None)
+
+
 def _is_payment_required_error(error: Exception) -> bool:
     """Check whether an MCP error is a -32042 payment required error.
 
     Distinguishes payment errors from other uses of -32042 (such as
     URL elicitation) by checking for a ``challenges`` array in ``error.data``.
     """
-    code = getattr(error, "code", None)
-    if code != CODE_PAYMENT_REQUIRED:
+    if _error_code(error) != CODE_PAYMENT_REQUIRED:
         return False
-    data = getattr(error, "data", None)
+    data = _error_data(error)
     if not isinstance(data, dict):
         return False
     challenges = data.get("challenges")
@@ -108,7 +123,7 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
 
 def _extract_challenges(error: Exception) -> list[MCPChallenge]:
     """Extract valid payment challenges from a payment required error."""
-    data = getattr(error, "data", None)
+    data = _error_data(error)
     if not isinstance(data, dict):
         return []
 

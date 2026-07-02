@@ -43,6 +43,23 @@ class FakeMcpError(Exception):
 
 
 @dataclass
+class FakeMcpErrorData:
+    """Mimics current mcp.types.ErrorData."""
+
+    code: int
+    message: str = ""
+    data: Any = None
+
+
+class FakeCurrentMcpError(Exception):
+    """Mimics current mcp.shared.exceptions.McpError with nested ErrorData."""
+
+    def __init__(self, error: FakeMcpErrorData):
+        super().__init__(error.message)
+        self.error = error
+
+
+@dataclass
 class FakeMethod:
     """Fake payment method for testing."""
 
@@ -115,6 +132,29 @@ class TestIsPaymentRequiredError:
     def test_correct_error(self) -> None:
         err = FakeMcpError(-32042, data={"challenges": [_make_challenge_dict()]})
         assert _is_payment_required_error(err) is True
+
+    def test_current_sdk_nested_error_data(self) -> None:
+        err = FakeCurrentMcpError(
+            FakeMcpErrorData(
+                -32042,
+                data={"challenges": [_make_challenge_dict()]},
+            )
+        )
+        assert _is_payment_required_error(err) is True
+
+    def test_real_current_mcp_sdk_error_data(self) -> None:
+        exceptions = pytest.importorskip("mcp.shared.exceptions")
+        types = pytest.importorskip("mcp.types")
+        err = exceptions.McpError(
+            types.ErrorData(
+                code=-32042,
+                message="Payment Required",
+                data={"challenges": [_make_challenge_dict()]},
+            )
+        )
+
+        assert _is_payment_required_error(err) is True
+        assert _extract_challenges(err) == [_make_challenge()]
 
     def test_wrong_code(self) -> None:
         err = FakeMcpError(-32000, data={"challenges": [_make_challenge_dict()]})
@@ -246,6 +286,56 @@ class TestMcpClientPaidTool:
             # Verify retry included credential in meta
             retry_call_kwargs = session.call_tool.call_args_list[1]
             retry_meta = retry_call_kwargs.kwargs.get("meta") or retry_call_kwargs[1].get("meta")
+            assert META_CREDENTIAL in retry_meta
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
+    @pytest.mark.asyncio
+    async def test_payment_flow_with_current_sdk_error_shape(self) -> None:
+        """Current mcp SDK stores ErrorData on McpError.error."""
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeCurrentMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            payment_error = FakeCurrentMcpError(
+                FakeMcpErrorData(
+                    -32042,
+                    message="Payment Required",
+                    data={
+                        "httpStatus": 402,
+                        "challenges": [_make_challenge_dict()],
+                    },
+                )
+            )
+            retry_result = FakeCallToolResult(
+                content=[{"type": "text", "text": "premium result"}],
+                meta=_make_receipt_meta(),
+            )
+            session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
+
+            client = McpClient(session, methods=[FakeMethod()])
+            result = await client.call_tool("premium_tool", {"query": "test"})
+
+            assert result.content[0]["text"] == "premium result"
+            assert result.receipt is not None
+            assert result.receipt.reference == "0xtxhash"
+
+            retry_meta = session.call_tool.call_args_list[1].kwargs.get("meta", {})
             assert META_CREDENTIAL in retry_meta
         finally:
             for mod_name, orig in original_modules.items():
