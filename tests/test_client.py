@@ -90,6 +90,166 @@ class TestPaymentTransport:
         method.create_credential.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_paid_retry_replays_request_body(self) -> None:
+        """The paid retry must carry the original bytes request body.
+
+        Regression: the retry previously reused the already-consumed request
+        stream, so a POST body was dropped on the (paying) retry.
+        """
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        body = b'{"prompt": "expensive question"}'
+        request = httpx.Request("POST", "https://example.com", content=body)
+        await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 2
+        retry_request = inner.requests[1]
+        assert retry_request.content == body
+        assert retry_request.headers["content-length"] == str(len(body))
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_replays_multipart_body(self) -> None:
+        """The paid retry must carry the original multipart (files=) body."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        file_content = b"hello from file"
+        request = httpx.Request(
+            "POST",
+            "https://example.com",
+            files={"upload": ("report.txt", file_content, "text/plain")},
+        )
+        await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 2
+        initial_body = inner.requests[0].content
+        retry_body = inner.requests[1].content
+        assert retry_body == initial_body
+        assert b"hello from file" in retry_body
+        assert b"report.txt" in retry_body
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_replays_put_body(self) -> None:
+        """The paid retry must carry the original body for PUT requests."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"updated": true}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        body = b'{"name": "updated"}'
+        request = httpx.Request("PUT", "https://example.com/item/1", content=body)
+        await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 2
+        retry_request = inner.requests[1]
+        assert retry_request.method == "PUT"
+        assert retry_request.content == body
+        assert retry_request.headers["content-length"] == str(len(body))
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_replays_patch_body(self) -> None:
+        """The paid retry must carry the original body for PATCH requests."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"patched": true}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        body = b'{"status": "active"}'
+        request = httpx.Request("PATCH", "https://example.com/item/1", content=body)
+        await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 2
+        retry_request = inner.requests[1]
+        assert retry_request.method == "PATCH"
+        assert retry_request.content == body
+        assert retry_request.headers["content-length"] == str(len(body))
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_raises_for_streaming_body(self) -> None:
+        """Should raise PaymentError upfront for async generator (streaming) bodies.
+
+        Streaming bodies cannot be reliably buffered and replayed: the generator
+        may be infinite, already partially consumed, or tied to a one-shot source.
+        A descriptive error is better than a silent empty body on the paid retry.
+        """
+        from mpp.errors import PaymentError
+
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        async def async_body_gen():
+            yield b"chunk1"
+            yield b"chunk2"
+
+        request = httpx.Request("POST", "https://example.com", content=async_body_gen())
+        with pytest.raises(PaymentError, match="Streaming request bodies"):
+            await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 0
+
+    @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
         """Should emit mppx-compatible client payment lifecycle events."""
         events: list[str] = []

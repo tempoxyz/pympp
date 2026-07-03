@@ -17,6 +17,7 @@ import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
+from mpp.errors import PaymentError
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -117,6 +118,25 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        # Async-generator bodies (content=async_gen()) produce an AsyncByteStream
+        # that is not also a SyncByteStream. They cannot be safely buffered for
+        # replay: the generator may be infinite, already partially consumed, or
+        # tied to a one-shot I/O source. Reject early so callers get a clear
+        # message instead of a silent empty body on the paid retry.
+        if isinstance(request.stream, httpx.AsyncByteStream) and not isinstance(
+            request.stream, httpx.SyncByteStream
+        ):
+            raise PaymentError(
+                "Streaming request bodies (async generators) are not supported "
+                "through the payment retry flow. Use a buffered body "
+                "(bytes, str, files=, or data=) instead."
+            )
+
+        # Buffer the request body before the first dispatch so it can be replayed
+        # on a paid 402 retry. Handles bytes bodies and multipart/files= bodies.
+        # After aread() the stream is replaced with a replayable ByteStream.
+        await request.aread()
+
         response = await self._inner.handle_async_request(request)
 
         if response.status_code != 402:
@@ -240,7 +260,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             method=request.method,
             url=request.url,
             headers=headers,
-            stream=request.stream,
+            content=request.content,
             extensions=request.extensions,
         )
 
