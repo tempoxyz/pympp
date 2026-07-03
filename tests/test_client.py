@@ -1,12 +1,12 @@
 """Tests for client-side transport."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpp import Challenge, Credential
+from mpp import Challenge, Credential, RetryPolicy
 from mpp.client import Client, PaymentTransport, get, post, request
 from tests import make_credential
 
@@ -430,6 +430,99 @@ class TestPaymentTransport:
 
         assert events == ["failed:test-id:RuntimeError"]
 
+    @pytest.mark.asyncio
+    async def test_5xx_retried_with_backoff(self) -> None:
+        """Should retry on retryable 5xx responses with exponential backoff."""
+        inner = MockTransport(
+            [
+                httpx.Response(503),
+                httpx.Response(503),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        policy = RetryPolicy(max_attempts=3, backoff_delays=[0.5, 1.0])
+        transport = PaymentTransport(methods=[], inner=inner, retry_policy=policy)
+
+        with patch("mpp.client.transport.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            response = await transport.handle_async_request(
+                httpx.Request("GET", "https://example.com")
+            )
+
+        assert response.status_code == 200
+        assert len(inner.requests) == 3
+        mock_sleep.assert_any_call(0.5)
+        mock_sleep.assert_any_call(1.0)
+
+    @pytest.mark.asyncio
+    async def test_5xx_exhausted_returns_last_response(self) -> None:
+        """Should return the last 5xx response when max_attempts is exhausted."""
+        inner = MockTransport(
+            [
+                httpx.Response(503),
+                httpx.Response(503),
+            ]
+        )
+        policy = RetryPolicy(max_attempts=2, backoff_delays=[0.5])
+        transport = PaymentTransport(methods=[], inner=inner, retry_policy=policy)
+
+        with patch("mpp.client.transport.asyncio.sleep", new_callable=AsyncMock):
+            response = await transport.handle_async_request(
+                httpx.Request("GET", "https://example.com")
+            )
+
+        assert response.status_code == 503
+        assert len(inner.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_connect_error_retried(self) -> None:
+        """Should retry on ConnectError and succeed if a later attempt returns 200."""
+
+        class ConnectErrorThenOkTransport(MockTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    raise httpx.ConnectError("Connection refused")
+                return httpx.Response(200, content=b'{"data": "ok"}')
+
+        inner = ConnectErrorThenOkTransport([])
+        policy = RetryPolicy(max_attempts=3, backoff_delays=[0.1])
+        transport = PaymentTransport(methods=[], inner=inner, retry_policy=policy)
+
+        with patch("mpp.client.transport.asyncio.sleep", new_callable=AsyncMock):
+            response = await transport.handle_async_request(
+                httpx.Request("GET", "https://example.com")
+            )
+
+        assert response.status_code == 200
+        assert len(inner.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_retry_disabled_when_policy_is_none(self) -> None:
+        """Should not retry when retry_policy=None; first 503 is returned immediately."""
+        inner = MockTransport([httpx.Response(503)])
+        transport = PaymentTransport(methods=[], inner=inner, retry_policy=None)
+
+        response = await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com")
+        )
+
+        assert response.status_code == 503
+        assert len(inner.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_retryable_5xx_not_retried(self) -> None:
+        """Should not retry 501 which is not in retryable_status_codes by default."""
+        inner = MockTransport([httpx.Response(501)])
+        policy = RetryPolicy()
+        transport = PaymentTransport(methods=[], inner=inner, retry_policy=policy)
+
+        response = await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com")
+        )
+
+        assert response.status_code == 501
+        assert len(inner.requests) == 1
+
 
 class TestClient:
     @pytest.mark.asyncio
@@ -492,6 +585,17 @@ class TestClient:
             assert callable(client.on_challenge_received(lambda payload: None))
             assert callable(client.on_credential_created(lambda payload: None))
             assert callable(client.on_payment_response(lambda payload: None))
+
+    @pytest.mark.asyncio
+    async def test_client_retry_disabled_when_policy_is_none(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """Client(retry_policy=None) should not retry; first 503 is returned as-is."""
+        httpx_mock.add_response(url="https://example.com/test", status_code=503)
+
+        async with Client(methods=[], retry_policy=None) as client:
+            response = await client.get("https://example.com/test")
+            assert response.status_code == 503
 
 
 class TestConvenienceFunctions:

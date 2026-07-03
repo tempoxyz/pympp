@@ -17,6 +17,7 @@ Example:
 """
 
 from mpp import _expires as Expires
+from mpp.client.retry import RetryPolicy
 from mpp.client.transport import Client, PaymentTransport, get, post, request
 from mpp.events import (
     CHALLENGE_RECEIVED,
