@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -28,22 +28,12 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
+from mpp.runtime import Method, PaymentRuntime
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for client-side credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _client_payment_failed_payload(
@@ -88,13 +78,22 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     def __init__(
         self,
-        methods: Sequence[Method],
+        methods: Sequence[Method] | None = None,
         inner: httpx.AsyncBaseTransport | None = None,
         events: EventDispatcher | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
     ) -> None:
-        self._methods = {m.name: m for m in methods}
+        if runtime is not None:
+            if methods is not None or events is not None:
+                raise ValueError("Pass either methods/events or runtime, not both")
+            self._runtime = runtime
+        else:
+            if methods is None:
+                raise ValueError("Pass methods or runtime")
+            self._runtime = PaymentRuntime(methods or [], events=events)
         self._inner = inner or httpx.AsyncHTTPTransport()
-        self._events = events or EventDispatcher()
+        self._events = self._runtime.events
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -144,6 +143,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         await response.aread()
 
+        # A high-level send may have followed redirects before returning the
+        # 402. Apply policy and retry against the request that was challenged.
+        try:
+            challenged_request = response.request
+        except RuntimeError:
+            challenged_request = request
+        if not self._runtime.allows_http_payment(challenged_request.url):
+            return response
+        await challenged_request.aread()
+
         # Handle multiple WWW-Authenticate headers (per RFC 9110)
         www_auth_headers = response.headers.get_list("www-authenticate")
 
@@ -159,13 +168,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 continue
             challenges.append(parsed)
 
-        challenge = None
-        matched_method = None
-        for parsed in challenges:
-            if parsed.method in self._methods:
-                challenge = parsed
-                matched_method = self._methods[parsed.method]
-                break
+        try:
+            challenge, matched_method = self._runtime.match_challenge(
+                challenges,
+                prefer_method_order=False,
+            )
+        except ValueError:
+            challenge = None
+            matched_method = None
 
         if not challenge or not matched_method:
             if parse_error is not None or challenges:
@@ -209,32 +219,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 pass  # If we can't parse, let server validate
 
         try:
-            # challenge.received is the one client event that can override the
-            # default credential creation path by returning a Credential.
-            event_credential = await self._events.emit(
-                CHALLENGE_RECEIVED,
-                {
-                    "challenge": challenge,
+            credential = await self._runtime.create_credential(
+                challenge,
+                matched_method,
+                event_payload={
                     "challenges": challenges,
-                    "method": matched_method,
-                    "request": request,
+                    "request": challenged_request,
                     "response": response,
-                },
-                first_result=True,
-            )
-            credential = (
-                event_credential
-                if isinstance(event_credential, Credential)
-                else await matched_method.create_credential(challenge)
-            )
-            await self._events.emit(
-                CREDENTIAL_CREATED,
-                {
-                    "challenge": challenge,
-                    "credential": credential,
-                    "method": matched_method,
-                    "request": request,
-                    "response": response,
+                    "protocol": "http",
                 },
             )
             auth_header = credential.to_authorization()
@@ -247,21 +239,21 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     credential=None,
                     error=error,
                     method=matched_method,
-                    request=request,
+                    request=challenged_request,
                     response=response,
                 ),
             )
             raise
 
-        headers = httpx.Headers(request.headers)
+        headers = httpx.Headers(challenged_request.headers)
         headers["Authorization"] = auth_header
 
         retry_request = httpx.Request(
-            method=request.method,
-            url=request.url,
+            method=challenged_request.method,
+            url=challenged_request.url,
             headers=headers,
-            content=request.content,
-            extensions=request.extensions,
+            content=challenged_request.content,
+            extensions=challenged_request.extensions,
         )
 
         try:
@@ -275,7 +267,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     credential=credential,
                     error=error,
                     method=matched_method,
-                    request=request,
+                    request=challenged_request,
                     response=response,
                 ),
             )
@@ -288,8 +280,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     "challenge": challenge,
                     "credential": credential,
                     "method": matched_method,
-                    "request": request,
+                    "request": challenged_request,
                     "response": payment_response,
+                    "protocol": "http",
                 },
             )
 
@@ -308,8 +301,13 @@ class Client:
             response = await client.get("https://api.example.com/resource")
     """
 
-    def __init__(self, methods: Sequence[Method]) -> None:
-        self._transport = PaymentTransport(methods)
+    def __init__(
+        self,
+        methods: Sequence[Method] | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
+    ) -> None:
+        self._transport = PaymentTransport(methods=methods, runtime=runtime)
         self._client = httpx.AsyncClient(transport=self._transport)
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
@@ -369,7 +367,8 @@ async def request(
     method: str,
     url: str,
     *,
-    methods: Sequence[Method],
+    methods: Sequence[Method] | None = None,
+    runtime: PaymentRuntime | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -384,15 +383,27 @@ async def request(
             methods=[tempo(...)],
         )
     """
-    async with Client(methods) as client:
+    async with Client(methods, runtime=runtime) as client:
         return await client.request(method, url, **kwargs)
 
 
-async def get(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
+async def get(
+    url: str,
+    *,
+    methods: Sequence[Method] | None = None,
+    runtime: PaymentRuntime | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
     """Send a GET request with automatic payment handling."""
-    return await request("GET", url, methods=methods, **kwargs)
+    return await request("GET", url, methods=methods, runtime=runtime, **kwargs)
 
 
-async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
+async def post(
+    url: str,
+    *,
+    methods: Sequence[Method] | None = None,
+    runtime: PaymentRuntime | None = None,
+    **kwargs: Any,
+) -> httpx.Response:
     """Send a POST request with automatic payment handling."""
-    return await request("POST", url, methods=methods, **kwargs)
+    return await request("POST", url, methods=methods, runtime=runtime, **kwargs)

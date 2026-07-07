@@ -27,13 +27,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
-from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
-from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-
-if TYPE_CHECKING:
-    from mpp import Challenge, Credential
+from mpp.extensions.mcp.constants import (
+    CODE_PAYMENT_REQUIRED,
+    META_PAYMENT_REQUIRED,
+    META_RECEIPT,
+)
+from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+from mpp.runtime import Method, PaymentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +51,6 @@ class PaymentOutcomeUnknownError(RuntimeError):
             f"payment outcome is unknown for challenge {challenge.id}. "
             "Do not blindly retry."
         )
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for MCP client credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _error_code(error: Exception) -> int | None:
@@ -121,9 +112,8 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
         return None
 
 
-def _extract_challenges(error: Exception) -> list[MCPChallenge]:
-    """Extract valid payment challenges from a payment required error."""
-    data = _error_data(error)
+def _extract_challenges_from_data(data: Any) -> list[MCPChallenge]:
+    """Extract valid payment challenges from payment-required data."""
     if not isinstance(data, dict):
         return []
 
@@ -137,6 +127,28 @@ def _extract_challenges(error: Exception) -> list[MCPChallenge]:
         if challenge is not None:
             challenges.append(challenge)
     return challenges
+
+
+def _extract_challenges(error: Exception) -> list[MCPChallenge]:
+    """Extract valid payment challenges from a payment required error."""
+    return _extract_challenges_from_data(_error_data(error))
+
+
+def _result_meta(result: Any) -> dict[str, Any] | None:
+    """Read MCP result metadata from SDK objects or raw wire dictionaries."""
+    if isinstance(result, dict):
+        meta = result.get("_meta") or result.get("meta")
+    else:
+        meta = getattr(result, "meta", None) or getattr(result, "_meta", None)
+    return meta if isinstance(meta, dict) else None
+
+
+def _extract_result_challenges(result: Any) -> list[MCPChallenge]:
+    """Extract payment challenges returned as MCP tool-result metadata."""
+    meta = _result_meta(result)
+    if meta is None:
+        return []
+    return _extract_challenges_from_data(meta.get(META_PAYMENT_REQUIRED))
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,9 +183,22 @@ class McpClient:
         print(result.receipt)
     """
 
-    def __init__(self, session: Any, methods: list[Method]) -> None:
+    def __init__(
+        self,
+        session: Any,
+        methods: list[Method] | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
+    ) -> None:
         self._session = session
-        self._methods = methods
+        if runtime is not None:
+            if methods is not None:
+                raise ValueError("Pass either methods or runtime, not both")
+            self._runtime = runtime
+        else:
+            if methods is None:
+                raise ValueError("Pass methods or runtime")
+            self._runtime = PaymentRuntime(methods)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
@@ -206,46 +231,20 @@ class McpClient:
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
             ValueError: If no installed method matches the server's challenge.
         """
-        from mcp.shared.exceptions import McpError
-
         call_kwargs: dict[str, Any] = {}
         if timeout is not None:
             call_kwargs["read_timeout_seconds"] = timeout
         if meta is not None:
             call_kwargs["meta"] = meta
 
-        try:
-            result = await self._session.call_tool(name, arguments, **call_kwargs)
-            receipt = self._extract_receipt(result)
-            return McpToolResult(result=result, receipt=receipt)
-
-        except McpError as e:
-            if not _is_payment_required_error(e):
-                raise
-
-            challenges = _extract_challenges(e)
-            if not challenges:
-                raise ValueError("Server returned malformed payment challenges") from e
-
-            challenge, method = self._match_challenge(challenges)
-
-            core_credential = await method.create_credential(challenge.to_core())
-            mcp_credential = MCPCredential.from_core(core_credential, challenge)
-
-            retry_meta = dict(meta) if meta else {}
-            retry_meta.update(mcp_credential.to_meta())
-
-            retry_kwargs: dict[str, Any] = {"meta": retry_meta}
-            if timeout is not None:
-                retry_kwargs["read_timeout_seconds"] = timeout
-
-            try:
-                retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
-            except Exception as exc:
-                raise PaymentOutcomeUnknownError(challenge, exc) from exc
-
-            receipt = self._extract_receipt(retry_result)
-            return McpToolResult(result=retry_result, receipt=receipt)
+        result = await self._runtime.call_mcp_tool(
+            self._session.call_tool,
+            name,
+            arguments,
+            **call_kwargs,
+        )
+        receipt = self._extract_receipt(result)
+        return McpToolResult(result=result, receipt=receipt)
 
     def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
         """Match a challenge to an installed method.
@@ -253,30 +252,12 @@ class McpClient:
         Iterates installed methods in order (client preference) and returns
         the first match by ``name`` and ``intent``.
         """
-        for method in self._methods:
-            supported_intents = self._intent_names(method)
-            for challenge in challenges:
-                if challenge.method == method.name and challenge.intent in supported_intents:
-                    return challenge, method
-
-        available = [challenge.method for challenge in challenges]
-        installed = [m.name for m in self._methods]
-        raise ValueError(
-            f"No compatible payment method. Server offered: {available}, client has: {installed}"
-        )
-
-    @staticmethod
-    def _intent_names(method: Method) -> set[str]:
-        """Get intent names supported by a method."""
-        intents = getattr(method, "intents", None) or getattr(method, "_intents", None)
-        if isinstance(intents, dict):
-            return set(intents.keys())
-        return {"charge"}
+        return self._runtime.match_mcp_challenge(challenges)
 
     @staticmethod
     def _extract_receipt(result: Any) -> MCPReceipt | None:
         """Extract a payment receipt from a tool result's _meta."""
-        meta = getattr(result, "meta", None)
+        meta = _result_meta(result)
         if not meta or not isinstance(meta, dict):
             return None
         receipt_data = meta.get(META_RECEIPT)

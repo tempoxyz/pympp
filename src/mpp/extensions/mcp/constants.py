@@ -8,6 +8,9 @@ Per draft-payment-transport-mcp-00:
 META_CREDENTIAL = "org.paymentauth/credential"
 """Meta key for payment credentials in params._meta."""
 
+META_PAYMENT_REQUIRED = "org.paymentauth/payment-required"
+"""Meta key for payment challenges returned in result._meta."""
+
 META_RECEIPT = "org.paymentauth/receipt"
 """Meta key for payment receipts in result._meta."""
 

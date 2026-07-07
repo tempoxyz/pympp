@@ -8,6 +8,7 @@ from pytest_httpx import HTTPXMock
 
 from mpp import Challenge, Credential
 from mpp.client import Client, PaymentTransport, get, post, request
+from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
 
@@ -41,6 +42,15 @@ class MockTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         pass
+
+
+def payment_challenge_header() -> str:
+    return Challenge(
+        id="test-id",
+        method="tempo",
+        intent="charge",
+        request={"amount": "1000"},
+    ).to_www_authenticate("example.com")
 
 
 class TestPaymentTransport:
@@ -88,6 +98,73 @@ class TestPaymentTransport:
         assert retry_request.headers["Authorization"].startswith("Payment ")
 
         method.create_credential.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_delegates_payment_matching_to_runtime(self) -> None:
+        """Should use an injected runtime for payment matching and credentials."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+
+        method = MockMethod()
+        runtime = PaymentRuntime([method])
+        transport = PaymentTransport(inner=inner, runtime=runtime)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        assert inner.requests[1].headers["Authorization"].startswith("Payment ")
+        method.create_credential.assert_called_once()
+
+    def test_rejects_runtime_with_methods_or_events(self) -> None:
+        runtime = PaymentRuntime([])
+
+        with pytest.raises(ValueError, match="either methods/events or runtime"):
+            PaymentTransport(methods=[], runtime=runtime)
+        with pytest.raises(ValueError, match="either methods/events or runtime"):
+            PaymentTransport(events=runtime.events, runtime=runtime)
+
+    @pytest.mark.asyncio
+    async def test_runtime_transport_blocks_disallowed_origin(self) -> None:
+        inner = MockTransport(
+            [httpx.Response(402, headers={"www-authenticate": payment_challenge_header()})]
+        )
+        method = MockMethod()
+        runtime = PaymentRuntime([method], allowed_origins=["https://other.example"])
+
+        response = await runtime.payment_transport(inner).handle_async_request(
+            httpx.Request("GET", "https://example.com/paid")
+        )
+
+        assert response.status_code == 402
+        method.create_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exact_https_origin_does_not_authorize_http(self) -> None:
+        inner = MockTransport(
+            [httpx.Response(402, headers={"www-authenticate": payment_challenge_header()})]
+        )
+        method = MockMethod()
+        runtime = PaymentRuntime([method], allowed_origins=["https://example.com"])
+
+        response = await runtime.payment_transport(inner).handle_async_request(
+            httpx.Request("GET", "http://example.com/paid")
+        )
+
+        assert response.status_code == 402
+        method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_paid_retry_replays_request_body(self) -> None:

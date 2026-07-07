@@ -8,6 +8,7 @@ from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_VERIFICATION_FAILED as _CODE_PAYMENT_VERIFICATION_FAILED,
 )
 from mpp.extensions.mcp.constants import META_CREDENTIAL as _META_CREDENTIAL
+from mpp.extensions.mcp.constants import META_PAYMENT_REQUIRED as _META_PAYMENT_REQUIRED
 from mpp.extensions.mcp.constants import META_RECEIPT as _META_RECEIPT
 from mpp.extensions.mcp.decorator import pay as _pay
 from mpp.extensions.mcp.errors import MalformedCredentialError as _MalformedCredentialError
@@ -23,6 +24,7 @@ CODE_MALFORMED_CREDENTIAL = _CODE_MALFORMED_CREDENTIAL
 CODE_PAYMENT_REQUIRED = _CODE_PAYMENT_REQUIRED
 CODE_PAYMENT_VERIFICATION_FAILED = _CODE_PAYMENT_VERIFICATION_FAILED
 META_CREDENTIAL = _META_CREDENTIAL
+META_PAYMENT_REQUIRED = _META_PAYMENT_REQUIRED
 META_RECEIPT = _META_RECEIPT
 payment_capabilities = _payment_capabilities
 McpClient = _McpClient

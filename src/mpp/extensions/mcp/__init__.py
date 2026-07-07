@@ -66,6 +66,7 @@ from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,
     META_CREDENTIAL,
+    META_PAYMENT_REQUIRED,
     META_RECEIPT,
 )
 
