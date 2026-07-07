@@ -83,14 +83,24 @@ class MCPChallenge:
         )
 
     def to_core(self) -> Challenge:
-        """Convert to core Challenge type (loses realm, expires, description)."""
+        """Convert to core Challenge type, preserving MCP challenge metadata."""
+        import base64
+        import json
+
         from mpp import Challenge
+
+        request_json = json.dumps(self.request, separators=(",", ":"), sort_keys=True)
+        request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
 
         return Challenge(
             id=self.id,
             method=self.method,
             intent=self.intent,
             request=self.request,
+            realm=self.realm,
+            request_b64=request_b64,
+            expires=self.expires,
+            description=self.description,
             digest=self.digest,
             opaque=self.opaque,
         )

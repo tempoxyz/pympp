@@ -139,6 +139,10 @@ class TestMCPChallenge:
         assert core.method == "tempo"
         assert core.intent == "charge"
         assert core.request == {"amount": "1000"}
+        assert core.realm == "api.example.com"
+        assert core.expires == "2025-01-15T12:05:00Z"
+        assert core.description == "API call fee"
+        assert core.to_echo().request
 
     def test_to_core_preserves_digest_opaque(self) -> None:
         mcp_challenge = MCPChallenge(
