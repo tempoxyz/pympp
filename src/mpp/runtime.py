@@ -27,11 +27,25 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 _PAYMENT_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_payment_flow_active", default=False)
+_MCP_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_mcp_flow_active", default=False)
+_payment_flow_count = 0
+_payment_flow_lock = threading.Lock()
 
 
 def payment_flow_active() -> bool:
     """Return whether the current context is creating a payment credential."""
     return _PAYMENT_FLOW_ACTIVE.get()
+
+
+def payment_flow_active_in_process() -> bool:
+    """Return whether any context is creating a payment credential."""
+    with _payment_flow_lock:
+        return _payment_flow_count > 0
+
+
+def mcp_payment_flow_active() -> bool:
+    """Return whether the current context is inside an MCP payment adapter."""
+    return _MCP_FLOW_ACTIVE.get()
 
 
 @runtime_checkable
@@ -299,6 +313,20 @@ class PaymentRuntime:
         **kwargs: Any,
     ) -> Any:
         """Call an MCP tool with automatic payment handling, preserving result type."""
+        token = _MCP_FLOW_ACTIVE.set(True)
+        try:
+            return await self._call_mcp_tool(call_tool, name, arguments, *args, **kwargs)
+        finally:
+            _MCP_FLOW_ACTIVE.reset(token)
+
+    async def _call_mcp_tool(
+        self,
+        call_tool: Any,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
         from mpp.extensions.mcp.client import (
             PaymentOutcomeUnknownError,
             _extract_challenges,
@@ -471,7 +499,11 @@ class PaymentRuntime:
         *,
         event_payload: dict[str, Any] | None = None,
     ) -> Credential:
+        global _payment_flow_count
+
         token = _PAYMENT_FLOW_ACTIVE.set(True)
+        with _payment_flow_lock:
+            _payment_flow_count += 1
         try:
             payload = {
                 "challenge": challenge,
@@ -495,6 +527,8 @@ class PaymentRuntime:
             )
             return credential
         finally:
+            with _payment_flow_lock:
+                _payment_flow_count -= 1
             _PAYMENT_FLOW_ACTIVE.reset(token)
 
     async def emit_event(self, name: str, payload: EventPayload) -> Any:
