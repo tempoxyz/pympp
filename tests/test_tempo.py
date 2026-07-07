@@ -2022,6 +2022,87 @@ class TestCosignAsFeePayer:
         with pytest.raises(VerificationError, match="approve target does not match"):
             intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
 
+    def test_cosign_rejects_padded_approve_calldata(self) -> None:
+        """Should reject padded approve calldata before co-signing."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x0000000000000000000000000000000000000003",
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, 2000000) + "00",
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        "0x0000000000000000000000000000000000000003",
+                        "0x20c0000000000000000000000000000000000000",
+                        1000000,
+                        2000000,
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="malformed approve call data"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
+    def test_cosign_rejects_padded_swap_calldata(self) -> None:
+        """Should reject padded swap calldata before co-signing."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x0000000000000000000000000000000000000003",
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, 2000000),
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        "0x0000000000000000000000000000000000000003",
+                        "0x20c0000000000000000000000000000000000000",
+                        1000000,
+                        2000000,
+                    )
+                    + "00",
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="malformed swap call data"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
     def test_cosign_rejects_gas_over_policy(self) -> None:
         """Should reject sponsored transactions above the gas limit policy."""
         intent = self._make_intent()
@@ -3266,6 +3347,23 @@ class TestMatchTransferCalldataWithMemo:
         calldata = self._build_calldata(TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT)
         assert _match_transfer_calldata(calldata, request) is False
 
+    def test_rejects_padded_transfer_calldata(self) -> None:
+        """Trailing bytes after a valid transfer must be rejected."""
+        request = self._make_request()
+        calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT) + "00"
+        assert _match_transfer_calldata(calldata, request) is False
+
+    def test_rejects_padded_transfer_with_memo_calldata(self) -> None:
+        """Trailing bytes after a valid transferWithMemo must be rejected."""
+        request = self._make_request(memo=self.MEMO)
+        calldata = (
+            self._build_calldata(
+                TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
+            )
+            + "00"
+        )
+        assert _match_transfer_calldata(calldata, request) is False
+
     def test_short_calldata_rejected(self) -> None:
         """Calldata shorter than 136 chars should always be rejected."""
         request = self._make_request()
@@ -3991,6 +4089,30 @@ class TestMatchSingleTransferCalldata:
         """When no memo expected, truncated transferWithMemo calldata should be rejected."""
         calldata = self._build_calldata(TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT)
         assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is False
+
+    def test_rejects_padded_transfer_calldata(self) -> None:
+        calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT) + "00"
+        assert _match_single_transfer_calldata(calldata, self.RECIPIENT, self.AMOUNT, None) is False
+
+    def test_rejects_padded_transfer_with_memo_calldata(self) -> None:
+        calldata = (
+            self._build_calldata(
+                TRANSFER_WITH_MEMO_SELECTOR,
+                self.RECIPIENT,
+                self.AMOUNT,
+                "ab" * 32,
+            )
+            + "00"
+        )
+        assert (
+            _match_single_transfer_calldata(
+                calldata,
+                self.RECIPIENT,
+                self.AMOUNT,
+                self.MEMO,
+            )
+            is False
+        )
 
     def test_no_memo_accepts_plain_transfer(self) -> None:
         calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)

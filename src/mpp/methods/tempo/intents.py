@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import attrs
+from eth_abi.abi import decode
+from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
@@ -37,10 +39,13 @@ TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 APPROVE_SELECTOR = "095ea7b3"
 SWAP_EXACT_AMOUNT_OUT_SELECTOR = "b30d91d5"
-TRANSFER_CALLDATA_HEX_LENGTH = 8 + (2 * 64)
-TRANSFER_WITH_MEMO_CALLDATA_HEX_LENGTH = 8 + (3 * 64)
-APPROVE_CALLDATA_HEX_LENGTH = 8 + (2 * 64)
-SWAP_EXACT_AMOUNT_OUT_CALLDATA_HEX_LENGTH = 8 + (4 * 64)
+
+SELECTOR_HEX_LEN = 8
+ABI_WORD_HEX_LEN = 64
+TRANSFER_CALL_DATA_HEX_LEN = SELECTOR_HEX_LEN + (2 * ABI_WORD_HEX_LEN)
+TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN = SELECTOR_HEX_LEN + (3 * ABI_WORD_HEX_LEN)
+APPROVE_CALL_DATA_HEX_LEN = SELECTOR_HEX_LEN + (2 * ABI_WORD_HEX_LEN)
+SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN = SELECTOR_HEX_LEN + (4 * ABI_WORD_HEX_LEN)
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
@@ -155,24 +160,40 @@ def _match_single_transfer_calldata(
     memo: bytes | None,
 ) -> bool:
     """Check if ABI-encoded calldata matches a single expected transfer."""
-    selector = call_data_hex[:8].lower()
+    call_data_hex = _strip_0x(call_data_hex)
+    if len(call_data_hex) < TRANSFER_CALL_DATA_HEX_LEN:
+        return False
+
+    selector = call_data_hex[:SELECTOR_HEX_LEN].lower()
 
     if memo is not None:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
             return False
-        if len(call_data_hex) != TRANSFER_WITH_MEMO_CALLDATA_HEX_LENGTH:
-            return False
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256", "bytes32"),
+            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
+        )
     elif selector == TRANSFER_WITH_MEMO_SELECTOR:
-        if len(call_data_hex) != TRANSFER_WITH_MEMO_CALLDATA_HEX_LENGTH:
-            return False
-    elif selector == TRANSFER_SELECTOR:
-        if len(call_data_hex) != TRANSFER_CALLDATA_HEX_LENGTH:
-            return False
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256", "bytes32"),
+            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
+        )
+    elif selector != TRANSFER_SELECTOR:
+        return False
     else:
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256"),
+            TRANSFER_CALL_DATA_HEX_LEN,
+        )
+
+    if decoded is None:
         return False
 
-    decoded_to = "0x" + call_data_hex[32:72]
-    decoded_amount = int(call_data_hex[72:136], 16)
+    decoded_to = decoded[0]
+    decoded_amount = decoded[1]
 
     if decoded_to.lower() != recipient.lower():
         return False
@@ -180,7 +201,7 @@ def _match_single_transfer_calldata(
         return False
 
     if memo is not None:
-        decoded_memo = bytes.fromhex(call_data_hex[136:200])
+        decoded_memo = decoded[2]
         if decoded_memo != memo:
             return False
 
@@ -252,25 +273,41 @@ def _is_already_known_transaction_error(result: dict[str, Any]) -> bool:
 
 def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
     """Check if ABI-encoded calldata matches the expected transfer parameters."""
-    selector = call_data_hex[:8].lower()
+    call_data_hex = _strip_0x(call_data_hex)
+    if len(call_data_hex) < TRANSFER_CALL_DATA_HEX_LEN:
+        return False
+
+    selector = call_data_hex[:SELECTOR_HEX_LEN].lower()
     expected_memo = request.methodDetails.memo
 
     if expected_memo:
         if selector != TRANSFER_WITH_MEMO_SELECTOR:
             return False
-        if len(call_data_hex) != TRANSFER_WITH_MEMO_CALLDATA_HEX_LENGTH:
-            return False
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256", "bytes32"),
+            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
+        )
     elif selector == TRANSFER_WITH_MEMO_SELECTOR:
-        if len(call_data_hex) != TRANSFER_WITH_MEMO_CALLDATA_HEX_LENGTH:
-            return False
-    elif selector == TRANSFER_SELECTOR:
-        if len(call_data_hex) != TRANSFER_CALLDATA_HEX_LENGTH:
-            return False
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256", "bytes32"),
+            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
+        )
+    elif selector != TRANSFER_SELECTOR:
+        return False
     else:
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256"),
+            TRANSFER_CALL_DATA_HEX_LEN,
+        )
+
+    if decoded is None:
         return False
 
-    decoded_to = "0x" + call_data_hex[32:72]
-    decoded_amount = int(call_data_hex[72:136], 16)
+    decoded_to = decoded[0]
+    decoded_amount = decoded[1]
 
     if decoded_to.lower() != request.recipient.lower():
         return False
@@ -278,7 +315,7 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
         return False
 
     if expected_memo:
-        decoded_memo = "0x" + call_data_hex[136:200]
+        decoded_memo = "0x" + decoded[2].hex()
         memo_clean = expected_memo.lower()
         if not memo_clean.startswith("0x"):
             memo_clean = "0x" + memo_clean
@@ -288,12 +325,24 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
     return True
 
 
-def _decode_call_address_arg(call_data_hex: str, arg_index: int) -> str:
-    start = 8 + (arg_index * 64)
-    end = start + 64
-    if len(call_data_hex) < end:
-        raise VerificationError("Invalid transaction: malformed call data")
-    return "0x" + call_data_hex[start + 24 : end]
+def _strip_0x(hex_str: str) -> str:
+    return hex_str[2:] if hex_str.startswith(("0x", "0X")) else hex_str
+
+
+def _decode_static_call_args(
+    call_data_hex: str,
+    arg_types: tuple[str, ...],
+    expected_hex_len: int,
+) -> tuple[Any, ...] | None:
+    call_data_hex = _strip_0x(call_data_hex)
+    if len(call_data_hex) != expected_hex_len:
+        return None
+
+    try:
+        args_bytes = bytes.fromhex(call_data_hex[SELECTOR_HEX_LEN:])
+        return decode(arg_types, args_bytes, strict=True)
+    except (ValueError, DecodingError):
+        return None
 
 
 def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
@@ -325,12 +374,22 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
     if has_swap_prefix:
         approve_to, _, approve_data = calls[0]
         swap_to, _, swap_data = calls[1]
-        if len(approve_data) != APPROVE_CALLDATA_HEX_LENGTH:
+        decoded_approve = _decode_static_call_args(
+            approve_data,
+            ("address", "uint256"),
+            APPROVE_CALL_DATA_HEX_LEN,
+        )
+        if decoded_approve is None:
             raise VerificationError("Invalid transaction: malformed approve call data")
-        if len(swap_data) != SWAP_EXACT_AMOUNT_OUT_CALLDATA_HEX_LENGTH:
+        decoded_swap = _decode_static_call_args(
+            swap_data,
+            ("address", "address", "uint256", "uint256"),
+            SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
+        )
+        if decoded_swap is None:
             raise VerificationError("Invalid transaction: malformed swap call data")
-        approve_spender = _decode_call_address_arg(approve_data, 0)
-        swap_token_in = _decode_call_address_arg(swap_data, 0)
+        approve_spender = decoded_approve[0]
+        swap_token_in = decoded_swap[0]
 
         if approve_to.lower() != swap_token_in.lower():
             raise VerificationError("Invalid transaction: approve target does not match swap token")
