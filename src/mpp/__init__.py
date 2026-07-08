@@ -380,6 +380,7 @@ class Receipt:
     reference: str
     method: str = "tempo"
     external_id: str | None = None
+    subscription_id: str | None = None
     extra: dict[str, Any] | None = None
 
     @classmethod
@@ -398,6 +399,7 @@ class Receipt:
         timestamp: datetime | None = None,
         method: str = "tempo",
         external_id: str | None = None,
+        subscription_id: str | None = None,
     ) -> Receipt:
         """Create a success receipt with current timestamp."""
         return cls(
@@ -406,6 +408,7 @@ class Receipt:
             reference=reference,
             method=method,
             external_id=external_id,
+            subscription_id=subscription_id,
         )
 
 

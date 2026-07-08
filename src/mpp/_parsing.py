@@ -325,6 +325,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         reference=str(data["reference"]),
         method=method,
         external_id=str(data["externalId"]) if data.get("externalId") else None,
+        subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
         extra=extra if isinstance(extra, dict) else None,
     )
 
@@ -345,6 +346,8 @@ def format_payment_receipt(receipt: Receipt) -> str:
     payload["method"] = receipt.method
     if receipt.external_id:
         payload["externalId"] = receipt.external_id
+    if receipt.subscription_id:
+        payload["subscriptionId"] = receipt.subscription_id
     if receipt.extra:
         payload["extra"] = receipt.extra
     return _b64_encode(payload)

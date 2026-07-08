@@ -338,6 +338,7 @@ class TestReceipt:
             method="tempo",
             external_id="order-123",
             extra={"plan": "pro"},
+            subscription_id="sub_123",
         )
 
         header = receipt.to_payment_receipt()
@@ -346,6 +347,23 @@ class TestReceipt:
         assert parsed.method == "tempo"
         assert parsed.external_id == "order-123"
         assert parsed.extra == {"plan": "pro"}
+        assert parsed.subscription_id == "sub_123"
+
+    def test_parse_preserves_foreign_subscription_id(self) -> None:
+        payload = {
+            "status": "success",
+            "method": "tempo",
+            "timestamp": "2024-01-20T12:00:00Z",
+            "reference": "0xabc123def456",
+            "subscriptionId": "sub_123",
+        }
+        header = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+        parsed = Receipt.from_payment_receipt(header)
+
+        assert parsed.subscription_id == "sub_123"
+        roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
+        assert roundtripped.subscription_id == "sub_123"
 
     def test_parse_invalid_timestamp(self) -> None:
         payload = {
