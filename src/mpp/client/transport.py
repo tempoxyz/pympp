@@ -9,6 +9,7 @@ Implements automatic 402 Payment Required handling by:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -17,6 +18,7 @@ import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
+from mpp.client.retry import RetryPolicy
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -90,10 +92,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         methods: Sequence[Method],
         inner: httpx.AsyncBaseTransport | None = None,
         events: EventDispatcher | None = None,
+        retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._methods = {m.name: m for m in methods}
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = events or EventDispatcher()
+        self._retry_policy = retry_policy
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -115,9 +119,49 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         """Register a handler for failed automatic payment handling."""
         return self.on(PAYMENT_FAILED, handler)
 
+    async def _dispatch(self, request: httpx.Request) -> httpx.Response:
+        """Dispatch request to inner transport, retrying on transient 5xx errors."""
+        if self._retry_policy is None:
+            return await self._inner.handle_async_request(request)
+
+        policy = self._retry_policy
+
+        for attempt in range(policy.max_attempts):
+            is_last = attempt == policy.max_attempts - 1
+            delay = policy.backoff_delays[min(attempt, len(policy.backoff_delays) - 1)]
+
+            try:
+                response = await self._inner.handle_async_request(request)
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                if not policy.retry_on_connect_error or is_last:
+                    raise
+                logger.warning(
+                    "Retrying request (attempt %d/%d) after %s %s",
+                    attempt + 1,
+                    policy.max_attempts,
+                    type(exc).__name__,
+                    request.url,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if response.status_code not in policy.retryable_status_codes or is_last:
+                return response
+
+            logger.warning(
+                "Retrying request (attempt %d/%d) after %s %s",
+                attempt + 1,
+                policy.max_attempts,
+                response.status_code,
+                request.url,
+            )
+            await asyncio.sleep(delay)
+
+        raise AssertionError("unreachable: max_attempts must be >= 1")  # pragma: no cover
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        response = await self._inner.handle_async_request(request)
+        response = await self._dispatch(request)
 
         if response.status_code != 402:
             return response
@@ -288,8 +332,17 @@ class Client:
             response = await client.get("https://api.example.com/resource")
     """
 
-    def __init__(self, methods: Sequence[Method]) -> None:
-        self._transport = PaymentTransport(methods)
+    # Sentinel so that Client() defaults to RetryPolicy() while Client(retry_policy=None) disables retry.
+    _RETRY_DEFAULT: Any = object()
+
+    def __init__(
+        self,
+        methods: Sequence[Method],
+        retry_policy: RetryPolicy | None = _RETRY_DEFAULT,  # type: ignore[assignment]
+    ) -> None:
+        if retry_policy is Client._RETRY_DEFAULT:
+            retry_policy = RetryPolicy()
+        self._transport = PaymentTransport(methods, retry_policy=retry_policy)
         self._client = httpx.AsyncClient(transport=self._transport)
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
