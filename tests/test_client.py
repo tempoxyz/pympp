@@ -90,6 +90,38 @@ class TestPaymentTransport:
         method.create_credential.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_paid_retry_replays_request_body(self) -> None:
+        """The paid retry must carry the original request body.
+
+        Regression: the retry previously reused the already-consumed request
+        stream, so a POST body was dropped on the (paying) retry.
+        """
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        body = b'{"prompt": "expensive question"}'
+        request = httpx.Request("POST", "https://example.com", content=body)
+        await transport.handle_async_request(request)
+
+        assert len(inner.requests) == 2
+        retry_request = inner.requests[1]
+        assert retry_request.content == body
+        assert retry_request.headers["content-length"] == str(len(body))
+
+    @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
         """Should emit mppx-compatible client payment lifecycle events."""
         events: list[str] = []
