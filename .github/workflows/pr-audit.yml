@@ -38,7 +38,8 @@ jobs:
           echo "$EVENTS_KEY" > "$RUNNER_TEMP/key"
           echo "$EVENTS_CERT" > "$RUNNER_TEMP/cert"
 
-          curl -sf -o /dev/null -X POST ${EVENTS_ARGS} \
+          read -r -a events_args <<< "${EVENTS_ARGS:-}"
+          curl -sf -o /dev/null -X POST "${events_args[@]}" \
             -H "Content-Type: application/json" \
             --key "$RUNNER_TEMP/key" \
             --cert "$RUNNER_TEMP/cert" \
