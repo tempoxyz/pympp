@@ -62,7 +62,7 @@ jobs:
 
       - name: Add venv to PATH
         if: matrix.python-version == '3.12'
-        run: echo "$PWD/.venv/bin" >> $GITHUB_PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Type check
         if: matrix.python-version == '3.12'
@@ -74,11 +74,11 @@ jobs:
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
         run: |
-          COV_REPORTS="--cov-report=term-missing"
+          cov_reports=(--cov-report=term-missing)
           if [[ "$PYTHON_VERSION" == "3.12" ]]; then
-            COV_REPORTS="$COV_REPORTS --cov-report=xml:coverage.xml --cov-report=html:htmlcov"
+            cov_reports+=(--cov-report=xml:coverage.xml --cov-report=html:htmlcov)
           fi
-          uv run pytest -v --cov=mpp $COV_REPORTS --cov-fail-under=90
+          uv run pytest -v --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
 
       - name: Upload coverage artifacts
         if: always() && matrix.python-version == '3.12'
@@ -115,7 +115,7 @@ jobs:
       - name: Resolve Tempo image digest
         id: tempo-digest
         run: |
-          digest=$(docker buildx imagetools inspect ghcr.io/tempoxyz/tempo:${TEMPO_TAG} --raw | sha256sum | cut -d' ' -f1)
+          digest=$(docker buildx imagetools inspect "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" --raw | sha256sum | cut -d' ' -f1)
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Tempo Docker image
@@ -132,8 +132,8 @@ jobs:
       - name: Pull and cache Tempo image
         if: steps.docker-cache.outputs.cache-hit != 'true'
         run: |
-          docker pull ghcr.io/tempoxyz/tempo:${TEMPO_TAG}
-          docker save ghcr.io/tempoxyz/tempo:${TEMPO_TAG} -o /tmp/tempo-image.tar
+          docker pull "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}"
+          docker save "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" -o /tmp/tempo-image.tar
 
       - name: Start Tempo devnet and Redis
         run: docker compose up -d --wait
