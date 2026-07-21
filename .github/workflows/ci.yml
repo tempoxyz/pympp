@@ -266,10 +266,24 @@ jobs:
         if: matrix.profile == 'tempo'
         run: |
           .smoke-venv/bin/python - <<'PY'
-          from mpp.methods.tempo import ChargeIntent, TempoAccount
+          from pytempo import TempoTransaction
+
+          from mpp.methods.tempo import (
+              ChargeIntent,
+              TempoAccount,
+              TempoSessionMethod,
+              tempo_session,
+          )
 
           assert ChargeIntent.__name__ == "ChargeIntent"
           assert TempoAccount.__name__ == "TempoAccount"
+          assert hasattr(TempoTransaction, "encode_for_signing")
+
+          method = tempo_session(
+              account=TempoAccount.from_key("0x" + "01" * 32),
+              max_deposit=1,
+          )
+          assert isinstance(method, TempoSessionMethod)
 
           print("tempo install smoke test passed")
           PY
