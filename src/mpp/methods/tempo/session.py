@@ -193,10 +193,14 @@ class TempoSessionMethod:
         if not exchange.response.is_success:
             return exchange.response
         async with self._locked(request.scope):
-            channel = await self._require(request)
-            self._apply_receipt_header(exchange.response, exchange.challenge, channel)
-            self._apply_accepted_response(channel, exchange.credential.payload)
-            await self._save(request, channel)
+            await exchange.run_async(
+                self._accept_response(
+                    request,
+                    exchange.response,
+                    exchange.challenge,
+                    exchange.credential.payload,
+                )
+            )
         if action == "topUp" and exchange.refetch:
             return await exchange.refetch()
         if not _is_sse(exchange.response):
@@ -211,9 +215,7 @@ class TempoSessionMethod:
 
         async def receipt(event: dict[str, Any]) -> None:
             async with self._locked(request.scope):
-                current = await self._require(request)
-                self._apply_receipt(event, exchange.challenge, current)
-                await self._save(request, current)
+                await exchange.run_async(self._record_receipt(request, event, exchange.challenge))
 
         return wrap_async_sse_response(
             exchange.response, on_need_voucher=need_voucher, on_receipt=receipt
@@ -225,10 +227,14 @@ class TempoSessionMethod:
         if not exchange.response.is_success:
             return exchange.response
         with self._locked_sync(request.scope):
-            channel = exchange.run_sync(self._require(request))
-            self._apply_receipt_header(exchange.response, exchange.challenge, channel)
-            self._apply_accepted_response(channel, exchange.credential.payload)
-            exchange.run_sync(self._save(request, channel))
+            exchange.run_sync(
+                self._accept_response(
+                    request,
+                    exchange.response,
+                    exchange.challenge,
+                    exchange.credential.payload,
+                )
+            )
         if action == "topUp" and exchange.refetch:
             return exchange.refetch()
         if not _is_sse(exchange.response):
@@ -243,9 +249,7 @@ class TempoSessionMethod:
 
         def receipt(event: dict[str, Any]) -> None:
             with self._locked_sync(request.scope):
-                current = exchange.run_sync(self._require(request))
-                self._apply_receipt(event, exchange.challenge, current)
-                exchange.run_sync(self._save(request, current))
+                exchange.run_sync(self._record_receipt(request, event, exchange.challenge))
 
         return wrap_sync_sse_response(
             exchange.response, on_need_voucher=need_voucher, on_receipt=receipt
@@ -275,6 +279,10 @@ class TempoSessionMethod:
             deposit = min(max(target, request.suggested_deposit or target), self.max_deposit)
             return await self._open(request, deposit, target)
 
+        replacement = await self._replace_expired_pending(request, channel)
+        if replacement is not None:
+            return replacement
+
         accepted = channel.accepted
         if request.snapshot is not None:
             snapshot = self._snapshot(request, channel)
@@ -282,16 +290,10 @@ class TempoSessionMethod:
             accepted = _amount(snapshot["acceptedCumulative"], "acceptedCumulative")
             if accepted > channel.cumulative:
                 raise ValueError("server accepted cumulative exceeds local signed watermark")
-            previous_deposit = channel.deposit
             await self._reconcile_deposit(channel, _amount(snapshot["deposit"], "deposit"))
             if channel.status == "pending":
                 channel.status = "open"
                 channel.pending_transaction = None
-            elif channel.pending_top_up is not None:
-                expected = previous_deposit + channel.pending_top_up
-                if channel.deposit >= expected:
-                    channel.pending_transaction = None
-                    channel.pending_top_up = None
             channel.cumulative = max(channel.cumulative, accepted)
             channel.accepted = max(channel.accepted, accepted)
             accepted = channel.accepted
@@ -337,6 +339,8 @@ class TempoSessionMethod:
         raise ValueError(f"Unsupported Tempo session action: {action!r}")
 
     async def _open(self, request: _Request, deposit: int, cumulative: int) -> dict[str, Any]:
+        if deposit == 0:
+            raise ValueError("Tempo session deposit must be greater than zero")
         salt = "0x" + os.urandom(32).hex()
         payer = self.account.address.lower()
         call = _call(
@@ -395,6 +399,7 @@ class TempoSessionMethod:
                 [_descriptor_tuple(channel.descriptor), additional],
             ),
             nonce_key=_session_nonce_key(channel.descriptor.salt),
+            distinguish=True,
         )
         channel.pending_transaction = transaction
         channel.pending_top_up = additional
@@ -456,7 +461,12 @@ class TempoSessionMethod:
         }
 
     async def _transaction(
-        self, request: _Request, data: bytes, *, nonce_key: int
+        self,
+        request: _Request,
+        data: bytes,
+        *,
+        nonce_key: int,
+        distinguish: bool = False,
     ) -> tuple[str, Any]:
         from pytempo import Call, TempoTransaction
 
@@ -481,6 +491,7 @@ class TempoSessionMethod:
             valid_before=(
                 int(time.time()) + FEE_PAYER_VALID_BEFORE_SECS if request.fee_payer else None
             ),
+            valid_after=(_random_valid_after() if request.fee_payer and distinguish else None),
             calls=(Call.create(to=request.escrow, value=0, data=data),),
         )
         signed = tx.sign(self.account.private_key)
@@ -489,6 +500,57 @@ class TempoSessionMethod:
 
             return "0x" + encode_fee_payer_envelope(signed).hex(), tx
         return "0x" + signed.encode().hex(), tx
+
+    async def _replace_expired_pending(
+        self, request: _Request, channel: _Channel
+    ) -> dict[str, Any] | None:
+        transaction = channel.pending_transaction
+        if transaction is None:
+            return None
+        valid_before = _transaction_valid_before(transaction)
+        if valid_before is None or valid_before > int(time.time()):
+            return None
+        chain_timestamp, block_number = await self._expiry_block()
+        if chain_timestamp < valid_before:
+            return None
+
+        settled, deposit, closing = await self._channel_state(channel, block_number)
+        if (
+            closing != 0
+            or settled > channel.cumulative
+            or (deposit < channel.deposit and (channel.status == "open" or deposit != 0))
+        ):
+            raise ValueError("expired Tempo session transaction cannot be safely reconciled")
+        _limit(deposit, self.max_deposit, "channel deposit")
+
+        if channel.status == "pending":
+            if deposit == 0:
+                return await self._open(request, channel.deposit, channel.cumulative)
+            channel.status = "open"
+            channel.deposit = deposit
+            channel.pending_transaction = None
+            await self._save(request, channel)
+            return None
+
+        additional = channel.pending_top_up
+        if additional is None:
+            raise ValueError("expired Tempo session top-up is incomplete")
+        target = channel.deposit + additional
+        channel.deposit = deposit
+        channel.pending_transaction = None
+        channel.pending_top_up = None
+        if deposit < target:
+            return await self._top_up(request, channel, target - deposit)
+        await self._save(request, channel)
+        return None
+
+    async def _expiry_block(self) -> tuple[int, dict[str, object]]:
+        block = await _rpc_call(self.rpc_url, "eth_getBlockByNumber", ["finalized", False])
+        if not isinstance(block, dict):
+            raise ValueError("invalid finalized block RPC response")
+        timestamp = _rpc_quantity(block.get("timestamp"), "finalized block timestamp")
+        block_hash = _bytes32(block.get("hash"), "finalized block hash")
+        return timestamp, {"blockHash": block_hash, "requireCanonical": True}
 
     async def _lane_nonce(self, nonce_key: int) -> int:
         data = _call(
@@ -512,20 +574,18 @@ class TempoSessionMethod:
     async def _recover(self, request: _Request) -> _Channel:
         snapshot = request.snapshot
         assert snapshot is not None
+        accepted = _amount(snapshot.get("acceptedCumulative"), "acceptedCumulative")
         channel = _Channel(
             channel_id=_bytes32(snapshot.get("channelId"), "sessionSnapshot.channelId"),
             descriptor=_Descriptor.parse(snapshot.get("descriptor")),
             escrow=_address(snapshot.get("escrow"), "sessionSnapshot.escrow"),
             chain_id=_chain_id(snapshot.get("chainId"), "sessionSnapshot.chainId"),
             deposit=_amount(snapshot.get("deposit"), "sessionSnapshot.deposit"),
-            cumulative=max(
-                _amount(snapshot.get("acceptedCumulative"), "acceptedCumulative"),
-                _amount(snapshot.get("spent"), "spent"),
-                _amount(snapshot.get("settled"), "settled"),
-            ),
-            accepted=_amount(snapshot.get("acceptedCumulative"), "acceptedCumulative"),
+            cumulative=accepted,
+            accepted=accepted,
             status="open",
         )
+        self._snapshot(request, channel)
         self._validate(channel, request)
         settled, deposit, closing = await self._channel_state(channel)
         if deposit == 0 or closing != 0 or settled > deposit:
@@ -538,7 +598,9 @@ class TempoSessionMethod:
         await self._save(request, channel)
         return channel
 
-    async def _channel_state(self, channel: _Channel) -> tuple[int, int, int]:
+    async def _channel_state(
+        self, channel: _Channel, block: str | dict[str, object] = "latest"
+    ) -> tuple[int, int, int]:
         from eth_abi.abi import decode
 
         data = _call(
@@ -547,7 +609,7 @@ class TempoSessionMethod:
         result = await _rpc_call(
             self.rpc_url,
             "eth_call",
-            [{"to": channel.escrow, "data": "0x" + data.hex()}, "latest"],
+            [{"to": channel.escrow, "data": "0x" + data.hex()}, block],
         )
         if not isinstance(result, str) or not result.startswith("0x"):
             raise ValueError("invalid getChannelState RPC response")
@@ -560,21 +622,20 @@ class TempoSessionMethod:
     async def _reconcile_deposit(self, channel: _Channel, advertised: int) -> None:
         if advertised == channel.deposit:
             return
+        previous = channel.deposit
         settled, deposit, closing = await self._channel_state(channel)
         if closing != 0 or settled > channel.cumulative or deposit < channel.deposit:
             raise ValueError("Tempo session deposit cannot be safely reconciled")
         _limit(deposit, self.max_deposit, "channel deposit")
         channel.deposit = deposit
+        if channel.pending_top_up is not None and deposit >= previous + channel.pending_top_up:
+            channel.pending_transaction = None
+            channel.pending_top_up = None
 
     async def _need_voucher_async(
         self, exchange: AsyncHttpResponseContext, request: _Request, event: dict[str, Any]
     ) -> None:
-        channel = await self._require(request)
-        advertised_deposit = _amount(event.get("deposit"), "deposit")
-        await self._reconcile_deposit(channel, advertised_deposit)
-        self._validate(channel, request)
-        await self._save(request, channel)
-        target = self._voucher_target(request, channel, event)
+        channel, target = await exchange.run_async(self._prepare_voucher(request, event))
         if target > channel.deposit:
             additional = target - channel.deposit
             credential = await exchange.create_credential(
@@ -597,12 +658,7 @@ class TempoSessionMethod:
     def _need_voucher_sync(
         self, exchange: SyncHttpResponseContext, request: _Request, event: dict[str, Any]
     ) -> None:
-        channel = exchange.run_sync(self._require(request))
-        advertised_deposit = _amount(event.get("deposit"), "deposit")
-        exchange.run_sync(self._reconcile_deposit(channel, advertised_deposit))
-        self._validate(channel, request)
-        exchange.run_sync(self._save(request, channel))
-        target = self._voucher_target(request, channel, event)
+        channel, target = exchange.run_sync(self._prepare_voucher(request, event))
         if target > channel.deposit:
             additional = target - channel.deposit
             credential = exchange.create_credential(
@@ -621,6 +677,17 @@ class TempoSessionMethod:
             }
         )
         self._post_sync(exchange, request, credential)
+
+    async def _prepare_voucher(
+        self, request: _Request, event: dict[str, Any]
+    ) -> tuple[_Channel, int]:
+        channel = await self._require(request)
+        if channel.pending_top_up is not None:
+            await self._replace_expired_pending(request, channel)
+        await self._reconcile_deposit(channel, _amount(event.get("deposit"), "deposit"))
+        self._validate(channel, request)
+        await self._save(request, channel)
+        return channel, self._voucher_target(request, channel, event)
 
     def _voucher_target(self, request: _Request, channel: _Channel, event: dict[str, Any]) -> int:
         if event.get("channelId") != channel.channel_id:
@@ -650,10 +717,9 @@ class TempoSessionMethod:
                 raise TransactionError(
                     f"Tempo session management POST failed with status {response.status_code}"
                 )
-            channel = await self._require(request)
-            self._apply_receipt_header(response, exchange.challenge, channel)
-            self._apply_accepted_response(channel, credential.payload)
-            await self._save(request, channel)
+            await exchange.run_async(
+                self._accept_response(request, response, exchange.challenge, credential.payload)
+            )
         finally:
             await response.aclose()
 
@@ -673,12 +739,28 @@ class TempoSessionMethod:
                 raise TransactionError(
                     f"Tempo session management POST failed with status {response.status_code}"
                 )
-            channel = exchange.run_sync(self._require(request))
-            self._apply_receipt_header(response, exchange.challenge, channel)
-            self._apply_accepted_response(channel, credential.payload)
-            exchange.run_sync(self._save(request, channel))
+            exchange.run_sync(
+                self._accept_response(request, response, exchange.challenge, credential.payload)
+            )
         finally:
             response.close()
+
+    async def _accept_response(
+        self,
+        request: _Request,
+        response: httpx.Response,
+        challenge: Challenge,
+        payload: dict[str, Any],
+    ) -> None:
+        channel = await self._require(request)
+        self._apply_receipt_header(response, challenge, channel)
+        self._apply_accepted_response(channel, payload)
+        await self._save(request, channel)
+
+    async def _record_receipt(self, request: _Request, value: object, challenge: Challenge) -> None:
+        channel = await self._require(request)
+        self._apply_receipt(value, challenge, channel)
+        await self._save(request, channel)
 
     def _apply_accepted_response(self, channel: _Channel, payload: dict[str, Any]) -> None:
         action = payload.get("action")
@@ -791,6 +873,8 @@ class TempoSessionMethod:
         if channel.channel_id != _channel_id(descriptor, channel.escrow, channel.chain_id):
             raise ValueError("stored Tempo session channelId does not match its descriptor")
         _limit(channel.deposit, self.max_deposit, "stored channel deposit")
+        if channel.deposit == 0:
+            raise ValueError("stored Tempo session deposit must be greater than zero")
         if not 0 <= channel.accepted <= channel.cumulative <= channel.deposit:
             raise ValueError("stored Tempo session amounts are inconsistent")
         if channel.status == "pending":
@@ -848,8 +932,6 @@ class TempoSessionMethod:
         if escrow != self.escrow:
             raise ValueError("session challenge escrow is outside local policy")
         operator = _address(details.get("operator", ZERO_ADDRESS), "methodDetails.operator")
-        if operator != ZERO_ADDRESS:
-            raise ValueError("v1 TempoSessionMethod only accepts the zero operator")
         fee_payer = details.get("feePayer", False)
         if not isinstance(fee_payer, bool):
             raise ValueError("methodDetails.feePayer must be a boolean")
@@ -967,6 +1049,12 @@ def _session_nonce_key(salt: str) -> int:
     return int.from_bytes(b"\x01" + value[1:])
 
 
+def _random_valid_after() -> int:
+    """Distinguish otherwise-identical sponsored transactions with a past timestamp."""
+    latest = int(time.time()) - 60
+    return 1 + int.from_bytes(os.urandom(8)) % latest if latest > 0 else 0
+
+
 def _channel_id(descriptor: _Descriptor, escrow: str, chain_id: int) -> str:
     from eth_abi.abi import encode
 
@@ -1057,6 +1145,22 @@ def _transaction_hex(value: object) -> str | None:
     return value.lower()
 
 
+def _transaction_valid_before(transaction: str) -> int | None:
+    import rlp
+
+    raw = bytes.fromhex(transaction[2:])
+    try:
+        fields = rlp.decode(raw[1:])
+        valid_before = fields[8]
+    except (IndexError, rlp.DecodingError) as error:
+        raise ValueError("invalid stored Tempo session transaction") from error
+    if not isinstance(fields, list) or raw[0] not in {0x76, 0x78}:
+        raise ValueError("invalid stored Tempo session transaction")
+    if not isinstance(valid_before, bytes):
+        raise ValueError("invalid stored Tempo session transaction")
+    return int.from_bytes(valid_before) if valid_before else None
+
+
 def _amount(value: object, name: str) -> int:
     if not isinstance(value, str) or _AMOUNT_RE.fullmatch(value) is None:
         raise ValueError(f"{name} must be a canonical decimal string")
@@ -1073,6 +1177,15 @@ def _chain_id(value: object, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _rpc_quantity(value: object, name: str) -> int:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)", value) is None
+    ):
+        raise ValueError(f"invalid {name} RPC response")
+    return int(value, 16)
 
 
 def _limit(value: int, limit: int, name: str) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, cast
 
 import pytest
@@ -24,8 +25,10 @@ RPC_URL = "https://rpc.test"
 TOKEN = "0x20c0000000000000000000000000000000000001"
 PAYEE = "0x0000000000000000000000000000000000000002"
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+OPERATOR = "0x0000000000000000000000000000000000000004"
 SALT = bytes.fromhex("11" * 32)
 CHANNEL_ID = "0xf8e4ab2eca9ec42f2cb0478ba074a76fa803607cacae5e557171f6679924fcf9"
+FINALIZED_HASH = "0x" + "ab" * 32
 PREIMAGE = (
     "76f9012582a5bf0202831e8480f8def8dc944d5050000000000000000000000000000000000080b8"
     "c4edc53b000000000000000000000000000000000000000000000000000000000000000002000000"
@@ -55,6 +58,7 @@ def challenge(
     chain_id: int = CHAIN_ID,
     escrow: str = TIP20_CHANNEL_ESCROW,
     operator: str | None = None,
+    fee_payer: bool = False,
 ) -> Challenge:
     details: dict[str, Any] = {
         "sessionProtocol": protocol,
@@ -67,6 +71,8 @@ def challenge(
         details["sessionSnapshot"] = snapshot
     if operator is not None:
         details["operator"] = operator
+    if fee_payer:
+        details["feePayer"] = True
     request: dict[str, Any] = {
         "amount": amount,
         "currency": TOKEN,
@@ -121,6 +127,25 @@ def deterministic_transactions(
     return calls
 
 
+def deterministic_sponsored_transactions(
+    monkeypatch: pytest.MonkeyPatch, now: list[int]
+) -> list[tuple[str, str]]:
+    calls = deterministic_transactions(monkeypatch)
+    random_value = 0
+
+    def urandom(length: int) -> bytes:
+        nonlocal random_value
+        if length == 32:
+            return SALT
+        assert length == 8
+        random_value += 1
+        return random_value.to_bytes(8)
+
+    monkeypatch.setattr(session_module.os, "urandom", urandom)
+    monkeypatch.setattr(session_module.time, "time", lambda: now[0])
+    return calls
+
+
 def transaction_fields(payload: dict[str, Any]) -> list[Any]:
     raw = bytes.fromhex(cast("str", payload["transaction"])[2:])
     return cast("list[Any]", rlp.decode(raw[1:]))
@@ -152,15 +177,50 @@ def test_public_factory(account: TempoAccount) -> None:
             challenge(escrow="0x0000000000000000000000000000000000000003"),
             "escrow is outside local policy",
         ),
-        (
-            challenge(operator="0x0000000000000000000000000000000000000004"),
-            "only accepts the zero operator",
-        ),
     ],
 )
 async def test_challenge_policy(account: TempoAccount, invalid: Challenge, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         await method(account).create_credential(invalid)
+
+
+@pytest.mark.asyncio
+async def test_open_accepts_nonzero_operator(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deterministic_transactions(monkeypatch)
+
+    payload = (await method(account).create_credential(challenge(operator=OPERATOR))).payload
+    call = cast("list[bytes]", transaction_fields(payload)[4][0])
+    decoded = decode(["address", "address", "address", "uint96", "bytes32", "address"], call[2][4:])
+
+    assert cast("dict[str, str]", payload["descriptor"])["operator"] == OPERATOR
+    assert decoded[1] == OPERATOR
+
+
+@pytest.mark.asyncio
+async def test_open_rejects_zero_deposit(account: TempoAccount) -> None:
+    with pytest.raises(ValueError, match="deposit must be greater than zero"):
+        await method(account).create_credential(
+            challenge(amount="0", suggested_deposit=None, min_voucher_delta="0")
+        )
+
+
+@pytest.mark.asyncio
+async def test_stored_channel_rejects_zero_deposit(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deterministic_transactions(monkeypatch)
+    store = MemoryStore()
+    payment_method = method(account, store=store)
+    await payment_method.create_credential(challenge())
+    key, raw = next(iter(store._data.items()))
+    value = json.loads(cast("str", raw))
+    value.update(deposit="0", cumulative="0", accepted="0")
+    await store.put(key, json.dumps(value))
+
+    with pytest.raises(ValueError, match="stored Tempo session deposit must be greater than zero"):
+        await payment_method.create_credential(challenge())
 
 
 @pytest.mark.asyncio
@@ -339,6 +399,50 @@ async def test_snapshot_recovery_reads_channel_state(
 
 
 @pytest.mark.asyncio
+async def test_rejected_snapshot_recovery_does_not_poison_store(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tx_calls = deterministic_transactions(monkeypatch)
+    opened = await method(account, max_deposit=100).create_credential(
+        challenge(suggested_deposit="100", min_voucher_delta="0")
+    )
+    snapshot = {
+        "channelId": opened.payload["channelId"],
+        "descriptor": opened.payload["descriptor"],
+        "escrow": TIP20_CHANNEL_ESCROW,
+        "chainId": CHAIN_ID,
+        "deposit": "100",
+        "acceptedCumulative": "10",
+        "spent": "90",
+        "settled": "0",
+        "requiredCumulative": "20",
+    }
+    rpc_calls: list[str] = []
+
+    async def rpc_call(rpc_url: str, rpc_method: str, params: list[object]) -> str:
+        rpc_calls.append(rpc_method)
+        return "0x" + encode(["uint96", "uint96", "uint32"], [0, 100, 0]).hex()
+
+    monkeypatch.setattr(session_module, "_rpc_call", rpc_call)
+    store = MemoryStore()
+    payment_method = method(account, max_deposit=100, store=store)
+
+    with pytest.raises(ValueError, match="snapshot amounts are inconsistent"):
+        await payment_method.create_credential(
+            challenge(amount="5", min_voucher_delta="0", snapshot=snapshot)
+        )
+
+    assert store._data == {}
+    assert rpc_calls == []
+    fresh = await payment_method.create_credential(
+        challenge(amount="5", suggested_deposit="20", min_voucher_delta="0")
+    )
+    assert fresh.payload["action"] == "open"
+    assert fresh.payload["cumulativeAmount"] == "5"
+    assert len(tx_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_pending_open_and_voucher_are_retried_without_advancing(
     account: TempoAccount, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -373,6 +477,204 @@ async def test_pending_open_and_voucher_are_retried_without_advancing(
     assert voucher.payload["action"] == "voucher"
     assert voucher.payload["cumulativeAmount"] == "15"
     assert retried_voucher.payload == voucher.payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("onchain_deposit", [0, 50])
+async def test_expired_sponsored_open_reconciles_before_replacement(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch, onchain_deposit: int
+) -> None:
+    now = [1_000]
+    chain_time = [1_024]
+    tx_calls = deterministic_sponsored_transactions(monkeypatch, now)
+    rpc_calls: list[str] = []
+    state_blocks: list[object] = []
+
+    async def rpc_call(rpc_url: str, rpc_method: str, params: list[object]) -> object:
+        rpc_calls.append(rpc_method)
+        if rpc_method == "eth_getBlockByNumber":
+            assert params == ["finalized", False]
+            return {"hash": FINALIZED_HASH, "timestamp": hex(chain_time[0])}
+        state_blocks.append(params[1])
+        return "0x" + encode(["uint96", "uint96", "uint32"], [0, onchain_deposit, 0]).hex()
+
+    monkeypatch.setattr(session_module, "_rpc_call", rpc_call)
+    payment_method = method(account)
+    request = challenge(fee_payer=True, min_voucher_delta="0")
+    opened = await payment_method.create_credential(request)
+
+    now[0] = 1_024
+    assert (await payment_method.create_credential(request)).payload == opened.payload
+    assert rpc_calls == []
+
+    now[0] = 1_025
+    lagged = await payment_method.create_credential(request)
+    assert lagged.payload == opened.payload
+    assert rpc_calls == ["eth_getBlockByNumber"]
+
+    chain_time[0] = 1_025
+    replacement = await payment_method.create_credential(request)
+
+    assert replacement.payload["action"] == ("voucher" if onchain_deposit else "open")
+    if onchain_deposit:
+        assert "transaction" not in replacement.payload
+        assert replacement.payload["channelId"] == opened.payload["channelId"]
+    else:
+        assert replacement.payload["transaction"] != opened.payload["transaction"]
+        assert replacement.payload["channelId"] != opened.payload["channelId"]
+    assert rpc_calls == ["eth_getBlockByNumber", "eth_getBlockByNumber", "eth_call"]
+    assert state_blocks == [{"blockHash": FINALIZED_HASH, "requireCanonical": True}]
+    assert len(tx_calls) == (1 if onchain_deposit else 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block", [{"timestamp": "0x1"}, {"hash": "0x12", "timestamp": "0x1"}])
+async def test_expiry_block_requires_valid_hash(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch, block: dict[str, str]
+) -> None:
+    async def rpc_call(rpc_url: str, rpc_method: str, params: list[object]) -> object:
+        assert (rpc_method, params) == ("eth_getBlockByNumber", ["finalized", False])
+        return block
+
+    monkeypatch.setattr(session_module, "_rpc_call", rpc_call)
+
+    with pytest.raises(ValueError, match="finalized block hash"):
+        await method(account)._expiry_block()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("onchain_deposit", "reconnect_time"), [(20, 1_025), (25, 1_024), (25, 1_025)]
+)
+async def test_sse_reconnect_reconciles_pending_sponsored_top_up(
+    account: TempoAccount,
+    monkeypatch: pytest.MonkeyPatch,
+    onchain_deposit: int,
+    reconnect_time: int,
+) -> None:
+    now = [1_000]
+    tx_calls = deterministic_sponsored_transactions(monkeypatch, now)
+    rpc_calls: list[str] = []
+    state_blocks: list[object] = []
+
+    async def rpc_call(rpc_url: str, rpc_method: str, params: list[object]) -> object:
+        rpc_calls.append(rpc_method)
+        if rpc_method == "eth_getBlockByNumber":
+            assert params == ["finalized", False]
+            return {"hash": FINALIZED_HASH, "timestamp": hex(now[0])}
+        state_blocks.append(params[1])
+        return "0x" + encode(["uint96", "uint96", "uint32"], [0, onchain_deposit, 0]).hex()
+
+    monkeypatch.setattr(session_module, "_rpc_call", rpc_call)
+    payment_method = method(account)
+    opened = await payment_method.create_credential(
+        challenge(fee_payer=True, suggested_deposit="20", min_voucher_delta="0")
+    )
+    snapshot = {
+        "channelId": opened.payload["channelId"],
+        "descriptor": opened.payload["descriptor"],
+        "escrow": TIP20_CHANNEL_ESCROW,
+        "chainId": CHAIN_ID,
+        "deposit": "20",
+        "acceptedCumulative": "10",
+        "spent": "10",
+        "settled": "0",
+        "requiredCumulative": "25",
+    }
+    request = challenge(
+        amount="15",
+        fee_payer=True,
+        suggested_deposit=None,
+        min_voucher_delta="0",
+        snapshot=snapshot,
+    )
+    top_up = await payment_method.create_credential(request)
+
+    now[0] = 1_024
+    retry = await payment_method.create_credential(
+        challenge(amount="15", fee_payer=True, suggested_deposit=None, min_voucher_delta="0")
+    )
+    assert retry.payload == top_up.payload
+    assert rpc_calls == []
+
+    now[0] = reconnect_time
+    reconnect = challenge(
+        amount="15", fee_payer=True, suggested_deposit=None, min_voucher_delta="0"
+    )
+    channel, target = await payment_method._prepare_voucher(
+        payment_method._resolve(reconnect),
+        {
+            "channelId": opened.payload["channelId"],
+            "deposit": str(onchain_deposit),
+            "requiredCumulative": "25",
+            "acceptedCumulative": "10",
+        },
+    )
+    action = "voucher" if onchain_deposit == 25 else "topUp"
+    context = {"action": action, "channelId": channel.channel_id}
+    if action == "voucher":
+        context["cumulativeAmount"] = str(target)
+    else:
+        context["additionalDeposit"] = str(target - channel.deposit)
+    replacement = await payment_method.create_credential(reconnect, context=context)
+
+    assert replacement.payload["action"] == action
+    if onchain_deposit == 25:
+        assert "transaction" not in replacement.payload
+    else:
+        assert replacement.payload["additionalDeposit"] == "5"
+        assert replacement.payload["transaction"] != top_up.payload["transaction"]
+    expired = reconnect_time == 1_025
+    assert rpc_calls == (["eth_getBlockByNumber", "eth_call"] if expired else ["eth_call"])
+    assert state_blocks == (
+        [{"blockHash": FINALIZED_HASH, "requireCanonical": True}] if expired else ["latest"]
+    )
+    assert len(tx_calls) == (2 if onchain_deposit == 25 else 3)
+
+
+@pytest.mark.asyncio
+async def test_sponsored_top_ups_are_unique_within_one_second(
+    account: TempoAccount, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1_000]
+    deterministic_sponsored_transactions(monkeypatch, now)
+
+    async def create_top_up() -> dict[str, Any]:
+        payment_method = method(account)
+        opened = await payment_method.create_credential(
+            challenge(fee_payer=True, suggested_deposit="20", min_voucher_delta="0")
+        )
+        return (
+            await payment_method.create_credential(
+                challenge(
+                    amount="15",
+                    fee_payer=True,
+                    suggested_deposit=None,
+                    min_voucher_delta="0",
+                    snapshot={
+                        "channelId": opened.payload["channelId"],
+                        "descriptor": opened.payload["descriptor"],
+                        "escrow": TIP20_CHANNEL_ESCROW,
+                        "chainId": CHAIN_ID,
+                        "deposit": "20",
+                        "acceptedCumulative": "10",
+                        "spent": "10",
+                        "settled": "0",
+                        "requiredCumulative": "25",
+                    },
+                )
+            )
+        ).payload
+
+    first = await create_top_up()
+    second = await create_top_up()
+    first_fields = transaction_fields(first)
+    second_fields = transaction_fields(second)
+
+    assert first_fields[8] == second_fields[8]
+    assert first_fields[9] != second_fields[9]
+    assert first_fields[9] and second_fields[9]
+    assert first["transaction"] != second["transaction"]
 
 
 @pytest.mark.asyncio

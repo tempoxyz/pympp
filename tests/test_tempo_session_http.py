@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, MemoryStore, Receipt
 from mpp.client import PaymentTransport, SyncPaymentTransport
 from mpp.methods.tempo import TempoAccount, tempo_session
+from mpp.runtime import PaymentRuntime
 
 PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 TOKEN = "0x20c0000000000000000000000000000000000000"
@@ -172,6 +175,27 @@ class ErrorSseServer:
         )
 
 
+class LoopBoundStore(MemoryStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.loop: asyncio.AbstractEventLoop | None = None
+
+    def _check_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self.loop is None:
+            self.loop = loop
+        elif self.loop is not loop:
+            raise RuntimeError("store used from a different event loop")
+
+    async def get(self, key: str) -> Any | None:
+        self._check_loop()
+        return await super().get(key)
+
+    async def put(self, key: str, value: Any) -> None:
+        self._check_loop()
+        await super().put(key, value)
+
+
 @pytest.mark.asyncio
 async def test_async_transport_drives_session_sse_top_up_and_voucher() -> None:
     server = SessionServer()
@@ -191,6 +215,31 @@ async def test_async_transport_drives_session_sse_top_up_and_voucher() -> None:
     assert server.actions == ["open", "topUp", "voucher"]
     assert server.management_urls == [URL, URL]
     assert "content-length" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_async_session_state_stays_on_runtime_loop() -> None:
+    server = SessionServer()
+    store = LoopBoundStore()
+    method = tempo_session(
+        account=TempoAccount.from_key(PRIVATE_KEY),
+        max_deposit=10,
+        rpc_url="https://rpc.test",
+        channel_store=store,
+    )
+    runtime = PaymentRuntime([method])
+    transport = PaymentTransport(runtime=runtime, inner=httpx.MockTransport(server))
+
+    try:
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get(URL, headers={"Accept": "text/event-stream"})
+            assert b"".join([chunk async for chunk in response.aiter_bytes()]) == (
+                b"data: first\n\ndata: second\n\n"
+            )
+    finally:
+        await runtime.aclose()
+
+    assert store.loop is not asyncio.get_running_loop()
 
 
 def test_sync_transport_drives_session_sse_top_up_and_voucher() -> None:
