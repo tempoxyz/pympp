@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+import asyncio
+import threading
+from contextvars import ContextVar, copy_context
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import urlparse
 
 import httpx
@@ -14,12 +17,21 @@ from mpp.events import (
     PAYMENT_FAILED,
     PAYMENT_RESPONSE,
     EventDispatcher,
+    EventPayload,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Coroutine, Sequence
 
-    from mpp.client import PaymentTransport
+    from mpp.client import PaymentTransport, SyncPaymentTransport
+
+_T = TypeVar("_T")
+_PAYMENT_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_payment_flow_active", default=False)
+
+
+def payment_flow_active() -> bool:
+    """Return whether the current context is creating a payment credential."""
+    return _PAYMENT_FLOW_ACTIVE.get()
 
 
 @runtime_checkable
@@ -49,6 +61,136 @@ class _BoundSendTransport(httpx.AsyncBaseTransport):
         return None
 
 
+class _BoundSyncSendTransport(httpx.BaseTransport):
+    def __init__(self, send: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+        self._send = send
+        self._args = args
+        self._kwargs = kwargs
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        kwargs = dict(self._kwargs)
+        if request.headers.get("authorization", "").startswith("Payment "):
+            kwargs["auth"] = None
+        return self._send(request, *self._args, **kwargs)
+
+    def close(self) -> None:
+        return None
+
+
+class _AsyncBridge:
+    """Own one lazy event loop for synchronous payment-method calls."""
+
+    def __init__(self) -> None:
+        self._closed = False
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ready = threading.Event()
+        self._start_error: BaseException | None = None
+        self._thread: threading.Thread | None = None
+
+    def _submit(self, coroutine: Coroutine[Any, Any, _T]) -> Any:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("PaymentRuntime is closed")
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    name="pympp-payment-runtime",
+                    daemon=True,
+                )
+                self._thread.start()
+        self._ready.wait()
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("PaymentRuntime is closed")
+            if self._start_error is not None:
+                raise RuntimeError("PaymentRuntime background loop failed to start") from (
+                    self._start_error
+                )
+            if self._loop is None:
+                raise RuntimeError("PaymentRuntime background loop failed to start")
+            if threading.current_thread() is self._thread:
+                raise RuntimeError("Cannot block the PaymentRuntime background loop")
+            return copy_context().run(
+                asyncio.run_coroutine_threadsafe,
+                coroutine,
+                self._loop,
+            )
+
+    def _run(self) -> None:
+        try:
+            loop = asyncio.new_event_loop()
+        except BaseException as error:
+            self._start_error = error
+            self._ready.set()
+            return
+        self._loop = loop
+        asyncio.set_event_loop(loop)
+        self._ready.set()
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+            loop.close()
+
+    def run(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run an async payment operation from synchronous code."""
+        try:
+            future = self._submit(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
+        try:
+            return future.result()
+        except BaseException:
+            future.cancel()
+            raise
+
+    async def _cancel_pending(self) -> None:
+        current = asyncio.current_task()
+        pending = [task for task in asyncio.all_tasks() if task is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def close(self) -> None:
+        """Stop the runtime loop, if it was started."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            thread = self._thread
+        if thread is None:
+            return
+        if self._loop is None:
+            self._ready.wait()
+        loop = self._loop
+        if loop is None:
+            thread.join()
+            return
+        if threading.current_thread() is thread:
+
+            async def shutdown() -> None:
+                await self._cancel_pending()
+                loop.stop()
+
+            loop.create_task(shutdown())
+            return
+        if thread.is_alive():
+            future = asyncio.run_coroutine_threadsafe(self._cancel_pending(), loop)
+            future.result()
+        if loop is not None:
+            loop.call_soon_threadsafe(loop.stop)
+        thread.join()
+
+
 class PaymentRuntime:
     """Reusable payment runtime for HTTP and MCP payment handling."""
 
@@ -62,6 +204,7 @@ class PaymentRuntime:
         self.methods = tuple(methods)
         self.events = events or EventDispatcher()
         self._allowed = _AllowedOrigins(allowed_origins)
+        self._bridge = _AsyncBridge()
 
     def payment_transport(self, inner: httpx.AsyncBaseTransport | None = None) -> PaymentTransport:
         """Create an httpx transport using this runtime's payment methods."""
@@ -71,6 +214,31 @@ class PaymentRuntime:
             inner=inner,
             runtime=self,
         )
+
+    def sync_payment_transport(
+        self, inner: httpx.BaseTransport | None = None
+    ) -> SyncPaymentTransport:
+        """Create a synchronous httpx transport using this runtime."""
+        from mpp.client import SyncPaymentTransport
+
+        return SyncPaymentTransport(inner=inner, runtime=self)
+
+    def wrap_client(self, client: httpx.Client) -> httpx.Client:
+        """Make one existing Client payment-aware without global instrumentation."""
+        client._mpp_payment_runtime = self  # type: ignore[attr-defined]
+        if getattr(client, "_mpp_payment_wrapped", False):
+            return client
+
+        original_send = client.send
+
+        def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+            runtime = getattr(client, "_mpp_payment_runtime", self)
+            return runtime.send_httpx_sync(original_send, request, *args, **kwargs)
+
+        client._mpp_payment_original_send = original_send  # type: ignore[attr-defined]
+        client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
+        client.send = send  # type: ignore[method-assign]
+        return client
 
     def wrap_async_client(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
         """Make one existing AsyncClient payment-aware without global instrumentation."""
@@ -111,6 +279,17 @@ class PaymentRuntime:
         transport = _BoundSendTransport(send, args, dict(kwargs))
         return await self.payment_transport(inner=transport).handle_async_request(request)
 
+    def send_httpx_sync(
+        self,
+        send: Any,
+        request: httpx.Request,
+        *args: Any,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        """Send one sync httpx request with automatic 402 payment handling."""
+        transport = _BoundSyncSendTransport(send, args, dict(kwargs))
+        return self.sync_payment_transport(inner=transport).handle_request(request)
+
     async def call_mcp_tool(
         self,
         call_tool: Any,
@@ -148,7 +327,7 @@ class PaymentRuntime:
             error = ValueError(
                 "Server returned malformed payment challenges or disallowed payment origins"
             )
-            await self.events.emit(
+            await self.emit_event(
                 PAYMENT_FAILED,
                 {
                     "challenge": None,
@@ -179,7 +358,7 @@ class PaymentRuntime:
             )
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
         except Exception as error:
-            await self.events.emit(
+            await self.emit_event(
                 PAYMENT_FAILED,
                 {
                     "challenge": locals().get("core_challenge"),
@@ -202,7 +381,7 @@ class PaymentRuntime:
             payment_response = await call_tool(name, arguments, *args, **retry_kwargs)
         except Exception as error:
             outcome_error = PaymentOutcomeUnknownError(challenge, error)
-            await self.events.emit(
+            await self.emit_event(
                 PAYMENT_FAILED,
                 {
                     "challenge": core_challenge,
@@ -216,7 +395,7 @@ class PaymentRuntime:
             )
             raise outcome_error from error
 
-        await self.events.emit(
+        await self.emit_event(
             PAYMENT_RESPONSE,
             {
                 "challenge": core_challenge,
@@ -270,28 +449,69 @@ class PaymentRuntime:
         *,
         event_payload: dict[str, Any] | None = None,
     ) -> Credential:
-        """Create a credential and emit shared client lifecycle events."""
-        payload = {
-            "challenge": challenge,
-            "challenges": [challenge],
-            "method": method,
-            **(event_payload or {}),
-        }
-        event_credential = await self.events.emit(
-            CHALLENGE_RECEIVED,
-            payload,
-            first_result=True,
+        """Create a credential on the caller event loop."""
+        return await self._create_credential(challenge, method, event_payload=event_payload)
+
+    def create_credential_sync(
+        self,
+        challenge: Challenge,
+        method: Method,
+        *,
+        event_payload: dict[str, Any] | None = None,
+    ) -> Credential:
+        """Synchronously create a credential on the runtime-owned event loop."""
+        return self._bridge.run(
+            self._create_credential(challenge, method, event_payload=event_payload)
         )
-        credential = (
-            event_credential
-            if isinstance(event_credential, Credential)
-            else await method.create_credential(challenge)
-        )
-        await self.events.emit(
-            CREDENTIAL_CREATED,
-            {**payload, "credential": credential},
-        )
-        return credential
+
+    async def _create_credential(
+        self,
+        challenge: Challenge,
+        method: Method,
+        *,
+        event_payload: dict[str, Any] | None = None,
+    ) -> Credential:
+        token = _PAYMENT_FLOW_ACTIVE.set(True)
+        try:
+            payload = {
+                "challenge": challenge,
+                "challenges": [challenge],
+                "method": method,
+                **(event_payload or {}),
+            }
+            event_credential = await self.events.emit(
+                CHALLENGE_RECEIVED,
+                payload,
+                first_result=True,
+            )
+            credential = (
+                event_credential
+                if isinstance(event_credential, Credential)
+                else await method.create_credential(challenge)
+            )
+            await self.events.emit(
+                CREDENTIAL_CREATED,
+                {**payload, "credential": credential},
+            )
+            return credential
+        finally:
+            _PAYMENT_FLOW_ACTIVE.reset(token)
+
+    async def emit_event(self, name: str, payload: EventPayload) -> Any:
+        """Emit an asynchronous lifecycle event on the caller event loop."""
+        return await self.events.emit(name, payload)
+
+    def emit_event_sync(self, name: str, payload: EventPayload) -> Any:
+        """Synchronously emit a lifecycle event on the runtime-owned event loop."""
+        return self._bridge.run(self.events.emit(name, payload))
+
+    def close(self) -> None:
+        """Release the runtime background loop."""
+        self._bridge.close()
+
+    async def aclose(self) -> None:
+        """Asynchronously release the runtime background loop."""
+        await asyncio.to_thread(self.close)
 
     def allows_http_payment(self, url: httpx.URL) -> bool:
         """Return whether credentials may be created for an HTTP origin."""

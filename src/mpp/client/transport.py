@@ -57,6 +57,39 @@ def _client_payment_failed_payload(
     }
 
 
+def _challenged_request(
+    response: httpx.Response,
+    fallback: httpx.Request,
+) -> httpx.Request:
+    try:
+        return response.request
+    except RuntimeError:
+        return fallback
+
+
+def _payment_challenges(response: httpx.Response) -> tuple[list[Challenge], ParseError | None]:
+    challenges: list[Challenge] = []
+    parse_error: ParseError | None = None
+    for header in response.headers.get_list("www-authenticate"):
+        if not header.lower().startswith("payment "):
+            continue
+        try:
+            challenges.append(Challenge.from_www_authenticate(header))
+        except ParseError as error:
+            parse_error = error
+    return challenges, parse_error
+
+
+def _challenge_is_expired(challenge: Challenge) -> bool:
+    if not challenge.expires:
+        return False
+    try:
+        expires = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return expires < datetime.now(UTC)
+
+
 class PaymentTransport(httpx.AsyncBaseTransport):
     """httpx transport that handles 402 Payment Required responses.
 
@@ -84,6 +117,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         *,
         runtime: PaymentRuntime | None = None,
     ) -> None:
+        self._owns_runtime = runtime is None
         if runtime is not None:
             if methods is not None or events is not None:
                 raise ValueError("Pass either methods/events or runtime, not both")
@@ -145,28 +179,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         # A high-level send may have followed redirects before returning the
         # 402. Apply policy and retry against the request that was challenged.
-        try:
-            challenged_request = response.request
-        except RuntimeError:
-            challenged_request = request
+        challenged_request = _challenged_request(response, request)
         if not self._runtime.allows_http_payment(challenged_request.url):
             return response
         await challenged_request.aread()
 
-        # Handle multiple WWW-Authenticate headers (per RFC 9110)
-        www_auth_headers = response.headers.get_list("www-authenticate")
-
-        challenges: list[Challenge] = []
-        parse_error: ParseError | None = None
-        for header in www_auth_headers:
-            if not header.lower().startswith("payment "):
-                continue
-            try:
-                parsed = Challenge.from_www_authenticate(header)
-            except ParseError as error:
-                parse_error = error
-                continue
-            challenges.append(parsed)
+        challenges, parse_error = _payment_challenges(response)
 
         try:
             challenge, matched_method = self._runtime.match_challenge(
@@ -181,7 +199,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             if parse_error is not None or challenges:
                 # Surface parse/method-selection failures to observers while
                 # preserving the original 402 response for the caller.
-                await self._events.emit(
+                await self._runtime.emit_event(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
                         challenge=None,
@@ -197,26 +215,21 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             return response
 
         # Check expiry before paying (client-side guardrail)
-        if challenge.expires:
-            try:
-                expires_dt = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
-                if expires_dt < datetime.now(UTC):
-                    logger.warning("Challenge expired at %s, not paying", challenge.expires)
-                    await self._events.emit(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
-                            credential=None,
-                            error=ValueError(f"Challenge expired at {challenge.expires}"),
-                            method=matched_method,
-                            request=request,
-                            response=response,
-                        ),
-                    )
-                    return response
-            except ValueError:
-                pass  # If we can't parse, let server validate
+        if _challenge_is_expired(challenge):
+            logger.warning("Challenge expired at %s, not paying", challenge.expires)
+            await self._runtime.emit_event(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=challenge,
+                    challenges=challenges,
+                    credential=None,
+                    error=ValueError(f"Challenge expired at {challenge.expires}"),
+                    method=matched_method,
+                    request=challenged_request,
+                    response=response,
+                ),
+            )
+            return response
 
         try:
             credential = await self._runtime.create_credential(
@@ -231,7 +244,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             )
             auth_header = credential.to_authorization()
         except Exception as error:
-            await self._events.emit(
+            await self._runtime.emit_event(
                 PAYMENT_FAILED,
                 _client_payment_failed_payload(
                     challenge=challenge,
@@ -259,7 +272,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         try:
             payment_response = await self._inner.handle_async_request(retry_request)
         except Exception as error:
-            await self._events.emit(
+            await self._runtime.emit_event(
                 PAYMENT_FAILED,
                 _client_payment_failed_payload(
                     challenge=challenge,
@@ -274,7 +287,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             raise
 
         if payment_response.is_success:
-            await self._events.emit(
+            await self._runtime.emit_event(
                 PAYMENT_RESPONSE,
                 {
                     "challenge": challenge,
@@ -290,7 +303,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         """Close the inner transport."""
-        await self._inner.aclose()
+        try:
+            await self._inner.aclose()
+        finally:
+            if self._owns_runtime:
+                await self._runtime.aclose()
 
 
 class Client:
