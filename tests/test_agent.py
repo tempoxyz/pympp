@@ -86,14 +86,18 @@ def payment_challenge_header() -> str:
     return challenge.to_www_authenticate("example.com")
 
 
-def mcp_payment_error() -> FakeMcpError:
-    return FakeMcpError(
+def mcp_payment_error(
+    *,
+    realm: str = "example.com",
+    expires: str | None = None,
+) -> FakeMcpError:
+    error = FakeMcpError(
         -32042,
         data={
             "challenges": [
                 {
                     "id": "test-id",
-                    "realm": "example.com",
+                    "realm": realm,
                     "method": "tempo",
                     "intent": "charge",
                     "request": {"amount": "1000"},
@@ -101,21 +105,41 @@ def mcp_payment_error() -> FakeMcpError:
             ]
         },
     )
+    if expires is not None:
+        error.data["challenges"][0]["expires"] = expires
+    return error
 
 
-def mcp_payment_result() -> FakeCallToolResult:
+def mcp_payment_result(*, expires: str | None = None) -> FakeCallToolResult:
     return FakeCallToolResult(
         "payment required",
         meta={
             META_PAYMENT_REQUIRED: {
                 "httpStatus": 402,
-                "challenges": mcp_payment_error().data["challenges"],
+                "challenges": mcp_payment_error(expires=expires).data["challenges"],
             }
         },
     )
 
 
 class TestHttpxRuntime:
+    @pytest.mark.parametrize(
+        ("allowed", "url"),
+        [
+            ("HTTPS://EXAMPLE.COM:443/path", "https://example.com/resource"),
+            ("https://[2001:DB8::1]:443/path", "https://[2001:db8::1]/resource"),
+        ],
+    )
+    def test_allowed_origins_are_normalized(self, allowed: str, url: str) -> None:
+        runtime = PaymentRuntime([], allowed_origins=[allowed])
+
+        assert runtime.allows_http_payment(httpx.URL(url))
+
+    def test_mcp_url_realm_uses_normalized_origin(self) -> None:
+        runtime = PaymentRuntime([], allowed_origins=["HTTPS://EXAMPLE.COM:443/path"])
+
+        assert runtime._allowed.mcp_realm("https://example.com/tool")
+
     @pytest.mark.asyncio
     async def test_runtime_wrap_async_client_without_global_hook(self) -> None:
         inner = MockTransport(
@@ -186,6 +210,24 @@ class TestHttpxRuntime:
 
 
 class TestMcpRuntime:
+    def test_mcp_does_not_use_legacy_name_only_matching(self) -> None:
+        class NameOnlyMethod:
+            name = "tempo"
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        runtime = PaymentRuntime([NameOnlyMethod()])
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="subscription",
+            request={},
+        )
+
+        with pytest.raises(ValueError, match="No compatible payment method"):
+            runtime.match_challenge([challenge])
+
     @pytest.mark.asyncio
     async def test_mcp_client_accepts_runtime_without_methods(self) -> None:
         runtime = PaymentRuntime([MockMethod()])
@@ -196,6 +238,31 @@ class TestMcpRuntime:
 
         assert client._runtime is runtime
         assert result.result.content[0]["text"] == "paid"
+
+    @pytest.mark.asyncio
+    async def test_mcp_client_context_closes_owned_runtime(self) -> None:
+        session = FakeClientSession([mcp_payment_error(), FakeCallToolResult("paid")])
+
+        async with McpClient(session, methods=[MockMethod()]) as client:
+            await client.call_tool("premium_tool")
+            thread = client._runtime._bridge._thread
+            assert thread is not None and thread.is_alive()
+
+        assert thread.is_alive() is False
+
+    @pytest.mark.asyncio
+    async def test_mcp_client_does_not_close_injected_runtime(self) -> None:
+        runtime = PaymentRuntime([MockMethod()])
+        session = FakeClientSession([mcp_payment_error(), FakeCallToolResult("paid")])
+        client = McpClient(session, runtime=runtime)
+        await client.call_tool("premium_tool")
+        thread = runtime._bridge._thread
+        assert thread is not None and thread.is_alive()
+
+        await client.aclose()
+        assert thread.is_alive()
+        await runtime.aclose()
+        assert thread.is_alive() is False
 
     def test_mcp_client_rejects_runtime_with_methods(self) -> None:
         runtime = PaymentRuntime([])
@@ -238,6 +305,56 @@ class TestMcpRuntime:
 
         assert len(session.calls) == 1
         method.create_credential.assert_not_called()
+
+    @pytest.mark.parametrize("shape", ["error", "result"])
+    @pytest.mark.asyncio
+    async def test_expired_mcp_challenge_emits_failure_without_paying(
+        self,
+        shape: str,
+    ) -> None:
+        method = MockMethod()
+        expires = "2020-01-01T00:00:00Z"
+        challenge = (
+            mcp_payment_error(expires=expires)
+            if shape == "error"
+            else mcp_payment_result(expires=expires)
+        )
+        session = FakeClientSession([challenge])
+        runtime = PaymentRuntime([method])
+        events: list[Any] = []
+        runtime.events.on("*", events.append)
+        try:
+            with pytest.raises(ValueError, match="Challenge expired"):
+                await runtime.call_mcp_tool(session.call_tool, "premium_tool")
+        finally:
+            await runtime.aclose()
+
+        assert len(session.calls) == 1
+        method.create_credential.assert_not_called()
+        assert [event.name for event in events] == ["payment.failed"]
+        assert events[-1].payload["challenge"].expires == expires
+        assert events[-1].payload["credential"] is None
+
+    @pytest.mark.asyncio
+    async def test_malformed_mcp_url_realm_fails_closed(self) -> None:
+        method = MockMethod()
+        session = FakeClientSession([mcp_payment_error(realm="https://[malformed")])
+        runtime = PaymentRuntime(
+            [method],
+            allowed_origins=["https://example.com"],
+        )
+        events: list[Any] = []
+        runtime.events.on("*", events.append)
+        try:
+            with pytest.raises(ValueError, match="malformed.*disallowed"):
+                await runtime.call_mcp_tool(session.call_tool, "premium_tool")
+        finally:
+            await runtime.aclose()
+
+        assert len(session.calls) == 1
+        method.create_credential.assert_not_called()
+        assert events[-1].name == "payment.failed"
+        assert events[-1].payload["credential"] is None
 
     @pytest.mark.asyncio
     async def test_result_metadata_payment_preserves_raw_result_and_meta(self) -> None:

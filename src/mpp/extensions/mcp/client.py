@@ -18,15 +18,16 @@ Example:
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
 
-            client = McpClient(session, methods=[method])
-            result = await client.call_tool("premium_tool", {"query": "hello"})
-            print(result.receipt)
+            async with McpClient(session, methods=[method]) as client:
+                result = await client.call_tool("premium_tool", {"query": "hello"})
+                print(result.receipt)
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from mpp.extensions.mcp.constants import (
@@ -181,9 +182,9 @@ class McpClient:
         methods: Payment methods available for credential creation.
 
     Example:
-        client = McpClient(session, methods=[tempo(...)])
-        result = await client.call_tool("premium_tool", {"query": "hello"})
-        print(result.receipt)
+        async with McpClient(session, methods=[tempo(...)]) as client:
+            result = await client.call_tool("premium_tool", {"query": "hello"})
+            print(result.receipt)
     """
 
     def __init__(
@@ -194,6 +195,7 @@ class McpClient:
         runtime: PaymentRuntime | None = None,
     ) -> None:
         self._session = session
+        self._owns_runtime = runtime is None
         if runtime is not None:
             if methods is not None:
                 raise ValueError("Pass either methods or runtime, not both")
@@ -206,13 +208,30 @@ class McpClient:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
 
+    async def __aenter__(self) -> McpClient:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        await self.aclose()
+
+    def close(self) -> None:
+        """Close the runtime created by this client, if any."""
+        if self._owns_runtime:
+            self._runtime.close()
+
+    async def aclose(self) -> None:
+        """Asynchronously close the runtime created by this client, if any."""
+        if self._owns_runtime:
+            await self._runtime.aclose()
+
     async def call_tool(
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
-        *,
+        *args: Any,
         timeout: float | None = None,
         meta: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> McpToolResult:
         """Call an MCP tool with automatic payment handling.
 
@@ -225,6 +244,8 @@ class McpClient:
             arguments: Tool arguments.
             timeout: Per-call timeout override (passed as ``read_timeout_seconds``).
             meta: Additional ``_meta`` fields to include in the request.
+            *args: Positional arguments accepted by the underlying MCP session.
+            **kwargs: Keyword arguments accepted by the underlying MCP session.
 
         Returns:
             An ``McpToolResult`` with the tool result and an optional receipt.
@@ -234,9 +255,11 @@ class McpClient:
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
             ValueError: If no installed method matches the server's challenge.
         """
-        call_kwargs: dict[str, Any] = {}
+        call_kwargs = dict(kwargs)
         if timeout is not None:
-            call_kwargs["read_timeout_seconds"] = timeout
+            if args or "read_timeout_seconds" in call_kwargs:
+                raise TypeError("Pass either timeout or read_timeout_seconds, not both")
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=timeout)
         if meta is not None:
             call_kwargs["meta"] = meta
 
@@ -244,6 +267,7 @@ class McpClient:
             self._session.call_tool,
             name,
             arguments,
+            *args,
             **call_kwargs,
         )
         receipt = self._extract_receipt(result)
@@ -255,7 +279,7 @@ class McpClient:
         Iterates installed methods in order (client preference) and returns
         the first match by ``name`` and ``intent``.
         """
-        return self._runtime.match_mcp_challenge(challenges)
+        return self._runtime.match_challenge(challenges)
 
     @staticmethod
     def _extract_receipt(result: Any) -> MCPReceipt | None:

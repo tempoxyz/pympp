@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -426,7 +427,48 @@ class TestMcpClientPaidTool:
         await client.call_tool("tool", {}, timeout=60.0)
 
         _, kwargs = session.call_tool.call_args
-        assert kwargs.get("read_timeout_seconds") == 60.0
+        assert kwargs.get("read_timeout_seconds") == timedelta(seconds=60)
+
+    @pytest.mark.asyncio
+    async def test_mcp_119_call_shape_is_forwarded(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(return_value=FakeCallToolResult())
+        read_timeout = timedelta(seconds=30)
+        progress_callback = AsyncMock()
+        client = McpClient(session, methods=[FakeMethod()])
+
+        await client.call_tool(
+            "tool",
+            {},
+            read_timeout,
+            progress_callback,
+            meta={"trace": "abc"},
+        )
+
+        args, kwargs = session.call_tool.call_args
+        assert args == ("tool", {}, read_timeout, progress_callback)
+        assert kwargs == {"meta": {"trace": "abc"}}
+
+    @pytest.mark.asyncio
+    async def test_mcp_119_keyword_arguments_are_forwarded(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(return_value=FakeCallToolResult())
+        read_timeout = timedelta(seconds=30)
+        progress_callback = AsyncMock()
+        client = McpClient(session, methods=[FakeMethod()])
+
+        await client.call_tool(
+            "tool",
+            {},
+            read_timeout_seconds=read_timeout,
+            progress_callback=progress_callback,
+        )
+
+        _, kwargs = session.call_tool.call_args
+        assert kwargs == {
+            "read_timeout_seconds": read_timeout,
+            "progress_callback": progress_callback,
+        }
 
     @pytest.mark.asyncio
     async def test_meta_forwarded(self) -> None:

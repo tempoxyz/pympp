@@ -7,6 +7,7 @@ import inspect
 import threading
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import urlparse
 
@@ -63,6 +64,8 @@ class AsyncHttpResponseContext:
     ``refetch`` is available only once and closes the original response. Close
     non-streaming responses before using ``send`` so the connection is free.
     Streaming hooks need another connection while the source remains open.
+    Use ``run_async`` for state shared with credential creation; HTTP I/O stays
+    on the hook's caller loop.
     """
 
     challenge: Challenge
@@ -72,6 +75,7 @@ class AsyncHttpResponseContext:
     send: Callable[[httpx.Request], Awaitable[httpx.Response]]
     refetch: Callable[[], Awaitable[httpx.Response]] | None
     create_credential: Callable[[Any], Awaitable[Credential]]
+    run_async: Callable[[Coroutine[Any, Any, Any]], Awaitable[Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +87,7 @@ class SyncHttpResponseContext:
     ``refetch`` is available only once and closes the original response. Close
     non-streaming responses before using ``send`` so the connection is free.
     Streaming hooks need another connection while the source remains open.
+    Use ``run_sync`` for async state shared with credential creation.
     """
 
     challenge: Challenge
@@ -128,7 +133,7 @@ class _BoundSyncSendTransport(httpx.BaseTransport):
 
 
 class _AsyncBridge:
-    """Own one lazy event loop for synchronous payment-method calls."""
+    """Own one lazy event loop for payment-method calls."""
 
     def __init__(self) -> None:
         self._closed = False
@@ -202,6 +207,21 @@ class _AsyncBridge:
             future.cancel()
             raise
 
+    async def run_async(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run an async payment operation on the runtime loop."""
+        if asyncio.get_running_loop() is self._loop:
+            return await coroutine
+        try:
+            future = self._submit(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
+        try:
+            return await asyncio.wrap_future(future)
+        except BaseException:
+            future.cancel()
+            raise
+
     async def _cancel_pending(self) -> None:
         current = asyncio.current_task()
         pending = [task for task in asyncio.all_tasks() if task is not current]
@@ -242,7 +262,7 @@ class _AsyncBridge:
 
 
 class PaymentRuntime:
-    """Reusable payment runtime for HTTP and MCP payment handling."""
+    """Payment runtime with one loop for shared method and lifecycle state."""
 
     def __init__(
         self,
@@ -285,7 +305,6 @@ class PaymentRuntime:
             runtime = getattr(client, "_mpp_payment_runtime", self)
             return runtime.send_httpx_sync(original_send, request, *args, **kwargs)
 
-        client._mpp_payment_original_send = original_send  # type: ignore[attr-defined]
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
         client.send = send  # type: ignore[method-assign]
         return client
@@ -302,21 +321,9 @@ class PaymentRuntime:
             runtime = getattr(client, "_mpp_payment_runtime", self)
             return await runtime.send_httpx(original_send, request, *args, **kwargs)
 
-        client._mpp_payment_original_send = original_send  # type: ignore[attr-defined]
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
         client.send = send  # type: ignore[method-assign]
         return client
-
-    def httpx_client_factory(
-        self,
-        base_factory: Any = httpx.AsyncClient,
-    ) -> Callable[..., httpx.AsyncClient]:
-        """Return an AsyncClient factory suitable for MCP SDK framework hooks."""
-
-        def factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
-            return self.wrap_async_client(base_factory(*args, **kwargs))
-
-        return factory
 
     async def send_httpx(
         self,
@@ -327,7 +334,11 @@ class PaymentRuntime:
     ) -> httpx.Response:
         """Send one httpx request with automatic 402 payment handling."""
         transport = _BoundSendTransport(send, args, dict(kwargs))
-        return await self.payment_transport(inner=transport).handle_async_request(request)
+        response = await transport.handle_async_request(request)
+        return await self.payment_transport(inner=transport)._handle_async_response(
+            request,
+            response,
+        )
 
     def send_httpx_sync(
         self,
@@ -338,7 +349,8 @@ class PaymentRuntime:
     ) -> httpx.Response:
         """Send one sync httpx request with automatic 402 payment handling."""
         transport = _BoundSyncSendTransport(send, args, dict(kwargs))
-        return self.sync_payment_transport(inner=transport).handle_request(request)
+        response = transport.handle_request(request)
+        return self.sync_payment_transport(inner=transport)._handle_response(request, response)
 
     async def handle_async_http_response(
         self,
@@ -449,6 +461,8 @@ class PaymentRuntime:
             challenge, method = self.match_challenge(allowed_challenges)
             core_challenges = [item.to_core() for item in allowed_challenges]
             core_challenge = challenge.to_core()
+            if _challenge_is_expired(challenge):
+                raise ValueError(f"Challenge expired at {challenge.expires}")
             core_credential = await self.create_credential(
                 core_challenge,
                 method,
@@ -515,6 +529,7 @@ class PaymentRuntime:
         challenges: list[Any],
         *,
         prefer_method_order: bool = True,
+        allow_name_only: bool = False,
     ) -> tuple[Any, Method]:
         """Match payment challenges against configured methods."""
         if prefer_method_order:
@@ -522,7 +537,9 @@ class PaymentRuntime:
                 for challenge in challenges:
                     if challenge.method != method.name:
                         continue
-                    if challenge.intent not in _intent_names(method):
+                    if not allow_name_only and challenge.intent not in (
+                        _intent_names(method) or {"charge"}
+                    ):
                         continue
                     return challenge, method
         else:
@@ -530,7 +547,9 @@ class PaymentRuntime:
                 for method in self.methods:
                     if challenge.method != method.name:
                         continue
-                    if challenge.intent not in _intent_names(method):
+                    if not allow_name_only and challenge.intent not in (
+                        _intent_names(method) or {"charge"}
+                    ):
                         continue
                     return challenge, method
 
@@ -540,10 +559,6 @@ class PaymentRuntime:
             f"No compatible payment method. Server offered: {available}, client has: {installed}"
         )
 
-    def match_mcp_challenge(self, challenges: list[Any]) -> tuple[Any, Method]:
-        """Match MCP payment challenges against configured methods."""
-        return self.match_challenge(challenges)
-
     async def create_credential(
         self,
         challenge: Challenge,
@@ -552,12 +567,14 @@ class PaymentRuntime:
         event_payload: dict[str, Any] | None = None,
         context: Any = _CONTEXT_UNSET,
     ) -> Credential:
-        """Create a credential on the caller event loop."""
-        return await self._create_credential(
-            challenge,
-            method,
-            event_payload=event_payload,
-            context=context,
+        """Create a credential with method state owned by the runtime loop."""
+        return await self.run_async(
+            self._create_credential(
+                challenge,
+                method,
+                event_payload=event_payload,
+                context=context,
+            )
         )
 
     def create_credential_sync(
@@ -582,6 +599,10 @@ class PaymentRuntime:
         """Run a coroutine on the runtime-owned loop and block for its result."""
         return self._bridge.run(coroutine)
 
+    async def run_async(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run a coroutine on the runtime-owned loop without blocking."""
+        return await self._bridge.run_async(coroutine)
+
     async def _create_credential(
         self,
         challenge: Challenge,
@@ -600,7 +621,7 @@ class PaymentRuntime:
             }
             if context is not _CONTEXT_UNSET:
                 payload["context"] = context
-            event_credential = await self.events.emit(
+            event_credential = await self._emit_event(
                 CHALLENGE_RECEIVED,
                 payload,
                 first_result=True,
@@ -611,7 +632,7 @@ class PaymentRuntime:
                 credential = await method.create_credential(challenge)
             else:
                 credential = await method.create_credential(challenge, context=context)  # type: ignore[call-arg]
-            await self.events.emit(
+            await self._emit_event(
                 CREDENTIAL_CREATED,
                 {**payload, "credential": credential},
             )
@@ -620,16 +641,25 @@ class PaymentRuntime:
             _PAYMENT_FLOW_ACTIVE.reset(token)
 
     async def emit_event(self, name: str, payload: EventPayload) -> Any:
-        """Emit an asynchronous lifecycle event on the caller event loop."""
+        """Emit a lifecycle event on the runtime-owned loop."""
+        return await self.run_async(self._emit_event(name, payload))
+
+    async def _emit_event(
+        self,
+        name: str,
+        payload: EventPayload,
+        *,
+        first_result: bool = False,
+    ) -> Any:
         token = _PAYMENT_FLOW_ACTIVE.set(True)
         try:
-            return await self.events.emit(name, payload)
+            return await self.events.emit(name, payload, first_result=first_result)
         finally:
             _PAYMENT_FLOW_ACTIVE.reset(token)
 
     def emit_event_sync(self, name: str, payload: EventPayload) -> Any:
         """Synchronously emit a lifecycle event on the runtime-owned event loop."""
-        return self.run_sync(self.emit_event(name, payload))
+        return self.run_sync(self._emit_event(name, payload))
 
     def close(self) -> None:
         """Release the runtime background loop."""
@@ -644,40 +674,74 @@ class PaymentRuntime:
         return self._allowed.http_url(url)
 
 
-def _intent_names(method: Method) -> set[str]:
+def _intent_names(method: Method) -> set[str] | None:
     intents = getattr(method, "intents", None) or getattr(method, "_intents", None)
     if isinstance(intents, dict):
         return set(intents.keys())
-    return {"charge"}
+    return None
+
+
+def _challenge_is_expired(challenge: Any) -> bool:
+    if not challenge.expires:
+        return False
+    try:
+        expires = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
+        return expires < datetime.now(UTC)
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 class _AllowedOrigins:
     def __init__(self, allowed_origins: Sequence[str] | None) -> None:
         self._allow_all = allowed_origins is None
-        self._origins = set[str]()
+        self._origins = set[tuple[str, str, int | None]]()
         self._realms = set[str]()
         if allowed_origins is None:
             return
         for value in allowed_origins:
-            parsed = urlparse(str(value))
-            if parsed.scheme and parsed.netloc:
-                self._origins.add(f"{parsed.scheme}://{parsed.netloc}")
+            origin = _origin(str(value))
+            if origin is not None:
+                self._origins.add(origin)
             else:
-                self._realms.add(str(value))
+                self._realms.add(str(value).casefold())
 
     def http_url(self, url: httpx.URL) -> bool:
         if self._allow_all:
             return True
-        origin = f"{url.scheme}://{url.host}"
-        if url.port is not None:
-            origin = f"{origin}:{url.port}"
-        return origin in self._origins or url.host in self._realms
+        origin = _httpx_origin(url)
+        return origin in self._origins or url.host.casefold() in self._realms
 
     def mcp_realm(self, realm: str) -> bool:
+        if not isinstance(realm, str):
+            return False
+        origin = _origin(realm)
+        if "://" in realm and origin is None:
+            return False
         if self._allow_all:
             return True
-        parsed = urlparse(realm)
-        if parsed.scheme and parsed.netloc:
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            return origin in self._origins or parsed.netloc in self._realms
-        return realm in self._realms
+        if origin is not None:
+            return origin in self._origins or origin[1] in self._realms
+        return realm.casefold() in self._realms
+
+
+def _origin(value: str) -> tuple[str, str, int | None] | None:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        port = parsed.port
+    except (AttributeError, TypeError, UnicodeError, ValueError):
+        return None
+    if not parsed.scheme or not hostname:
+        return None
+    scheme = parsed.scheme.casefold()
+    if port == {"http": 80, "https": 443}.get(scheme):
+        port = None
+    return scheme, hostname.casefold(), port
+
+
+def _httpx_origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    scheme = url.scheme.casefold()
+    port = url.port
+    if port == {"http": 80, "https": 443}.get(scheme):
+        port = None
+    return scheme, url.host.casefold(), port

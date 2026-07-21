@@ -23,6 +23,7 @@ class _Binding:
     runtime: PaymentRuntime
     httpx: bool
     mcp: bool
+    install_thread: int
     active: bool = True
 
 
@@ -77,7 +78,12 @@ def instrument(
     choosing between multiple wallets.
     """
     client_session = _resolve_mcp_client(required=mcp is True) if mcp is not False else None
-    binding = _Binding(runtime=runtime, httpx=httpx, mcp=client_session is not None)
+    binding = _Binding(
+        runtime=runtime,
+        httpx=httpx,
+        mcp=client_session is not None,
+        install_thread=threading.get_ident(),
+    )
 
     with _state.lock:
         try:
@@ -121,21 +127,30 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
                 return binding.runtime
         return None
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pass
-    else:
-        return None
-
     if getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False):
         return None
 
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = False
+    else:
+        running_loop = True
+
     with _state.lock:
+        candidates = [
+            binding for binding in _state.bindings if binding.active and getattr(binding, protocol)
+        ]
+        # A task that predates a context-local install on the same event-loop
+        # thread must not inherit that task's wallet. An independently-owned
+        # worker loop (such as Hermes' MCP loop) may use an unambiguous process
+        # runtime.
+        if running_loop and any(
+            binding.install_thread == threading.get_ident() for binding in candidates
+        ):
+            return None
         runtimes: list[PaymentRuntime] = []
-        for binding in _state.bindings:
-            if not binding.active or not getattr(binding, protocol):
-                continue
+        for binding in candidates:
             if all(runtime is not binding.runtime for runtime in runtimes):
                 runtimes.append(binding.runtime)
         return runtimes[0] if len(runtimes) == 1 else None

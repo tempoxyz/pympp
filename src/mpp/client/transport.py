@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -29,7 +28,12 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import AsyncHttpResponseContext, Method, PaymentRuntime
+from mpp.runtime import (
+    AsyncHttpResponseContext,
+    Method,
+    PaymentRuntime,
+    _challenge_is_expired,
+)
 
 logger = logging.getLogger(__name__)
 _REFETCHED = "mpp.response_hook_refetched"
@@ -104,16 +108,6 @@ def _payment_challenges(response: httpx.Response) -> tuple[list[Challenge], Pars
     return challenges, parse_error
 
 
-def _challenge_is_expired(challenge: Challenge) -> bool:
-    if not challenge.expires:
-        return False
-    try:
-        expires = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return expires < datetime.now(UTC)
-
-
 class PaymentTransport(httpx.AsyncBaseTransport):
     """httpx transport that handles 402 Payment Required responses.
 
@@ -175,27 +169,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        # Async-generator bodies (content=async_gen()) produce an AsyncByteStream
-        # that is not also a SyncByteStream. They cannot be safely buffered for
-        # replay: the generator may be infinite, already partially consumed, or
-        # tied to a one-shot I/O source. Reject early so callers get a clear
-        # message instead of a silent empty body on the paid retry.
-        if isinstance(request.stream, httpx.AsyncByteStream) and not isinstance(
-            request.stream, httpx.SyncByteStream
-        ):
-            raise PaymentError(
-                "Streaming request bodies (async generators) are not supported "
-                "through the payment retry flow. Use a buffered body "
-                "(bytes, str, files=, or data=) instead."
-            )
-
-        # Buffer the request body before the first dispatch so it can be replayed
-        # on a paid 402 retry. Handles bytes bodies and multipart/files= bodies.
-        # After aread() the stream is replaced with a replayable ByteStream.
-        await request.aread()
-
         response = await self._inner.handle_async_request(request)
+        return await self._handle_async_response(request, response)
 
+    async def _handle_async_response(
+        self,
+        request: httpx.Request,
+        response: httpx.Response,
+    ) -> httpx.Response:
+        """Handle an already-dispatched response, retrying a payable 402."""
         if response.status_code != 402:
             return response
 
@@ -206,7 +188,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         challenged_request = _challenged_request(response, request)
         if not self._runtime.allows_http_payment(challenged_request.url):
             return response
-        await challenged_request.aread()
 
         challenges, parse_error = _payment_challenges(response)
 
@@ -214,6 +195,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             challenge, matched_method = self._runtime.match_challenge(
                 challenges,
                 prefer_method_order=False,
+                allow_name_only=True,
             )
         except ValueError:
             challenge = None
@@ -254,6 +236,27 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 ),
             )
             return response
+
+        try:
+            await challenged_request.aread()
+        except httpx.StreamConsumed as cause:
+            error = PaymentError(
+                "Streaming request bodies cannot be replayed after a payment challenge. "
+                "Use a buffered body for paid requests."
+            )
+            await self._runtime.emit_event(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=challenge,
+                    challenges=challenges,
+                    credential=None,
+                    error=error,
+                    method=matched_method,
+                    request=challenged_request,
+                    response=response,
+                ),
+            )
+            raise error from cause
 
         try:
             credential = await self._runtime.create_credential(
@@ -385,6 +388,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     send=send,
                     refetch=refetch,
                     create_credential=create_credential,
+                    run_async=self._runtime.run_async,
                 ),
             )
             await emit_payment_response(final_response)

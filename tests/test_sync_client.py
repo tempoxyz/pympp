@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -44,6 +44,19 @@ class MockTransport(httpx.BaseTransport):
 
     def close(self) -> None:
         self.closed = True
+
+
+class ConsumingTransport(httpx.BaseTransport):
+    def __init__(self, responses: list[httpx.Response]) -> None:
+        self.responses = responses
+        self.requests: list[httpx.Request] = []
+        self.bodies: list[bytes] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        stream = cast(httpx.SyncByteStream, request.stream)
+        self.bodies.append(b"".join(stream))
+        return self.responses.pop(0)
 
 
 class TrackingStream(httpx.SyncByteStream):
@@ -96,7 +109,7 @@ class TestSyncPaymentTransport:
         ]
 
         for request in requests:
-            inner = MockTransport([payment_required(), httpx.Response(200, content=b"paid")])
+            inner = ConsumingTransport([payment_required(), httpx.Response(200, content=b"paid")])
             transport = SyncPaymentTransport(methods=[MockMethod()], inner=inner)
             try:
                 response = transport.handle_request(request)
@@ -104,24 +117,58 @@ class TestSyncPaymentTransport:
                 transport.close()
 
             assert response.status_code == 200
-            assert inner.requests[1].content == inner.requests[0].content
+            assert inner.bodies[1] == inner.bodies[0]
             assert inner.requests[1].headers["authorization"].startswith("Payment ")
 
-    def test_rejects_generator_body_before_send(self) -> None:
+    def test_free_generator_body_passes_through(self) -> None:
         def body():
             yield b"one-shot"
 
-        inner = MockTransport([])
+        received: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            stream = cast(httpx.SyncByteStream, request.stream)
+            received.append(b"".join(stream))
+            return httpx.Response(200, content=b"ok")
+
+        inner = httpx.MockTransport(handler)
         transport = SyncPaymentTransport(methods=[MockMethod()], inner=inner)
         try:
-            with pytest.raises(PaymentError, match="Streaming request bodies"):
+            response = transport.handle_request(
+                httpx.Request("POST", "https://example.com", content=body())
+            )
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert received == [b"one-shot"]
+
+    def test_paid_generator_body_fails_after_first_send(self) -> None:
+        def body():
+            yield b"one-shot"
+
+        requests: list[httpx.Request] = []
+
+        class OneShotTransport(httpx.BaseTransport):
+            def handle_request(self, request: httpx.Request) -> httpx.Response:
+                requests.append(request)
+                stream = cast(httpx.SyncByteStream, request.stream)
+                _ = b"".join(stream)
+                return payment_required()
+
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=OneShotTransport(),
+        )
+        try:
+            with pytest.raises(PaymentError, match="cannot be replayed"):
                 transport.handle_request(
                     httpx.Request("POST", "https://example.com", content=body())
                 )
         finally:
             transport.close()
 
-        assert inner.requests == []
+        assert len(requests) == 1
 
     def test_paid_stream_remains_lazy(self) -> None:
         stream = TrackingStream([b"one", b"two"])
@@ -380,6 +427,28 @@ class TestWrappedSyncClient:
         assert [request.url.host for request in requests] == ["allowed.example", "evil.example"]
         method.create_credential.assert_not_called()
 
+    def test_free_generator_upload_is_not_buffered(self) -> None:
+        bodies: list[bytes] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(request.read())
+            return httpx.Response(200, content=b"ok")
+
+        def body():
+            yield b"one-"
+            yield b"shot"
+
+        runtime = PaymentRuntime([MockMethod()])
+        client = runtime.wrap_client(httpx.Client(transport=httpx.MockTransport(handler)))
+        try:
+            response = client.post("https://example.com/upload", content=body())
+        finally:
+            client.close()
+            runtime.close()
+
+        assert response.status_code == 200
+        assert bodies == [b"one-shot"]
+
 
 class TestRuntimeBridge:
     def test_concurrent_sync_calls_share_one_method_loop(self) -> None:
@@ -400,24 +469,23 @@ class TestRuntimeBridge:
         assert len({id(loop) for loop in method.loops}) == 1
 
     @pytest.mark.asyncio
-    async def test_async_method_stays_on_caller_loop(self) -> None:
+    async def test_sync_and_async_methods_share_runtime_loop(self) -> None:
         caller_loop = asyncio.get_running_loop()
-        future = caller_loop.create_future()
         method = MockMethod()
-
-        async def create(challenge: Challenge):
-            await future
-            return make_credential({"hash": "0xabc"}, challenge_id=challenge.id)
-
-        method.create_credential = AsyncMock(side_effect=create)
         runtime = PaymentRuntime([method])
+        event_loops: list[asyncio.AbstractEventLoop] = []
+        runtime.events.on("*", lambda _: event_loops.append(asyncio.get_running_loop()))
         try:
-            task = asyncio.create_task(runtime.create_credential(challenge(), method))
-            await asyncio.sleep(0)
-            future.set_result(None)
-            await task
+            await runtime.create_credential(challenge(), method)
+            await asyncio.to_thread(runtime.create_credential_sync, challenge(), method)
         finally:
             runtime.close()
+
+        assert len(method.loops) == 2
+        assert method.loops[0] is method.loops[1]
+        assert method.loops[0] is not caller_loop
+        assert len(event_loops) == 4
+        assert set(event_loops) == {method.loops[0]}
 
     def test_bridge_rejects_same_thread_blocking(self) -> None:
         runtime = PaymentRuntime([])

@@ -18,12 +18,16 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import Method, PaymentRuntime, SyncHttpResponseContext
+from mpp.runtime import (
+    Method,
+    PaymentRuntime,
+    SyncHttpResponseContext,
+    _challenge_is_expired,
+)
 
 from .transport import (
     _REFETCHED,
     _bind_response_request,
-    _challenge_is_expired,
     _challenged_request,
     _client_payment_failed_payload,
     _copy_request,
@@ -77,16 +81,15 @@ class SyncPaymentTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         """Send a request and retry one 402 with a payment credential."""
-        if isinstance(request.stream, httpx.SyncByteStream) and not isinstance(
-            request.stream, httpx.AsyncByteStream
-        ):
-            raise PaymentError(
-                "Streaming request bodies (generators) are not supported through the "
-                "payment retry flow. Use a buffered body (bytes, str, files=, or data=) instead."
-            )
-
-        request.read()
         response = self._inner.handle_request(request)
+        return self._handle_response(request, response)
+
+    def _handle_response(
+        self,
+        request: httpx.Request,
+        response: httpx.Response,
+    ) -> httpx.Response:
+        """Handle an already-dispatched response, retrying a payable 402."""
         if response.status_code != 402:
             return response
 
@@ -94,13 +97,13 @@ class SyncPaymentTransport(httpx.BaseTransport):
         challenged_request = _challenged_request(response, request)
         if not self._runtime.allows_http_payment(challenged_request.url):
             return response
-        challenged_request.read()
 
         challenges, parse_error = _payment_challenges(response)
         try:
             challenge, method = self._runtime.match_challenge(
                 challenges,
                 prefer_method_order=False,
+                allow_name_only=True,
             )
         except ValueError:
             challenge = None
@@ -138,6 +141,27 @@ class SyncPaymentTransport(httpx.BaseTransport):
                 ),
             )
             return response
+
+        try:
+            challenged_request.read()
+        except httpx.StreamConsumed as cause:
+            error = PaymentError(
+                "Streaming request bodies cannot be replayed after a payment challenge. "
+                "Use a buffered body for paid requests."
+            )
+            self._runtime.emit_event_sync(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=challenge,
+                    challenges=challenges,
+                    credential=None,
+                    error=error,
+                    method=method,
+                    request=challenged_request,
+                    response=response,
+                ),
+            )
+            raise error from cause
 
         try:
             credential = self._runtime.create_credential_sync(

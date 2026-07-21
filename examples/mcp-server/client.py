@@ -56,26 +56,25 @@ async def run_client() -> None:
             await session.initialize()
 
             # Wrap the session with automatic payment handling
-            client = McpClient(session, methods=[method])
+            async with McpClient(session, methods=[method]) as client:
+                tools = await client.list_tools()
+                print("Available tools:")
+                for tool in tools.tools:
+                    print(f"  - {tool.name}: {tool.description}")
+                print()
 
-            tools = await client.list_tools()
-            print("Available tools:")
-            for tool in tools.tools:
-                print(f"  - {tool.name}: {tool.description}")
-            print()
+                # 1. Free tool — works without payment
+                print("1. Calling free tool (echo)...")
+                result = await client.call_tool("echo", {"message": "Hello, world!"})
+                print(f"   Result: {result.content[0].text}")
+                print()
 
-            # 1. Free tool — works without payment
-            print("1. Calling free tool (echo)...")
-            result = await client.call_tool("echo", {"message": "Hello, world!"})
-            print(f"   Result: {result.content[0].text}")
-            print()
-
-            # 2. Paid tool — McpClient handles payment automatically
-            print("2. Calling paid tool (premium_echo)...")
-            result = await client.call_tool("premium_echo", {"message": "Hello, premium!"})
-            print(f"   Result: {result.content[0].text}")
-            if result.receipt:
-                print(f"   Receipt: {result.receipt.status}, ref={result.receipt.reference}")
+                # 2. Paid tool — McpClient handles payment automatically
+                print("2. Calling paid tool (premium_echo)...")
+                result = await client.call_tool("premium_echo", {"message": "Hello, premium!"})
+                print(f"   Result: {result.content[0].text}")
+                if result.receipt:
+                    print(f"   Receipt: {result.receipt.status}, ref={result.receipt.reference}")
             print()
 
 

@@ -120,13 +120,14 @@ async def test_concurrent_contexts_select_their_own_runtime() -> None:
 
 @pytest.mark.asyncio
 async def test_active_payment_does_not_block_another_local_context() -> None:
-    started = asyncio.Event()
-    release = asyncio.Event()
+    started = threading.Event()
+    release = threading.Event()
 
     class BlockingMethod(MockMethod):
         async def _create(self, challenge: Challenge):
             started.set()
-            await release.wait()
+            while not release.is_set():
+                await asyncio.sleep(0.01)
             return await super()._create(challenge)
 
     methods = [BlockingMethod("a"), MockMethod("b")]
@@ -139,7 +140,7 @@ async def test_active_payment_does_not_block_another_local_context() -> None:
                 return (await client.get("https://example.com/first")).status_code
 
     task = asyncio.create_task(first_call())
-    await started.wait()
+    assert await asyncio.to_thread(started.wait, 1)
     second_requests: list[httpx.Request] = []
     try:
         async with httpx.AsyncClient(transport=paid_transport(second_requests)) as client:
@@ -237,6 +238,80 @@ def test_bare_thread_uses_only_unambiguous_process_runtime() -> None:
     assert thread.is_alive() is False
     assert result == [200]
     assert method.create_credential.call_count == 1
+
+
+def test_background_event_loop_uses_unambiguous_http_runtime() -> None:
+    method = MockMethod("one")
+    runtime = PaymentRuntime([method])
+    requests: list[httpx.Request] = []
+    result: dict[str, Any] = {}
+    handle = instrument(runtime, mcp=False)
+
+    async def call() -> None:
+        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
+            result["status"] = (await client.get("https://example.com/paid")).status_code
+
+    thread = threading.Thread(target=lambda: asyncio.run(call()))
+    try:
+        thread.start()
+        thread.join(timeout=2)
+    finally:
+        handle.disable()
+        runtime.close()
+
+    assert thread.is_alive() is False
+    assert result == {"status": 200}
+    assert len(requests) == 2
+
+
+def test_background_event_loop_uses_unambiguous_mcp_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp
+
+    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
+    method = MockMethod("one")
+    runtime = PaymentRuntime([method])
+    paid_result = object()
+    session = FakeSession([FakeMcpError(), paid_result])
+    result: list[Any] = []
+    handle = instrument(runtime, httpx=False, mcp=True)
+    thread = threading.Thread(target=lambda: result.append(asyncio.run(session.call_tool("paid"))))
+    try:
+        thread.start()
+        thread.join(timeout=2)
+    finally:
+        handle.disable()
+        runtime.close()
+
+    assert thread.is_alive() is False
+    assert result == [paid_result]
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_free_async_generator_upload_is_not_buffered() -> None:
+    consumed: list[bytes] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        consumed.append(await request.aread())
+        return httpx.Response(200, content=b"ok")
+
+    async def body():
+        yield b"one-"
+        yield b"shot"
+
+    runtime = PaymentRuntime([MockMethod("one")])
+    handle = instrument(runtime, mcp=False)
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            response = await client.post("https://example.com/upload", content=body())
+    finally:
+        handle.disable()
+        runtime.close()
+
+    assert response.status_code == 200
+    assert consumed == [b"one-shot"]
 
 
 def test_concurrent_bare_threads_share_the_process_runtime() -> None:

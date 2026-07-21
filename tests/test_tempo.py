@@ -1,5 +1,6 @@
 """Tests for Tempo payment method."""
 
+import asyncio
 import json
 import os
 import re
@@ -49,6 +50,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
+from mpp.runtime import PaymentRuntime
 from mpp.server.intent import VerificationError
 from tests import make_credential
 
@@ -232,6 +234,52 @@ class TestTempoMethod:
         assert rpc_methods.count("eth_chainId") == 1
         assert rpc_methods.count("eth_getTransactionCount") == 2
         assert rpc_methods.count("eth_gasPrice") == 2
+
+    @pytest.mark.asyncio
+    async def test_runtime_shares_tempo_method_across_sync_and_async_calls(self) -> None:
+        caller_loop = asyncio.get_running_loop()
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        runtime = PaymentRuntime([method])
+        challenge = Challenge(
+            id="mixed-runtime",
+            method="tempo",
+            intent="charge",
+            realm="test.example.com",
+            request={
+                "amount": "1000000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+        rpc_loops: list[asyncio.AbstractEventLoop] = []
+
+        async def fake_rpc_call(*_args: object, **_kwargs: object) -> str:
+            rpc_loops.append(asyncio.get_running_loop())
+            await asyncio.sleep(0.05)
+            return "0x1079"
+
+        build = AsyncMock(return_value=("0xdeadbeef", 4217))
+        try:
+            with (
+                patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+                patch.object(method, "_build_tempo_transfer", build),
+            ):
+                credentials = await asyncio.gather(
+                    runtime.create_credential(challenge, method),
+                    asyncio.to_thread(runtime.create_credential_sync, challenge, method),
+                )
+        finally:
+            runtime.close()
+
+        assert len(credentials) == 2
+        assert len(rpc_loops) == 1
+        assert rpc_loops[0] is not caller_loop
+        assert build.await_count == 2
 
     @pytest.mark.asyncio
     async def test_create_credential_reuses_cached_rpc_chain_id_for_rejected_switch(self) -> None:
