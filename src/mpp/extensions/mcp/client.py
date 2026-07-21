@@ -53,20 +53,23 @@ class PaymentOutcomeUnknownError(RuntimeError):
         )
 
 
+def _error_detail(error: Exception) -> Any:
+    nested = getattr(error, "error", None)
+    return nested if nested is not None else (error.args[0] if error.args else None)
+
+
 def _error_code(error: Exception) -> int | None:
     code = getattr(error, "code", None)
     if code is not None:
         return code
-    nested = getattr(error, "error", None)
-    return getattr(nested, "code", None)
+    return getattr(_error_detail(error), "code", None)
 
 
 def _error_data(error: Exception) -> Any:
     data = getattr(error, "data", None)
     if data is not None:
         return data
-    nested = getattr(error, "error", None)
-    return getattr(nested, "data", None)
+    return getattr(_error_detail(error), "data", None)
 
 
 def _is_payment_required_error(error: Exception) -> bool:

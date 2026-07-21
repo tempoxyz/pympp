@@ -147,6 +147,19 @@ class TestIsPaymentRequiredError:
         assert _is_payment_required_error(err) is True
         assert _extract_challenges(err) == [_make_challenge()]
 
+    def test_mcp_1_1_args_error_data(self) -> None:
+        types = pytest.importorskip("mcp.types")
+        err = Exception(
+            types.ErrorData(
+                code=-32042,
+                message="Payment Required",
+                data={"challenges": [_make_challenge_dict()]},
+            )
+        )
+
+        assert _is_payment_required_error(err) is True
+        assert _extract_challenges(err) == [_make_challenge()]
+
     def test_wrong_code(self) -> None:
         err = FakeMcpError(-32000, data={"challenges": [_make_challenge_dict()]})
         assert _is_payment_required_error(err) is False

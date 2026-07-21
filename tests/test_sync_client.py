@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from mpp import Challenge
+from mpp.agent import instrument
 from mpp.client import SyncPaymentTransport
 from mpp.errors import PaymentError
 from mpp.runtime import PaymentRuntime, payment_flow_active
@@ -59,8 +60,10 @@ class TrackingStream(httpx.SyncByteStream):
         self.closed = True
 
 
-def challenge() -> Challenge:
-    return Challenge(id="test-id", method="tempo", intent="charge", request={})
+def challenge(**overrides: Any) -> Challenge:
+    values = {"id": "test-id", "method": "tempo", "intent": "charge", "request": {}}
+    values.update(overrides)
+    return Challenge(**values)
 
 
 def payment_required() -> httpx.Response:
@@ -131,6 +134,115 @@ class TestSyncPaymentTransport:
             assert stream.started is True
         finally:
             transport.close()
+
+    @pytest.mark.parametrize(
+        ("www_authenticate", "expected_challenges"),
+        [
+            pytest.param("Payment invalid-base64!!", 0, id="malformed"),
+            pytest.param(
+                challenge(method="stripe").to_www_authenticate("example.com"),
+                1,
+                id="no-match",
+            ),
+            pytest.param(
+                challenge(expires="2020-01-01T00:00:00Z").to_www_authenticate("example.com"),
+                1,
+                id="expired",
+            ),
+        ],
+    )
+    def test_nonpayable_challenges_fail_closed(
+        self,
+        www_authenticate: str,
+        expected_challenges: int,
+    ) -> None:
+        method = MockMethod()
+        inner = MockTransport([httpx.Response(402, headers={"www-authenticate": www_authenticate})])
+        transport = SyncPaymentTransport(methods=[method], inner=inner)
+        failed: list[dict[str, Any]] = []
+        transport.on_payment_failed(failed.append)
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert response.status_code == 402
+        assert len(inner.requests) == 1
+        method.create_credential.assert_not_called()
+        assert len(failed) == 1
+        assert len(failed[0]["challenges"]) == expected_challenges
+        assert failed[0]["credential"] is None
+        assert failed[0]["response"] is response
+
+    @pytest.mark.parametrize("failure_stage", ["credential", "retry"])
+    def test_payment_failures_emit_and_propagate(self, failure_stage: str) -> None:
+        error = RuntimeError(f"{failure_stage} failed")
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if len(requests) == 1:
+                return payment_required()
+            raise error
+
+        method = MockMethod()
+        if failure_stage == "credential":
+            method.create_credential.side_effect = error
+        transport = SyncPaymentTransport(
+            methods=[method],
+            inner=httpx.MockTransport(handler),
+        )
+        failed: list[dict[str, Any]] = []
+        transport.on_payment_failed(failed.append)
+        try:
+            with pytest.raises(RuntimeError, match=f"{failure_stage} failed") as raised:
+                transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert raised.value is error
+        assert len(requests) == (1 if failure_stage == "credential" else 2)
+        assert len(failed) == 1
+        assert failed[0]["challenge"].id == "test-id"
+        if failure_stage == "credential":
+            assert failed[0]["credential"] is None
+        else:
+            assert failed[0]["credential"] is not None
+        assert failed[0]["error"] is error
+
+    def test_lifecycle_handler_can_supply_sync_credential(self) -> None:
+        method = MockMethod()
+        credential = make_credential({"hash": "0xevent"}, challenge_id="test-id")
+        inner = MockTransport([payment_required(), httpx.Response(200, content=b"paid")])
+        transport = SyncPaymentTransport(methods=[method], inner=inner)
+        events: list[str] = []
+        transport.on_challenge_received(lambda _payload: credential)
+        transport.on_credential_created(lambda payload: events.append("credential"))
+        transport.on_payment_response(lambda payload: events.append("response"))
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        assert events == ["credential", "response"]
+        assert inner.requests[1].headers["authorization"] == credential.to_authorization()
+        method.create_credential.assert_not_called()
+
+    def test_close_preserves_borrowed_runtime(self) -> None:
+        method = MockMethod()
+        runtime = PaymentRuntime([method])
+        inner = MockTransport([])
+        transport = SyncPaymentTransport(inner=inner, runtime=runtime)
+        try:
+            runtime.create_credential_sync(challenge(), method)
+            transport.close()
+            runtime.create_credential_sync(challenge(), method)
+        finally:
+            transport.close()
+            runtime.close()
+
+        assert inner.closed
 
     def test_sync_response_hook_runs_for_credentialed_402(self) -> None:
         contexts: list[object | None] = []
@@ -358,7 +470,7 @@ class TestRuntimeBridge:
             runtime.create_credential_sync(challenge(), method)
 
 
-def test_openai_sync_streaming_retries_without_eager_read() -> None:
+def test_instrumented_openai_sync_streaming_in_worker_thread() -> None:
     openai = pytest.importorskip("openai")
     requests: list[httpx.Request] = []
     bodies: list[bytes] = []
@@ -386,13 +498,14 @@ def test_openai_sync_streaming_retries_without_eager_read() -> None:
         )
 
     runtime = PaymentRuntime([MockMethod()])
-    http_client = runtime.wrap_client(httpx.Client(transport=httpx.MockTransport(handler)))
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
     client = openai.OpenAI(
         api_key="test",
         base_url="https://example.com/v1",
         http_client=http_client,
         max_retries=0,
     )
+    handle = instrument(runtime, mcp=False)
     result: dict[str, Any] = {}
 
     def run() -> None:
@@ -419,5 +532,6 @@ def test_openai_sync_streaming_retries_without_eager_read() -> None:
         assert bodies[0] == bodies[1]
         assert requests[1].headers["authorization"].startswith("Payment ")
     finally:
+        handle.disable()
         client.close()
         runtime.close()

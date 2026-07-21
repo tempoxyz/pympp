@@ -15,7 +15,6 @@ from mpp.runtime import (
     PaymentRuntime,
     mcp_payment_flow_active,
     payment_flow_active,
-    payment_flow_active_in_process,
 )
 
 
@@ -33,6 +32,7 @@ _bindings: ContextVar[tuple[_Binding, ...] | None] = ContextVar(
 )
 _httpx_active: ContextVar[bool] = ContextVar("mpp_httpx_instrumentation_active", default=False)
 _mcp_active: ContextVar[bool] = ContextVar("mpp_mcp_instrumentation_active", default=False)
+_PAYMENT_INTERNAL_THREAD = "_mpp_payment_internal_thread"
 
 
 @dataclass(slots=True)
@@ -103,6 +103,8 @@ class _InstrumentationState:
         self.sync_send_patch: Any | None = None
         self.original_async_send: Any | None = None
         self.async_send_patch: Any | None = None
+        self.original_thread_start: Any | None = None
+        self.thread_start_patch: Any | None = None
         self.original_mcp_call_tool: Any | None = None
         self.mcp_call_tool_patch: Any | None = None
         self.mcp_client_session: Any | None = None
@@ -126,7 +128,7 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
     else:
         return None
 
-    if payment_flow_active_in_process():
+    if getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False):
         return None
 
     with _state.lock:
@@ -140,6 +142,22 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
 
 
 def _install_httpx_patches() -> None:
+    if _state.original_thread_start is None:
+        original_thread_start = threading.Thread.start
+
+        def thread_start(self: threading.Thread, *args: Any, **kwargs: Any) -> Any:
+            if payment_flow_active() or getattr(
+                threading.current_thread(),
+                _PAYMENT_INTERNAL_THREAD,
+                False,
+            ):
+                setattr(self, _PAYMENT_INTERNAL_THREAD, True)
+            return original_thread_start(self, *args, **kwargs)
+
+        _state.original_thread_start = original_thread_start
+        _state.thread_start_patch = thread_start
+        threading.Thread.start = thread_start  # type: ignore[method-assign]
+
     if _state.original_sync_send is None:
         original_sync_send = httpx.Client.send
 
@@ -273,6 +291,14 @@ def _restore_unused_patches() -> None:
         _state.sync_send_patch = None
         _state.original_async_send = None
         _state.async_send_patch = None
+        if (
+            _state.thread_start_patch is not None
+            and threading.Thread.start is _state.thread_start_patch
+            and _state.original_thread_start is not None
+        ):
+            threading.Thread.start = _state.original_thread_start  # type: ignore[method-assign]
+        _state.original_thread_start = None
+        _state.thread_start_patch = None
 
     if not any(binding.active and binding.mcp for binding in _state.bindings):
         if (

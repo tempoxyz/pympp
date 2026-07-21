@@ -235,9 +235,18 @@ jobs:
           import mpp
           import mpp.extensions.mcp as mcp
           import mpp.methods.tempo as tempo
+          from mpp.agent import instrument
+          from mpp.client import SyncPaymentTransport
+          from mpp.runtime import PaymentRuntime
 
           assert tempo.CHAIN_ID == 4217
           assert mcp.CODE_PAYMENT_REQUIRED == -32042
+          assert SyncPaymentTransport.__name__ == "SyncPaymentTransport"
+
+          runtime = PaymentRuntime([])
+          handle = instrument(runtime, httpx=False, mcp=False)
+          handle.disable()
+          runtime.close()
 
           for expr, hint in (
               ("tempo.ChargeIntent", "pympp[tempo]"),

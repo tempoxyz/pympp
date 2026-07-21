@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -50,6 +51,7 @@ def paid_transport(requests: list[httpx.Request]) -> httpx.MockTransport:
 def clean_instrumentation_state():
     sync_send = httpx.Client.send
     async_send = httpx.AsyncClient.send
+    thread_start = threading.Thread.start
     _bindings.set(None)
     yield
     with _state.lock:
@@ -62,11 +64,14 @@ def clean_instrumentation_state():
         _state.sync_send_patch = None
         _state.original_async_send = None
         _state.async_send_patch = None
+        _state.original_thread_start = None
+        _state.thread_start_patch = None
         _state.original_mcp_call_tool = None
         _state.mcp_call_tool_patch = None
         _state.mcp_client_session = None
     httpx.Client.send = sync_send
     httpx.AsyncClient.send = async_send
+    threading.Thread.start = thread_start
     _bindings.set(None)
 
 
@@ -234,6 +239,47 @@ def test_bare_thread_uses_only_unambiguous_process_runtime() -> None:
     assert method.create_credential.call_count == 1
 
 
+def test_concurrent_bare_threads_share_the_process_runtime() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingFirstMethod(MockMethod):
+        async def _create(self, challenge: Challenge):
+            if self.create_credential.call_count == 1:
+                started.set()
+                while not release.is_set():
+                    await asyncio.sleep(0.01)
+            return await super()._create(challenge)
+
+    method = BlockingFirstMethod("one")
+    runtime = PaymentRuntime([method])
+    request_sets: list[list[httpx.Request]] = [[], []]
+    clients = [
+        httpx.Client(transport=paid_transport(request_sets[0])),
+        httpx.Client(transport=paid_transport(request_sets[1])),
+    ]
+    handle = instrument(runtime, mcp=False)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(clients[0].get, "https://example.com/paid")
+            try:
+                assert started.wait(1)
+                second = pool.submit(clients[1].get, "https://example.com/paid")
+                assert second.result(timeout=2).status_code == 200
+            finally:
+                release.set()
+            assert first.result(timeout=2).status_code == 200
+    finally:
+        release.set()
+        handle.disable()
+        for client in clients:
+            client.close()
+        runtime.close()
+
+    assert [len(requests) for requests in request_sets] == [2, 2]
+    assert method.create_credential.call_count == 2
+
+
 def test_bare_thread_fails_closed_with_multiple_runtimes() -> None:
     methods = [MockMethod("a"), MockMethod("b")]
     runtimes = [PaymentRuntime([method]) for method in methods]
@@ -262,6 +308,7 @@ def test_bare_thread_fails_closed_with_multiple_runtimes() -> None:
 def test_out_of_order_disable_restores_exact_originals() -> None:
     sync_send = httpx.Client.send
     async_send = httpx.AsyncClient.send
+    thread_start = threading.Thread.start
     runtimes = [PaymentRuntime([MockMethod("a")]), PaymentRuntime([MockMethod("b")])]
     first = instrument(runtimes[0], mcp=False)
     second = instrument(runtimes[1], mcp=False)
@@ -272,6 +319,7 @@ def test_out_of_order_disable_restores_exact_originals() -> None:
 
     assert httpx.Client.send is sync_send
     assert httpx.AsyncClient.send is async_send
+    assert threading.Thread.start is thread_start
     for runtime in runtimes:
         runtime.close()
 
