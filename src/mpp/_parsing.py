@@ -29,6 +29,9 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 _AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
 _PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
+_RECEIPT_RESERVED_FIELDS = frozenset(
+    {"status", "timestamp", "reference", "method", "externalId", "subscriptionId", "extra"}
+)
 
 
 class ParseError(Exception):
@@ -318,6 +321,7 @@ def parse_payment_receipt(header: str) -> Receipt:
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
+    extensions = {key: value for key, value in data.items() if key not in _RECEIPT_RESERVED_FIELDS}
 
     return Receipt(
         status=status,
@@ -327,6 +331,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
         extra=extra if isinstance(extra, dict) else None,
+        extensions=extensions or None,
     )
 
 
@@ -350,4 +355,9 @@ def format_payment_receipt(receipt: Receipt) -> str:
         payload["subscriptionId"] = receipt.subscription_id
     if receipt.extra:
         payload["extra"] = receipt.extra
+    if receipt.extensions:
+        reserved = receipt.extensions.keys() & _RECEIPT_RESERVED_FIELDS
+        if reserved:
+            raise ValueError(f"Receipt extensions contain reserved fields: {sorted(reserved)}")
+        payload.update(receipt.extensions)
     return _b64_encode(payload)
