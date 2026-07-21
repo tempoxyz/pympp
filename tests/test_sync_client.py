@@ -14,7 +14,7 @@ import pytest
 from mpp import Challenge
 from mpp.client import SyncPaymentTransport
 from mpp.errors import PaymentError
-from mpp.runtime import PaymentRuntime
+from mpp.runtime import PaymentRuntime, payment_flow_active
 from tests import make_credential
 
 
@@ -131,6 +131,100 @@ class TestSyncPaymentTransport:
             assert stream.started is True
         finally:
             transport.close()
+
+    def test_sync_response_hook_runs_for_credentialed_402(self) -> None:
+        contexts: list[object | None] = []
+
+        class HookMethod:
+            name = "tempo"
+            _intents = {"charge": True}
+
+            async def create_credential(
+                self,
+                challenge: Challenge,
+                *,
+                context: object | None = None,
+            ):
+                contexts.append(context)
+                return make_credential({"context": context}, challenge_id=challenge.id)
+
+            def handle_http_response(self, exchange):
+                exchange.create_credential({"action": "voucher"})
+                exchange.response.close()
+                return httpx.Response(200, content=b"handled")
+
+        paid_response = httpx.Response(402)
+        inner = MockTransport([payment_required(), paid_response])
+        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
+        finally:
+            transport.close()
+
+        assert response.content == b"handled"
+        assert response.request.url == httpx.URL("https://example.com/paid")
+        assert contexts == [None, {"action": "voucher"}]
+        assert paid_response.is_closed
+
+    def test_sync_response_hook_can_run_async_and_refetch_once(self) -> None:
+        hook_calls = 0
+
+        class HookMethod(MockMethod):
+            def handle_http_response(self, exchange):
+                nonlocal hook_calls
+                hook_calls += 1
+                assert payment_flow_active()
+                assert exchange.run_sync(asyncio.sleep(0, result="ok")) == "ok"
+                if hook_calls == 2:
+                    assert exchange.refetch is None
+                    return exchange.response
+                assert exchange.refetch is not None
+                return exchange.refetch()
+
+        inner = MockTransport(
+            [
+                payment_required(),
+                httpx.Response(204),
+                payment_required(),
+                httpx.Response(200, content=b"stream"),
+            ]
+        )
+        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
+        events: list[tuple[int, bool]] = []
+        transport.on_payment_response(
+            lambda payload: events.append((payload["response"].status_code, payment_flow_active()))
+        )
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
+        finally:
+            transport.close()
+
+        assert response.content == b"stream"
+        assert response.request.url == httpx.URL("https://example.com/paid")
+        assert events == [(204, True), (200, True)]
+        assert len(inner.requests) == 4
+
+    def test_replacement_response_can_own_paid_stream(self) -> None:
+        class HookMethod(MockMethod):
+            def handle_http_response(self, exchange):
+                return httpx.Response(
+                    exchange.response.status_code,
+                    headers=exchange.response.headers,
+                    stream=exchange.response.stream,
+                )
+
+        stream = TrackingStream([b"one", b"two"])
+        inner = MockTransport([payment_required(), httpx.Response(200, stream=stream)])
+        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
+            assert stream.started is False
+            assert response.read() == b"onetwo"
+            response.close()
+        finally:
+            transport.close()
+
+        assert stream.closed
 
 
 class TestWrappedSyncClient:

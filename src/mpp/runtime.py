@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from contextvars import ContextVar, copy_context
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 from urllib.parse import urlparse
 
@@ -21,16 +23,17 @@ from mpp.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     from mpp.client import PaymentTransport, SyncPaymentTransport
 
 _T = TypeVar("_T")
+_CONTEXT_UNSET = object()
 _PAYMENT_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_payment_flow_active", default=False)
 
 
 def payment_flow_active() -> bool:
-    """Return whether the current context is creating a payment credential."""
+    """Return whether the current context is handling a payment flow."""
     return _PAYMENT_FLOW_ACTIVE.get()
 
 
@@ -43,6 +46,47 @@ class Method(Protocol):
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge."""
         ...
+
+
+@dataclass(frozen=True, slots=True)
+class AsyncHttpResponseContext:
+    """Context passed to an async method-specific HTTP response hook.
+
+    A hook returning a replacement response owns the original response. It
+    must either close it or delegate its stream and close it with the wrapper.
+    ``refetch`` is available only once and closes the original response. Close
+    non-streaming responses before using ``send`` so the connection is free.
+    Streaming hooks need another connection while the source remains open.
+    """
+
+    challenge: Challenge
+    credential: Credential
+    request: httpx.Request
+    response: httpx.Response
+    send: Callable[[httpx.Request], Awaitable[httpx.Response]]
+    refetch: Callable[[], Awaitable[httpx.Response]] | None
+    create_credential: Callable[[Any], Awaitable[Credential]]
+
+
+@dataclass(frozen=True, slots=True)
+class SyncHttpResponseContext:
+    """Context passed to a sync method-specific HTTP response hook.
+
+    A hook returning a replacement response owns the original response. It
+    must either close it or delegate its stream and close it with the wrapper.
+    ``refetch`` is available only once and closes the original response. Close
+    non-streaming responses before using ``send`` so the connection is free.
+    Streaming hooks need another connection while the source remains open.
+    """
+
+    challenge: Challenge
+    credential: Credential
+    request: httpx.Request
+    response: httpx.Response
+    send: Callable[[httpx.Request], httpx.Response]
+    refetch: Callable[[], httpx.Response] | None
+    create_credential: Callable[[Any], Credential]
+    run_sync: Callable[[Coroutine[Any, Any, Any]], Any]
 
 
 class _BoundSendTransport(httpx.AsyncBaseTransport):
@@ -290,6 +334,44 @@ class PaymentRuntime:
         transport = _BoundSyncSendTransport(send, args, dict(kwargs))
         return self.sync_payment_transport(inner=transport).handle_request(request)
 
+    async def handle_async_http_response(
+        self,
+        method: Method,
+        context: AsyncHttpResponseContext,
+    ) -> httpx.Response:
+        """Run an optional method-specific async response hook."""
+        handler = getattr(method, "handle_async_http_response", None)
+        if handler is None:
+            return context.response
+        token = _PAYMENT_FLOW_ACTIVE.set(True)
+        try:
+            result = handler(context)
+            if inspect.isawaitable(result):
+                result = await result
+        finally:
+            _PAYMENT_FLOW_ACTIVE.reset(token)
+        if not isinstance(result, httpx.Response):
+            raise TypeError("handle_async_http_response must return an httpx.Response")
+        return result
+
+    def handle_http_response(
+        self,
+        method: Method,
+        context: SyncHttpResponseContext,
+    ) -> httpx.Response:
+        """Run an optional method-specific synchronous response hook."""
+        handler = getattr(method, "handle_http_response", None)
+        if handler is None:
+            return context.response
+        token = _PAYMENT_FLOW_ACTIVE.set(True)
+        try:
+            result = handler(context)
+        finally:
+            _PAYMENT_FLOW_ACTIVE.reset(token)
+        if not isinstance(result, httpx.Response):
+            raise TypeError("handle_http_response must return an httpx.Response")
+        return result
+
     async def call_mcp_tool(
         self,
         call_tool: Any,
@@ -448,9 +530,15 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
+        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         """Create a credential on the caller event loop."""
-        return await self._create_credential(challenge, method, event_payload=event_payload)
+        return await self._create_credential(
+            challenge,
+            method,
+            event_payload=event_payload,
+            context=context,
+        )
 
     def create_credential_sync(
         self,
@@ -458,11 +546,21 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
+        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         """Synchronously create a credential on the runtime-owned event loop."""
-        return self._bridge.run(
-            self._create_credential(challenge, method, event_payload=event_payload)
+        return self.run_sync(
+            self._create_credential(
+                challenge,
+                method,
+                event_payload=event_payload,
+                context=context,
+            )
         )
+
+    def run_sync(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        """Run a coroutine on the runtime-owned loop and block for its result."""
+        return self._bridge.run(coroutine)
 
     async def _create_credential(
         self,
@@ -470,6 +568,7 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
+        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         token = _PAYMENT_FLOW_ACTIVE.set(True)
         try:
@@ -479,16 +578,19 @@ class PaymentRuntime:
                 "method": method,
                 **(event_payload or {}),
             }
+            if context is not _CONTEXT_UNSET:
+                payload["context"] = context
             event_credential = await self.events.emit(
                 CHALLENGE_RECEIVED,
                 payload,
                 first_result=True,
             )
-            credential = (
-                event_credential
-                if isinstance(event_credential, Credential)
-                else await method.create_credential(challenge)
-            )
+            if isinstance(event_credential, Credential):
+                credential = event_credential
+            elif context is _CONTEXT_UNSET:
+                credential = await method.create_credential(challenge)
+            else:
+                credential = await method.create_credential(challenge, context=context)  # type: ignore[call-arg]
             await self.events.emit(
                 CREDENTIAL_CREATED,
                 {**payload, "credential": credential},
@@ -499,11 +601,15 @@ class PaymentRuntime:
 
     async def emit_event(self, name: str, payload: EventPayload) -> Any:
         """Emit an asynchronous lifecycle event on the caller event loop."""
-        return await self.events.emit(name, payload)
+        token = _PAYMENT_FLOW_ACTIVE.set(True)
+        try:
+            return await self.events.emit(name, payload)
+        finally:
+            _PAYMENT_FLOW_ACTIVE.reset(token)
 
     def emit_event_sync(self, name: str, payload: EventPayload) -> Any:
         """Synchronously emit a lifecycle event on the runtime-owned event loop."""
-        return self._bridge.run(self.events.emit(name, payload))
+        return self.run_sync(self.emit_event(name, payload))
 
     def close(self) -> None:
         """Release the runtime background loop."""
