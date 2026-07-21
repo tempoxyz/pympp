@@ -2,4 +2,4 @@
 pympp: minor
 ---
 
-Added a shared payment runtime for payment-aware HTTP requests and MCP tool calls.
+Added a shared payment runtime with sync and async HTTP, MCP, and scoped instrumentation.
