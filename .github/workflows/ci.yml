@@ -235,7 +235,7 @@ jobs:
           import mpp
           import mpp.extensions.mcp as mcp
           import mpp.methods.tempo as tempo
-          from mpp.agent import instrument
+          from mpp.instrumentation import instrument
           from mpp.client import SyncPaymentTransport
           from mpp.runtime import PaymentRuntime
 
