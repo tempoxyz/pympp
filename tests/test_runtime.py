@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -128,6 +129,8 @@ class TestHttpxRuntime:
         [
             ("HTTPS://EXAMPLE.COM:443/path", "https://example.com/resource"),
             ("https://[2001:DB8::1]:443/path", "https://[2001:db8::1]/resource"),
+            ("https://bücher.example", "https://xn--bcher-kva.example/resource"),
+            ("https://xn--bcher-kva.example", "https://bücher.example/resource"),
         ],
     )
     def test_allowed_origins_are_normalized(self, allowed: str, url: str) -> None:
@@ -139,6 +142,32 @@ class TestHttpxRuntime:
         runtime = PaymentRuntime([], allowed_origins=["HTTPS://EXAMPLE.COM:443/path"])
 
         assert runtime._allowed.mcp_realm("https://example.com/tool")
+
+    def test_http_url_allowlist_accepts_matching_hostname_mcp_realm(self) -> None:
+        runtime = PaymentRuntime([], allowed_origins=["https://api.example.com"])
+
+        assert runtime._allowed.mcp_realm("api.example.com")
+        assert not runtime._allowed.mcp_realm("http://api.example.com:9999")
+
+    @pytest.mark.parametrize(
+        ("allowed", "realm"),
+        [
+            ("https://bücher.example", "xn--bcher-kva.example"),
+            ("https://xn--bcher-kva.example", "bücher.example"),
+            ("bücher.example", "https://xn--bcher-kva.example"),
+            ("xn--bcher-kva.example", "https://bücher.example"),
+        ],
+    )
+    def test_mcp_realms_use_idna_normalized_hosts(self, allowed: str, realm: str) -> None:
+        runtime = PaymentRuntime([], allowed_origins=[allowed])
+
+        assert runtime._allowed.mcp_realm(realm)
+
+    def test_bare_mcp_realm_does_not_authorize_http(self) -> None:
+        runtime = PaymentRuntime([], allowed_origins=["api.example.com"])
+
+        assert runtime._allowed.mcp_realm("api.example.com")
+        assert not runtime.allows_http_payment(httpx.URL("https://api.example.com"))
 
     @pytest.mark.asyncio
     async def test_runtime_wrap_async_client_without_global_hook(self) -> None:
@@ -158,6 +187,64 @@ class TestHttpxRuntime:
         assert response.status_code == 200
         assert len(inner.requests) == 2
         assert inner.requests[1].headers["authorization"].startswith("Payment ")
+
+    @pytest.mark.asyncio
+    async def test_runtime_wrappers_pay_before_httpx_response_hooks(self) -> None:
+        sync_calls = 0
+        async_calls = 0
+        seen: list[tuple[str, int]] = []
+
+        def sync_handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal sync_calls
+            sync_calls += 1
+            if sync_calls == 1:
+                return httpx.Response(
+                    402,
+                    headers={"www-authenticate": payment_challenge_header()},
+                )
+            return httpx.Response(200)
+
+        async def async_handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal async_calls
+            async_calls += 1
+            if async_calls == 1:
+                return httpx.Response(
+                    402,
+                    headers={"www-authenticate": payment_challenge_header()},
+                )
+            return httpx.Response(200)
+
+        def sync_hook(response: httpx.Response) -> None:
+            seen.append(("sync", response.status_code))
+            response.raise_for_status()
+
+        async def async_hook(response: httpx.Response) -> None:
+            seen.append(("async", response.status_code))
+            response.raise_for_status()
+
+        runtime = PaymentRuntime([MockMethod()])
+        sync_client = runtime.wrap_client(
+            httpx.Client(
+                transport=httpx.MockTransport(sync_handler),
+                event_hooks={"response": [sync_hook]},
+            )
+        )
+        async_client = runtime.wrap_async_client(
+            httpx.AsyncClient(
+                transport=httpx.MockTransport(async_handler),
+                event_hooks={"response": [async_hook]},
+            )
+        )
+        try:
+            sync_response = sync_client.get("https://example.com/sync")
+            async_response = await async_client.get("https://example.com/async")
+        finally:
+            sync_client.close()
+            await async_client.aclose()
+            runtime.close()
+
+        assert sync_response.status_code == async_response.status_code == 200
+        assert seen == [("sync", 200), ("async", 200)]
 
     @pytest.mark.asyncio
     async def test_disallowed_http_origin_does_not_retry_payment(self) -> None:
@@ -240,15 +327,27 @@ class TestMcpRuntime:
         assert result.result.content[0]["text"] == "paid"
 
     @pytest.mark.asyncio
-    async def test_mcp_client_context_closes_owned_runtime(self) -> None:
+    async def test_mcp_client_implicit_runtime_stays_on_caller_loop(self) -> None:
+        caller_loop = asyncio.get_running_loop()
+        caller_future: asyncio.Future[None] = caller_loop.create_future()
+        method = MockMethod()
+
+        async def create_credential(challenge: Challenge) -> Credential:
+            await caller_future
+            return Credential(
+                challenge=challenge.to_echo(),
+                payload={"hash": "0xabc"},
+            )
+
+        method.create_credential.side_effect = create_credential
         session = FakeClientSession([mcp_payment_error(), FakeCallToolResult("paid")])
+        caller_loop.call_later(0.01, caller_future.set_result, None)
 
-        async with McpClient(session, methods=[MockMethod()]) as client:
+        async with McpClient(session, methods=[method]) as client:
             await client.call_tool("premium_tool")
-            thread = client._runtime._bridge._thread
-            assert thread is not None and thread.is_alive()
+            assert client._runtime._bridge._thread is None
 
-        assert thread.is_alive() is False
+        assert client._runtime._bridge._closed
 
     @pytest.mark.asyncio
     async def test_mcp_client_does_not_close_injected_runtime(self) -> None:
@@ -290,6 +389,58 @@ class TestMcpRuntime:
         assert retry_kwargs["progress_callback"] == "callback"
         assert retry_kwargs["meta"]["trace_id"] == "abc"
         assert META_CREDENTIAL in retry_kwargs["meta"]
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_committed_mcp_retry(self) -> None:
+        retry_started = asyncio.Event()
+        retry_release = asyncio.Event()
+        raw_result = FakeCallToolResult("paid")
+        calls = 0
+
+        async def call_tool(*_args: Any, **_kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise mcp_payment_error()
+            retry_started.set()
+            await retry_release.wait()
+            return raw_result
+
+        runtime = PaymentRuntime([MockMethod()])
+        request = asyncio.create_task(runtime.call_mcp_tool(call_tool, "premium_tool"))
+        await asyncio.wait_for(retry_started.wait(), 1)
+        close = asyncio.create_task(runtime.aclose())
+        await asyncio.sleep(0.05)
+        assert not close.done()
+
+        retry_release.set()
+        assert await request is raw_result
+        await asyncio.wait_for(close, 1)
+
+    @pytest.mark.asyncio
+    async def test_inherited_paid_lease_expires_with_its_owner(self) -> None:
+        runtime = PaymentRuntime([], _async_inline=True)
+        release = asyncio.Event()
+        ran = False
+
+        async def delayed() -> None:
+            nonlocal ran
+            await release.wait()
+
+            async def mark_ran() -> None:
+                nonlocal ran
+                ran = True
+
+            await runtime.run_async(mark_ran())
+
+        with runtime._paid_operation():
+            task = asyncio.create_task(delayed())
+        runtime.close()
+        release.set()
+
+        with pytest.raises(RuntimeError, match="closed"):
+            await task
+        assert not ran
 
     @pytest.mark.asyncio
     async def test_disallowed_mcp_realm_does_not_retry_payment(self) -> None:
@@ -423,3 +574,25 @@ class TestMcpRuntime:
 
         assert events[-1].name == "payment.failed"
         assert isinstance(events[-1].payload["error"], PaymentOutcomeUnknownError)
+
+    @pytest.mark.asyncio
+    async def test_repeated_result_payment_challenge_fails_without_retrying_again(self) -> None:
+        events: list[Any] = []
+        first = mcp_payment_result()
+        second = mcp_payment_result()
+        runtime = PaymentRuntime([MockMethod()])
+        runtime.events.on("*", events.append)
+        session = FakeClientSession([first, second])
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await runtime.call_mcp_tool(session.call_tool, "premium_tool")
+        finally:
+            await runtime.aclose()
+
+        assert len(session.calls) == 2
+        assert [event.name for event in events] == [
+            "challenge.received",
+            "credential.created",
+            "payment.failed",
+        ]
+        assert events[-1].payload["response"] is second

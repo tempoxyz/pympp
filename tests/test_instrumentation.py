@@ -49,8 +49,8 @@ def paid_transport(requests: list[httpx.Request]) -> httpx.MockTransport:
 
 @pytest.fixture(autouse=True)
 def clean_instrumentation_state():
-    sync_send = httpx.Client.send
-    async_send = httpx.AsyncClient.send
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
     thread_start = threading.Thread.start
     _bindings.set(None)
     yield
@@ -60,17 +60,17 @@ def clean_instrumentation_state():
         _state.bindings.clear()
         if _state.mcp_client_session is not None and _state.original_mcp_call_tool is not None:
             _state.mcp_client_session.call_tool = _state.original_mcp_call_tool
-        _state.original_sync_send = None
-        _state.sync_send_patch = None
-        _state.original_async_send = None
-        _state.async_send_patch = None
+        _state.original_sync_send_single = None
+        _state.sync_send_single_patch = None
+        _state.original_async_send_single = None
+        _state.async_send_single_patch = None
         _state.original_thread_start = None
         _state.thread_start_patch = None
         _state.original_mcp_call_tool = None
         _state.mcp_call_tool_patch = None
         _state.mcp_client_session = None
-    httpx.Client.send = sync_send
-    httpx.AsyncClient.send = async_send
+    httpx.Client._send_single_request = sync_send_single
+    httpx.AsyncClient._send_single_request = async_send_single
     threading.Thread.start = thread_start
     _bindings.set(None)
 
@@ -96,6 +96,43 @@ async def test_instruments_existing_sync_and_async_clients() -> None:
     assert sync_response.status_code == async_response.status_code == 200
     assert len(sync_requests) == len(async_requests) == 2
     assert method.create_credential.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_httpx_response_hooks_see_only_paid_responses() -> None:
+    sync_requests: list[httpx.Request] = []
+    async_requests: list[httpx.Request] = []
+    seen: list[tuple[str, int]] = []
+
+    def sync_hook(response: httpx.Response) -> None:
+        seen.append(("sync", response.status_code))
+        response.raise_for_status()
+
+    async def async_hook(response: httpx.Response) -> None:
+        seen.append(("async", response.status_code))
+        response.raise_for_status()
+
+    sync_client = httpx.Client(
+        transport=paid_transport(sync_requests),
+        event_hooks={"response": [sync_hook]},
+    )
+    async_client = httpx.AsyncClient(
+        transport=paid_transport(async_requests),
+        event_hooks={"response": [async_hook]},
+    )
+    runtime = PaymentRuntime([MockMethod("one")])
+    handle = instrument(runtime, mcp=False)
+    try:
+        sync_response = sync_client.get("https://example.com/sync")
+        async_response = await async_client.get("https://example.com/async")
+    finally:
+        handle.disable()
+        sync_client.close()
+        await async_client.aclose()
+        runtime.close()
+
+    assert sync_response.status_code == async_response.status_code == 200
+    assert seen == [("sync", 200), ("async", 200)]
 
 
 @pytest.mark.asyncio
@@ -217,12 +254,12 @@ async def test_preexisting_async_context_does_not_use_process_fallback() -> None
     method.create_credential.assert_not_called()
 
 
-def test_bare_thread_uses_only_unambiguous_process_runtime() -> None:
+def test_bare_thread_uses_explicit_process_runtime() -> None:
     method = MockMethod("one")
     runtime = PaymentRuntime([method])
     requests: list[httpx.Request] = []
     client = httpx.Client(transport=paid_transport(requests))
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
     result: list[int] = []
     thread = threading.Thread(
         target=lambda: result.append(client.get("https://example.com/paid").status_code)
@@ -240,12 +277,51 @@ def test_bare_thread_uses_only_unambiguous_process_runtime() -> None:
     assert method.create_credential.call_count == 1
 
 
-def test_background_event_loop_uses_unambiguous_http_runtime() -> None:
+def test_context_runtime_does_not_leak_to_preexisting_worker() -> None:
+    method = MockMethod("one")
+    runtime = PaymentRuntime([method])
+    requests: list[httpx.Request] = []
+    client = httpx.Client(transport=paid_transport(requests))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(lambda: None).result(timeout=1)
+        handle = instrument(runtime, mcp=False)
+        try:
+            response = pool.submit(client.get, "https://example.com/paid").result(timeout=2)
+        finally:
+            handle.disable()
+            client.close()
+            runtime.close()
+
+    assert response.status_code == 402
+    assert len(requests) == 1
+    method.create_credential.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_runtime_follows_asyncio_to_thread() -> None:
+    method = MockMethod("one")
+    runtime = PaymentRuntime([method])
+    requests: list[httpx.Request] = []
+    client = httpx.Client(transport=paid_transport(requests))
+    handle = instrument(runtime, mcp=False)
+    try:
+        response = await asyncio.to_thread(client.get, "https://example.com/paid")
+    finally:
+        handle.disable()
+        client.close()
+        runtime.close()
+
+    assert response.status_code == 200
+    assert len(requests) == 2
+    assert method.create_credential.call_count == 1
+
+
+def test_background_event_loop_uses_explicit_process_http_runtime() -> None:
     method = MockMethod("one")
     runtime = PaymentRuntime([method])
     requests: list[httpx.Request] = []
     result: dict[str, Any] = {}
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
 
     async def call() -> None:
         async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
@@ -264,7 +340,7 @@ def test_background_event_loop_uses_unambiguous_http_runtime() -> None:
     assert len(requests) == 2
 
 
-def test_background_event_loop_uses_unambiguous_mcp_runtime(
+def test_background_event_loop_uses_explicit_process_mcp_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import mcp
@@ -275,7 +351,7 @@ def test_background_event_loop_uses_unambiguous_mcp_runtime(
     paid_result = object()
     session = FakeSession([FakeMcpError(), paid_result])
     result: list[Any] = []
-    handle = instrument(runtime, httpx=False, mcp=True)
+    handle = instrument(runtime, httpx=False, mcp=True, scope="process")
     thread = threading.Thread(target=lambda: result.append(asyncio.run(session.call_tool("paid"))))
     try:
         thread.start()
@@ -314,7 +390,7 @@ async def test_free_async_generator_upload_is_not_buffered() -> None:
     assert consumed == [b"one-shot"]
 
 
-def test_concurrent_bare_threads_share_the_process_runtime() -> None:
+def test_concurrent_bare_threads_share_explicit_process_runtime() -> None:
     started = threading.Event()
     release = threading.Event()
 
@@ -333,7 +409,7 @@ def test_concurrent_bare_threads_share_the_process_runtime() -> None:
         httpx.Client(transport=paid_transport(request_sets[0])),
         httpx.Client(transport=paid_transport(request_sets[1])),
     ]
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(clients[0].get, "https://example.com/paid")
@@ -358,7 +434,7 @@ def test_concurrent_bare_threads_share_the_process_runtime() -> None:
 def test_bare_thread_fails_closed_with_multiple_runtimes() -> None:
     methods = [MockMethod("a"), MockMethod("b")]
     runtimes = [PaymentRuntime([method]) for method in methods]
-    handles = [instrument(runtime, mcp=False) for runtime in runtimes]
+    handles = [instrument(runtime, mcp=False, scope="process") for runtime in runtimes]
     requests: list[httpx.Request] = []
     client = httpx.Client(transport=paid_transport(requests))
     result: list[int] = []
@@ -381,40 +457,40 @@ def test_bare_thread_fails_closed_with_multiple_runtimes() -> None:
 
 
 def test_out_of_order_disable_restores_exact_originals() -> None:
-    sync_send = httpx.Client.send
-    async_send = httpx.AsyncClient.send
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
     thread_start = threading.Thread.start
     runtimes = [PaymentRuntime([MockMethod("a")]), PaymentRuntime([MockMethod("b")])]
     first = instrument(runtimes[0], mcp=False)
     second = instrument(runtimes[1], mcp=False)
 
     first.disable()
-    assert httpx.Client.send is not sync_send
+    assert httpx.Client._send_single_request is not sync_send_single
     second.disable()
 
-    assert httpx.Client.send is sync_send
-    assert httpx.AsyncClient.send is async_send
+    assert httpx.Client._send_single_request is sync_send_single
+    assert httpx.AsyncClient._send_single_request is async_send_single
     assert threading.Thread.start is thread_start
     for runtime in runtimes:
         runtime.close()
 
 
 def test_disable_does_not_overwrite_a_later_patch() -> None:
-    sync_send = httpx.Client.send
-    async_send = httpx.AsyncClient.send
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
     runtime = PaymentRuntime([MockMethod("one")])
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
 
-    def replacement(self: httpx.Client, request: httpx.Request, **kwargs: Any):
-        return sync_send(self, request, **kwargs)
+    def replacement(self: httpx.Client, request: httpx.Request):
+        return sync_send_single(self, request)
 
-    httpx.Client.send = replacement
+    httpx.Client._send_single_request = replacement
     try:
         handle.disable()
-        assert httpx.Client.send is replacement
-        assert httpx.AsyncClient.send is async_send
+        assert httpx.Client._send_single_request is replacement
+        assert httpx.AsyncClient._send_single_request is async_send_single
     finally:
-        httpx.Client.send = sync_send
+        httpx.Client._send_single_request = sync_send_single
         runtime.close()
 
 
@@ -474,7 +550,7 @@ def test_credential_http_is_not_recursively_instrumented() -> None:
     runtime = PaymentRuntime([method])
     requests: list[httpx.Request] = []
     client = runtime.wrap_client(httpx.Client(transport=paid_transport(requests)))
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
     try:
         assert client.get("https://example.com/paid").status_code == 200
     finally:
@@ -595,8 +671,8 @@ async def test_mcp_instrumentation_preserves_shape_and_explicit_precedence(
 
 
 def test_required_mcp_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) -> None:
-    sync_send = httpx.Client.send
-    async_send = httpx.AsyncClient.send
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
     real_import = builtins.__import__
 
     def missing_mcp(name: str, *args: Any, **kwargs: Any):
@@ -612,15 +688,29 @@ def test_required_mcp_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) 
     finally:
         runtime.close()
 
-    assert httpx.Client.send is sync_send
-    assert httpx.AsyncClient.send is async_send
+    assert httpx.Client._send_single_request is sync_send_single
+    assert httpx.AsyncClient._send_single_request is async_send_single
+
+
+def test_invalid_scope_fails_before_installing_patches() -> None:
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
+    runtime = PaymentRuntime([])
+    try:
+        with pytest.raises(ValueError, match="scope"):
+            instrument(runtime, mcp=False, scope="invalid")  # type: ignore[arg-type]
+    finally:
+        runtime.close()
+
+    assert httpx.Client._send_single_request is sync_send_single
+    assert httpx.AsyncClient._send_single_request is async_send_single
 
 
 def test_mcp_patch_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) -> None:
     import mcp
 
-    sync_send = httpx.Client.send
-    async_send = httpx.AsyncClient.send
+    sync_send_single = httpx.Client._send_single_request
+    async_send_single = httpx.AsyncClient._send_single_request
 
     class FrozenSessionMeta(type):
         def __setattr__(cls, name: str, value: Any) -> None:
@@ -640,5 +730,5 @@ def test_mcp_patch_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) -> 
     finally:
         runtime.close()
 
-    assert httpx.Client.send is sync_send
-    assert httpx.AsyncClient.send is async_send
+    assert httpx.Client._send_single_request is sync_send_single
+    assert httpx.AsyncClient._send_single_request is async_send_single

@@ -155,6 +155,12 @@ def _extract_result_challenges(result: Any) -> list[MCPChallenge]:
     return _extract_challenges_from_data(meta.get(META_PAYMENT_REQUIRED))
 
 
+def _is_payment_required_result(result: Any) -> bool:
+    """Check whether a tool result carries payment-required metadata."""
+    meta = _result_meta(result)
+    return meta is not None and META_PAYMENT_REQUIRED in meta
+
+
 @dataclass(frozen=True, slots=True)
 class McpToolResult:
     """Result of a payment-aware tool call.
@@ -203,7 +209,7 @@ class McpClient:
         else:
             if methods is None:
                 raise ValueError("Pass methods or runtime")
-            self._runtime = PaymentRuntime(methods)
+            self._runtime = PaymentRuntime(methods, _async_inline=True)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -23,7 +22,7 @@ class _Binding:
     runtime: PaymentRuntime
     httpx: bool
     mcp: bool
-    install_thread: int
+    scope: Literal["context", "process"]
     active: bool = True
 
 
@@ -69,20 +68,22 @@ def instrument(
     *,
     httpx: bool = True,
     mcp: Literal["auto"] | bool = "auto",
+    scope: Literal["context", "process"] = "context",
 ) -> InstrumentationHandle:
     """Make common Python HTTP and MCP client boundaries payment-aware.
 
-    Selection is context-local when instrumentation is installed in an async
-    task or request context. A bare thread uses the process fallback only when
-    exactly one runtime is active, which supports harness worker threads without
-    choosing between multiple wallets.
+    Bindings are context-local by default. Use ``scope="process"`` only for a
+    single-wallet process whose calls run on independent worker threads;
+    ambiguous process bindings fail closed.
     """
+    if scope not in ("context", "process"):
+        raise ValueError('scope must be "context" or "process"')
     client_session = _resolve_mcp_client(required=mcp is True) if mcp is not False else None
     binding = _Binding(
         runtime=runtime,
         httpx=httpx,
         mcp=client_session is not None,
-        install_thread=threading.get_ident(),
+        scope=scope,
     )
 
     with _state.lock:
@@ -107,10 +108,10 @@ class _InstrumentationState:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.bindings: list[_Binding] = []
-        self.original_sync_send: Any | None = None
-        self.sync_send_patch: Any | None = None
-        self.original_async_send: Any | None = None
-        self.async_send_patch: Any | None = None
+        self.original_sync_send_single: Any | None = None
+        self.sync_send_single_patch: Any | None = None
+        self.original_async_send_single: Any | None = None
+        self.async_send_single_patch: Any | None = None
         self.original_thread_start: Any | None = None
         self.thread_start_patch: Any | None = None
         self.original_mcp_call_tool: Any | None = None
@@ -132,24 +133,12 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
     if getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False):
         return None
 
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = False
-    else:
-        running_loop = True
-
     with _state.lock:
         candidates = [
-            binding for binding in _state.bindings if binding.active and getattr(binding, protocol)
+            binding
+            for binding in _state.bindings
+            if binding.active and binding.scope == "process" and getattr(binding, protocol)
         ]
-        # A task that predates a context-local install on the same event-loop
-        # thread must not inherit that task's wallet. An independently owned
-        # worker loop may use an unambiguous process runtime.
-        if running_loop and any(
-            binding.install_thread == threading.get_ident() for binding in candidates
-        ):
-            return None
         runtimes: list[PaymentRuntime] = []
         for binding in candidates:
             if all(runtime is not binding.runtime for runtime in runtimes):
@@ -176,71 +165,63 @@ def _install_thread_patch() -> None:
 
 
 def _install_httpx_patches() -> None:
-    if _state.original_sync_send is None:
-        original_sync_send = httpx.Client.send
+    if _state.original_sync_send_single is None:
+        original_sync_send_single = httpx.Client._send_single_request
 
-        def sync_send(
+        def sync_send_single(
             self: httpx.Client,
             request: httpx.Request,
-            *args: Any,
-            **kwargs: Any,
         ) -> httpx.Response:
             if (
                 getattr(self, "_mpp_payment_wrapped", False)
                 or payment_flow_active()
                 or _httpx_active.get()
             ):
-                return original_sync_send(self, request, *args, **kwargs)
+                return original_sync_send_single(self, request)
             runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime("httpx")
             if runtime is None:
-                return original_sync_send(self, request, *args, **kwargs)
+                return original_sync_send_single(self, request)
             token = _httpx_active.set(True)
             try:
                 return runtime.send_httpx_sync(
-                    MethodType(original_sync_send, self),
+                    MethodType(original_sync_send_single, self),
                     request,
-                    *args,
-                    **kwargs,
                 )
             finally:
                 _httpx_active.reset(token)
 
-        _state.original_sync_send = original_sync_send
-        _state.sync_send_patch = sync_send
-        httpx.Client.send = sync_send  # type: ignore[method-assign]
+        _state.original_sync_send_single = original_sync_send_single
+        _state.sync_send_single_patch = sync_send_single
+        httpx.Client._send_single_request = sync_send_single  # type: ignore[method-assign]
 
-    if _state.original_async_send is None:
-        original_async_send = httpx.AsyncClient.send
+    if _state.original_async_send_single is None:
+        original_async_send_single = httpx.AsyncClient._send_single_request
 
-        async def async_send(
+        async def async_send_single(
             self: httpx.AsyncClient,
             request: httpx.Request,
-            *args: Any,
-            **kwargs: Any,
         ) -> httpx.Response:
             if (
                 getattr(self, "_mpp_payment_wrapped", False)
                 or payment_flow_active()
                 or _httpx_active.get()
             ):
-                return await original_async_send(self, request, *args, **kwargs)
+                return await original_async_send_single(self, request)
             runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime("httpx")
             if runtime is None:
-                return await original_async_send(self, request, *args, **kwargs)
+                return await original_async_send_single(self, request)
             token = _httpx_active.set(True)
             try:
                 return await runtime.send_httpx(
-                    MethodType(original_async_send, self),
+                    MethodType(original_async_send_single, self),
                     request,
-                    *args,
-                    **kwargs,
                 )
             finally:
                 _httpx_active.reset(token)
 
-        _state.original_async_send = original_async_send
-        _state.async_send_patch = async_send
-        httpx.AsyncClient.send = async_send  # type: ignore[method-assign]
+        _state.original_async_send_single = original_async_send_single
+        _state.async_send_single_patch = async_send_single
+        httpx.AsyncClient._send_single_request = async_send_single  # type: ignore[method-assign]
 
 
 def _resolve_mcp_client(*, required: bool) -> Any | None:
@@ -294,21 +275,21 @@ def _install_mcp_patch(client_session: Any) -> None:
 def _restore_unused_patches() -> None:
     if not any(binding.active and binding.httpx for binding in _state.bindings):
         if (
-            _state.sync_send_patch is not None
-            and httpx.Client.send is _state.sync_send_patch
-            and _state.original_sync_send is not None
+            _state.sync_send_single_patch is not None
+            and httpx.Client._send_single_request is _state.sync_send_single_patch
+            and _state.original_sync_send_single is not None
         ):
-            httpx.Client.send = _state.original_sync_send  # type: ignore[method-assign]
+            httpx.Client._send_single_request = _state.original_sync_send_single  # type: ignore[method-assign]
         if (
-            _state.async_send_patch is not None
-            and httpx.AsyncClient.send is _state.async_send_patch
-            and _state.original_async_send is not None
+            _state.async_send_single_patch is not None
+            and httpx.AsyncClient._send_single_request is _state.async_send_single_patch
+            and _state.original_async_send_single is not None
         ):
-            httpx.AsyncClient.send = _state.original_async_send  # type: ignore[method-assign]
-        _state.original_sync_send = None
-        _state.sync_send_patch = None
-        _state.original_async_send = None
-        _state.async_send_patch = None
+            httpx.AsyncClient._send_single_request = _state.original_async_send_single  # type: ignore[method-assign]
+        _state.original_sync_send_single = None
+        _state.sync_send_single_patch = None
+        _state.original_async_send_single = None
+        _state.async_send_single_patch = None
 
     if not any(binding.active and (binding.httpx or binding.mcp) for binding in _state.bindings):
         if (

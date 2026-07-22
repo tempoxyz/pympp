@@ -547,6 +547,91 @@ class TestRuntimeBridge:
         with pytest.raises(RuntimeError, match="closed"):
             runtime.create_credential_sync(challenge(), method)
 
+    def test_close_waits_for_committed_http_retry(self) -> None:
+        retry_started = threading.Event()
+        retry_release = threading.Event()
+        calls = 0
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return payment_required()
+            retry_started.set()
+            assert retry_release.wait(1)
+            return httpx.Response(200, content=b"paid")
+
+        runtime = PaymentRuntime([MockMethod()])
+        transport = SyncPaymentTransport(runtime=runtime, inner=httpx.MockTransport(handler))
+        responses: list[httpx.Response] = []
+        errors: list[BaseException] = []
+        closed = threading.Event()
+
+        def request() -> None:
+            try:
+                responses.append(
+                    transport.handle_request(httpx.Request("GET", "https://example.com"))
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        request_thread = threading.Thread(target=request)
+        close_thread = threading.Thread(target=lambda: (runtime.close(), closed.set()))
+        request_thread.start()
+        assert retry_started.wait(1)
+        close_thread.start()
+        assert not closed.wait(0.05)
+
+        retry_release.set()
+        for thread in (request_thread, close_thread):
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+        transport.close()
+
+        assert not errors
+        assert responses[0].status_code == 200
+        assert closed.is_set()
+
+    def test_concurrent_close_waits_for_shutdown_completion(self) -> None:
+        started = threading.Event()
+        cleanup_started = threading.Event()
+        cleanup_release = threading.Event()
+
+        class BlockingMethod(MockMethod):
+            async def _create_credential(self, challenge: Challenge) -> Any:
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cleanup_started.set()
+                    while not cleanup_release.is_set():
+                        await asyncio.sleep(0.01)
+
+        runtime = PaymentRuntime([BlockingMethod()])
+
+        def create() -> None:
+            try:
+                runtime.create_credential_sync(challenge(), runtime.methods[0])
+            except BaseException:
+                pass
+
+        create_thread = threading.Thread(target=create)
+        first_close = threading.Thread(target=runtime.close)
+        second_returned = threading.Event()
+        second_close = threading.Thread(target=lambda: (runtime.close(), second_returned.set()))
+        create_thread.start()
+        assert started.wait(1)
+        first_close.start()
+        assert cleanup_started.wait(1)
+        second_close.start()
+        assert not second_returned.wait(0.05)
+
+        cleanup_release.set()
+        for thread in (create_thread, first_close, second_close):
+            thread.join(timeout=1)
+            assert not thread.is_alive()
+        assert second_returned.is_set()
+
 
 def test_instrumented_openai_sync_streaming_in_worker_thread() -> None:
     openai = pytest.importorskip("openai")
@@ -583,7 +668,7 @@ def test_instrumented_openai_sync_streaming_in_worker_thread() -> None:
         http_client=http_client,
         max_retries=0,
     )
-    handle = instrument(runtime, mcp=False)
+    handle = instrument(runtime, mcp=False, scope="process")
     result: dict[str, Any] = {}
 
     def run() -> None:

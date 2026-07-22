@@ -157,6 +157,39 @@ class TestPaymentTransport:
         method.create_credential.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_implicit_runtime_preserves_method_caller_loop(self) -> None:
+        caller_loop = asyncio.get_running_loop()
+        caller_future: asyncio.Future[None] = caller_loop.create_future()
+        method = MockMethod()
+
+        async def create_credential(challenge: Challenge) -> Credential:
+            await caller_future
+            return make_credential({"hash": "0xabc"}, challenge_id=challenge.id)
+
+        method.create_credential.side_effect = create_credential
+        caller_loop.call_later(0.01, caller_future.set_result, None)
+        transport = PaymentTransport(
+            methods=[method],
+            inner=MockTransport(
+                [
+                    httpx.Response(
+                        402,
+                        headers={"www-authenticate": payment_challenge_header()},
+                    ),
+                    httpx.Response(200),
+                ]
+            ),
+        )
+        try:
+            response = await transport.handle_async_request(
+                httpx.Request("GET", "https://example.com")
+            )
+        finally:
+            await transport.aclose()
+
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_async_response_hook_can_send_create_and_refetch(self) -> None:
         caller_loop = asyncio.get_running_loop()
         contexts: list[object | None] = []
@@ -244,7 +277,7 @@ class TestPaymentTransport:
         assert contexts == [None, {"action": "voucher"}, None]
         assert set(hook_loops) == {caller_loop}
         assert len(set(method_loops)) == 1
-        assert method_loops[0] is not caller_loop
+        assert method_loops[0] is caller_loop
         assert events == [(None, 204, True), (None, 200, True)]
         assert len(inner.requests) == 5
         assert inner.requests[2].headers["authorization"].startswith("Payment ")

@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 import threading
+from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
-from urllib.parse import urlparse
 
 import httpx
 
@@ -32,6 +32,14 @@ _T = TypeVar("_T")
 _CONTEXT_UNSET = object()
 _PAYMENT_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_payment_flow_active", default=False)
 _MCP_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_mcp_flow_active", default=False)
+
+
+@dataclass(slots=True)
+class _PaidLease:
+    active: bool = True
+
+
+_PAID_LEASES: ContextVar[dict[int, _PaidLease] | None] = ContextVar("mpp_paid_leases", default=None)
 
 
 def payment_flow_active() -> bool:
@@ -101,32 +109,22 @@ class SyncHttpResponseContext:
 
 
 class _BoundSendTransport(httpx.AsyncBaseTransport):
-    def __init__(self, send: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    def __init__(self, send: Any) -> None:
         self._send = send
-        self._args = args
-        self._kwargs = kwargs
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        kwargs = dict(self._kwargs)
-        if request.headers.get("authorization", "").startswith("Payment "):
-            kwargs["auth"] = None
-        return await self._send(request, *self._args, **kwargs)
+        return await self._send(request)
 
     async def aclose(self) -> None:
         return None
 
 
 class _BoundSyncSendTransport(httpx.BaseTransport):
-    def __init__(self, send: Any, args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
+    def __init__(self, send: Any) -> None:
         self._send = send
-        self._args = args
-        self._kwargs = kwargs
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
-        kwargs = dict(self._kwargs)
-        if request.headers.get("authorization", "").startswith("Payment "):
-            kwargs["auth"] = None
-        return self._send(request, *self._args, **kwargs)
+        return self._send(request)
 
     def close(self) -> None:
         return None
@@ -140,6 +138,7 @@ class _AsyncBridge:
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
+        self._stopped = threading.Event()
         self._start_error: BaseException | None = None
         self._thread: threading.Thread | None = None
 
@@ -178,6 +177,7 @@ class _AsyncBridge:
         except BaseException as error:
             self._start_error = error
             self._ready.set()
+            self._stopped.set()
             return
         self._loop = loop
         asyncio.set_event_loop(loop)
@@ -193,6 +193,7 @@ class _AsyncBridge:
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
+            self._stopped.set()
 
     def run(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         """Run an async payment operation from synchronous code."""
@@ -234,10 +235,20 @@ class _AsyncBridge:
         """Stop the runtime loop, if it was started."""
         with self._lock:
             if self._closed:
-                return
-            self._closed = True
-            thread = self._thread
+                already_closed = True
+                wait = threading.current_thread() is not self._thread
+                thread = self._thread
+            else:
+                already_closed = False
+                self._closed = True
+                wait = False
+                thread = self._thread
+        if already_closed:
+            if wait:
+                self._stopped.wait()
+            return
         if thread is None:
+            self._stopped.set()
             return
         if self._loop is None:
             self._ready.wait()
@@ -270,11 +281,51 @@ class PaymentRuntime:
         *,
         events: EventDispatcher | None = None,
         allowed_origins: Sequence[str] | None = None,
+        _async_inline: bool = False,
     ) -> None:
         self.methods = tuple(methods)
         self.events = events or EventDispatcher()
         self._allowed = _AllowedOrigins(allowed_origins)
+        self._async_inline = _async_inline
         self._bridge = _AsyncBridge()
+        self._lifecycle = threading.Condition()
+        self._active_paid_operations = 0
+        self._closing = False
+
+    @contextmanager
+    def _paid_operation(self):
+        key = id(self)
+        leases = _PAID_LEASES.get() or {}
+        if (lease := leases.get(key)) is not None and lease.active:
+            yield
+            return
+
+        with self._lifecycle:
+            if self._closing:
+                raise RuntimeError("PaymentRuntime is closed")
+            self._active_paid_operations += 1
+        lease = _PaidLease()
+        token = _PAID_LEASES.set({**leases, key: lease})
+        try:
+            yield
+        finally:
+            lease.active = False
+            _PAID_LEASES.reset(token)
+            with self._lifecycle:
+                self._active_paid_operations -= 1
+                should_close = self._closing and self._active_paid_operations == 0
+                if self._active_paid_operations == 0:
+                    self._lifecycle.notify_all()
+            if should_close:
+                self._bridge.close()
+
+    def _ensure_open(self) -> None:
+        lease = (_PAID_LEASES.get() or {}).get(id(self))
+        if lease is not None and lease.active:
+            return
+        with self._lifecycle:
+            if self._closing:
+                raise RuntimeError("PaymentRuntime is closed")
 
     def payment_transport(self, inner: httpx.AsyncBaseTransport | None = None) -> PaymentTransport:
         """Create an httpx transport using this runtime's payment methods."""
@@ -299,14 +350,14 @@ class PaymentRuntime:
         if getattr(client, "_mpp_payment_wrapped", False):
             return client
 
-        original_send = client.send
+        original_send = client._send_single_request
 
-        def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        def send(request: httpx.Request) -> httpx.Response:
             runtime = getattr(client, "_mpp_payment_runtime", self)
-            return runtime.send_httpx_sync(original_send, request, *args, **kwargs)
+            return runtime.send_httpx_sync(original_send, request)
 
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
-        client.send = send  # type: ignore[method-assign]
+        client._send_single_request = send  # type: ignore[method-assign]
         return client
 
     def wrap_async_client(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
@@ -315,25 +366,23 @@ class PaymentRuntime:
         if getattr(client, "_mpp_payment_wrapped", False):
             return client
 
-        original_send = client.send
+        original_send = client._send_single_request
 
-        async def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+        async def send(request: httpx.Request) -> httpx.Response:
             runtime = getattr(client, "_mpp_payment_runtime", self)
-            return await runtime.send_httpx(original_send, request, *args, **kwargs)
+            return await runtime.send_httpx(original_send, request)
 
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
-        client.send = send  # type: ignore[method-assign]
+        client._send_single_request = send  # type: ignore[method-assign]
         return client
 
     async def send_httpx(
         self,
         send: Any,
         request: httpx.Request,
-        *args: Any,
-        **kwargs: Any,
     ) -> httpx.Response:
         """Send one httpx request with automatic 402 payment handling."""
-        transport = _BoundSendTransport(send, args, dict(kwargs))
+        transport = _BoundSendTransport(send)
         response = await transport.handle_async_request(request)
         return await self.payment_transport(inner=transport)._handle_async_response(
             request,
@@ -344,11 +393,9 @@ class PaymentRuntime:
         self,
         send: Any,
         request: httpx.Request,
-        *args: Any,
-        **kwargs: Any,
     ) -> httpx.Response:
         """Send one sync httpx request with automatic 402 payment handling."""
-        transport = _BoundSyncSendTransport(send, args, dict(kwargs))
+        transport = _BoundSyncSendTransport(send)
         response = transport.handle_request(request)
         return self.sync_payment_transport(inner=transport)._handle_response(request, response)
 
@@ -418,6 +465,7 @@ class PaymentRuntime:
             _extract_challenges,
             _extract_result_challenges,
             _is_payment_required_error,
+            _is_payment_required_result,
         )
         from mpp.extensions.mcp.types import MCPCredential
 
@@ -430,7 +478,7 @@ class PaymentRuntime:
             cause: Any = error
         else:
             challenges = _extract_result_challenges(result)
-            if not challenges:
+            if not challenges and not _is_payment_required_result(result):
                 return result
             cause = result
 
@@ -495,36 +543,56 @@ class PaymentRuntime:
         retry_meta.update(mcp_credential.to_meta())
         retry_kwargs["meta"] = retry_meta
 
-        try:
-            payment_response = await call_tool(name, arguments, *args, **retry_kwargs)
-        except Exception as error:
-            outcome_error = PaymentOutcomeUnknownError(challenge, error)
+        with self._paid_operation():
+            try:
+                payment_response = await call_tool(name, arguments, *args, **retry_kwargs)
+            except Exception as error:
+                outcome_error = PaymentOutcomeUnknownError(challenge, error)
+                await self.emit_event(
+                    PAYMENT_FAILED,
+                    {
+                        "challenge": core_challenge,
+                        "challenges": core_challenges,
+                        "credential": core_credential,
+                        "error": outcome_error,
+                        "method": method,
+                        "response": cause,
+                        "protocol": "mcp",
+                    },
+                )
+                raise outcome_error from error
+
+            if _is_payment_required_result(payment_response):
+                cause_error = RuntimeError(
+                    "Server returned another payment challenge after receiving a credential"
+                )
+                outcome_error = PaymentOutcomeUnknownError(challenge, cause_error)
+                await self.emit_event(
+                    PAYMENT_FAILED,
+                    {
+                        "challenge": core_challenge,
+                        "challenges": core_challenges,
+                        "credential": core_credential,
+                        "error": outcome_error,
+                        "method": method,
+                        "response": payment_response,
+                        "protocol": "mcp",
+                    },
+                )
+                raise outcome_error from cause_error
+
             await self.emit_event(
-                PAYMENT_FAILED,
+                PAYMENT_RESPONSE,
                 {
                     "challenge": core_challenge,
                     "challenges": core_challenges,
                     "credential": core_credential,
-                    "error": outcome_error,
                     "method": method,
-                    "response": cause,
+                    "response": payment_response,
                     "protocol": "mcp",
                 },
             )
-            raise outcome_error from error
-
-        await self.emit_event(
-            PAYMENT_RESPONSE,
-            {
-                "challenge": core_challenge,
-                "challenges": core_challenges,
-                "credential": core_credential,
-                "method": method,
-                "response": payment_response,
-                "protocol": "mcp",
-            },
-        )
-        return payment_response
+            return payment_response
 
     def match_challenge(
         self,
@@ -599,11 +667,23 @@ class PaymentRuntime:
 
     def run_sync(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         """Run a coroutine on the runtime-owned loop and block for its result."""
+        try:
+            self._ensure_open()
+        except BaseException:
+            coroutine.close()
+            raise
         return self._bridge.run(coroutine)
 
     async def run_async(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         """Run a coroutine on the runtime-owned loop without blocking."""
-        return await self._bridge.run_async(coroutine)
+        try:
+            self._ensure_open()
+            if self._async_inline:
+                return await coroutine
+            return await self._bridge.run_async(coroutine)
+        except BaseException:
+            coroutine.close()
+            raise
 
     async def _create_credential(
         self,
@@ -665,6 +745,15 @@ class PaymentRuntime:
 
     def close(self) -> None:
         """Release the runtime background loop."""
+        key = id(self)
+        lease = (_PAID_LEASES.get() or {}).get(key)
+        active_here = lease is not None and lease.active
+        with self._lifecycle:
+            self._closing = True
+            if active_here:
+                return
+            while self._active_paid_operations:
+                self._lifecycle.wait()
         self._bridge.close()
 
     async def aclose(self) -> None:
@@ -697,6 +786,7 @@ class _AllowedOrigins:
     def __init__(self, allowed_origins: Sequence[str] | None) -> None:
         self._allow_all = allowed_origins is None
         self._origins = set[tuple[str, str, int | None]]()
+        self._origin_hosts = set[str]()
         self._realms = set[str]()
         if allowed_origins is None:
             return
@@ -704,14 +794,17 @@ class _AllowedOrigins:
             origin = _origin(str(value))
             if origin is not None:
                 self._origins.add(origin)
+                self._origin_hosts.add(origin[1])
             else:
-                self._realms.add(str(value).casefold())
+                realm = str(value)
+                self._realms.add(realm.casefold())
+                if host := _bare_host(realm):
+                    self._realms.add(host)
 
     def http_url(self, url: httpx.URL) -> bool:
         if self._allow_all:
             return True
-        origin = _httpx_origin(url)
-        return origin in self._origins or url.host.casefold() in self._realms
+        return _httpx_origin(url) in self._origins
 
     def mcp_realm(self, realm: str) -> bool:
         if not isinstance(realm, str):
@@ -723,22 +816,33 @@ class _AllowedOrigins:
             return True
         if origin is not None:
             return origin in self._origins or origin[1] in self._realms
-        return realm.casefold() in self._realms
+        normalized = realm.casefold()
+        host = _bare_host(realm)
+        return (
+            normalized in self._realms
+            or normalized in self._origin_hosts
+            or host is not None
+            and (host in self._realms or host in self._origin_hosts)
+        )
 
 
 def _origin(value: str) -> tuple[str, str, int | None] | None:
     try:
-        parsed = urlparse(value)
-        hostname = parsed.hostname
-        port = parsed.port
-    except (AttributeError, TypeError, UnicodeError, ValueError):
+        url = httpx.URL(value)
+    except (httpx.InvalidURL, TypeError, UnicodeError):
         return None
-    if not parsed.scheme or not hostname:
+    if not url.scheme or not url.raw_host:
         return None
-    scheme = parsed.scheme.casefold()
-    if port == {"http": 80, "https": 443}.get(scheme):
-        port = None
-    return scheme, hostname.casefold(), port
+    return _httpx_origin(url)
+
+
+def _bare_host(value: str) -> str | None:
+    if not value or any(character.isspace() or character in "/@?#%" for character in value):
+        return None
+    try:
+        return httpx.URL(scheme="https", host=value).raw_host.decode("ascii").casefold()
+    except (httpx.InvalidURL, TypeError, UnicodeError):
+        return None
 
 
 def _httpx_origin(url: httpx.URL) -> tuple[str, str, int | None]:
@@ -746,4 +850,4 @@ def _httpx_origin(url: httpx.URL) -> tuple[str, str, int | None]:
     port = url.port
     if port == {"http": 80, "https": 443}.get(scheme):
         port = None
-    return scheme, url.host.casefold(), port
+    return scheme, url.raw_host.decode("ascii").casefold(), port

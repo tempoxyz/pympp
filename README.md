@@ -75,8 +75,11 @@ finally:
     runtime.close()
 ```
 
-For one client instead of process-scoped instrumentation, use
+For one client instead of patching the standard client classes, use
 `runtime.wrap_client(client)` or `runtime.wrap_async_client(client)`.
+Instrumentation is context-scoped by default. Single-wallet plugins whose calls
+run on independent worker threads can opt in to process scope with
+`instrument(runtime, scope="process")`.
 
 ## Examples
 
