@@ -58,6 +58,7 @@ def _client_payment_failed_payload(
         "credential": credential,
         "error": error,
         "method": method,
+        "protocol": "http",
         "request": request,
         "response": response,
     }
@@ -214,7 +215,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         error=parse_error
                         or ValueError("No compatible payment method for challenges"),
                         method=None,
-                        request=request,
+                        request=challenged_request,
                         response=response,
                     ),
                 )

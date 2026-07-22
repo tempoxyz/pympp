@@ -58,6 +58,7 @@ class ClientChallengeReceivedPayload(TypedDict):
     challenge: Challenge
     challenges: list[Challenge]
     method: Any
+    protocol: Literal["http"]
     request: httpx.Request
     response: httpx.Response
     context: NotRequired[Any]
@@ -77,6 +78,7 @@ class ClientPaymentFailedPayload(TypedDict):
     credential: Credential | None
     error: Exception
     method: Any | None
+    protocol: Literal["http"]
     request: httpx.Request
     response: httpx.Response
 

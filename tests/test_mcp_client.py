@@ -19,6 +19,7 @@ from mpp.extensions.mcp import (
 )
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+from mpp.runtime import PaymentRuntime
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -353,6 +354,9 @@ class TestMcpClientPaidTool:
     async def test_no_matching_method_raises(self) -> None:
         """Raises ValueError when no installed method matches the challenge."""
         session = AsyncMock()
+        runtime = PaymentRuntime([FakeMethod(name="tempo")])
+        failed: list[dict[str, Any]] = []
+        runtime.events.on("payment.failed", failed.append)
 
         import sys
         from unittest.mock import MagicMock
@@ -373,11 +377,17 @@ class TestMcpClientPaidTool:
             )
             session.call_tool = AsyncMock(side_effect=payment_error)
 
-            client = McpClient(session, methods=[FakeMethod(name="tempo")])
+            client = McpClient(session, runtime=runtime)
 
             with pytest.raises(ValueError, match="No compatible payment method"):
                 await client.call_tool("tool", {})
+
+            assert failed[0]["challenge"] is None
+            assert [challenge.id for challenge in failed[0]["challenges"]] == ["ch_test123"]
+            assert failed[0]["method"] is None
+            assert failed[0]["protocol"] == "mcp"
         finally:
+            runtime.close()
             for mod_name, orig in original_modules.items():
                 if orig is None:
                     sys.modules.pop(mod_name, None)
@@ -593,14 +603,14 @@ class TestMcpClientPaidTool:
                     sys.modules[mod_name] = orig
 
 
-class TestMcpClientMethodMatching:
+class TestPaymentRuntimeMethodMatching:
     """Tests for challenge-to-method matching logic."""
 
     def test_match_by_method_and_intent(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
-        challenge, matched = client._match_challenge([_make_challenge()])
+        challenge, matched = runtime.match_challenge([_make_challenge()])
         assert isinstance(challenge, MCPChallenge)
         assert matched is method
 
@@ -609,28 +619,28 @@ class TestMcpClientMethodMatching:
         stripe_method = FakeMethod(name="stripe", _intents={"charge": True})
         tempo_method = FakeMethod(name="tempo", _intents={"charge": True})
 
-        client = McpClient(AsyncMock(), methods=[stripe_method, tempo_method])
+        runtime = PaymentRuntime([stripe_method, tempo_method])
 
         challenges = [
             _make_challenge(method="tempo"),
             _make_challenge(method="stripe"),
         ]
-        _, matched = client._match_challenge(challenges)
+        _, matched = runtime.match_challenge(challenges)
         assert matched is stripe_method
 
     def test_no_match_raises(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="stripe")])
+            runtime.match_challenge([_make_challenge(method="stripe")])
 
     def test_intent_mismatch(self) -> None:
         method = FakeMethod(name="tempo", _intents={"session": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="tempo", intent="charge")])
+            runtime.match_challenge([_make_challenge(method="tempo", intent="charge")])
 
     def test_extract_challenges_skips_malformed_entries(self) -> None:
         err = FakeMcpError(

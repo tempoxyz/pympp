@@ -174,6 +174,7 @@ class SyncPaymentTransport(httpx.BaseTransport):
                     "protocol": "http",
                 },
             )
+            auth_header = credential.to_authorization()
         except Exception as error:
             self._runtime.emit_event_sync(
                 PAYMENT_FAILED,
@@ -190,7 +191,7 @@ class SyncPaymentTransport(httpx.BaseTransport):
             raise
 
         headers = httpx.Headers(challenged_request.headers)
-        headers["Authorization"] = credential.to_authorization()
+        headers["Authorization"] = auth_header
         retry_request = _copy_request(challenged_request, headers=headers)
 
         try:

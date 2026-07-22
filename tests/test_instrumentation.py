@@ -13,8 +13,8 @@ import httpx
 import pytest
 
 from mpp import Challenge
-from mpp.agent import _bindings, _state, instrument
 from mpp.extensions.mcp import META_CREDENTIAL, McpClient
+from mpp.instrumentation import _bindings, _state, instrument
 from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
@@ -520,6 +520,46 @@ class FakeSession:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+@pytest.mark.asyncio
+async def test_credential_thread_is_not_recursively_instrumented_for_mcp_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp
+
+    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
+    internal = FakeSession([FakeMcpError()])
+    internal_results: list[str] = []
+
+    class ThreadedMethod(MockMethod):
+        async def _create(self, challenge: Challenge):
+            def call() -> None:
+                try:
+                    asyncio.run(internal.call_tool("internal"))
+                except FakeMcpError:
+                    internal_results.append("unpaid")
+
+            thread = threading.Thread(target=call)
+            thread.start()
+            thread.join(timeout=2)
+            assert thread.is_alive() is False
+            return await super()._create(challenge)
+
+    method = ThreadedMethod("one")
+    runtime = PaymentRuntime([method])
+    paid_result = object()
+    session = FakeSession([FakeMcpError(), paid_result])
+    handle = instrument(runtime, httpx=False, mcp=True)
+    try:
+        result = await session.call_tool("paid")
+    finally:
+        handle.disable()
+        runtime.close()
+
+    assert result is paid_result
+    assert internal_results == ["unpaid"]
+    assert len(internal.calls) == 1
 
 
 @pytest.mark.asyncio

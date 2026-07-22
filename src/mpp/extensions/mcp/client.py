@@ -273,14 +273,6 @@ class McpClient:
         receipt = self._extract_receipt(result)
         return McpToolResult(result=result, receipt=receipt)
 
-    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
-        """Match a challenge to an installed method.
-
-        Iterates installed methods in order (client preference) and returns
-        the first match by ``name`` and ``intent``.
-        """
-        return self._runtime.match_challenge(challenges)
-
     @staticmethod
     def _extract_receipt(result: Any) -> MCPReceipt | None:
         """Extract a payment receipt from a tool result's _meta."""

@@ -11,10 +11,10 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from mpp import Challenge
-from mpp.agent import instrument
+from mpp import Challenge, Credential
 from mpp.client import SyncPaymentTransport
 from mpp.errors import PaymentError
+from mpp.instrumentation import instrument
 from mpp.runtime import PaymentRuntime, payment_flow_active
 from tests import make_credential
 
@@ -219,12 +219,20 @@ class TestSyncPaymentTransport:
         assert len(failed) == 1
         assert len(failed[0]["challenges"]) == expected_challenges
         assert failed[0]["credential"] is None
+        assert failed[0]["protocol"] == "http"
         assert failed[0]["response"] is response
 
-    @pytest.mark.parametrize("failure_stage", ["credential", "retry"])
-    def test_payment_failures_emit_and_propagate(self, failure_stage: str) -> None:
+    @pytest.mark.parametrize("failure_stage", ["credential", "serialization", "retry"])
+    def test_payment_failures_emit_and_propagate(
+        self,
+        failure_stage: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         error = RuntimeError(f"{failure_stage} failed")
         requests: list[httpx.Request] = []
+
+        def fail_serialization(_credential: Credential) -> str:
+            raise error
 
         def handler(request: httpx.Request) -> httpx.Response:
             requests.append(request)
@@ -235,6 +243,8 @@ class TestSyncPaymentTransport:
         method = MockMethod()
         if failure_stage == "credential":
             method.create_credential.side_effect = error
+        elif failure_stage == "serialization":
+            monkeypatch.setattr(Credential, "to_authorization", fail_serialization)
         transport = SyncPaymentTransport(
             methods=[method],
             inner=httpx.MockTransport(handler),
@@ -248,10 +258,10 @@ class TestSyncPaymentTransport:
             transport.close()
 
         assert raised.value is error
-        assert len(requests) == (1 if failure_stage == "credential" else 2)
+        assert len(requests) == (2 if failure_stage == "retry" else 1)
         assert len(failed) == 1
         assert failed[0]["challenge"].id == "test-id"
-        if failure_stage == "credential":
+        if failure_stage in {"credential", "serialization"}:
             assert failed[0]["credential"] is None
         else:
             assert failed[0]["credential"] is not None

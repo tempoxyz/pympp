@@ -1,7 +1,7 @@
 """Tests for client-side transport."""
 
 import asyncio
-from typing import cast
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -733,8 +733,33 @@ class TestPaymentTransport:
         assert payload["credential"] is None
         assert isinstance(payload["error"], ValueError)
         assert payload["method"] is None
+        assert payload["protocol"] == "http"
         assert payload["request"] is request
         assert payload["response"] is response
+
+    @pytest.mark.asyncio
+    async def test_unmatched_redirect_reports_challenged_request(self) -> None:
+        original_request = httpx.Request("GET", "https://example.com/start")
+        challenged_request = httpx.Request("GET", "https://redirected.example/paid")
+        response = httpx.Response(
+            402,
+            headers={
+                "www-authenticate": Challenge(
+                    id="test-id",
+                    method="stripe",
+                    intent="charge",
+                    request={},
+                ).to_www_authenticate("redirected.example")
+            },
+            request=challenged_request,
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=MockTransport([response]))
+        failed: list[dict[str, Any]] = []
+        transport.on_payment_failed(failed.append)
+
+        await transport.handle_async_request(original_request)
+
+        assert failed[0]["request"] is challenged_request
 
     @pytest.mark.asyncio
     async def test_returns_402_without_payment_header(self) -> None:

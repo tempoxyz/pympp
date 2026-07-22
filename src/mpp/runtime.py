@@ -457,9 +457,11 @@ class PaymentRuntime:
                 raise error from cause
             raise error
 
+        core_challenges = [item.to_core() for item in allowed_challenges]
+        core_challenge = None
+        method = None
         try:
             challenge, method = self.match_challenge(allowed_challenges)
-            core_challenges = [item.to_core() for item in allowed_challenges]
             core_challenge = challenge.to_core()
             if _challenge_is_expired(challenge):
                 raise ValueError(f"Challenge expired at {challenge.expires}")
@@ -477,11 +479,11 @@ class PaymentRuntime:
             await self.emit_event(
                 PAYMENT_FAILED,
                 {
-                    "challenge": locals().get("core_challenge"),
-                    "challenges": locals().get("core_challenges", []),
+                    "challenge": core_challenge,
+                    "challenges": core_challenges,
                     "credential": None,
                     "error": error,
-                    "method": locals().get("method"),
+                    "method": method,
                     "response": cause,
                     "protocol": "mcp",
                 },

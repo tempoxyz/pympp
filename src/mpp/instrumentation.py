@@ -87,6 +87,8 @@ def instrument(
 
     with _state.lock:
         try:
+            if httpx or client_session is not None:
+                _install_thread_patch()
             if httpx:
                 _install_httpx_patches()
             if client_session is not None:
@@ -142,9 +144,8 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
             binding for binding in _state.bindings if binding.active and getattr(binding, protocol)
         ]
         # A task that predates a context-local install on the same event-loop
-        # thread must not inherit that task's wallet. An independently-owned
-        # worker loop (such as Hermes' MCP loop) may use an unambiguous process
-        # runtime.
+        # thread must not inherit that task's wallet. An independently owned
+        # worker loop may use an unambiguous process runtime.
         if running_loop and any(
             binding.install_thread == threading.get_ident() for binding in candidates
         ):
@@ -156,7 +157,7 @@ def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
         return runtimes[0] if len(runtimes) == 1 else None
 
 
-def _install_httpx_patches() -> None:
+def _install_thread_patch() -> None:
     if _state.original_thread_start is None:
         original_thread_start = threading.Thread.start
 
@@ -173,6 +174,8 @@ def _install_httpx_patches() -> None:
         _state.thread_start_patch = thread_start
         threading.Thread.start = thread_start  # type: ignore[method-assign]
 
+
+def _install_httpx_patches() -> None:
     if _state.original_sync_send is None:
         original_sync_send = httpx.Client.send
 
@@ -306,6 +309,8 @@ def _restore_unused_patches() -> None:
         _state.sync_send_patch = None
         _state.original_async_send = None
         _state.async_send_patch = None
+
+    if not any(binding.active and (binding.httpx or binding.mcp) for binding in _state.bindings):
         if (
             _state.thread_start_patch is not None
             and threading.Thread.start is _state.thread_start_patch

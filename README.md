@@ -49,6 +49,35 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
     response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
+### Shared runtime
+
+Use one runtime to share payment methods, policy, and events across sync HTTP,
+async HTTP, and MCP. Instrumentation makes existing and future standard
+`httpx` clients and MCP `ClientSession.call_tool` calls payment-aware:
+
+```python
+import httpx
+
+from mpp.instrumentation import instrument
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.runtime import PaymentRuntime
+
+method = tempo(
+    account=TempoAccount.from_key("0x..."),
+    intents={"charge": ChargeIntent()},
+)
+runtime = PaymentRuntime([method], allowed_origins=["https://api.example.com"])
+
+try:
+    with instrument(runtime):
+        response = httpx.get("https://api.example.com/paid")
+finally:
+    runtime.close()
+```
+
+For one client instead of process-scoped instrumentation, use
+`runtime.wrap_client(client)` or `runtime.wrap_async_client(client)`.
+
 ## Examples
 
 | Example | Description |
