@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -16,7 +19,7 @@ from mpp.extensions.mcp import (
     McpClient,
     PaymentOutcomeUnknownError,
 )
-from mpp.runtime import PaymentRuntime
+from mpp.runtime import Method, PaymentRuntime
 
 
 class MockMethod:
@@ -296,6 +299,371 @@ class TestHttpxRuntime:
         method.create_credential.assert_not_called()
 
 
+class TestRuntimeLifecycle:
+    @pytest.mark.asyncio
+    async def test_factory_lifecycle_uses_one_owned_loop_for_sync_and_async(self) -> None:
+        loops: list[asyncio.AbstractEventLoop] = []
+        events: list[str] = []
+
+        class LoopBoundMethod:
+            name = "tempo"
+            _intents = {"charge": True}
+
+            def __init__(self) -> None:
+                self.loop = asyncio.get_running_loop()
+                self.ready = self.loop.create_future()
+                self.loop.call_soon(self.ready.set_result, None)
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                loops.append(asyncio.get_running_loop())
+                await self.ready
+                return Credential(challenge=challenge.to_echo(), payload={"ok": True})
+
+        @asynccontextmanager
+        async def factory():
+            events.append("enter")
+            method = LoopBoundMethod()
+            loops.append(method.loop)
+            try:
+                yield method
+            finally:
+                loops.append(asyncio.get_running_loop())
+                events.append("exit")
+
+        caller_loop = asyncio.get_running_loop()
+        async with PaymentRuntime(method_factories=[factory]) as runtime:
+            method = runtime.methods[0]
+            await runtime.create_credential(
+                Challenge(id="async", method="tempo", intent="charge", request={}),
+                method,
+            )
+            await asyncio.to_thread(
+                runtime.create_credential_sync,
+                Challenge(id="sync", method="tempo", intent="charge", request={}),
+                method,
+            )
+            thread = runtime._bridge._thread
+            assert thread is not None and thread is not threading.current_thread()
+
+        assert events == ["enter", "exit"]
+        assert len(set(loops)) == 1
+        assert loops[0] is not caller_loop
+        assert thread is not None and not thread.is_alive()
+        with pytest.raises(RuntimeError, match="closed"):
+            runtime.start()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_start_is_single_flight_and_cancellation_safe(self) -> None:
+        calls = 0
+
+        async def factory() -> MockMethod:
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+            return MockMethod()
+
+        runtime = PaymentRuntime(method_factories=[factory])
+        first = asyncio.create_task(runtime.astart())
+        second = asyncio.create_task(runtime.astart())
+        await asyncio.sleep(0.01)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await second is runtime
+        assert calls == 1
+        await runtime.aclose()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_async_context_entry_closes_started_runtime(self) -> None:
+        events: list[str] = []
+        entered = threading.Event()
+
+        @asynccontextmanager
+        async def slow_factory() -> AsyncIterator[Method]:
+            events.append("enter")
+            entered.set()
+            await asyncio.sleep(0.05)
+            try:
+                yield MockMethod()
+            finally:
+                events.append("exit")
+
+        runtime = PaymentRuntime(method_factories=[slow_factory])
+
+        async def use_runtime() -> None:
+            async with runtime:
+                raise AssertionError("cancelled entry must not reach the context body")
+
+        task = asyncio.create_task(use_runtime())
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        thread = runtime._bridge._thread
+        assert events == ["enter", "exit"]
+        assert runtime._state == "closed"
+        assert thread is not None and not thread.is_alive()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_async_context_exit_finishes_runtime_close(self) -> None:
+        events: list[str] = []
+        exit_started = threading.Event()
+
+        @asynccontextmanager
+        async def slow_factory() -> AsyncIterator[Method]:
+            events.append("enter")
+            try:
+                yield MockMethod()
+            finally:
+                exit_started.set()
+                await asyncio.sleep(0.05)
+                events.append("exit")
+
+        runtime = PaymentRuntime(method_factories=[slow_factory])
+
+        async def use_runtime() -> None:
+            async with runtime:
+                pass
+
+        task = asyncio.create_task(use_runtime())
+        assert await asyncio.to_thread(exit_started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        thread = runtime._bridge._thread
+        assert events == ["enter", "exit"]
+        assert runtime._state == "closed"
+        assert thread is not None and not thread.is_alive()
+
+    def test_sync_context_manager_and_close_before_start(self) -> None:
+        calls = 0
+
+        def factory() -> MockMethod:
+            nonlocal calls
+            calls += 1
+            return MockMethod()
+
+        unused = PaymentRuntime(method_factories=[factory])
+        unused.close()
+        assert calls == 0
+
+        with PaymentRuntime(method_factories=[factory]) as runtime:
+            assert runtime.methods
+        assert calls == 1
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+
+    def test_factory_failure_unwinds_entered_methods_and_stops_loop(self) -> None:
+        events: list[str] = []
+
+        @asynccontextmanager
+        async def managed():
+            events.append("enter")
+            try:
+                yield MockMethod()
+            finally:
+                events.append("exit")
+
+        async def fail() -> MockMethod:
+            raise ValueError("factory failed")
+
+        runtime = PaymentRuntime(method_factories=[managed, fail])
+        with pytest.raises(ValueError, match="factory failed"):
+            runtime.start()
+
+        assert events == ["enter", "exit"]
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+        with pytest.raises(RuntimeError, match="failed to start"):
+            runtime.start()
+
+    def test_methods_and_factories_are_mutually_exclusive(self) -> None:
+        with pytest.raises(ValueError, match="either methods or method_factories"):
+            PaymentRuntime([], method_factories=[MockMethod])
+
+    @pytest.mark.parametrize("async_close", [False, True])
+    @pytest.mark.asyncio
+    async def test_close_from_owned_loop_event_is_deferred(
+        self,
+        async_close: bool,
+    ) -> None:
+        events: list[str] = []
+
+        class ManagedMethod:
+            name = "tempo"
+            _intents = {"charge": True}
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                events.append("credential")
+                return Credential(challenge=challenge.to_echo(), payload={"ok": True})
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[Method]:
+            events.append("enter")
+            try:
+                yield ManagedMethod()
+            finally:
+                events.append("exit")
+
+        runtime = PaymentRuntime(method_factories=[factory])
+        await runtime.astart()
+
+        if async_close:
+
+            async def async_close_from_event(_payload: Any) -> None:
+                events.append("close")
+                await runtime.aclose()
+                events.append("closed-callback")
+
+            close_from_event = async_close_from_event
+        else:
+
+            def sync_close_from_event(_payload: Any) -> None:
+                events.append("close")
+                runtime.close()
+                events.append("closed-callback")
+
+            close_from_event = sync_close_from_event
+
+        runtime.events.on("challenge.received", close_from_event)
+        credential = await asyncio.wait_for(
+            runtime.create_credential(
+                Challenge(id="close", method="tempo", intent="charge", request={}),
+                runtime.methods[0],
+            ),
+            1,
+        )
+
+        assert credential.payload == {"ok": True}
+        assert events == ["enter", "close", "closed-callback", "credential", "exit"]
+        assert runtime._state == "closed"
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+
+    def test_external_close_cancels_method_before_lifecycle_exit(self) -> None:
+        events: list[str] = []
+        started = threading.Event()
+
+        class BlockingMethod:
+            name = "tempo"
+            _intents = {"charge": True}
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                events.append("credential-start")
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    events.append("credential-finally")
+                raise AssertionError(f"unexpected release for {challenge.id}")
+
+        @asynccontextmanager
+        async def factory() -> AsyncIterator[Method]:
+            events.append("enter")
+            try:
+                yield BlockingMethod()
+            finally:
+                events.append("exit")
+
+        runtime = PaymentRuntime(method_factories=[factory])
+        runtime.start()
+        errors: list[BaseException] = []
+
+        def create_credential() -> None:
+            try:
+                runtime.create_credential_sync(
+                    Challenge(id="cancel", method="tempo", intent="charge", request={}),
+                    runtime.methods[0],
+                )
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=create_credential)
+        worker.start()
+        assert started.wait(1)
+
+        runtime.close()
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert len(errors) == 1
+        assert type(errors[0]).__name__ == "CancelledError"
+        assert events == ["enter", "credential-start", "credential-finally", "exit"]
+
+    @pytest.mark.parametrize("async_close", [False, True])
+    def test_close_during_method_exit_does_not_deadlock(self, async_close: bool) -> None:
+        events: list[str] = []
+        runtime_holder: dict[str, PaymentRuntime] = {}
+
+        class ManagedMethod:
+            name = "tempo"
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise AssertionError(f"unexpected credential for {challenge.id}")
+
+            async def __aenter__(self) -> ManagedMethod:
+                events.append("enter")
+                return self
+
+            async def __aexit__(self, *_args: Any) -> None:
+                events.append("exit-start")
+                runtime = runtime_holder["runtime"]
+                if async_close:
+                    await runtime.aclose()
+                else:
+                    runtime.close()
+                events.append("exit-end")
+
+        runtime = PaymentRuntime(method_factories=[ManagedMethod])
+        runtime_holder["runtime"] = runtime
+        runtime.start()
+        errors: list[BaseException] = []
+
+        def close() -> None:
+            try:
+                runtime.close()
+            except BaseException as error:
+                errors.append(error)
+
+        worker = threading.Thread(target=close, daemon=True)
+        worker.start()
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert not errors
+        assert events == ["enter", "exit-start", "exit-end"]
+        assert runtime._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_caller_loop_cancellation_finishes_deferred_close(self) -> None:
+        from mpp.runtime import _CallerLoopRuntime
+
+        runtime = _CallerLoopRuntime([MockMethod()])
+        started = asyncio.Event()
+        finalized = asyncio.Event()
+
+        async def operation() -> None:
+            runtime.close()
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                finalized.set()
+
+        task = asyncio.create_task(runtime.run_async(operation()))
+        await asyncio.wait_for(started.wait(), 1)
+        assert runtime._state == "closing"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert finalized.is_set()
+        assert runtime._state == "closed"
+
+
 class TestMcpRuntime:
     def test_mcp_does_not_use_legacy_name_only_matching(self) -> None:
         class NameOnlyMethod:
@@ -419,7 +787,7 @@ class TestMcpRuntime:
 
     @pytest.mark.asyncio
     async def test_inherited_paid_lease_expires_with_its_owner(self) -> None:
-        runtime = PaymentRuntime([], _async_inline=True)
+        runtime = PaymentRuntime([])
         release = asyncio.Event()
         ran = False
 
@@ -574,6 +942,74 @@ class TestMcpRuntime:
 
         assert events[-1].name == "payment.failed"
         assert isinstance(events[-1].payload["error"], PaymentOutcomeUnknownError)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_mcp_retry_blocks_same_operation_from_paying_again(self) -> None:
+        retry_started = asyncio.Event()
+        events: list[Any] = []
+        calls = 0
+        method = MockMethod()
+        runtime = PaymentRuntime([method])
+        runtime.events.on("*", events.append)
+
+        async def call_tool(*_args: Any, **_kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise mcp_payment_error()
+            if calls == 2:
+                retry_started.set()
+                await asyncio.Event().wait()
+            error = mcp_payment_error(realm="replacement.example")
+            error.data["challenges"][0]["id"] = "replacement-id"
+            raise error
+
+        try:
+            request = asyncio.create_task(
+                runtime.call_mcp_tool(call_tool, "premium_tool", {"query": "same"})
+            )
+            await asyncio.wait_for(retry_started.wait(), 1)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await runtime.call_mcp_tool(call_tool, "premium_tool", {"query": "same"})
+        finally:
+            await runtime.aclose()
+
+        assert calls == 3
+        assert method.create_credential.await_count == 1
+        failures = [event for event in events if event.name == "payment.failed"]
+        assert len(failures) == 2
+        assert isinstance(failures[0].payload["error"].cause, asyncio.CancelledError)
+
+    @pytest.mark.asyncio
+    async def test_invalid_mcp_retry_metadata_does_not_lock_unsent_attempt(self) -> None:
+        method = MockMethod()
+        paid = FakeCallToolResult("paid")
+        session = FakeClientSession([mcp_payment_error(), mcp_payment_error(), paid])
+        runtime = PaymentRuntime([method])
+        try:
+            with pytest.raises(TypeError):
+                await runtime.call_mcp_tool(
+                    session.call_tool,
+                    "premium_tool",
+                    {"query": "same"},
+                    meta=object(),
+                )
+
+            result = await runtime.call_mcp_tool(
+                session.call_tool,
+                "premium_tool",
+                {"query": "same"},
+            )
+        finally:
+            await runtime.aclose()
+
+        assert result is paid
+        assert len(session.calls) == 3
+        assert method.create_credential.await_count == 2
 
     @pytest.mark.asyncio
     async def test_repeated_result_payment_challenge_fails_without_retrying_again(self) -> None:

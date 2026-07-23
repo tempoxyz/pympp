@@ -52,8 +52,8 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
 ### Shared runtime
 
 Use one runtime to share payment methods, policy, and events across sync HTTP,
-async HTTP, and MCP. Instrumentation makes existing and future standard
-`httpx` clients and MCP `ClientSession.call_tool` calls payment-aware:
+async HTTP, and explicit MCP clients. HTTPX instrumentation makes existing and
+future standard `httpx` clients payment-aware:
 
 ```python
 import httpx
@@ -62,24 +62,48 @@ from mpp.instrumentation import instrument
 from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.runtime import PaymentRuntime
 
-method = tempo(
-    account=TempoAccount.from_key("0x..."),
-    intents={"charge": ChargeIntent()},
-)
-runtime = PaymentRuntime([method], allowed_origins=["https://api.example.com"])
 
-try:
+def method_factory():
+    return tempo(
+        account=TempoAccount.from_key("0x..."),
+        intents={"charge": ChargeIntent()},
+    )
+
+
+with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
     with instrument(runtime):
         response = httpx.get("https://api.example.com/paid")
-finally:
-    runtime.close()
 ```
+
+`PaymentRuntime` owns one event loop. Factories construct loop-bound methods on
+that loop and async context-manager results are closed there. Direct `methods`
+are borrowed and must be loop-independent.
 
 For one client instead of patching the standard client classes, use
 `runtime.wrap_client(client)` or `runtime.wrap_async_client(client)`.
 Instrumentation is context-scoped by default. Single-wallet plugins whose calls
 run on independent worker threads can opt in to process scope with
 `instrument(runtime, scope="process")`.
+Global instrumentation requires `allowed_origins`; use
+`allow_unrestricted=True` only when the runtime should be able to pay any
+origin.
+
+The monkey-patching adapters—global instrumentation, `wrap_client`, and
+`wrap_async_client`—support HTTPX `0.27.x` and `0.28.x`. They validate the
+installed adapter before patching and fail without changing HTTPX when the
+version or adapter shape is unsupported. Explicit `PaymentTransport` and
+`SyncPaymentTransport` remain available without the private HTTPX adapter seam.
+
+After a credential is sent, failures or a repeated payment challenge mark its
+outcome unknown; matching future payment attempts raise
+`PaymentOutcomeUnknownError` and remain blocked on that runtime to prevent
+accidental repayment. Global and per-client adapters include redirects,
+response hooks, and body consumption in that outcome boundary. Use a stable,
+unique `Idempotency-Key` for each logical HTTP operation so retries can be
+matched reliably.
 
 ## Examples
 

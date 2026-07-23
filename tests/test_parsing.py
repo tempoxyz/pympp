@@ -365,41 +365,6 @@ class TestReceipt:
         roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
         assert roundtripped.subscription_id == "sub_123"
 
-    def test_roundtrip_preserves_top_level_extensions(self) -> None:
-        payload = {
-            "status": "success",
-            "method": "tempo",
-            "timestamp": "2024-01-20T12:00:00Z",
-            "reference": "session-123",
-            "extra": {"plan": "pro"},
-            "intent": "session",
-            "channelId": "0xabc123",
-            "acceptedCumulative": "1000",
-            "units": 3,
-        }
-
-        parsed = Receipt.from_payment_receipt(_b64_json(payload))
-
-        assert parsed.extra == {"plan": "pro"}
-        assert parsed.extensions == {
-            "intent": "session",
-            "channelId": "0xabc123",
-            "acceptedCumulative": "1000",
-            "units": 3,
-        }
-        assert Receipt.from_payment_receipt(parsed.to_payment_receipt()) == parsed
-
-    def test_extensions_cannot_override_receipt_fields(self) -> None:
-        receipt = Receipt(
-            status="success",
-            timestamp=datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC),
-            reference="0xabc123",
-            extensions={"status": "failed"},
-        )
-
-        with pytest.raises(ValueError, match=r"reserved fields: \['status'\]"):
-            receipt.to_payment_receipt()
-
     def test_parse_invalid_timestamp(self) -> None:
         payload = {
             "status": "success",

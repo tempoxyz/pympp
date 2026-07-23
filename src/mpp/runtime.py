@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 import threading
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, contextmanager
 from contextvars import ContextVar, copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, runtime_checkable
 
 import httpx
 
@@ -24,14 +27,10 @@ from mpp.events import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
-
     from mpp.client import PaymentTransport, SyncPaymentTransport
 
 _T = TypeVar("_T")
-_CONTEXT_UNSET = object()
 _PAYMENT_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_payment_flow_active", default=False)
-_MCP_FLOW_ACTIVE: ContextVar[bool] = ContextVar("mpp_mcp_flow_active", default=False)
 
 
 @dataclass(slots=True)
@@ -39,7 +38,59 @@ class _PaidLease:
     active: bool = True
 
 
+@dataclass(slots=True)
+class _RuntimeLease:
+    active: bool = True
+
+
+@dataclass(eq=False, slots=True)
+class _HttpPaymentAttempt:
+    runtime: PaymentRuntime
+    challenge_key: str
+    operation_key: str
+    challenge: Challenge
+    request: httpx.Request
+    credential: Credential | None = None
+    cause: BaseException | None = None
+    sent: bool = False
+    body_complete: bool = False
+    send_complete: bool = False
+    operation: _HttpxOperation | None = None
+    idempotent: bool = False
+
+
+@dataclass(slots=True)
+class _HttpxOperation:
+    attempts: list[_HttpPaymentAttempt] = field(default_factory=list)
+    payment_sent: bool = False
+    active: bool = True
+
+
+@dataclass(eq=False, slots=True)
+class _McpPaymentAttempt:
+    challenge_key: str
+    operation_key: str
+    challenge: Any
+    endpoint: Any
+    credential: Credential | None = None
+    cause: BaseException | None = None
+    sent: bool = False
+
+
 _PAID_LEASES: ContextVar[dict[int, _PaidLease] | None] = ContextVar("mpp_paid_leases", default=None)
+_RUNTIME_LEASES: ContextVar[dict[int, _RuntimeLease] | None] = ContextVar(
+    "mpp_runtime_leases",
+    default=None,
+)
+_HTTPX_OPERATIONS: ContextVar[dict[int, _HttpxOperation] | None] = ContextVar(
+    "mpp_httpx_operations",
+    default=None,
+)
+_HTTPX_ADAPTER_RUNTIME: ContextVar[int | None] = ContextVar(
+    "mpp_httpx_adapter_runtime",
+    default=None,
+)
+_HTTP_PAYMENT_ATTEMPT_EXTENSION = "mpp.payment_attempt"
 
 
 def payment_flow_active() -> bool:
@@ -47,9 +98,14 @@ def payment_flow_active() -> bool:
     return _PAYMENT_FLOW_ACTIVE.get()
 
 
-def mcp_payment_flow_active() -> bool:
-    """Return whether the current context is inside an MCP payment adapter."""
-    return _MCP_FLOW_ACTIVE.get()
+async def _wait_for_task(task: asyncio.Task[_T]) -> _T:
+    """Wait for task completion while preserving an already-raised cancellation."""
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
 
 
 @runtime_checkable
@@ -63,49 +119,10 @@ class Method(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class AsyncHttpResponseContext:
-    """Context passed to an async method-specific HTTP response hook.
-
-    A hook returning a replacement response owns the original response. It
-    must either close it or delegate its stream and close it with the wrapper.
-    ``refetch`` is available only once and closes the original response. Close
-    non-streaming responses before using ``send`` so the connection is free.
-    Streaming hooks need another connection while the source remains open.
-    Use ``run_async`` for state shared with credential creation; HTTP I/O stays
-    on the hook's caller loop.
-    """
-
-    challenge: Challenge
-    credential: Credential
-    request: httpx.Request
-    response: httpx.Response
-    send: Callable[[httpx.Request], Awaitable[httpx.Response]]
-    refetch: Callable[[], Awaitable[httpx.Response]] | None
-    create_credential: Callable[[Any], Awaitable[Credential]]
-    run_async: Callable[[Coroutine[Any, Any, Any]], Awaitable[Any]]
-
-
-@dataclass(frozen=True, slots=True)
-class SyncHttpResponseContext:
-    """Context passed to a sync method-specific HTTP response hook.
-
-    A hook returning a replacement response owns the original response. It
-    must either close it or delegate its stream and close it with the wrapper.
-    ``refetch`` is available only once and closes the original response. Close
-    non-streaming responses before using ``send`` so the connection is free.
-    Streaming hooks need another connection while the source remains open.
-    Use ``run_sync`` for async state shared with credential creation.
-    """
-
-    challenge: Challenge
-    credential: Credential
-    request: httpx.Request
-    response: httpx.Response
-    send: Callable[[httpx.Request], httpx.Response]
-    refetch: Callable[[], httpx.Response] | None
-    create_credential: Callable[[Any], Credential]
-    run_sync: Callable[[Coroutine[Any, Any, Any]], Any]
+MethodFactory = Callable[
+    [],
+    Method | Awaitable[Method] | AbstractAsyncContextManager[Method],
+]
 
 
 class _BoundSendTransport(httpx.AsyncBaseTransport):
@@ -172,6 +189,7 @@ class _AsyncBridge:
             )
 
     def _run(self) -> None:
+        vars(threading.current_thread())["_mpp_payment_internal_thread"] = True
         try:
             loop = asyncio.new_event_loop()
         except BaseException as error:
@@ -231,6 +249,18 @@ class _AsyncBridge:
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
+    def is_current_thread(self) -> bool:
+        return threading.current_thread() is self._thread
+
+    def cancel_pending(self) -> None:
+        """Cancel and drain runtime-loop work without stopping the loop."""
+        thread, loop = self._thread, self._loop
+        if thread is None or loop is None or not thread.is_alive():
+            return
+        if self.is_current_thread():
+            raise RuntimeError("Cannot synchronously cancel the PaymentRuntime loop")
+        asyncio.run_coroutine_threadsafe(self._cancel_pending(), loop).result()
+
     def close(self) -> None:
         """Stop the runtime loop, if it was started."""
         with self._lock:
@@ -273,24 +303,138 @@ class _AsyncBridge:
 
 
 class PaymentRuntime:
-    """Payment runtime with one loop for shared method and lifecycle state."""
+    """Payment runtime that owns one loop for method and lifecycle state.
+
+    Direct ``methods`` are borrowed and must be safe to use on the owned loop.
+    Use ``method_factories`` for loop-bound methods: factories are called on
+    the owned loop, and async context-manager results are exited there when the
+    runtime closes.
+    """
 
     def __init__(
         self,
-        methods: Sequence[Method],
+        methods: Sequence[Method] | None = None,
         *,
+        method_factories: Sequence[MethodFactory] = (),
         events: EventDispatcher | None = None,
         allowed_origins: Sequence[str] | None = None,
-        _async_inline: bool = False,
     ) -> None:
-        self.methods = tuple(methods)
+        if methods is not None and method_factories:
+            raise ValueError("Pass either methods or method_factories, not both")
+        self.methods = tuple(methods or ())
+        self._method_factories = tuple(method_factories)
+        self._method_stack: AsyncExitStack | None = None
         self.events = events or EventDispatcher()
         self._allowed = _AllowedOrigins(allowed_origins)
-        self._async_inline = _async_inline
         self._bridge = _AsyncBridge()
         self._lifecycle = threading.Condition()
         self._active_paid_operations = 0
-        self._closing = False
+        self._active_runtime_operations = 0
+        self._state: str = "new"
+        self._start_error: BaseException | None = None
+        self._finalizing = False
+        self._deferred_close = False
+        self._http_attempt_lock = threading.Lock()
+        self._http_challenges: dict[str, _HttpPaymentAttempt] = {}
+        self._http_unknown_operations: dict[str, _HttpPaymentAttempt] = {}
+        self._http_idempotent_operations: dict[str, _HttpPaymentAttempt] = {}
+        self._mcp_attempt_lock = threading.Lock()
+        self._mcp_challenges: dict[str, _McpPaymentAttempt] = {}
+        self._mcp_unknown_operations: dict[str, _McpPaymentAttempt] = {}
+
+    async def _initialize_methods(self) -> None:
+        stack = AsyncExitStack()
+        methods: list[Method] = []
+        token = _PAYMENT_FLOW_ACTIVE.set(True)
+        try:
+            for factory in self._method_factories:
+                value: Any = factory()
+                if inspect.isawaitable(value):
+                    value = await value
+                if hasattr(value, "__aenter__") and hasattr(value, "__aexit__"):
+                    value = await stack.enter_async_context(value)
+                if not isinstance(value, Method):
+                    raise TypeError("Method factory must return a payment Method")
+                methods.append(value)
+        except BaseException:
+            await stack.aclose()
+            raise
+        finally:
+            _PAYMENT_FLOW_ACTIVE.reset(token)
+        if self._method_factories:
+            self.methods = tuple(methods)
+        self._method_stack = stack
+
+    async def _teardown_methods(self) -> None:
+        stack, self._method_stack = self._method_stack, None
+        if stack is not None:
+            token = _PAYMENT_FLOW_ACTIVE.set(True)
+            try:
+                await stack.aclose()
+            finally:
+                _PAYMENT_FLOW_ACTIVE.reset(token)
+
+    def start(self) -> Self:
+        """Start the owned loop and initialize method factories once."""
+        with self._lifecycle:
+            while self._state == "starting":
+                if payment_flow_active():
+                    raise RuntimeError("Cannot use PaymentRuntime while method factories start")
+                self._lifecycle.wait()
+            if self._state == "open":
+                return self
+            if self._state in ("closing", "closed"):
+                if self._start_error is not None:
+                    raise RuntimeError("PaymentRuntime failed to start") from self._start_error
+                raise RuntimeError("PaymentRuntime is closed")
+            self._state = "starting"
+
+        try:
+            self._bridge.run(self._initialize_methods())
+        except BaseException as error:
+            self._bridge.close()
+            with self._lifecycle:
+                self._start_error = error
+                self._state = "closed"
+                self._lifecycle.notify_all()
+            raise
+
+        with self._lifecycle:
+            self._state = "open"
+            self._lifecycle.notify_all()
+        return self
+
+    async def astart(self) -> Self:
+        """Asynchronously start the runtime without blocking the caller loop."""
+        start = asyncio.create_task(asyncio.to_thread(self.start))
+        try:
+            await asyncio.shield(start)
+        except asyncio.CancelledError:
+            await _wait_for_task(start)
+            raise
+        return self
+
+    def __enter__(self) -> Self:
+        return self.start()
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    async def __aenter__(self) -> Self:
+        try:
+            return await self.astart()
+        except BaseException:
+            close = asyncio.create_task(self.aclose())
+            await _wait_for_task(close)
+            raise
+
+    async def __aexit__(self, *_args: Any) -> None:
+        close = asyncio.create_task(self.aclose())
+        try:
+            await asyncio.shield(close)
+        except asyncio.CancelledError:
+            await _wait_for_task(close)
+            raise
 
     @contextmanager
     def _paid_operation(self):
@@ -300,8 +444,9 @@ class PaymentRuntime:
             yield
             return
 
+        self.start()
         with self._lifecycle:
-            if self._closing:
+            if self._state != "open":
                 raise RuntimeError("PaymentRuntime is closed")
             self._active_paid_operations += 1
         lease = _PaidLease()
@@ -313,19 +458,86 @@ class PaymentRuntime:
             _PAID_LEASES.reset(token)
             with self._lifecycle:
                 self._active_paid_operations -= 1
-                should_close = self._closing and self._active_paid_operations == 0
+                should_close = self._state == "closing" and self._active_paid_operations == 0
                 if self._active_paid_operations == 0:
                     self._lifecycle.notify_all()
             if should_close:
-                self._bridge.close()
+                self._finish_close()
+
+    @contextmanager
+    def _runtime_operation(self):
+        key = id(self)
+        leases = _RUNTIME_LEASES.get() or {}
+        if (lease := leases.get(key)) is not None and lease.active:
+            yield
+            return
+
+        paid_here = self._has_active_paid_lease()
+        if not paid_here:
+            self.start()
+        with self._lifecycle:
+            if self._state != "open" and not paid_here:
+                raise RuntimeError("PaymentRuntime is closed")
+            self._active_runtime_operations += 1
+        lease = _RuntimeLease()
+        token = _RUNTIME_LEASES.set({**leases, key: lease})
+        try:
+            yield
+        finally:
+            lease.active = False
+            _RUNTIME_LEASES.reset(token)
+            with self._lifecycle:
+                self._active_runtime_operations -= 1
+                should_close = (
+                    self._deferred_close
+                    and self._active_runtime_operations == 0
+                    and self._active_paid_operations == 0
+                )
+                if self._active_runtime_operations == 0:
+                    self._lifecycle.notify_all()
+            if should_close:
+                self._finish_close()
 
     def _ensure_open(self) -> None:
-        lease = (_PAID_LEASES.get() or {}).get(id(self))
-        if lease is not None and lease.active:
+        if self._has_active_runtime_lease() or self._has_active_paid_lease():
             return
         with self._lifecycle:
-            if self._closing:
+            if self._state != "open":
                 raise RuntimeError("PaymentRuntime is closed")
+
+    def _has_active_paid_lease(self) -> bool:
+        lease = (_PAID_LEASES.get() or {}).get(id(self))
+        return lease is not None and lease.active
+
+    def _has_active_runtime_lease(self) -> bool:
+        lease = (_RUNTIME_LEASES.get() or {}).get(id(self))
+        return lease is not None and lease.active
+
+    def _finish_close(self) -> None:
+        with self._lifecycle:
+            if self._state == "closed":
+                return
+            if self._finalizing:
+                while self._state != "closed":
+                    self._lifecycle.wait()
+                return
+            self._finalizing = True
+
+        error: BaseException | None = None
+        try:
+            self._bridge.cancel_pending()
+            if self._method_stack is not None:
+                self._bridge.run(self._teardown_methods())
+        except BaseException as cause:
+            error = cause
+        finally:
+            self._bridge.close()
+            with self._lifecycle:
+                self._state = "closed"
+                self._finalizing = False
+                self._lifecycle.notify_all()
+        if error is not None:
+            raise error
 
     def payment_transport(self, inner: httpx.AsyncBaseTransport | None = None) -> PaymentTransport:
         """Create an httpx transport using this runtime's payment methods."""
@@ -346,34 +558,54 @@ class PaymentRuntime:
 
     def wrap_client(self, client: httpx.Client) -> httpx.Client:
         """Make one existing Client payment-aware without global instrumentation."""
+        from mpp.instrumentation import _validate_httpx_compatibility
+
+        _validate_httpx_compatibility()
         client._mpp_payment_runtime = self  # type: ignore[attr-defined]
         if getattr(client, "_mpp_payment_wrapped", False):
             return client
 
-        original_send = client._send_single_request
+        original_send_single = client._send_single_request
+        original_send = client.send
 
-        def send(request: httpx.Request) -> httpx.Response:
+        def send_single(request: httpx.Request) -> httpx.Response:
             runtime = getattr(client, "_mpp_payment_runtime", self)
-            return runtime.send_httpx_sync(original_send, request)
+            return runtime.send_httpx_sync(original_send_single, request)
+
+        def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+            runtime = getattr(client, "_mpp_payment_runtime", self)
+            with runtime._httpx_operation_scope(request):
+                return original_send(request, *args, **kwargs)
 
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
-        client._send_single_request = send  # type: ignore[method-assign]
+        client._send_single_request = send_single  # type: ignore[method-assign]
+        client.send = send  # type: ignore[method-assign]
         return client
 
     def wrap_async_client(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
         """Make one existing AsyncClient payment-aware without global instrumentation."""
+        from mpp.instrumentation import _validate_httpx_compatibility
+
+        _validate_httpx_compatibility()
         client._mpp_payment_runtime = self  # type: ignore[attr-defined]
         if getattr(client, "_mpp_payment_wrapped", False):
             return client
 
-        original_send = client._send_single_request
+        original_send_single = client._send_single_request
+        original_send = client.send
 
-        async def send(request: httpx.Request) -> httpx.Response:
+        async def send_single(request: httpx.Request) -> httpx.Response:
             runtime = getattr(client, "_mpp_payment_runtime", self)
-            return await runtime.send_httpx(original_send, request)
+            return await runtime.send_httpx(original_send_single, request)
+
+        async def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+            runtime = getattr(client, "_mpp_payment_runtime", self)
+            with runtime._httpx_operation_scope(request):
+                return await original_send(request, *args, **kwargs)
 
         client._mpp_payment_wrapped = True  # type: ignore[attr-defined]
-        client._send_single_request = send  # type: ignore[method-assign]
+        client._send_single_request = send_single  # type: ignore[method-assign]
+        client.send = send  # type: ignore[method-assign]
         return client
 
     async def send_httpx(
@@ -382,12 +614,17 @@ class PaymentRuntime:
         request: httpx.Request,
     ) -> httpx.Response:
         """Send one httpx request with automatic 402 payment handling."""
-        transport = _BoundSendTransport(send)
-        response = await transport.handle_async_request(request)
-        return await self.payment_transport(inner=transport)._handle_async_response(
-            request,
-            response,
-        )
+        with self._httpx_operation_scope(request, reuse=True):
+            token = _HTTPX_ADAPTER_RUNTIME.set(id(self))
+            try:
+                transport = _BoundSendTransport(send)
+                response = await transport.handle_async_request(request)
+                return await self.payment_transport(inner=transport)._handle_async_response(
+                    request,
+                    response,
+                )
+            finally:
+                _HTTPX_ADAPTER_RUNTIME.reset(token)
 
     def send_httpx_sync(
         self,
@@ -395,47 +632,17 @@ class PaymentRuntime:
         request: httpx.Request,
     ) -> httpx.Response:
         """Send one sync httpx request with automatic 402 payment handling."""
-        transport = _BoundSyncSendTransport(send)
-        response = transport.handle_request(request)
-        return self.sync_payment_transport(inner=transport)._handle_response(request, response)
-
-    async def handle_async_http_response(
-        self,
-        method: Method,
-        context: AsyncHttpResponseContext,
-    ) -> httpx.Response:
-        """Run an optional method-specific async response hook."""
-        handler = getattr(method, "handle_async_http_response", None)
-        if handler is None:
-            return context.response
-        token = _PAYMENT_FLOW_ACTIVE.set(True)
-        try:
-            result = handler(context)
-            if inspect.isawaitable(result):
-                result = await result
-        finally:
-            _PAYMENT_FLOW_ACTIVE.reset(token)
-        if not isinstance(result, httpx.Response):
-            raise TypeError("handle_async_http_response must return an httpx.Response")
-        return result
-
-    def handle_http_response(
-        self,
-        method: Method,
-        context: SyncHttpResponseContext,
-    ) -> httpx.Response:
-        """Run an optional method-specific synchronous response hook."""
-        handler = getattr(method, "handle_http_response", None)
-        if handler is None:
-            return context.response
-        token = _PAYMENT_FLOW_ACTIVE.set(True)
-        try:
-            result = handler(context)
-        finally:
-            _PAYMENT_FLOW_ACTIVE.reset(token)
-        if not isinstance(result, httpx.Response):
-            raise TypeError("handle_http_response must return an httpx.Response")
-        return result
+        with self._httpx_operation_scope(request, reuse=True):
+            token = _HTTPX_ADAPTER_RUNTIME.set(id(self))
+            try:
+                transport = _BoundSyncSendTransport(send)
+                response = transport.handle_request(request)
+                return self.sync_payment_transport(inner=transport)._handle_response(
+                    request,
+                    response,
+                )
+            finally:
+                _HTTPX_ADAPTER_RUNTIME.reset(token)
 
     async def call_mcp_tool(
         self,
@@ -446,22 +653,8 @@ class PaymentRuntime:
         **kwargs: Any,
     ) -> Any:
         """Call an MCP tool with automatic payment handling, preserving result type."""
-        token = _MCP_FLOW_ACTIVE.set(True)
-        try:
-            return await self._call_mcp_tool(call_tool, name, arguments, *args, **kwargs)
-        finally:
-            _MCP_FLOW_ACTIVE.reset(token)
-
-    async def _call_mcp_tool(
-        self,
-        call_tool: Any,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
+        from mpp.errors import PaymentOutcomeUnknownError
         from mpp.extensions.mcp.client import (
-            PaymentOutcomeUnknownError,
             _extract_challenges,
             _extract_result_challenges,
             _is_payment_required_error,
@@ -505,14 +698,17 @@ class PaymentRuntime:
                 raise error from cause
             raise error
 
+        await self.astart()
         core_challenges = [item.to_core() for item in allowed_challenges]
         core_challenge = None
         method = None
+        attempt = None
         try:
             challenge, method = self.match_challenge(allowed_challenges)
             core_challenge = challenge.to_core()
             if _challenge_is_expired(challenge):
                 raise ValueError(f"Challenge expired at {challenge.expires}")
+            attempt = self._begin_mcp_payment(challenge, call_tool, name, arguments)
             core_credential = await self.create_credential(
                 core_challenge,
                 method,
@@ -523,13 +719,18 @@ class PaymentRuntime:
                 },
             )
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
-        except Exception as error:
+            self._set_mcp_payment_credential(attempt, core_credential)
+        except BaseException as error:
+            if attempt is not None:
+                self._discard_mcp_payment(attempt)
+            if not isinstance(error, Exception):
+                raise
             await self.emit_event(
                 PAYMENT_FAILED,
                 {
                     "challenge": core_challenge,
                     "challenges": core_challenges,
-                    "credential": None,
+                    "credential": getattr(error, "credential", None),
                     "error": error,
                     "method": method,
                     "response": cause,
@@ -538,35 +739,69 @@ class PaymentRuntime:
             )
             raise
 
-        retry_kwargs = dict(kwargs)
-        retry_meta = dict(retry_kwargs.get("meta") or {})
-        retry_meta.update(mcp_credential.to_meta())
-        retry_kwargs["meta"] = retry_meta
+        assert attempt is not None
+        try:
+            retry_kwargs = dict(kwargs)
+            retry_meta = dict(retry_kwargs.get("meta") or {})
+            retry_meta.update(mcp_credential.to_meta())
+            retry_kwargs["meta"] = retry_meta
+        except BaseException as error:
+            self._discard_mcp_payment(attempt)
+            if not isinstance(error, Exception):
+                raise
+            await self.emit_event(
+                PAYMENT_FAILED,
+                {
+                    "challenge": core_challenge,
+                    "challenges": core_challenges,
+                    "credential": core_credential,
+                    "error": error,
+                    "method": method,
+                    "response": cause,
+                    "protocol": "mcp",
+                },
+            )
+            raise
 
-        with self._paid_operation():
+        with self._mcp_paid_operation(attempt):
+            self._mark_mcp_payment_sent(attempt)
             try:
                 payment_response = await call_tool(name, arguments, *args, **retry_kwargs)
-            except Exception as error:
-                outcome_error = PaymentOutcomeUnknownError(challenge, error)
-                await self.emit_event(
-                    PAYMENT_FAILED,
-                    {
-                        "challenge": core_challenge,
-                        "challenges": core_challenges,
-                        "credential": core_credential,
-                        "error": outcome_error,
-                        "method": method,
-                        "response": cause,
-                        "protocol": "mcp",
-                    },
+            except BaseException as error:
+                self._mark_mcp_payment_unknown(attempt, error)
+                outcome_error = PaymentOutcomeUnknownError(
+                    challenge,
+                    error,
+                    credential=core_credential,
                 )
+                payload = {
+                    "challenge": core_challenge,
+                    "challenges": core_challenges,
+                    "credential": core_credential,
+                    "error": outcome_error,
+                    "method": method,
+                    "response": cause,
+                    "protocol": "mcp",
+                }
+                if not isinstance(error, Exception):
+                    try:
+                        await self.emit_event(PAYMENT_FAILED, payload)
+                    except BaseException:
+                        pass
+                    raise
+                await self.emit_event(PAYMENT_FAILED, payload)
                 raise outcome_error from error
 
             if _is_payment_required_result(payment_response):
                 cause_error = RuntimeError(
                     "Server returned another payment challenge after receiving a credential"
                 )
-                outcome_error = PaymentOutcomeUnknownError(challenge, cause_error)
+                self._mark_mcp_payment_unknown(attempt, cause_error)
+                outcome_error = PaymentOutcomeUnknownError(
+                    challenge,
+                    cause_error,
+                    credential=core_credential,
+                )
                 await self.emit_event(
                     PAYMENT_FAILED,
                     {
@@ -581,18 +816,106 @@ class PaymentRuntime:
                 )
                 raise outcome_error from cause_error
 
-            await self.emit_event(
-                PAYMENT_RESPONSE,
-                {
-                    "challenge": core_challenge,
-                    "challenges": core_challenges,
-                    "credential": core_credential,
-                    "method": method,
-                    "response": payment_response,
-                    "protocol": "mcp",
-                },
-            )
+            try:
+                await self.emit_event(
+                    PAYMENT_RESPONSE,
+                    {
+                        "challenge": core_challenge,
+                        "challenges": core_challenges,
+                        "credential": core_credential,
+                        "method": method,
+                        "response": payment_response,
+                        "protocol": "mcp",
+                    },
+                )
+            except BaseException as error:
+                self._mark_mcp_payment_unknown(attempt, error)
+                raise
+            self._complete_mcp_payment(attempt)
             return payment_response
+
+    @contextmanager
+    def _mcp_paid_operation(self, attempt: _McpPaymentAttempt):
+        try:
+            with self._paid_operation():
+                yield
+        except BaseException:
+            if not attempt.sent:
+                self._discard_mcp_payment(attempt)
+            raise
+
+    def _begin_mcp_payment(
+        self,
+        challenge: Any,
+        call_tool: Any,
+        name: str,
+        arguments: dict[str, Any] | None,
+    ) -> _McpPaymentAttempt:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        endpoint = getattr(call_tool, "__self__", None)
+        if endpoint is None:
+            endpoint = call_tool
+        challenge_key, operation_key = _mcp_attempt_keys(
+            challenge,
+            endpoint,
+            name,
+            arguments,
+        )
+        with self._mcp_attempt_lock:
+            existing = self._mcp_challenges.get(challenge_key)
+            if existing is None:
+                existing = self._mcp_unknown_operations.get(operation_key)
+            if existing is not None:
+                cause = existing.cause or RuntimeError(
+                    "A matching MCP payment attempt is already in progress"
+                )
+                raise PaymentOutcomeUnknownError(
+                    existing.challenge,
+                    cause,
+                    credential=existing.credential,
+                )
+            attempt = _McpPaymentAttempt(
+                challenge_key=challenge_key,
+                operation_key=operation_key,
+                challenge=challenge,
+                endpoint=endpoint,
+            )
+            self._mcp_challenges[challenge_key] = attempt
+            return attempt
+
+    def _set_mcp_payment_credential(
+        self,
+        attempt: _McpPaymentAttempt,
+        credential: Credential,
+    ) -> None:
+        with self._mcp_attempt_lock:
+            attempt.credential = credential
+
+    def _mark_mcp_payment_sent(self, attempt: _McpPaymentAttempt) -> None:
+        with self._mcp_attempt_lock:
+            attempt.sent = True
+
+    def _mark_mcp_payment_unknown(
+        self,
+        attempt: _McpPaymentAttempt,
+        cause: BaseException,
+    ) -> None:
+        with self._mcp_attempt_lock:
+            if attempt.cause is None:
+                attempt.cause = cause
+            self._mcp_challenges[attempt.challenge_key] = attempt
+            self._mcp_unknown_operations[attempt.operation_key] = attempt
+
+    def _discard_mcp_payment(self, attempt: _McpPaymentAttempt) -> None:
+        with self._mcp_attempt_lock:
+            if not attempt.sent and self._mcp_challenges.get(attempt.challenge_key) is attempt:
+                self._mcp_challenges.pop(attempt.challenge_key, None)
+
+    def _complete_mcp_payment(self, attempt: _McpPaymentAttempt) -> None:
+        with self._mcp_attempt_lock:
+            if attempt.cause is None and self._mcp_challenges.get(attempt.challenge_key) is attempt:
+                self._mcp_challenges.pop(attempt.challenge_key, None)
 
     def match_challenge(
         self,
@@ -635,7 +958,6 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
-        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         """Create a credential with method state owned by the runtime loop."""
         return await self.run_async(
@@ -643,7 +965,6 @@ class PaymentRuntime:
                 challenge,
                 method,
                 event_payload=event_payload,
-                context=context,
             )
         )
 
@@ -653,7 +974,6 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
-        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         """Synchronously create a credential on the runtime-owned event loop."""
         return self.run_sync(
@@ -661,28 +981,33 @@ class PaymentRuntime:
                 challenge,
                 method,
                 event_payload=event_payload,
-                context=context,
             )
         )
 
     def run_sync(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         """Run a coroutine on the runtime-owned loop and block for its result."""
+        entered = False
         try:
-            self._ensure_open()
+            with self._runtime_operation():
+                entered = True
+                return self._bridge.run(coroutine)
         except BaseException:
-            coroutine.close()
+            if not entered:
+                coroutine.close()
             raise
-        return self._bridge.run(coroutine)
 
     async def run_async(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
         """Run a coroutine on the runtime-owned loop without blocking."""
+        entered = False
         try:
-            self._ensure_open()
-            if self._async_inline:
-                return await coroutine
-            return await self._bridge.run_async(coroutine)
+            if not self._has_active_runtime_lease() and not self._has_active_paid_lease():
+                await self.astart()
+            with self._runtime_operation():
+                entered = True
+                return await self._bridge.run_async(coroutine)
         except BaseException:
-            coroutine.close()
+            if not entered:
+                coroutine.close()
             raise
 
     async def _create_credential(
@@ -691,7 +1016,6 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
-        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         token = _PAYMENT_FLOW_ACTIVE.set(True)
         try:
@@ -701,8 +1025,6 @@ class PaymentRuntime:
                 "method": method,
                 **(event_payload or {}),
             }
-            if context is not _CONTEXT_UNSET:
-                payload["context"] = context
             event_credential = await self._emit_event(
                 CHALLENGE_RECEIVED,
                 payload,
@@ -710,10 +1032,8 @@ class PaymentRuntime:
             )
             if isinstance(event_credential, Credential):
                 credential = event_credential
-            elif context is _CONTEXT_UNSET:
-                credential = await method.create_credential(challenge)
             else:
-                credential = await method.create_credential(challenge, context=context)  # type: ignore[call-arg]
+                credential = await method.create_credential(challenge)
             await self._emit_event(
                 CREDENTIAL_CREATED,
                 {**payload, "credential": credential},
@@ -745,24 +1065,331 @@ class PaymentRuntime:
 
     def close(self) -> None:
         """Release the runtime background loop."""
-        key = id(self)
-        lease = (_PAID_LEASES.get() or {}).get(key)
-        active_here = lease is not None and lease.active
+        active_here = self._has_active_paid_lease() or self._has_active_runtime_lease()
+        on_runtime_thread = self._bridge.is_current_thread()
         with self._lifecycle:
-            self._closing = True
+            while self._state == "starting":
+                if payment_flow_active():
+                    raise RuntimeError("Cannot close PaymentRuntime while method factories start")
+                self._lifecycle.wait()
+            if self._state == "closed":
+                return
+            if self._state == "closing":
+                if active_here or self._bridge.is_current_thread():
+                    return
+                while self._state != "closed":
+                    self._lifecycle.wait()
+                return
+            if on_runtime_thread and not active_here:
+                raise RuntimeError("Cannot close PaymentRuntime from unmanaged runtime-loop work")
+            self._state = "closing"
             if active_here:
+                self._deferred_close = True
                 return
             while self._active_paid_operations:
                 self._lifecycle.wait()
-        self._bridge.close()
+        self._finish_close()
 
     async def aclose(self) -> None:
         """Asynchronously release the runtime background loop."""
+        if self._bridge.is_current_thread():
+            self.close()
+            return
         await asyncio.to_thread(self.close)
 
     def allows_http_payment(self, url: httpx.URL) -> bool:
         """Return whether credentials may be created for an HTTP origin."""
         return self._allowed.http_url(url)
+
+    def _allows_all_http_origins(self) -> bool:
+        return self._allowed._allow_all
+
+    def _httpx_adapter_active(self) -> bool:
+        return _HTTPX_ADAPTER_RUNTIME.get() == id(self)
+
+    @contextmanager
+    def _httpx_operation_scope(
+        self,
+        request: httpx.Request,
+        *,
+        reuse: bool = False,
+    ):
+        operations = _HTTPX_OPERATIONS.get() or {}
+        if reuse and (operation := operations.get(id(self))) is not None and operation.active:
+            yield operation
+            return
+
+        operation = _HttpxOperation()
+        token = _HTTPX_OPERATIONS.set({**operations, id(self): operation})
+        try:
+            yield operation
+        except BaseException as cause:
+            self._complete_httpx_operation(operation, cause)
+            raise
+        else:
+            self._complete_httpx_operation(operation)
+        finally:
+            operation.active = False
+            _HTTPX_OPERATIONS.reset(token)
+
+    def _complete_httpx_operation(
+        self,
+        operation: _HttpxOperation,
+        cause: BaseException | None = None,
+    ) -> None:
+        for attempt in tuple(operation.attempts):
+            if cause is not None:
+                if attempt.sent:
+                    self._mark_http_payment_unknown(attempt, cause)
+                else:
+                    self._discard_http_payment(attempt)
+            else:
+                self._mark_http_send_complete(attempt)
+
+    def _begin_http_payment(
+        self,
+        challenge: Challenge,
+        request: httpx.Request,
+    ) -> _HttpPaymentAttempt:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        challenge_key, operation_key, idempotent = _http_attempt_keys(challenge, request)
+        operation = (_HTTPX_OPERATIONS.get() or {}).get(id(self))
+        marker = request.extensions.get(_HTTP_PAYMENT_ATTEMPT_EXTENSION)
+        if isinstance(marker, _HttpPaymentAttempt) and marker.runtime is not self:
+            cause = marker.cause or RuntimeError(
+                "A payment credential was already sent for this logical HTTPX request"
+            )
+            marker.runtime._mark_http_payment_unknown(marker, cause)
+            raise PaymentOutcomeUnknownError(
+                marker.challenge,
+                cause,
+                credential=marker.credential,
+                request=marker.request,
+            )
+        with self._http_attempt_lock:
+            existing: _HttpPaymentAttempt | None = None
+            if isinstance(marker, _HttpPaymentAttempt):
+                existing = marker
+                cause = marker.cause or RuntimeError(
+                    "A payment credential was already sent for this logical HTTPX request"
+                )
+                self._mark_http_payment_unknown_locked(marker, cause)
+            elif operation is not None and operation.payment_sent:
+                existing = next(
+                    (attempt for attempt in operation.attempts if attempt.sent),
+                    None,
+                )
+                if existing is not None:
+                    cause = existing.cause or RuntimeError(
+                        "A payment credential was already sent for this logical HTTPX request"
+                    )
+                    self._mark_http_payment_unknown_locked(existing, cause)
+            if existing is None:
+                existing = self._http_challenges.get(challenge_key)
+            if existing is None and idempotent:
+                existing = self._http_idempotent_operations.get(operation_key)
+            if existing is None:
+                existing = self._http_unknown_operations.get(operation_key)
+            if existing is not None:
+                cause = existing.cause or RuntimeError(
+                    "A matching payment attempt is already in progress"
+                )
+                raise PaymentOutcomeUnknownError(
+                    existing.challenge,
+                    cause,
+                    credential=existing.credential,
+                    request=existing.request,
+                )
+            attempt = _HttpPaymentAttempt(
+                runtime=self,
+                challenge_key=challenge_key,
+                operation_key=operation_key,
+                challenge=challenge,
+                request=request,
+                operation=operation,
+                idempotent=idempotent,
+            )
+            self._http_challenges[challenge_key] = attempt
+            if idempotent:
+                self._http_idempotent_operations[operation_key] = attempt
+            if operation is not None:
+                operation.attempts.append(attempt)
+            return attempt
+
+    def _set_http_payment_credential(
+        self,
+        attempt: _HttpPaymentAttempt,
+        credential: Credential,
+    ) -> None:
+        with self._http_attempt_lock:
+            attempt.credential = credential
+
+    def _mark_http_payment_sent(
+        self,
+        attempt: _HttpPaymentAttempt,
+        retry_request: httpx.Request,
+    ) -> None:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        with self._http_attempt_lock:
+            existing = self._http_unknown_operations.get(attempt.operation_key)
+            if existing is not None and existing is not attempt:
+                self._remove_http_attempt_locked(attempt)
+                raise PaymentOutcomeUnknownError(
+                    existing.challenge,
+                    existing.cause or RuntimeError("A matching payment outcome is already unknown"),
+                    credential=existing.credential,
+                    request=existing.request,
+                )
+            attempt.sent = True
+            if attempt.operation is not None:
+                attempt.operation.payment_sent = True
+            attempt.request.extensions[_HTTP_PAYMENT_ATTEMPT_EXTENSION] = attempt
+            retry_request.extensions[_HTTP_PAYMENT_ATTEMPT_EXTENSION] = attempt
+
+    def _mark_http_payment_unknown(
+        self,
+        attempt: _HttpPaymentAttempt,
+        cause: BaseException,
+    ) -> None:
+        with self._http_attempt_lock:
+            self._mark_http_payment_unknown_locked(attempt, cause)
+
+    def _mark_http_payment_unknown_locked(
+        self,
+        attempt: _HttpPaymentAttempt,
+        cause: BaseException,
+    ) -> None:
+        if attempt.cause is None:
+            attempt.cause = cause
+        self._http_challenges[attempt.challenge_key] = attempt
+        self._http_unknown_operations[attempt.operation_key] = attempt
+
+    def _mark_http_response_body_complete(self, attempt: _HttpPaymentAttempt) -> None:
+        with self._http_attempt_lock:
+            attempt.body_complete = True
+            self._remove_completed_http_attempt_locked(attempt)
+
+    def _mark_http_send_complete(self, attempt: _HttpPaymentAttempt) -> None:
+        with self._http_attempt_lock:
+            attempt.send_complete = True
+            self._remove_completed_http_attempt_locked(attempt)
+
+    def _discard_http_payment(self, attempt: _HttpPaymentAttempt) -> None:
+        with self._http_attempt_lock:
+            if not attempt.sent:
+                self._remove_http_attempt_locked(attempt)
+
+    def _remove_completed_http_attempt_locked(self, attempt: _HttpPaymentAttempt) -> None:
+        if attempt.cause is None and attempt.body_complete and attempt.send_complete:
+            self._remove_http_attempt_locked(attempt)
+
+    def _remove_http_attempt_locked(self, attempt: _HttpPaymentAttempt) -> None:
+        if self._http_challenges.get(attempt.challenge_key) is attempt:
+            self._http_challenges.pop(attempt.challenge_key, None)
+        if (
+            attempt.idempotent
+            and self._http_idempotent_operations.get(attempt.operation_key) is attempt
+        ):
+            self._http_idempotent_operations.pop(attempt.operation_key, None)
+
+
+class _CallerLoopRuntime(PaymentRuntime):
+    """Compatibility runtime for legacy async ``methods=`` entry points."""
+
+    def start(self) -> Self:
+        with self._lifecycle:
+            if self._state == "new":
+                self._state = "open"
+            elif self._state != "open":
+                raise RuntimeError("PaymentRuntime is closed")
+        return self
+
+    async def astart(self) -> Self:
+        return self.start()
+
+    def run_sync(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        coroutine.close()
+        raise RuntimeError("Caller-loop payment runtime cannot be used synchronously")
+
+    async def run_async(self, coroutine: Coroutine[Any, Any, _T]) -> _T:
+        entered = False
+        try:
+            with self._runtime_operation():
+                entered = True
+                return await coroutine
+        except BaseException:
+            if not entered:
+                coroutine.close()
+            raise
+
+
+def _http_attempt_keys(
+    challenge: Challenge,
+    request: httpx.Request,
+) -> tuple[str, str, bool]:
+    origin = repr(_httpx_origin(request.url))
+    challenge_key = _http_attempt_digest("challenge", origin, challenge.id)
+    if idempotency_key := request.headers.get("idempotency-key"):
+        idempotent = True
+        operation_key = _http_attempt_digest(
+            "idempotency",
+            request.method,
+            str(request.url).split("#", 1)[0],
+            idempotency_key,
+        )
+    else:
+        idempotent = False
+        try:
+            body = request.content
+        except httpx.RequestNotRead:
+            body = b""
+        operation_key = _http_attempt_digest(
+            "request",
+            request.method,
+            str(request.url).split("#", 1)[0],
+            hashlib.sha256(body).hexdigest(),
+        )
+    return challenge_key, operation_key, idempotent
+
+
+def _mcp_attempt_keys(
+    challenge: Any,
+    endpoint: Any,
+    name: str,
+    arguments: dict[str, Any] | None,
+) -> tuple[str, str]:
+    realm = (
+        repr(origin)
+        if (origin := _origin(challenge.realm)) is not None
+        else (_bare_host(challenge.realm) or challenge.realm.casefold())
+    )
+    challenge_key = _http_attempt_digest(
+        "mcp-challenge",
+        realm,
+        challenge.id,
+    )
+    try:
+        arguments_key = json.dumps(
+            arguments or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        arguments_key = repr(arguments)
+    operation_key = _http_attempt_digest(
+        "mcp-operation",
+        str(id(endpoint)),
+        name,
+        arguments_key,
+    )
+    return challenge_key, operation_key
+
+
+def _http_attempt_digest(*parts: str) -> str:
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
 
 def _intent_names(method: Method) -> set[str] | None:

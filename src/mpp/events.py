@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Final, Literal, NotRequired, TypedDict, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, overload
 
 if TYPE_CHECKING:
     import httpx
@@ -61,7 +61,6 @@ class ClientChallengeReceivedPayload(TypedDict):
     protocol: Literal["http"]
     request: httpx.Request
     response: httpx.Response
-    context: NotRequired[Any]
 
 
 class ClientCredentialCreatedPayload(ClientChallengeReceivedPayload):

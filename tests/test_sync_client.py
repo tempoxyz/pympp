@@ -13,9 +13,9 @@ import pytest
 
 from mpp import Challenge, Credential
 from mpp.client import SyncPaymentTransport
-from mpp.errors import PaymentError
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.instrumentation import instrument
-from mpp.runtime import PaymentRuntime, payment_flow_active
+from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
 
@@ -252,12 +252,18 @@ class TestSyncPaymentTransport:
         failed: list[dict[str, Any]] = []
         transport.on_payment_failed(failed.append)
         try:
-            with pytest.raises(RuntimeError, match=f"{failure_stage} failed") as raised:
+            expected_error = (
+                PaymentOutcomeUnknownError if failure_stage == "retry" else RuntimeError
+            )
+            with pytest.raises(expected_error) as raised:
                 transport.handle_request(httpx.Request("GET", "https://example.com"))
         finally:
             transport.close()
 
-        assert raised.value is error
+        if failure_stage == "retry":
+            assert raised.value.__cause__ is error
+        else:
+            assert raised.value is error
         assert len(requests) == (2 if failure_stage == "retry" else 1)
         assert len(failed) == 1
         assert failed[0]["challenge"].id == "test-id"
@@ -265,7 +271,20 @@ class TestSyncPaymentTransport:
             assert failed[0]["credential"] is None
         else:
             assert failed[0]["credential"] is not None
-        assert failed[0]["error"] is error
+        assert isinstance(failed[0]["error"], expected_error)
+
+    def test_repeated_402_after_credential_has_unknown_outcome(self) -> None:
+        method = MockMethod()
+        inner = MockTransport([payment_required(), payment_required()])
+        transport = SyncPaymentTransport(methods=[method], inner=inner)
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError, match="Do not blindly retry"):
+                transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert len(inner.requests) == 2
+        method.create_credential.assert_awaited_once()
 
     def test_lifecycle_handler_can_supply_sync_credential(self) -> None:
         method = MockMethod()
@@ -300,100 +319,6 @@ class TestSyncPaymentTransport:
             runtime.close()
 
         assert inner.closed
-
-    def test_sync_response_hook_runs_for_credentialed_402(self) -> None:
-        contexts: list[object | None] = []
-
-        class HookMethod:
-            name = "tempo"
-            _intents = {"charge": True}
-
-            async def create_credential(
-                self,
-                challenge: Challenge,
-                *,
-                context: object | None = None,
-            ):
-                contexts.append(context)
-                return make_credential({"context": context}, challenge_id=challenge.id)
-
-            def handle_http_response(self, exchange):
-                exchange.create_credential({"action": "voucher"})
-                exchange.response.close()
-                return httpx.Response(200, content=b"handled")
-
-        paid_response = httpx.Response(402)
-        inner = MockTransport([payment_required(), paid_response])
-        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
-        try:
-            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
-        finally:
-            transport.close()
-
-        assert response.content == b"handled"
-        assert response.request.url == httpx.URL("https://example.com/paid")
-        assert contexts == [None, {"action": "voucher"}]
-        assert paid_response.is_closed
-
-    def test_sync_response_hook_can_run_async_and_refetch_once(self) -> None:
-        hook_calls = 0
-
-        class HookMethod(MockMethod):
-            def handle_http_response(self, exchange):
-                nonlocal hook_calls
-                hook_calls += 1
-                assert payment_flow_active()
-                assert exchange.run_sync(asyncio.sleep(0, result="ok")) == "ok"
-                if hook_calls == 2:
-                    assert exchange.refetch is None
-                    return exchange.response
-                assert exchange.refetch is not None
-                return exchange.refetch()
-
-        inner = MockTransport(
-            [
-                payment_required(),
-                httpx.Response(204),
-                payment_required(),
-                httpx.Response(200, content=b"stream"),
-            ]
-        )
-        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
-        events: list[tuple[int, bool]] = []
-        transport.on_payment_response(
-            lambda payload: events.append((payload["response"].status_code, payment_flow_active()))
-        )
-        try:
-            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
-        finally:
-            transport.close()
-
-        assert response.content == b"stream"
-        assert response.request.url == httpx.URL("https://example.com/paid")
-        assert events == [(204, True), (200, True)]
-        assert len(inner.requests) == 4
-
-    def test_replacement_response_can_own_paid_stream(self) -> None:
-        class HookMethod(MockMethod):
-            def handle_http_response(self, exchange):
-                return httpx.Response(
-                    exchange.response.status_code,
-                    headers=exchange.response.headers,
-                    stream=exchange.response.stream,
-                )
-
-        stream = TrackingStream([b"one", b"two"])
-        inner = MockTransport([payment_required(), httpx.Response(200, stream=stream)])
-        transport = SyncPaymentTransport(methods=[HookMethod()], inner=inner)
-        try:
-            response = transport.handle_request(httpx.Request("GET", "https://example.com/paid"))
-            assert stream.started is False
-            assert response.read() == b"onetwo"
-            response.close()
-        finally:
-            transport.close()
-
-        assert stream.closed
 
 
 class TestWrappedSyncClient:
@@ -660,7 +585,10 @@ def test_instrumented_openai_sync_streaming_in_worker_thread() -> None:
             stream=paid_stream,
         )
 
-    runtime = PaymentRuntime([MockMethod()])
+    runtime = PaymentRuntime(
+        [MockMethod()],
+        allowed_origins=["https://example.com"],
+    )
     http_client = httpx.Client(transport=httpx.MockTransport(handler))
     client = openai.OpenAI(
         api_key="test",
@@ -668,7 +596,7 @@ def test_instrumented_openai_sync_streaming_in_worker_thread() -> None:
         http_client=http_client,
         max_retries=0,
     )
-    handle = instrument(runtime, mcp=False, scope="process")
+    handle = instrument(runtime, scope="process")
     result: dict[str, Any] = {}
 
     def run() -> None:

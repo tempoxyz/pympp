@@ -10,14 +10,13 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
-from mpp.errors import PaymentError
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -29,14 +28,14 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.runtime import (
-    AsyncHttpResponseContext,
     Method,
     PaymentRuntime,
+    _CallerLoopRuntime,
     _challenge_is_expired,
+    _HttpPaymentAttempt,
 )
 
 logger = logging.getLogger(__name__)
-_REFETCHED = "mpp.response_hook_refetched"
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -78,14 +77,13 @@ def _copy_request(
     request: httpx.Request,
     *,
     headers: httpx.Headers | None = None,
-    extensions: dict[str, Any] | None = None,
 ) -> httpx.Request:
     return httpx.Request(
         method=request.method,
         url=request.url,
         headers=request.headers if headers is None else headers,
         content=request.content,
-        extensions=request.extensions if extensions is None else extensions,
+        extensions=request.extensions,
     )
 
 
@@ -107,6 +105,73 @@ def _payment_challenges(response: httpx.Response) -> tuple[list[Challenge], Pars
         except ParseError as error:
             parse_error = error
     return challenges, parse_error
+
+
+class _AsyncOutcomeStream(httpx.AsyncByteStream):
+    def __init__(
+        self,
+        stream: Any,
+        runtime: PaymentRuntime,
+        attempt: _HttpPaymentAttempt,
+    ) -> None:
+        self._stream = stream
+        self._runtime = runtime
+        self._attempt = attempt
+        self._complete = False
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self._stream:
+                yield chunk
+        except BaseException as error:
+            self._runtime._mark_http_payment_unknown(self._attempt, error)
+            raise
+        else:
+            self._complete = True
+            self._runtime._mark_http_response_body_complete(self._attempt)
+
+    async def aclose(self) -> None:
+        try:
+            await self._stream.aclose()
+        finally:
+            if not self._complete:
+                self._runtime._mark_http_payment_unknown(
+                    self._attempt,
+                    RuntimeError("Paid response body was not fully consumed"),
+                )
+
+
+class _SyncOutcomeStream(httpx.SyncByteStream):
+    def __init__(
+        self,
+        stream: Any,
+        runtime: PaymentRuntime,
+        attempt: _HttpPaymentAttempt,
+    ) -> None:
+        self._stream = stream
+        self._runtime = runtime
+        self._attempt = attempt
+        self._complete = False
+
+    def __iter__(self):
+        try:
+            yield from self._stream
+        except BaseException as error:
+            self._runtime._mark_http_payment_unknown(self._attempt, error)
+            raise
+        else:
+            self._complete = True
+            self._runtime._mark_http_response_body_complete(self._attempt)
+
+    def close(self) -> None:
+        try:
+            self._stream.close()
+        finally:
+            if not self._complete:
+                self._runtime._mark_http_payment_unknown(
+                    self._attempt,
+                    RuntimeError("Paid response body was not fully consumed"),
+                )
 
 
 class PaymentTransport(httpx.AsyncBaseTransport):
@@ -144,7 +209,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         else:
             if methods is None:
                 raise ValueError("Pass methods or runtime")
-            self._runtime = PaymentRuntime(methods or [], events=events, _async_inline=True)
+            self._runtime = _CallerLoopRuntime(methods or [], events=events)
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
 
@@ -170,8 +235,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        response = await self._inner.handle_async_request(request)
-        return await self._handle_async_response(request, response)
+        with self._runtime._httpx_operation_scope(
+            request,
+            reuse=self._runtime._httpx_adapter_active(),
+        ):
+            response = await self._inner.handle_async_request(request)
+            return await self._handle_async_response(request, response)
 
     async def _handle_async_response(
         self,
@@ -191,6 +260,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             return response
 
         challenges, parse_error = _payment_challenges(response)
+        if challenges:
+            await self._runtime.astart()
 
         try:
             challenge, matched_method = self._runtime.match_challenge(
@@ -260,6 +331,23 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             raise error from cause
 
         try:
+            attempt = self._runtime._begin_http_payment(challenge, challenged_request)
+        except PaymentOutcomeUnknownError as error:
+            await self._runtime.emit_event(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=challenge,
+                    challenges=challenges,
+                    credential=error.credential,
+                    error=error,
+                    method=matched_method,
+                    request=challenged_request,
+                    response=response,
+                ),
+            )
+            raise
+
+        try:
             credential = await self._runtime.create_credential(
                 challenge,
                 matched_method,
@@ -271,7 +359,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 },
             )
             auth_header = credential.to_authorization()
-        except Exception as error:
+        except BaseException as error:
+            self._runtime._discard_http_payment(attempt)
+            if not isinstance(error, Exception):
+                raise
             await self._runtime.emit_event(
                 PAYMENT_FAILED,
                 _client_payment_failed_payload(
@@ -285,122 +376,55 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 ),
             )
             raise
+        self._runtime._set_http_payment_credential(attempt, credential)
 
         headers = httpx.Headers(challenged_request.headers)
         headers["Authorization"] = auth_header
 
         retry_request = _copy_request(challenged_request, headers=headers)
 
-        with self._runtime._paid_operation():
-            try:
-                payment_response = await self._inner.handle_async_request(retry_request)
-            except Exception as error:
-                await self._runtime.emit_event(
-                    PAYMENT_FAILED,
-                    _client_payment_failed_payload(
-                        challenge=challenge,
-                        challenges=challenges,
+        try:
+            with self._runtime._paid_operation():
+                self._runtime._mark_http_payment_sent(attempt, retry_request)
+                try:
+                    payment_response = await self._inner.handle_async_request(retry_request)
+                except BaseException as cause:
+                    self._runtime._mark_http_payment_unknown(attempt, cause)
+                    if not isinstance(cause, Exception):
+                        raise
+                    error = PaymentOutcomeUnknownError(
+                        challenge,
+                        cause,
                         credential=credential,
-                        error=error,
-                        method=matched_method,
                         request=challenged_request,
-                        response=response,
-                    ),
-                )
-                raise
-
-            _bind_response_request(payment_response, challenged_request)
-
-            event_emitted = False
-
-            async def emit_payment_response(event_response: httpx.Response) -> None:
-                nonlocal event_emitted
-                if event_emitted or not event_response.is_success:
-                    return
-                event_emitted = True
-                _bind_response_request(event_response, challenged_request)
-                await self._runtime.emit_event(
-                    PAYMENT_RESPONSE,
-                    {
-                        "challenge": challenge,
-                        "challenges": challenges,
-                        "credential": credential,
-                        "method": matched_method,
-                        "request": challenged_request,
-                        "response": event_response,
-                        "protocol": "http",
-                    },
-                )
-
-            async def create_credential(context: Any) -> Credential:
-                return await self._runtime.create_credential(
-                    challenge,
-                    matched_method,
-                    context=context,
-                    event_payload={
-                        "challenges": challenges,
-                        "request": challenged_request,
-                        "response": payment_response,
-                        "protocol": "http",
-                    },
-                )
-
-            async def send(request: httpx.Request) -> httpx.Response:
-                if not self._runtime.allows_http_payment(request.url):
-                    raise PaymentError("HTTP response hook request is outside allowed origins")
-                for key, value in challenged_request.extensions.items():
-                    request.extensions.setdefault(key, value)
-                hook_response = await self._inner.handle_async_request(request)
-                _bind_response_request(hook_response, request)
-                return hook_response
-
-            refetch: Callable[[], Awaitable[httpx.Response]] | None
-            refetched_response: httpx.Response | None = None
-            if not challenged_request.extensions.get(_REFETCHED):
-                refetched = False
-
-                async def do_refetch() -> httpx.Response:
-                    nonlocal event_emitted, refetched, refetched_response
-                    if refetched:
-                        raise PaymentError("Payment response can only be refetched once")
-                    refetched = True
-                    await emit_payment_response(payment_response)
-                    event_emitted = True
-                    await payment_response.aclose()
-                    extensions = dict(challenged_request.extensions)
-                    extensions[_REFETCHED] = True
-                    refetched_response = await self.handle_async_request(
-                        _copy_request(challenged_request, extensions=extensions)
                     )
-                    return refetched_response
+                    await self._runtime.emit_event(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=challenge,
+                            challenges=challenges,
+                            credential=credential,
+                            error=error,
+                            method=matched_method,
+                            request=challenged_request,
+                            response=response,
+                        ),
+                    )
+                    raise error from cause
 
-                refetch = do_refetch
-            else:
-                refetch = None
+                _bind_response_request(payment_response, retry_request)
 
-            final_response: httpx.Response | None = None
-            try:
-                final_response = await self._runtime.handle_async_http_response(
-                    matched_method,
-                    AsyncHttpResponseContext(
-                        challenge=challenge,
+                if payment_response.status_code == 402:
+                    cause = RuntimeError(
+                        "Server returned another payment challenge after receiving a credential"
+                    )
+                    self._runtime._mark_http_payment_unknown(attempt, cause)
+                    error = PaymentOutcomeUnknownError(
+                        challenge,
+                        cause,
                         credential=credential,
                         request=challenged_request,
-                        response=payment_response,
-                        send=send,
-                        refetch=refetch,
-                        create_credential=create_credential,
-                        run_async=self._runtime.run_async,
-                    ),
-                )
-                await emit_payment_response(final_response)
-            except BaseException as error:
-                closed: set[int] = set()
-                for candidate in (final_response, refetched_response, payment_response):
-                    if candidate is not None and id(candidate) not in closed:
-                        closed.add(id(candidate))
-                        await candidate.aclose()
-                if isinstance(error, Exception):
+                    )
                     await self._runtime.emit_event(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(
@@ -413,11 +437,58 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             response=payment_response,
                         ),
                     )
-                raise
+                    await payment_response.aclose()
+                    raise error from cause
 
-            assert final_response is not None
-            _bind_response_request(final_response, challenged_request)
-            return final_response
+                if payment_response.status_code >= 400:
+                    cause = RuntimeError(
+                        f"Credentialed request returned HTTP {payment_response.status_code}"
+                    )
+                    self._runtime._mark_http_payment_unknown(attempt, cause)
+                    await self._runtime.emit_event(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=challenge,
+                            challenges=challenges,
+                            credential=credential,
+                            error=PaymentOutcomeUnknownError(
+                                challenge,
+                                cause,
+                                credential=credential,
+                                request=challenged_request,
+                            ),
+                            method=matched_method,
+                            request=challenged_request,
+                            response=payment_response,
+                        ),
+                    )
+                elif payment_response.is_stream_consumed:
+                    self._runtime._mark_http_response_body_complete(attempt)
+                else:
+                    payment_response.stream = _AsyncOutcomeStream(
+                        payment_response.stream,
+                        self._runtime,
+                        attempt,
+                    )
+
+                if payment_response.is_success:
+                    await self._runtime.emit_event(
+                        PAYMENT_RESPONSE,
+                        {
+                            "challenge": challenge,
+                            "challenges": challenges,
+                            "credential": credential,
+                            "method": matched_method,
+                            "request": challenged_request,
+                            "response": payment_response,
+                            "protocol": "http",
+                        },
+                    )
+                return payment_response
+        except BaseException:
+            if not attempt.sent:
+                self._runtime._discard_http_payment(attempt)
+            raise
 
     async def aclose(self) -> None:
         """Close the inner transport."""

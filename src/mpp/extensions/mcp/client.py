@@ -30,28 +30,16 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
+from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_REQUIRED,
     META_PAYMENT_REQUIRED,
     META_RECEIPT,
 )
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
-from mpp.runtime import Method, PaymentRuntime
+from mpp.runtime import Method, PaymentRuntime, _CallerLoopRuntime
 
 logger = logging.getLogger(__name__)
-
-
-class PaymentOutcomeUnknownError(RuntimeError):
-    """Raised when a paid retry fails after a credential was attached."""
-
-    def __init__(self, challenge: MCPChallenge, cause: Exception) -> None:
-        self.challenge = challenge
-        self.cause = cause
-        super().__init__(
-            "Tool call failed after sending a payment credential; "
-            f"payment outcome is unknown for challenge {challenge.id}. "
-            "Do not blindly retry."
-        )
 
 
 def _error_detail(error: Exception) -> Any:
@@ -209,7 +197,7 @@ class McpClient:
         else:
             if methods is None:
                 raise ValueError("Pass methods or runtime")
-            self._runtime = PaymentRuntime(methods, _async_inline=True)
+            self._runtime = _CallerLoopRuntime(methods)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)

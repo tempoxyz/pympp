@@ -32,6 +32,7 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
+    PaymentOutcomeUnknownError,
     PaymentRequiredError,
     VerificationFailedError,
 )
@@ -365,9 +366,6 @@ class Credential:
 class Receipt:
     """Payment receipt returned after verification.
 
-    Method-specific top-level fields are stored in ``extensions``. The ``extra``
-    field represents the distinct, nested ``extra`` wire field.
-
     Example:
         from datetime import datetime, UTC
 
@@ -385,7 +383,6 @@ class Receipt:
     external_id: str | None = None
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
-    extensions: dict[str, Any] | None = None
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:

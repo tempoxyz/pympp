@@ -10,8 +10,8 @@ from pytest_httpx import HTTPXMock
 
 from mpp import Challenge, Credential
 from mpp.client import Client, PaymentTransport, get, post, request
-from mpp.errors import PaymentError
-from mpp.runtime import PaymentRuntime, payment_flow_active
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
+from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
 
@@ -56,21 +56,6 @@ class ConsumingTransport(httpx.AsyncBaseTransport):
         stream = cast(httpx.AsyncByteStream, request.stream)
         self.bodies.append(b"".join([chunk async for chunk in stream]))
         return self.responses.pop(0)
-
-
-class TrackingAsyncStream(httpx.AsyncByteStream):
-    def __init__(self, chunks: list[bytes]) -> None:
-        self.chunks = chunks
-        self.started = False
-        self.closed = False
-
-    async def __aiter__(self):
-        self.started = True
-        for chunk in self.chunks:
-            yield chunk
-
-    async def aclose(self) -> None:
-        self.closed = True
 
 
 def payment_challenge_header() -> str:
@@ -188,195 +173,6 @@ class TestPaymentTransport:
             await transport.aclose()
 
         assert response.status_code == 200
-
-    @pytest.mark.asyncio
-    async def test_async_response_hook_can_send_create_and_refetch(self) -> None:
-        caller_loop = asyncio.get_running_loop()
-        contexts: list[object | None] = []
-        method_loops: list[asyncio.AbstractEventLoop] = []
-        hook_loops: list[asyncio.AbstractEventLoop] = []
-        hook_calls = 0
-
-        async def running_loop() -> asyncio.AbstractEventLoop:
-            return asyncio.get_running_loop()
-
-        class HookMethod:
-            name = "tempo"
-            _intents = {"charge": True}
-
-            async def create_credential(
-                self,
-                challenge: Challenge,
-                *,
-                context: object | None = None,
-            ) -> Credential:
-                contexts.append(context)
-                method_loops.append(asyncio.get_running_loop())
-                return make_credential({"context": context}, challenge_id=challenge.id)
-
-            async def handle_async_http_response(self, exchange):
-                nonlocal hook_calls
-                hook_calls += 1
-                hook_loops.append(asyncio.get_running_loop())
-                assert payment_flow_active()
-                assert await exchange.run_async(running_loop()) is method_loops[-1]
-                if hook_calls == 2:
-                    assert exchange.refetch is None
-                    return exchange.response
-                credential = await exchange.create_credential({"action": "voucher"})
-                await exchange.response.aclose()
-                management = await exchange.send(
-                    httpx.Request(
-                        "POST",
-                        exchange.request.url,
-                        headers={"authorization": credential.to_authorization()},
-                    )
-                )
-                await management.aread()
-                assert exchange.refetch is not None
-                return await exchange.refetch()
-
-        paid_response = httpx.Response(204)
-        inner = MockTransport(
-            [
-                httpx.Response(
-                    402,
-                    headers={"www-authenticate": payment_challenge_header()},
-                ),
-                paid_response,
-                httpx.Response(204),
-                httpx.Response(
-                    402,
-                    headers={"www-authenticate": payment_challenge_header()},
-                ),
-                httpx.Response(200, content=b"stream"),
-            ]
-        )
-        transport = PaymentTransport(methods=[HookMethod()], inner=inner)
-        events: list[tuple[object | None, int, bool]] = []
-        transport.on_payment_response(
-            lambda payload: events.append(
-                (
-                    payload["credential"].payload["context"],
-                    payload["response"].status_code,
-                    payment_flow_active(),
-                )
-            )
-        )
-
-        response = await transport.handle_async_request(
-            httpx.Request(
-                "GET",
-                "https://example.com/paid",
-                extensions={"timeout": {"read": 1.0}},
-            )
-        )
-
-        assert response.content == b"stream"
-        assert response.request.url == httpx.URL("https://example.com/paid")
-        assert contexts == [None, {"action": "voucher"}, None]
-        assert set(hook_loops) == {caller_loop}
-        assert len(set(method_loops)) == 1
-        assert method_loops[0] is caller_loop
-        assert events == [(None, 204, True), (None, 200, True)]
-        assert len(inner.requests) == 5
-        assert inner.requests[2].headers["authorization"].startswith("Payment ")
-        assert inner.requests[2].extensions["timeout"] == {"read": 1.0}
-        assert "authorization" not in inner.requests[3].headers
-        assert paid_response.is_closed
-
-    @pytest.mark.asyncio
-    async def test_response_hook_send_respects_origin_policy(self) -> None:
-        class HookMethod(MockMethod):
-            async def handle_async_http_response(self, exchange):
-                await exchange.send(httpx.Request("POST", "https://other.example/manage"))
-
-        paid_response = httpx.Response(200)
-        runtime = PaymentRuntime(
-            [HookMethod()],
-            allowed_origins=["https://example.com"],
-        )
-        transport = PaymentTransport(
-            runtime=runtime,
-            inner=MockTransport(
-                [
-                    httpx.Response(
-                        402,
-                        headers={"www-authenticate": payment_challenge_header()},
-                    ),
-                    paid_response,
-                ]
-            ),
-        )
-
-        with pytest.raises(PaymentError, match="outside allowed origins"):
-            await transport.handle_async_request(httpx.Request("GET", "https://example.com/paid"))
-
-        assert paid_response.is_closed
-        await runtime.aclose()
-
-    @pytest.mark.asyncio
-    async def test_replacement_response_can_own_paid_stream(self) -> None:
-        class HookMethod(MockMethod):
-            async def handle_async_http_response(self, exchange):
-                return httpx.Response(
-                    exchange.response.status_code,
-                    headers=exchange.response.headers,
-                    stream=exchange.response.stream,
-                )
-
-        stream = TrackingAsyncStream([b"one", b"two"])
-        inner = MockTransport(
-            [
-                httpx.Response(
-                    402,
-                    headers={"www-authenticate": payment_challenge_header()},
-                ),
-                httpx.Response(200, stream=stream),
-            ]
-        )
-        transport = PaymentTransport(methods=[HookMethod()], inner=inner)
-
-        response = await transport.handle_async_request(
-            httpx.Request("GET", "https://example.com/paid")
-        )
-        assert stream.started is False
-        assert await response.aread() == b"onetwo"
-        await response.aclose()
-
-        assert stream.closed
-
-    @pytest.mark.asyncio
-    async def test_cancelling_response_hook_closes_paid_response(self) -> None:
-        started = asyncio.Event()
-
-        class HookMethod(MockMethod):
-            async def handle_async_http_response(self, exchange):
-                started.set()
-                await asyncio.Event().wait()
-
-        stream = TrackingAsyncStream([b"never read"])
-        transport = PaymentTransport(
-            methods=[HookMethod()],
-            inner=MockTransport(
-                [
-                    httpx.Response(
-                        402,
-                        headers={"www-authenticate": payment_challenge_header()},
-                    ),
-                    httpx.Response(200, stream=stream),
-                ]
-            ),
-        )
-        task = asyncio.create_task(
-            transport.handle_async_request(httpx.Request("GET", "https://example.com/paid"))
-        )
-        await started.wait()
-        task.cancel()
-
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert stream.closed
 
     @pytest.mark.asyncio
     async def test_delegates_payment_matching_to_runtime(self) -> None:
@@ -981,10 +777,28 @@ class TestPaymentTransport:
             )
         )
 
-        with pytest.raises(RuntimeError, match="network failed"):
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
             await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
-        assert events == ["failed:test-id:RuntimeError"]
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        assert events == ["failed:test-id:PaymentOutcomeUnknownError"]
+
+    @pytest.mark.asyncio
+    async def test_repeated_402_after_credential_has_unknown_outcome(self) -> None:
+        method = MockMethod()
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": payment_challenge_header()}),
+                httpx.Response(402, headers={"www-authenticate": payment_challenge_header()}),
+            ]
+        )
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        with pytest.raises(PaymentOutcomeUnknownError, match="Do not blindly retry"):
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert len(inner.requests) == 2
+        method.create_credential.assert_awaited_once()
 
 
 class TestClient:

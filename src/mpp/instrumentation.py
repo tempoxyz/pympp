@@ -1,29 +1,42 @@
-"""Scoped instrumentation for payment-aware HTTP and MCP calls."""
+"""Scoped HTTPX instrumentation for payment-aware Python harnesses."""
 
 from __future__ import annotations
 
+import inspect
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import wraps
+from importlib.metadata import version
 from types import MethodType
 from typing import Any, Literal
 
 import httpx
 
-from mpp.runtime import (
-    PaymentRuntime,
-    mcp_payment_flow_active,
-    payment_flow_active,
-)
+from mpp.runtime import PaymentRuntime, payment_flow_active
+
+HTTPX_INSTRUMENTATION_VERSIONS = ">=0.27,<0.29"
+_SUPPORTED_HTTPX_MINORS = {(0, 27), (0, 28)}
+_PAYMENT_INTERNAL_THREAD = "_mpp_payment_internal_thread"
+
+
+class HttpxCompatibilityError(RuntimeError):
+    """The installed HTTPX version cannot be safely instrumented."""
 
 
 @dataclass(eq=False, slots=True)
 class _Binding:
     runtime: PaymentRuntime
-    httpx: bool
-    mcp: bool
     scope: Literal["context", "process"]
     active: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class _Patch:
+    owner: Any
+    name: str
+    original: Any
+    replacement: Any
 
 
 _bindings: ContextVar[tuple[_Binding, ...] | None] = ContextVar(
@@ -31,8 +44,6 @@ _bindings: ContextVar[tuple[_Binding, ...] | None] = ContextVar(
     default=None,
 )
 _httpx_active: ContextVar[bool] = ContextVar("mpp_httpx_instrumentation_active", default=False)
-_mcp_active: ContextVar[bool] = ContextVar("mpp_mcp_instrumentation_active", default=False)
-_PAYMENT_INTERNAL_THREAD = "_mpp_payment_internal_thread"
 
 
 @dataclass(slots=True)
@@ -43,14 +54,14 @@ class InstrumentationHandle:
     _binding: _Binding
 
     def disable(self) -> None:
-        """Disable this binding and restore unused process patches safely."""
+        """Disable this binding and safely restore unused HTTPX patches."""
         binding = self._binding
         with _state.lock:
             if not binding.active:
                 return
             binding.active = False
             _state.bindings = [item for item in _state.bindings if item is not binding]
-            _restore_unused_patches()
+            _restore_httpx_patches()
 
         local = _bindings.get()
         if local is not None:
@@ -66,11 +77,10 @@ class InstrumentationHandle:
 def instrument(
     runtime: PaymentRuntime,
     *,
-    httpx: bool = True,
-    mcp: Literal["auto"] | bool = "auto",
     scope: Literal["context", "process"] = "context",
+    allow_unrestricted: bool = False,
 ) -> InstrumentationHandle:
-    """Make common Python HTTP and MCP client boundaries payment-aware.
+    """Make existing and future standard HTTPX clients payment-aware.
 
     Bindings are context-local by default. Use ``scope="process"`` only for a
     single-wallet process whose calls run on independent worker threads;
@@ -78,25 +88,15 @@ def instrument(
     """
     if scope not in ("context", "process"):
         raise ValueError('scope must be "context" or "process"')
-    client_session = _resolve_mcp_client(required=mcp is True) if mcp is not False else None
-    binding = _Binding(
-        runtime=runtime,
-        httpx=httpx,
-        mcp=client_session is not None,
-        scope=scope,
-    )
+    if runtime._allows_all_http_origins() and not allow_unrestricted:
+        raise ValueError(
+            "Global HTTPX instrumentation requires allowed_origins. "
+            "Pass allow_unrestricted=True to explicitly allow payments to any origin."
+        )
+    binding = _Binding(runtime=runtime, scope=scope)
 
     with _state.lock:
-        try:
-            if httpx or client_session is not None:
-                _install_thread_patch()
-            if httpx:
-                _install_httpx_patches()
-            if client_session is not None:
-                _install_mcp_patch(client_session)
-        except BaseException:
-            _restore_unused_patches()
-            raise
+        _install_httpx_patches()
         _state.bindings.append(binding)
 
     local = _bindings.get()
@@ -108,207 +108,280 @@ class _InstrumentationState:
     def __init__(self) -> None:
         self.lock = threading.RLock()
         self.bindings: list[_Binding] = []
-        self.original_sync_send_single: Any | None = None
-        self.sync_send_single_patch: Any | None = None
-        self.original_async_send_single: Any | None = None
-        self.async_send_single_patch: Any | None = None
-        self.original_thread_start: Any | None = None
-        self.thread_start_patch: Any | None = None
-        self.original_mcp_call_tool: Any | None = None
-        self.mcp_call_tool_patch: Any | None = None
-        self.mcp_client_session: Any | None = None
+        self.patches: tuple[_Patch, ...] = ()
 
 
 _state = _InstrumentationState()
 
 
-def _select_runtime(protocol: Literal["httpx", "mcp"]) -> PaymentRuntime | None:
+def _select_runtime() -> PaymentRuntime | None:
     local = _bindings.get()
     if local is not None:
         for binding in reversed(local):
-            if binding.active and getattr(binding, protocol):
+            if binding.active:
                 return binding.runtime
-        return None
 
     if getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False):
         return None
 
     with _state.lock:
-        candidates = [
-            binding
-            for binding in _state.bindings
-            if binding.active and binding.scope == "process" and getattr(binding, protocol)
-        ]
         runtimes: list[PaymentRuntime] = []
-        for binding in candidates:
+        for binding in _state.bindings:
+            if not binding.active or binding.scope != "process":
+                continue
             if all(runtime is not binding.runtime for runtime in runtimes):
                 runtimes.append(binding.runtime)
         return runtimes[0] if len(runtimes) == 1 else None
 
 
-def _install_thread_patch() -> None:
-    if _state.original_thread_start is None:
-        original_thread_start = threading.Thread.start
+def _httpx_minor(installed: str) -> tuple[int, int]:
+    try:
+        major, minor, *_ = installed.split(".")
+        return int(major), int(minor)
+    except ValueError as error:
+        raise HttpxCompatibilityError(
+            f"Cannot determine HTTPX compatibility from version {installed!r}"
+        ) from error
 
-        def thread_start(self: threading.Thread, *args: Any, **kwargs: Any) -> Any:
-            if payment_flow_active() or getattr(
-                threading.current_thread(),
-                _PAYMENT_INTERNAL_THREAD,
-                False,
-            ):
-                setattr(self, _PAYMENT_INTERNAL_THREAD, True)
-            return original_thread_start(self, *args, **kwargs)
 
-        _state.original_thread_start = original_thread_start
-        _state.thread_start_patch = thread_start
-        threading.Thread.start = thread_start  # type: ignore[method-assign]
+def _validate_method_shape(
+    name: str,
+    method: Any,
+    *,
+    parameters: tuple[tuple[str, Any], ...],
+    asynchronous: bool,
+) -> None:
+    if not callable(method):
+        raise HttpxCompatibilityError(f"HTTPX adapter seam {name} is not callable")
+    try:
+        actual = tuple(
+            (parameter.name, parameter.kind)
+            for parameter in inspect.signature(method).parameters.values()
+        )
+    except (TypeError, ValueError) as error:
+        raise HttpxCompatibilityError(
+            f"HTTPX adapter seam {name} has no inspectable signature"
+        ) from error
+    if actual != parameters:
+        raise HttpxCompatibilityError(f"HTTPX adapter seam {name} has an unsupported signature")
+    if inspect.iscoroutinefunction(method) is not asynchronous:
+        shape = "async" if asynchronous else "sync"
+        raise HttpxCompatibilityError(f"HTTPX adapter seam {name} is not {shape}")
+
+
+def _validate_httpx_compatibility() -> tuple[Any, Any, Any, Any]:
+    """Return compatible private/public HTTPX seams or fail before patching."""
+    installed = version("httpx")
+    if _httpx_minor(installed) not in _SUPPORTED_HTTPX_MINORS:
+        raise HttpxCompatibilityError(
+            f"HTTPX {installed} is unsupported by pympp HTTPX instrumentation "
+            f"(supported: {HTTPX_INSTRUMENTATION_VERSIONS}). "
+            "Use PaymentTransport explicitly or upgrade pympp."
+        )
+    seams = []
+    for owner, name in (
+        (httpx.Client, "_send_single_request"),
+        (httpx.AsyncClient, "_send_single_request"),
+        (httpx.Client, "send"),
+        (httpx.AsyncClient, "send"),
+    ):
+        try:
+            seams.append(inspect.getattr_static(owner, name))
+        except AttributeError as error:
+            raise HttpxCompatibilityError(
+                f"HTTPX adapter seam {owner.__name__}.{name} is missing"
+            ) from error
+    sync_send_single, async_send_single, sync_send, async_send = seams
+
+    positional = inspect.Parameter.POSITIONAL_OR_KEYWORD
+    keyword_only = inspect.Parameter.KEYWORD_ONLY
+    private_parameters = (("self", positional), ("request", positional))
+    public_parameters = (
+        ("self", positional),
+        ("request", positional),
+        ("stream", keyword_only),
+        ("auth", keyword_only),
+        ("follow_redirects", keyword_only),
+    )
+    _validate_method_shape(
+        "Client._send_single_request",
+        sync_send_single,
+        parameters=private_parameters,
+        asynchronous=False,
+    )
+    _validate_method_shape(
+        "AsyncClient._send_single_request",
+        async_send_single,
+        parameters=private_parameters,
+        asynchronous=True,
+    )
+    _validate_method_shape(
+        "Client.send",
+        sync_send,
+        parameters=public_parameters,
+        asynchronous=False,
+    )
+    _validate_method_shape(
+        "AsyncClient.send",
+        async_send,
+        parameters=public_parameters,
+        asynchronous=True,
+    )
+    return sync_send_single, async_send_single, sync_send, async_send
+
+
+def _patch_is_installed(patch: _Patch) -> bool:
+    try:
+        return inspect.getattr_static(patch.owner, patch.name) is patch.replacement
+    except AttributeError:
+        return False
 
 
 def _install_httpx_patches() -> None:
-    if _state.original_sync_send_single is None:
-        original_sync_send_single = httpx.Client._send_single_request
-
-        def sync_send_single(
-            self: httpx.Client,
-            request: httpx.Request,
-        ) -> httpx.Response:
-            if (
-                getattr(self, "_mpp_payment_wrapped", False)
-                or payment_flow_active()
-                or _httpx_active.get()
-            ):
-                return original_sync_send_single(self, request)
-            runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime("httpx")
-            if runtime is None:
-                return original_sync_send_single(self, request)
-            token = _httpx_active.set(True)
-            try:
-                return runtime.send_httpx_sync(
-                    MethodType(original_sync_send_single, self),
-                    request,
-                )
-            finally:
-                _httpx_active.reset(token)
-
-        _state.original_sync_send_single = original_sync_send_single
-        _state.sync_send_single_patch = sync_send_single
-        httpx.Client._send_single_request = sync_send_single  # type: ignore[method-assign]
-
-    if _state.original_async_send_single is None:
-        original_async_send_single = httpx.AsyncClient._send_single_request
-
-        async def async_send_single(
-            self: httpx.AsyncClient,
-            request: httpx.Request,
-        ) -> httpx.Response:
-            if (
-                getattr(self, "_mpp_payment_wrapped", False)
-                or payment_flow_active()
-                or _httpx_active.get()
-            ):
-                return await original_async_send_single(self, request)
-            runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime("httpx")
-            if runtime is None:
-                return await original_async_send_single(self, request)
-            token = _httpx_active.set(True)
-            try:
-                return await runtime.send_httpx(
-                    MethodType(original_async_send_single, self),
-                    request,
-                )
-            finally:
-                _httpx_active.reset(token)
-
-        _state.original_async_send_single = original_async_send_single
-        _state.async_send_single_patch = async_send_single
-        httpx.AsyncClient._send_single_request = async_send_single  # type: ignore[method-assign]
-
-
-def _resolve_mcp_client(*, required: bool) -> Any | None:
-    try:
-        from mcp import ClientSession
-    except ImportError as error:
-        if required:
-            raise ImportError(
-                'Cannot instrument MCP calls. Install the "mcp" extra: pip install "pympp[mcp]"'
-            ) from error
-        return None
-    _ = ClientSession.call_tool
-    return ClientSession
-
-
-def _install_mcp_patch(client_session: Any) -> None:
-    if _state.original_mcp_call_tool is not None:
+    if _state.patches:
+        if not all(map(_patch_is_installed, _state.patches)):
+            raise HttpxCompatibilityError(
+                "Active pympp HTTPX instrumentation was replaced by another patch"
+            )
         return
-    original_call_tool = client_session.call_tool
 
-    async def call_tool(
-        self: Any,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        if mcp_payment_flow_active() or _mcp_active.get():
-            return await original_call_tool(self, name, arguments, *args, **kwargs)
-        runtime = _select_runtime("mcp")
+    (
+        original_sync_send_single,
+        original_async_send_single,
+        original_sync_send,
+        original_async_send,
+    ) = _validate_httpx_compatibility()
+    original_thread_start = threading.Thread.start
+
+    @wraps(original_sync_send_single)
+    def sync_send_single(
+        self: httpx.Client,
+        request: httpx.Request,
+    ) -> httpx.Response:
+        if (
+            getattr(self, "_mpp_payment_wrapped", False)
+            or payment_flow_active()
+            or _httpx_active.get()
+        ):
+            return original_sync_send_single(self, request)
+        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
         if runtime is None:
-            return await original_call_tool(self, name, arguments, *args, **kwargs)
-        token = _mcp_active.set(True)
+            return original_sync_send_single(self, request)
+        token = _httpx_active.set(True)
         try:
-            return await runtime.call_mcp_tool(
-                MethodType(original_call_tool, self),
-                name,
-                arguments,
-                *args,
-                **kwargs,
+            return runtime.send_httpx_sync(
+                MethodType(original_sync_send_single, self),
+                request,
             )
         finally:
-            _mcp_active.reset(token)
+            _httpx_active.reset(token)
 
-    client_session.call_tool = call_tool
-    _state.original_mcp_call_tool = original_call_tool
-    _state.mcp_call_tool_patch = call_tool
-    _state.mcp_client_session = client_session
-
-
-def _restore_unused_patches() -> None:
-    if not any(binding.active and binding.httpx for binding in _state.bindings):
+    @wraps(original_async_send_single)
+    async def async_send_single(
+        self: httpx.AsyncClient,
+        request: httpx.Request,
+    ) -> httpx.Response:
         if (
-            _state.sync_send_single_patch is not None
-            and httpx.Client._send_single_request is _state.sync_send_single_patch
-            and _state.original_sync_send_single is not None
+            getattr(self, "_mpp_payment_wrapped", False)
+            or payment_flow_active()
+            or _httpx_active.get()
         ):
-            httpx.Client._send_single_request = _state.original_sync_send_single  # type: ignore[method-assign]
-        if (
-            _state.async_send_single_patch is not None
-            and httpx.AsyncClient._send_single_request is _state.async_send_single_patch
-            and _state.original_async_send_single is not None
-        ):
-            httpx.AsyncClient._send_single_request = _state.original_async_send_single  # type: ignore[method-assign]
-        _state.original_sync_send_single = None
-        _state.sync_send_single_patch = None
-        _state.original_async_send_single = None
-        _state.async_send_single_patch = None
+            return await original_async_send_single(self, request)
+        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        if runtime is None:
+            return await original_async_send_single(self, request)
+        token = _httpx_active.set(True)
+        try:
+            return await runtime.send_httpx(
+                MethodType(original_async_send_single, self),
+                request,
+            )
+        finally:
+            _httpx_active.reset(token)
 
-    if not any(binding.active and (binding.httpx or binding.mcp) for binding in _state.bindings):
+    @wraps(original_sync_send)
+    def sync_send(
+        self: httpx.Client,
+        request: httpx.Request,
+        *args: Any,
+        **kwargs: Any,
+    ) -> httpx.Response:
         if (
-            _state.thread_start_patch is not None
-            and threading.Thread.start is _state.thread_start_patch
-            and _state.original_thread_start is not None
+            getattr(self, "_mpp_payment_wrapped", False)
+            or payment_flow_active()
+            or _httpx_active.get()
         ):
-            threading.Thread.start = _state.original_thread_start  # type: ignore[method-assign]
-        _state.original_thread_start = None
-        _state.thread_start_patch = None
+            return original_sync_send(self, request, *args, **kwargs)
+        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        if runtime is None:
+            return original_sync_send(self, request, *args, **kwargs)
+        with runtime._httpx_operation_scope(request):
+            return original_sync_send(self, request, *args, **kwargs)
 
-    if not any(binding.active and binding.mcp for binding in _state.bindings):
+    @wraps(original_async_send)
+    async def async_send(
+        self: httpx.AsyncClient,
+        request: httpx.Request,
+        *args: Any,
+        **kwargs: Any,
+    ) -> httpx.Response:
         if (
-            _state.mcp_client_session is not None
-            and _state.mcp_call_tool_patch is not None
-            and _state.mcp_client_session.call_tool is _state.mcp_call_tool_patch
-            and _state.original_mcp_call_tool is not None
+            getattr(self, "_mpp_payment_wrapped", False)
+            or payment_flow_active()
+            or _httpx_active.get()
         ):
-            _state.mcp_client_session.call_tool = _state.original_mcp_call_tool
-        _state.original_mcp_call_tool = None
-        _state.mcp_call_tool_patch = None
-        _state.mcp_client_session = None
+            return await original_async_send(self, request, *args, **kwargs)
+        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        if runtime is None:
+            return await original_async_send(self, request, *args, **kwargs)
+        with runtime._httpx_operation_scope(request):
+            return await original_async_send(self, request, *args, **kwargs)
+
+    @wraps(original_thread_start)
+    def thread_start(self: threading.Thread, *args: Any, **kwargs: Any) -> Any:
+        if payment_flow_active() or getattr(
+            threading.current_thread(),
+            _PAYMENT_INTERNAL_THREAD,
+            False,
+        ):
+            setattr(self, _PAYMENT_INTERNAL_THREAD, True)
+        return original_thread_start(self, *args, **kwargs)
+
+    patches = (
+        _Patch(
+            httpx.Client,
+            "_send_single_request",
+            original_sync_send_single,
+            sync_send_single,
+        ),
+        _Patch(
+            httpx.AsyncClient,
+            "_send_single_request",
+            original_async_send_single,
+            async_send_single,
+        ),
+        _Patch(httpx.Client, "send", original_sync_send, sync_send),
+        _Patch(httpx.AsyncClient, "send", original_async_send, async_send),
+        _Patch(threading.Thread, "start", original_thread_start, thread_start),
+    )
+    installed: list[_Patch] = []
+    try:
+        for patch in patches:
+            setattr(patch.owner, patch.name, patch.replacement)
+            installed.append(patch)
+    except BaseException:
+        for patch in reversed(installed):
+            if _patch_is_installed(patch):
+                setattr(patch.owner, patch.name, patch.original)
+        raise
+
+    _state.patches = patches
+
+
+def _restore_httpx_patches() -> None:
+    if any(binding.active for binding in _state.bindings):
+        return
+    for patch in reversed(_state.patches):
+        if _patch_is_installed(patch):
+            setattr(patch.owner, patch.name, patch.original)
+    _state.patches = ()

@@ -17,7 +17,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test, integration, package, install-smoke]
+    needs: [test, httpx-compat, integration, package, install-smoke]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -89,6 +89,36 @@ jobs:
             coverage.xml
             htmlcov/
           if-no-files-found: ignore
+
+  httpx-compat:
+    name: HTTPX ${{ matrix.httpx-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        httpx-version: ["0.27.0", "0.27.2", "0.28.0", "0.28.1"]
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install compatibility environment
+        env:
+          HTTPX_VERSION: ${{ matrix.httpx-version }}
+        run: |
+          uv venv .compat-venv --python 3.12
+          uv pip install --python .compat-venv/bin/python \
+            -e . "httpx==$HTTPX_VERSION" pytest pytest-asyncio
+
+      - name: Run HTTPX adapter tests
+        run: .compat-venv/bin/python -m pytest -q --noconftest tests/test_instrumentation.py
 
   integration:
     name: Integration Test
@@ -243,8 +273,8 @@ jobs:
           assert mcp.CODE_PAYMENT_REQUIRED == -32042
           assert SyncPaymentTransport.__name__ == "SyncPaymentTransport"
 
-          runtime = PaymentRuntime([])
-          handle = instrument(runtime, httpx=False, mcp=False)
+          runtime = PaymentRuntime([], allowed_origins=["https://example.com"])
+          handle = instrument(runtime)
           handle.disable()
           runtime.close()
 

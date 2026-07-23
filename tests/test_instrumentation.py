@@ -1,734 +1,980 @@
-"""Tests for scoped HTTP and MCP instrumentation."""
+"""Tests for scoped HTTPX payment instrumentation."""
 
 from __future__ import annotations
 
 import asyncio
-import builtins
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 
-from mpp import Challenge
-from mpp.extensions.mcp import META_CREDENTIAL, McpClient
-from mpp.instrumentation import _bindings, _state, instrument
+import mpp.instrumentation as instrumentation
+from mpp import Challenge, Credential
+from mpp.client import PaymentTransport
+from mpp.errors import PaymentOutcomeUnknownError
+from mpp.instrumentation import HttpxCompatibilityError, instrument
 from mpp.runtime import PaymentRuntime
-from tests import make_credential
 
 
-class MockMethod:
+class Method:
     name = "tempo"
     _intents = {"charge": True}
 
-    def __init__(self, label: str) -> None:
-        self.label = label
-        self.create_credential = AsyncMock(side_effect=self._create)
+    def __init__(self) -> None:
+        self.calls = 0
+        self.on_create: Any | None = None
 
-    async def _create(self, challenge: Challenge):
-        return make_credential({"runtime": self.label}, challenge_id=challenge.id)
+    async def create_credential(self, challenge: Challenge) -> Credential:
+        self.calls += 1
+        if self.on_create is not None:
+            result = self.on_create()
+            if asyncio.iscoroutine(result):
+                await result
+        return Credential(challenge=challenge.to_echo(), payload={"call": self.calls})
 
 
-def payment_required() -> httpx.Response:
-    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
+def payment_required(challenge_id: str = "test-id") -> httpx.Response:
+    challenge = Challenge(
+        id=challenge_id,
+        method="tempo",
+        intent="charge",
+        request={"amount": "1000"},
+    )
     return httpx.Response(
         402,
         headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
     )
 
 
-def paid_transport(requests: list[httpx.Request]) -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return payment_required() if len(requests) == 1 else httpx.Response(200, content=b"paid")
-
-    return httpx.MockTransport(handler)
-
-
 @pytest.fixture(autouse=True)
-def clean_instrumentation_state():
+def restore_instrumentation():
     sync_send_single = httpx.Client._send_single_request
     async_send_single = httpx.AsyncClient._send_single_request
+    sync_send = httpx.Client.send
+    async_send = httpx.AsyncClient.send
     thread_start = threading.Thread.start
-    _bindings.set(None)
+    token = instrumentation._bindings.set(None)
+    active_token = instrumentation._httpx_active.set(False)
     yield
-    with _state.lock:
-        for binding in _state.bindings:
-            binding.active = False
-        _state.bindings.clear()
-        if _state.mcp_client_session is not None and _state.original_mcp_call_tool is not None:
-            _state.mcp_client_session.call_tool = _state.original_mcp_call_tool
-        _state.original_sync_send_single = None
-        _state.sync_send_single_patch = None
-        _state.original_async_send_single = None
-        _state.async_send_single_patch = None
-        _state.original_thread_start = None
-        _state.thread_start_patch = None
-        _state.original_mcp_call_tool = None
-        _state.mcp_call_tool_patch = None
-        _state.mcp_client_session = None
     httpx.Client._send_single_request = sync_send_single
     httpx.AsyncClient._send_single_request = async_send_single
+    httpx.Client.send = sync_send
+    httpx.AsyncClient.send = async_send
     threading.Thread.start = thread_start
-    _bindings.set(None)
-
-
-@pytest.mark.asyncio
-async def test_instruments_existing_sync_and_async_clients() -> None:
-    sync_requests: list[httpx.Request] = []
-    async_requests: list[httpx.Request] = []
-    sync_client = httpx.Client(transport=paid_transport(sync_requests))
-    async_client = httpx.AsyncClient(transport=paid_transport(async_requests))
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    handle = instrument(runtime, mcp=False)
-    try:
-        sync_response = sync_client.get("https://example.com/sync")
-        async_response = await async_client.get("https://example.com/async")
-    finally:
-        handle.disable()
-        sync_client.close()
-        await async_client.aclose()
-        runtime.close()
-
-    assert sync_response.status_code == async_response.status_code == 200
-    assert len(sync_requests) == len(async_requests) == 2
-    assert method.create_credential.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_httpx_response_hooks_see_only_paid_responses() -> None:
-    sync_requests: list[httpx.Request] = []
-    async_requests: list[httpx.Request] = []
-    seen: list[tuple[str, int]] = []
-
-    def sync_hook(response: httpx.Response) -> None:
-        seen.append(("sync", response.status_code))
-        response.raise_for_status()
-
-    async def async_hook(response: httpx.Response) -> None:
-        seen.append(("async", response.status_code))
-        response.raise_for_status()
-
-    sync_client = httpx.Client(
-        transport=paid_transport(sync_requests),
-        event_hooks={"response": [sync_hook]},
-    )
-    async_client = httpx.AsyncClient(
-        transport=paid_transport(async_requests),
-        event_hooks={"response": [async_hook]},
-    )
-    runtime = PaymentRuntime([MockMethod("one")])
-    handle = instrument(runtime, mcp=False)
-    try:
-        sync_response = sync_client.get("https://example.com/sync")
-        async_response = await async_client.get("https://example.com/async")
-    finally:
-        handle.disable()
-        sync_client.close()
-        await async_client.aclose()
-        runtime.close()
-
-    assert sync_response.status_code == async_response.status_code == 200
-    assert seen == [("sync", 200), ("async", 200)]
-
-
-@pytest.mark.asyncio
-async def test_concurrent_contexts_select_their_own_runtime() -> None:
-    methods = [MockMethod("a"), MockMethod("b")]
-    runtimes = [PaymentRuntime([method]) for method in methods]
-
-    async def call(runtime: PaymentRuntime) -> None:
-        requests: list[httpx.Request] = []
-        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
-            with instrument(runtime, mcp=False):
-                assert (await client.get("https://example.com/paid")).status_code == 200
-
-    try:
-        await asyncio.gather(*(call(runtime) for runtime in runtimes))
-    finally:
-        for runtime in runtimes:
-            runtime.close()
-
-    assert [method.create_credential.call_count for method in methods] == [1, 1]
-
-
-@pytest.mark.asyncio
-async def test_active_payment_does_not_block_another_local_context() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    class BlockingMethod(MockMethod):
-        async def _create(self, challenge: Challenge):
-            started.set()
-            while not release.is_set():
-                await asyncio.sleep(0.01)
-            return await super()._create(challenge)
-
-    methods = [BlockingMethod("a"), MockMethod("b")]
-    runtimes = [PaymentRuntime([method]) for method in methods]
-
-    async def first_call() -> int:
-        requests: list[httpx.Request] = []
-        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
-            with instrument(runtimes[0], mcp=False):
-                return (await client.get("https://example.com/first")).status_code
-
-    task = asyncio.create_task(first_call())
-    assert await asyncio.to_thread(started.wait, 1)
-    second_requests: list[httpx.Request] = []
-    try:
-        async with httpx.AsyncClient(transport=paid_transport(second_requests)) as client:
-            with instrument(runtimes[1], mcp=False):
-                second_status = (await client.get("https://example.com/second")).status_code
-    finally:
-        release.set()
-        first_status = await task
-        for runtime in runtimes:
-            runtime.close()
-
-    assert first_status == second_status == 200
-    assert len(second_requests) == 2
-    assert [method.create_credential.call_count for method in methods] == [1, 1]
-
-
-@pytest.mark.asyncio
-async def test_disabled_context_does_not_fall_back_to_another_runtime() -> None:
-    other_method = MockMethod("other")
-    other_runtime = PaymentRuntime([other_method])
-    local_runtime = PaymentRuntime([MockMethod("local")])
-    ready = asyncio.Event()
-    release = asyncio.Event()
-
-    async def hold_other_context() -> None:
-        with instrument(other_runtime, mcp=False):
-            ready.set()
-            await release.wait()
-
-    task = asyncio.create_task(hold_other_context())
-    await ready.wait()
-    handle = instrument(local_runtime, mcp=False)
-    handle.disable()
-    requests: list[httpx.Request] = []
-    try:
-        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
-            assert (await client.get("https://example.com/paid")).status_code == 402
-    finally:
-        release.set()
-        await task
-        local_runtime.close()
-        other_runtime.close()
-
-    assert len(requests) == 1
-    other_method.create_credential.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_preexisting_async_context_does_not_use_process_fallback() -> None:
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    ready = asyncio.Event()
-    release = asyncio.Event()
-    requests: list[httpx.Request] = []
-
-    async def call() -> int:
-        ready.set()
-        await release.wait()
-        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
-            return (await client.get("https://example.com/paid")).status_code
-
-    task = asyncio.create_task(call())
-    await ready.wait()
-    handle = instrument(runtime, mcp=False)
-    try:
-        release.set()
-        status = await task
-    finally:
-        handle.disable()
-        runtime.close()
-
-    assert status == 402
-    assert len(requests) == 1
-    method.create_credential.assert_not_called()
-
-
-def test_bare_thread_uses_explicit_process_runtime() -> None:
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    requests: list[httpx.Request] = []
-    client = httpx.Client(transport=paid_transport(requests))
-    handle = instrument(runtime, mcp=False, scope="process")
-    result: list[int] = []
-    thread = threading.Thread(
-        target=lambda: result.append(client.get("https://example.com/paid").status_code)
-    )
-    try:
-        thread.start()
-        thread.join(timeout=2)
-    finally:
-        handle.disable()
-        client.close()
-        runtime.close()
-
-    assert thread.is_alive() is False
-    assert result == [200]
-    assert method.create_credential.call_count == 1
-
-
-def test_context_runtime_does_not_leak_to_preexisting_worker() -> None:
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    requests: list[httpx.Request] = []
-    client = httpx.Client(transport=paid_transport(requests))
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        pool.submit(lambda: None).result(timeout=1)
-        handle = instrument(runtime, mcp=False)
-        try:
-            response = pool.submit(client.get, "https://example.com/paid").result(timeout=2)
-        finally:
-            handle.disable()
-            client.close()
-            runtime.close()
-
-    assert response.status_code == 402
-    assert len(requests) == 1
-    method.create_credential.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_context_runtime_follows_asyncio_to_thread() -> None:
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    requests: list[httpx.Request] = []
-    client = httpx.Client(transport=paid_transport(requests))
-    handle = instrument(runtime, mcp=False)
-    try:
-        response = await asyncio.to_thread(client.get, "https://example.com/paid")
-    finally:
-        handle.disable()
-        client.close()
-        runtime.close()
-
-    assert response.status_code == 200
-    assert len(requests) == 2
-    assert method.create_credential.call_count == 1
-
-
-def test_background_event_loop_uses_explicit_process_http_runtime() -> None:
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    requests: list[httpx.Request] = []
-    result: dict[str, Any] = {}
-    handle = instrument(runtime, mcp=False, scope="process")
-
-    async def call() -> None:
-        async with httpx.AsyncClient(transport=paid_transport(requests)) as client:
-            result["status"] = (await client.get("https://example.com/paid")).status_code
-
-    thread = threading.Thread(target=lambda: asyncio.run(call()))
-    try:
-        thread.start()
-        thread.join(timeout=2)
-    finally:
-        handle.disable()
-        runtime.close()
-
-    assert thread.is_alive() is False
-    assert result == {"status": 200}
-    assert len(requests) == 2
-
-
-def test_background_event_loop_uses_explicit_process_mcp_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mcp
-
-    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
-    method = MockMethod("one")
-    runtime = PaymentRuntime([method])
-    paid_result = object()
-    session = FakeSession([FakeMcpError(), paid_result])
-    result: list[Any] = []
-    handle = instrument(runtime, httpx=False, mcp=True, scope="process")
-    thread = threading.Thread(target=lambda: result.append(asyncio.run(session.call_tool("paid"))))
-    try:
-        thread.start()
-        thread.join(timeout=2)
-    finally:
-        handle.disable()
-        runtime.close()
-
-    assert thread.is_alive() is False
-    assert result == [paid_result]
-    assert len(session.calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_free_async_generator_upload_is_not_buffered() -> None:
-    consumed: list[bytes] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        consumed.append(await request.aread())
-        return httpx.Response(200, content=b"ok")
-
-    async def body():
-        yield b"one-"
-        yield b"shot"
-
-    runtime = PaymentRuntime([MockMethod("one")])
-    handle = instrument(runtime, mcp=False)
-    try:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            response = await client.post("https://example.com/upload", content=body())
-    finally:
-        handle.disable()
-        runtime.close()
-
-    assert response.status_code == 200
-    assert consumed == [b"one-shot"]
-
-
-def test_concurrent_bare_threads_share_explicit_process_runtime() -> None:
-    started = threading.Event()
-    release = threading.Event()
-
-    class BlockingFirstMethod(MockMethod):
-        async def _create(self, challenge: Challenge):
-            if self.create_credential.call_count == 1:
-                started.set()
-                while not release.is_set():
-                    await asyncio.sleep(0.01)
-            return await super()._create(challenge)
-
-    method = BlockingFirstMethod("one")
-    runtime = PaymentRuntime([method])
-    request_sets: list[list[httpx.Request]] = [[], []]
-    clients = [
-        httpx.Client(transport=paid_transport(request_sets[0])),
-        httpx.Client(transport=paid_transport(request_sets[1])),
-    ]
-    handle = instrument(runtime, mcp=False, scope="process")
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(clients[0].get, "https://example.com/paid")
-            try:
-                assert started.wait(1)
-                second = pool.submit(clients[1].get, "https://example.com/paid")
-                assert second.result(timeout=2).status_code == 200
-            finally:
-                release.set()
-            assert first.result(timeout=2).status_code == 200
-    finally:
-        release.set()
-        handle.disable()
-        for client in clients:
-            client.close()
-        runtime.close()
-
-    assert [len(requests) for requests in request_sets] == [2, 2]
-    assert method.create_credential.call_count == 2
-
-
-def test_bare_thread_fails_closed_with_multiple_runtimes() -> None:
-    methods = [MockMethod("a"), MockMethod("b")]
-    runtimes = [PaymentRuntime([method]) for method in methods]
-    handles = [instrument(runtime, mcp=False, scope="process") for runtime in runtimes]
-    requests: list[httpx.Request] = []
-    client = httpx.Client(transport=paid_transport(requests))
-    result: list[int] = []
-    thread = threading.Thread(
-        target=lambda: result.append(client.get("https://example.com/paid").status_code)
-    )
-    try:
-        thread.start()
-        thread.join(timeout=2)
-    finally:
-        for handle in handles:
-            handle.disable()
-        client.close()
-        for runtime in runtimes:
-            runtime.close()
-
-    assert result == [402]
-    assert len(requests) == 1
-    assert all(method.create_credential.call_count == 0 for method in methods)
-
-
-def test_out_of_order_disable_restores_exact_originals() -> None:
-    sync_send_single = httpx.Client._send_single_request
-    async_send_single = httpx.AsyncClient._send_single_request
-    thread_start = threading.Thread.start
-    runtimes = [PaymentRuntime([MockMethod("a")]), PaymentRuntime([MockMethod("b")])]
-    first = instrument(runtimes[0], mcp=False)
-    second = instrument(runtimes[1], mcp=False)
-
-    first.disable()
-    assert httpx.Client._send_single_request is not sync_send_single
-    second.disable()
-
-    assert httpx.Client._send_single_request is sync_send_single
-    assert httpx.AsyncClient._send_single_request is async_send_single
+    instrumentation._bindings.reset(token)
+    instrumentation._httpx_active.reset(active_token)
+    instrumentation._state.bindings = []
+    instrumentation._state.patches = ()
     assert threading.Thread.start is thread_start
+
+
+def test_global_sync_instrumentation_covers_existing_and_future_clients() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required(f"challenge-{len(requests)}")
+
+    method = Method()
+    runtime = PaymentRuntime([method])
+    existing = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            first = existing.get("https://example.com/paid")
+            assert first.read() == b"paid"
+            first.close()
+            with httpx.Client(transport=httpx.MockTransport(handler)) as future:
+                assert future.get("https://example.com/paid").status_code == 200
+    finally:
+        existing.close()
+        runtime.close()
+
+    assert method.calls == 2
+    assert [request.headers.get("authorization") is not None for request in requests] == [
+        False,
+        True,
+        False,
+        True,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_global_async_instrumentation_and_response_hooks() -> None:
+    requests: list[httpx.Request] = []
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required()
+
+    async def hook(response: httpx.Response) -> None:
+        seen.append(response.status_code)
+        response.raise_for_status()
+
+    runtime = PaymentRuntime([Method()])
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        event_hooks={"response": [hook]},
+    )
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            response = await client.get("https://example.com/paid")
+    finally:
+        await client.aclose()
+        await runtime.aclose()
+
+    assert response.content == b"paid"
+    assert len(requests) == 2
+    assert seen == [200]
+
+
+def test_process_scope_reaches_workers_but_context_scope_does_not() -> None:
+    method = Method()
+    runtime = PaymentRuntime([method])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required()
+
+    def run(result: list[int]) -> None:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            result.append(client.get("https://example.com/paid").status_code)
+
+    context_result: list[int] = []
+    with instrument(runtime, allow_unrestricted=True):
+        thread = threading.Thread(target=run, args=(context_result,))
+        thread.start()
+        thread.join()
+    assert context_result == [402]
+
+    process_result: list[int] = []
+    with instrument(runtime, scope="process", allow_unrestricted=True):
+        thread = threading.Thread(target=run, args=(process_result,))
+        thread.start()
+        thread.join()
+    runtime.close()
+
+    assert process_result == [200]
+    assert method.calls == 1
+
+
+def test_ambiguous_process_bindings_fail_closed() -> None:
+    methods = [Method(), Method()]
+    runtimes = [PaymentRuntime([method]) for method in methods]
+    handles = [
+        instrument(runtime, scope="process", allow_unrestricted=True) for runtime in runtimes
+    ]
+    result: list[int] = []
+
+    def run() -> None:
+        with httpx.Client(transport=httpx.MockTransport(lambda _: payment_required())) as client:
+            result.append(client.get("https://example.com/paid").status_code)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    thread.join()
+    for handle in handles:
+        handle.disable()
     for runtime in runtimes:
         runtime.close()
 
+    assert result == [402]
+    assert [method.calls for method in methods] == [0, 0]
 
-def test_disable_does_not_overwrite_a_later_patch() -> None:
-    sync_send_single = httpx.Client._send_single_request
-    async_send_single = httpx.AsyncClient._send_single_request
-    runtime = PaymentRuntime([MockMethod("one")])
-    handle = instrument(runtime, mcp=False, scope="process")
 
-    def replacement(self: httpx.Client, request: httpx.Request):
-        return sync_send_single(self, request)
+def test_nested_bindings_choose_innermost_and_restore_exactly() -> None:
+    original_sync = httpx.Client._send_single_request
+    original_async = httpx.AsyncClient._send_single_request
+    original_sync_send = httpx.Client.send
+    original_async_send = httpx.AsyncClient.send
+    original_thread_start = threading.Thread.start
+    methods = [Method(), Method()]
+    runtimes = [PaymentRuntime([method]) for method in methods]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required(f"challenge-{request.url.path}")
+
+    first = instrument(runtimes[0], allow_unrestricted=True)
+    patched_sync = httpx.Client._send_single_request
+    second = instrument(runtimes[1], allow_unrestricted=True)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            assert client.get("https://example.com/inner").status_code == 200
+        second.disable()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            assert client.get("https://example.com/outer").status_code == 200
+        assert httpx.Client._send_single_request is patched_sync
+    finally:
+        first.disable()
+        for runtime in runtimes:
+            runtime.close()
+
+    assert [method.calls for method in methods] == [1, 1]
+    assert httpx.Client._send_single_request is original_sync
+    assert httpx.AsyncClient._send_single_request is original_async
+    assert httpx.Client.send is original_sync_send
+    assert httpx.AsyncClient.send is original_async_send
+    assert threading.Thread.start is original_thread_start
+
+
+def test_disabling_does_not_overwrite_a_later_third_party_patch() -> None:
+    original_async = httpx.AsyncClient._send_single_request
+    runtime = PaymentRuntime([])
+    handle = instrument(runtime, allow_unrestricted=True)
+
+    def replacement(self: httpx.Client, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(204, request=request)
 
     httpx.Client._send_single_request = replacement
+    handle.disable()
+    runtime.close()
+
+    assert httpx.Client._send_single_request is replacement
+    assert httpx.AsyncClient._send_single_request is original_async
+
+
+def test_method_http_is_not_recursively_instrumented() -> None:
+    requests: list[str] = []
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        if request.url.path == "/method":
+            return httpx.Response(204)
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required()
+
+    def on_create() -> None:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            assert client.get("https://example.com/method").status_code == 204
+
+    method.on_create = on_create
+    runtime = PaymentRuntime([method])
     try:
-        handle.disable()
-        assert httpx.Client._send_single_request is replacement
-        assert httpx.AsyncClient._send_single_request is async_send_single
+        with instrument(runtime, allow_unrestricted=True):
+            with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+                assert client.get("https://example.com/paid").status_code == 200
     finally:
-        httpx.Client._send_single_request = sync_send_single
         runtime.close()
 
-
-@pytest.mark.asyncio
-async def test_explicit_sync_and_async_wrappers_take_precedence() -> None:
-    explicit_method = MockMethod("explicit")
-    global_method = MockMethod("global")
-    explicit_runtime = PaymentRuntime([explicit_method])
-    global_runtime = PaymentRuntime([global_method])
-    sync_requests: list[httpx.Request] = []
-    async_requests: list[httpx.Request] = []
-    handle = instrument(global_runtime, mcp=False)
-    sync_client = explicit_runtime.wrap_client(
-        httpx.Client(transport=paid_transport(sync_requests))
-    )
-    async_client = explicit_runtime.wrap_async_client(
-        httpx.AsyncClient(transport=paid_transport(async_requests))
-    )
-    try:
-        assert sync_client.get("https://example.com/sync").status_code == 200
-        assert (await async_client.get("https://example.com/async")).status_code == 200
-    finally:
-        handle.disable()
-        sync_client.close()
-        await async_client.aclose()
-        explicit_runtime.close()
-        global_runtime.close()
-
-    assert explicit_method.create_credential.call_count == 2
-    global_method.create_credential.assert_not_called()
-    assert len(sync_requests) == len(async_requests) == 2
+    assert requests == [
+        "https://example.com/paid",
+        "https://example.com/method",
+        "https://example.com/paid",
+    ]
 
 
-def test_credential_http_is_not_recursively_instrumented() -> None:
+def test_raw_method_thread_is_marked_internal_for_process_scope() -> None:
+    method = Method()
     internal_requests: list[httpx.Request] = []
     internal_statuses: list[int] = []
 
     def internal_handler(request: httpx.Request) -> httpx.Response:
         internal_requests.append(request)
-        return payment_required()
+        return payment_required("internal")
 
-    class HttpMethod(MockMethod):
-        async def _create(self, challenge: Challenge):
-            if self.create_credential.call_count == 1:
+    def on_create() -> None:
+        def request() -> None:
+            with httpx.Client(transport=httpx.MockTransport(internal_handler)) as client:
+                internal_statuses.append(client.get("https://example.com/internal").status_code)
 
-                def request() -> None:
-                    with httpx.Client(transport=httpx.MockTransport(internal_handler)) as client:
-                        internal_statuses.append(client.get("https://rpc.example.com").status_code)
+        thread = threading.Thread(target=request)
+        thread.start()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
 
-                thread = threading.Thread(target=request)
-                thread.start()
-                thread.join(timeout=2)
-                assert thread.is_alive() is False
-            return await super()._create(challenge)
+    method.on_create = on_create
 
-    method = HttpMethod("one")
+    def outer_handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required("outer")
+
     runtime = PaymentRuntime([method])
-    requests: list[httpx.Request] = []
-    client = runtime.wrap_client(httpx.Client(transport=paid_transport(requests)))
-    handle = instrument(runtime, mcp=False, scope="process")
-    try:
-        assert client.get("https://example.com/paid").status_code == 200
-    finally:
-        handle.disable()
-        client.close()
-        runtime.close()
+    with httpx.Client(transport=httpx.MockTransport(outer_handler)) as client:
+        with instrument(runtime, scope="process", allow_unrestricted=True):
+            assert client.get("https://example.com/paid").status_code == 200
+    runtime.close()
 
     assert len(internal_requests) == 1
     assert internal_statuses == [402]
-    assert method.create_credential.call_count == 1
+    assert method.calls == 1
 
 
-class FakeMcpError(Exception):
-    def __init__(self) -> None:
-        self.code = -32042
-        self.data = {
-            "challenges": [
-                {
-                    "id": "test-id",
-                    "realm": "example.com",
-                    "method": "tempo",
-                    "intent": "charge",
-                    "request": {},
-                }
-            ]
-        }
+def test_paid_send_loss_blocks_outer_retry_from_minting_again() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return payment_required("first")
+        if len(requests) == 2:
+            raise httpx.ReadTimeout("paid response lost", request=request)
+        return payment_required("outer-retry")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(PaymentOutcomeUnknownError) as first:
+                client.get("https://example.com/paid")
+            with pytest.raises(PaymentOutcomeUnknownError) as second:
+                client.get("https://example.com/paid")
+    finally:
+        client.close()
+        runtime.close()
+
+    assert isinstance(first.value.__cause__, httpx.ReadTimeout)
+    assert isinstance(second.value.cause, httpx.ReadTimeout)
+    assert len(requests) == 3
+    assert method.calls == 1
 
 
-class FakeSession:
-    def __init__(self, results: list[Any]) -> None:
-        self.results = results
-        self.calls: list[dict[str, Any]] = []
+class BrokenStream(httpx.SyncByteStream):
+    def __iter__(self):
+        raise httpx.ReadError("body lost")
+        yield b""  # pragma: no cover
 
-    async def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
+
+def test_paid_stream_failure_blocks_outer_retry() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return payment_required("first")
+        if len(requests) == 2:
+            return httpx.Response(200, stream=BrokenStream())
+        return payment_required("outer-retry")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(httpx.ReadError, match="body lost"):
+                client.get("https://example.com/paid")
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get("https://example.com/paid")
+    finally:
+        client.close()
+        runtime.close()
+
+    assert len(requests) == 3
+    assert method.calls == 1
+
+
+def test_paid_server_error_blocks_outer_retry() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return payment_required("first")
+        if len(requests) == 2:
+            return httpx.Response(503, content=b"unknown")
+        return payment_required("outer-retry")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            assert client.get("https://example.com/paid").status_code == 503
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get("https://example.com/paid")
+    finally:
+        client.close()
+        runtime.close()
+
+    assert len(requests) == 3
+    assert method.calls == 1
+
+
+def test_paid_redirect_to_another_402_does_not_mint_again() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/start":
+            if "authorization" not in request.headers:
+                return payment_required("first")
+            return httpx.Response(302, headers={"location": "/next"})
+        return payment_required("second")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get("https://example.com/start")
+    finally:
+        client.close()
+        runtime.close()
+
+    assert method.calls == 1
+    assert [(request.url.path, "authorization" in request.headers) for request in requests] == [
+        ("/start", False),
+        ("/start", True),
+        ("/next", False),
+    ]
+
+
+def test_response_hook_failure_after_read_blocks_idempotent_retry() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+    hook_calls = 0
+    challenge_number = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number
+        requests.append(request)
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=b"paid")
+        challenge_number += 1
+        return payment_required(f"challenge-{challenge_number}")
+
+    def hook(response: httpx.Response) -> None:
+        nonlocal hook_calls
+        hook_calls += 1
+        response.read()
+        if hook_calls == 1:
+            raise RuntimeError("consumer failed after reading paid response")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        event_hooks={"response": [hook]},
+    )
+    headers = {"Idempotency-Key": "hook-operation"}
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(RuntimeError, match="consumer failed"):
+                client.get("https://example.com/paid", headers=headers)
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get("https://example.com/paid", headers=headers)
+    finally:
+        client.close()
+        runtime.close()
+
+    assert hook_calls == 1
+    assert method.calls == 1
+    assert len(requests) == 3
+
+
+def test_response_hook_nested_send_has_an_independent_payment_budget() -> None:
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=request.url.path.encode())
+        return payment_required(f"challenge-{request.url.path}")
+
+    runtime = PaymentRuntime([method])
+    inner = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def hook(_response: httpx.Response) -> None:
+        assert inner.get("https://example.com/inner").status_code == 200
+
+    outer = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        event_hooks={"response": [hook]},
+    )
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            response = outer.get("https://example.com/outer")
+    finally:
+        outer.close()
+        inner.close()
+        runtime.close()
+
+    assert response.content == b"/outer"
+    assert method.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_requests_with_distinct_challenges_both_pay() -> None:
+    requests: list[httpx.Request] = []
+    method = Method()
+    challenge_number = 0
+
+    async def delay_credential() -> None:
+        await asyncio.sleep(0.05)
+
+    method.on_create = delay_credential
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number
+        requests.append(request)
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=b"paid")
+        challenge_number += 1
+        return payment_required(f"challenge-{challenge_number}")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            first, second = await asyncio.gather(
+                client.get("https://example.com/identical"),
+                client.get("https://example.com/identical"),
+            )
+    finally:
+        await client.aclose()
+        await runtime.aclose()
+
+    assert first.status_code == second.status_code == 200
+    assert challenge_number == method.calls == 2
+    assert len(requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_direct_transport_nested_calls_use_independent_operations() -> None:
+    release = asyncio.Event()
+    background: asyncio.Task[httpx.Response] | None = None
+    nested_response: httpx.Response | None = None
+    method = Method()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=request.url.path.encode())
+        return payment_required(f"challenge-{request.url.path}")
+
+    runtime = PaymentRuntime([method])
+    inner = httpx.AsyncClient(
+        transport=PaymentTransport(
+            inner=httpx.MockTransport(handler),
+            runtime=runtime,
+        )
+    )
+
+    async def hook(_response: httpx.Response) -> None:
+        nonlocal background, nested_response
+
+        nested_response = await inner.get("https://example.com/inner")
+
+        async def send_later() -> httpx.Response:
+            await release.wait()
+            return await inner.get("https://example.com/background")
+
+        background = asyncio.create_task(send_later())
+
+    outer = runtime.wrap_async_client(
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"response": [hook]},
+        )
+    )
+    try:
+        response = await outer.get("https://example.com/outer")
+        assert nested_response is not None
+        assert background is not None
+        release.set()
+        background_response = await background
+    finally:
+        await outer.aclose()
+        await inner.aclose()
+        await runtime.aclose()
+
+    assert response.content == b"/outer"
+    assert nested_response.content == b"/inner"
+    assert background_response.content == b"/background"
+    assert method.calls == 3
+
+
+def test_concurrent_requests_with_same_idempotency_key_pay_once() -> None:
+    barrier = threading.Barrier(2)
+    counter_lock = threading.Lock()
+    challenge_number = 0
+    paid_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number, paid_requests
+        if "authorization" in request.headers:
+            with counter_lock:
+                paid_requests += 1
+            return httpx.Response(200, content=b"paid")
+        with counter_lock:
+            challenge_number += 1
+            challenge_id = f"challenge-{challenge_number}"
+        barrier.wait(timeout=1)
+        return payment_required(challenge_id)
+
+    method = Method()
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def send() -> httpx.Response:
+        return client.post(
+            "https://example.com/paid",
+            content=b"same",
+            headers={"Idempotency-Key": "same-operation"},
+        )
+
+    try:
+        with instrument(runtime, scope="process", allow_unrestricted=True):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(send) for _ in range(2)]
+                outcomes: list[httpx.Response | PaymentOutcomeUnknownError] = []
+                for future in futures:
+                    try:
+                        outcomes.append(future.result())
+                    except PaymentOutcomeUnknownError as error:
+                        outcomes.append(error)
+    finally:
+        client.close()
+        runtime.close()
+
+    assert sum(isinstance(item, httpx.Response) for item in outcomes) == 1
+    assert sum(isinstance(item, PaymentOutcomeUnknownError) for item in outcomes) == 1
+    assert method.calls == paid_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_cancellation_before_credential_send_does_not_poison_retry() -> None:
+    requests: list[httpx.Request] = []
+    started = threading.Event()
+    cancelled = threading.Event()
+    method = Method()
+
+    async def block_credential() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    method.on_create = block_credential
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=b"paid")
+        return payment_required("same-challenge")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            task = asyncio.create_task(client.get("https://example.com/cancel"))
+            assert await asyncio.to_thread(started.wait, 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.to_thread(cancelled.wait, 1)
+
+            method.on_create = None
+            response = await client.get("https://example.com/cancel")
+    finally:
+        await client.aclose()
+        await runtime.aclose()
+
+    assert response.status_code == 200
+    assert method.calls == 2
+    assert ["authorization" in request.headers for request in requests] == [
+        False,
+        False,
+        True,
+    ]
+
+
+def test_unknown_attempt_is_not_evicted_after_256_others() -> None:
+    method = Method()
+    challenge_number = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number
+        if "authorization" in request.headers:
+            raise httpx.ReadTimeout("paid response lost", request=request)
+        challenge_number += 1
+        return payment_required(f"challenge-{challenge_number}")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def lose_response(key: str) -> None:
+        with pytest.raises(PaymentOutcomeUnknownError):
+            client.get(
+                "https://example.com/paid",
+                headers={"Idempotency-Key": key},
+            )
+
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            lose_response("victim")
+            for index in range(256):
+                lose_response(f"filler-{index}")
+            calls_before_retry = method.calls
+            lose_response("victim")
+    finally:
+        client.close()
+        runtime.close()
+
+    assert calls_before_retry == 257
+    assert method.calls == calls_before_retry
+
+
+def test_idempotency_key_scopes_unknown_outcome_protection() -> None:
+    method = Method()
+    challenge_number = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number
+        if "authorization" in request.headers:
+            if request.headers["idempotency-key"] == "operation-a":
+                raise httpx.ReadTimeout("paid response lost", request=request)
+            return httpx.Response(200, content=b"paid")
+        challenge_number += 1
+        return payment_required(f"challenge-{challenge_number}")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.post(
+                    "https://example.com/paid",
+                    content=b"first body",
+                    headers={"Idempotency-Key": "operation-a"},
+                )
+            with pytest.raises(PaymentOutcomeUnknownError) as repeated:
+                client.post(
+                    "https://example.com/paid",
+                    content=b"different body",
+                    headers={"Idempotency-Key": "operation-a"},
+                )
+            response = client.post(
+                "https://example.com/paid",
+                content=b"first body",
+                headers={"Idempotency-Key": "operation-b"},
+            )
+    finally:
+        client.close()
+        runtime.close()
+
+    assert isinstance(repeated.value.cause, httpx.ReadTimeout)
+    assert response.status_code == 200
+    assert method.calls == 2
+    assert challenge_number == 3
+
+
+def test_url_fragment_does_not_bypass_idempotency_protection() -> None:
+    method = Method()
+    challenge_number = 0
+    paid_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal challenge_number, paid_requests
+        if "authorization" in request.headers:
+            paid_requests += 1
+            if paid_requests == 1:
+                raise httpx.ReadTimeout("paid response lost", request=request)
+            return httpx.Response(200, content=b"paid")
+        challenge_number += 1
+        return payment_required(f"challenge-{challenge_number}")
+
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get(
+                    "https://example.com/paid#first",
+                    headers={"Idempotency-Key": "same-operation"},
+                )
+            with pytest.raises(PaymentOutcomeUnknownError):
+                client.get(
+                    "https://example.com/paid#second",
+                    headers={"Idempotency-Key": "same-operation"},
+                )
+    finally:
+        client.close()
+        runtime.close()
+
+    assert method.calls == paid_requests == 1
+
+
+def test_stale_context_falls_back_to_active_process_binding() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "authorization" in request.headers:
+            return httpx.Response(200, content=b"paid")
+        return payment_required()
+
+    stale_runtime = PaymentRuntime([])
+    stale_handle = instrument(stale_runtime, allow_unrestricted=True)
+    stale_context = copy_context()
+    stale_handle.disable()
+
+    method = Method()
+    runtime = PaymentRuntime([method])
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        with instrument(runtime, scope="process", allow_unrestricted=True):
+            response = stale_context.run(client.get, "https://example.com/paid")
+    finally:
+        client.close()
+        runtime.close()
+        stale_runtime.close()
+
+    assert response.status_code == 200
+    assert method.calls == 1
+
+
+@pytest.mark.parametrize("scope", ["invalid", "", "PROCESS"])
+def test_invalid_scope_fails_without_patching(scope: str) -> None:
+    original = httpx.Client._send_single_request
+    runtime = PaymentRuntime([])
+    with pytest.raises(ValueError, match="scope"):
+        instrument(runtime, scope=scope)  # type: ignore[arg-type]
+    runtime.close()
+    assert httpx.Client._send_single_request is original
+
+
+def test_unrestricted_runtime_requires_explicit_opt_in() -> None:
+    original_sync_single = httpx.Client._send_single_request
+    original_async_single = httpx.AsyncClient._send_single_request
+    original_sync_send = httpx.Client.send
+    original_async_send = httpx.AsyncClient.send
+    original_thread_start = threading.Thread.start
+    runtime = PaymentRuntime([])
+
+    with pytest.raises(ValueError, match="allow_unrestricted=True"):
+        instrument(runtime)
+
+    assert httpx.Client._send_single_request is original_sync_single
+    assert httpx.AsyncClient._send_single_request is original_async_single
+    assert httpx.Client.send is original_sync_send
+    assert httpx.AsyncClient.send is original_async_send
+    assert threading.Thread.start is original_thread_start
+
+    with instrument(runtime, allow_unrestricted=True):
+        assert httpx.Client._send_single_request is not original_sync_single
+
+    runtime.close()
+    assert httpx.Client._send_single_request is original_sync_single
+    assert httpx.AsyncClient._send_single_request is original_async_single
+    assert httpx.Client.send is original_sync_send
+    assert httpx.AsyncClient.send is original_async_send
+    assert threading.Thread.start is original_thread_start
+
+
+def test_unsupported_httpx_version_fails_before_patching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_sync = httpx.Client._send_single_request
+    original_async = httpx.AsyncClient._send_single_request
+    monkeypatch.setattr(instrumentation, "version", lambda _: "0.29.0")
+    runtime = PaymentRuntime([])
+
+    with pytest.raises(HttpxCompatibilityError, match=r"supported: >=0.27,<0.29"):
+        instrument(runtime, allow_unrestricted=True)
+    runtime.close()
+
+    assert httpx.Client._send_single_request is original_sync
+    assert httpx.AsyncClient._send_single_request is original_async
+
+
+def test_changed_httpx_signature_fails_before_patching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_async = httpx.AsyncClient._send_single_request
+
+    def incompatible(self: httpx.Client, request: httpx.Request, extra: object) -> httpx.Response:
+        raise AssertionError
+
+    monkeypatch.setattr(httpx.Client, "_send_single_request", incompatible)
+    runtime = PaymentRuntime([])
+    with pytest.raises(HttpxCompatibilityError, match="unsupported signature"):
+        instrument(runtime, allow_unrestricted=True)
+    runtime.close()
+
+    assert httpx.Client._send_single_request is incompatible
+    assert httpx.AsyncClient._send_single_request is original_async
+
+
+def test_wrong_async_shape_fails_before_patching(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_sync = httpx.Client._send_single_request
+
+    def incompatible(self: httpx.AsyncClient, request: httpx.Request) -> httpx.Response:
+        raise AssertionError
+
+    monkeypatch.setattr(httpx.AsyncClient, "_send_single_request", incompatible)
+    runtime = PaymentRuntime([])
+    with pytest.raises(HttpxCompatibilityError, match="is not async"):
+        instrument(runtime, allow_unrestricted=True)
+    runtime.close()
+
+    assert httpx.Client._send_single_request is original_sync
+    assert httpx.AsyncClient._send_single_request is incompatible
+
+
+def test_missing_httpx_seam_fails_before_patching(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_async = httpx.AsyncClient._send_single_request
+    monkeypatch.delattr(httpx.Client, "_send_single_request")
+    runtime = PaymentRuntime([])
+    with pytest.raises(HttpxCompatibilityError, match="is missing"):
+        instrument(runtime, allow_unrestricted=True)
+    runtime.close()
+    assert httpx.AsyncClient._send_single_request is original_async
+
+
+def test_changed_public_send_signature_fails_before_patching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_sync_single = httpx.Client._send_single_request
+    original_async_single = httpx.AsyncClient._send_single_request
+
+    def incompatible(
+        self: httpx.Client,
+        request: httpx.Request,
+        extra: object,
+    ) -> httpx.Response:
+        raise AssertionError
+
+    monkeypatch.setattr(httpx.Client, "send", incompatible)
+    runtime = PaymentRuntime([])
+    with pytest.raises(HttpxCompatibilityError, match="Client.send.*unsupported signature"):
+        instrument(runtime, allow_unrestricted=True)
+    runtime.close()
+
+    assert httpx.Client._send_single_request is original_sync_single
+    assert httpx.AsyncClient._send_single_request is original_async_single
+
+
+def test_reinstrument_fails_if_an_active_patch_was_replaced() -> None:
+    runtime = PaymentRuntime([])
+    handle = instrument(runtime, allow_unrestricted=True)
+    installed_send = httpx.Client.send
+
+    def replacement(
+        self: httpx.Client,
+        request: httpx.Request,
         *args: Any,
         **kwargs: Any,
-    ) -> Any:
-        self.calls.append(kwargs)
-        result = self.results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return result
+    ) -> httpx.Response:
+        return installed_send(self, request, *args, **kwargs)
 
-
-@pytest.mark.asyncio
-async def test_credential_thread_is_not_recursively_instrumented_for_mcp_only(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mcp
-
-    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
-    internal = FakeSession([FakeMcpError()])
-    internal_results: list[str] = []
-
-    class ThreadedMethod(MockMethod):
-        async def _create(self, challenge: Challenge):
-            def call() -> None:
-                try:
-                    asyncio.run(internal.call_tool("internal"))
-                except FakeMcpError:
-                    internal_results.append("unpaid")
-
-            thread = threading.Thread(target=call)
-            thread.start()
-            thread.join(timeout=2)
-            assert thread.is_alive() is False
-            return await super()._create(challenge)
-
-    method = ThreadedMethod("one")
-    runtime = PaymentRuntime([method])
-    paid_result = object()
-    session = FakeSession([FakeMcpError(), paid_result])
-    handle = instrument(runtime, httpx=False, mcp=True)
+    httpx.Client.send = replacement  # type: ignore[method-assign]
     try:
-        result = await session.call_tool("paid")
+        with pytest.raises(HttpxCompatibilityError, match="was replaced"):
+            instrument(runtime, allow_unrestricted=True)
     finally:
+        httpx.Client.send = installed_send  # type: ignore[method-assign]
         handle.disable()
         runtime.close()
-
-    assert result is paid_result
-    assert internal_results == ["unpaid"]
-    assert len(internal.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_mcp_instrumentation_preserves_shape_and_explicit_precedence(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import mcp
-
-    monkeypatch.setattr(mcp, "ClientSession", FakeSession)
-    global_method = MockMethod("global")
-    explicit_method = MockMethod("explicit")
-    global_runtime = PaymentRuntime([global_method])
-    explicit_runtime = PaymentRuntime([explicit_method])
-    handle = instrument(global_runtime, httpx=False, mcp=True)
-    raw_result = object()
-    raw_session = FakeSession([FakeMcpError(), raw_result])
-    explicit_result = object()
-    explicit_session = FakeSession([FakeMcpError(), explicit_result])
-    try:
-        result = await raw_session.call_tool("paid", meta={"trace": "abc"})
-        wrapped = await McpClient(explicit_session, runtime=explicit_runtime).call_tool("paid")
-    finally:
-        handle.disable()
-        global_runtime.close()
-        explicit_runtime.close()
-
-    assert result is raw_result
-    assert raw_session.calls[1]["meta"]["trace"] == "abc"
-    assert META_CREDENTIAL in raw_session.calls[1]["meta"]
-    assert wrapped.result is explicit_result
-    assert global_method.create_credential.call_count == 1
-    assert explicit_method.create_credential.call_count == 1
-
-
-def test_required_mcp_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) -> None:
-    sync_send_single = httpx.Client._send_single_request
-    async_send_single = httpx.AsyncClient._send_single_request
-    real_import = builtins.__import__
-
-    def missing_mcp(name: str, *args: Any, **kwargs: Any):
-        if name == "mcp":
-            raise ImportError("missing")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", missing_mcp)
-    runtime = PaymentRuntime([])
-    try:
-        with pytest.raises(ImportError, match="Cannot instrument MCP"):
-            instrument(runtime, mcp=True)
-    finally:
-        runtime.close()
-
-    assert httpx.Client._send_single_request is sync_send_single
-    assert httpx.AsyncClient._send_single_request is async_send_single
-
-
-def test_invalid_scope_fails_before_installing_patches() -> None:
-    sync_send_single = httpx.Client._send_single_request
-    async_send_single = httpx.AsyncClient._send_single_request
-    runtime = PaymentRuntime([])
-    try:
-        with pytest.raises(ValueError, match="scope"):
-            instrument(runtime, mcp=False, scope="invalid")  # type: ignore[arg-type]
-    finally:
-        runtime.close()
-
-    assert httpx.Client._send_single_request is sync_send_single
-    assert httpx.AsyncClient._send_single_request is async_send_single
-
-
-def test_mcp_patch_failure_is_transactional(monkeypatch: pytest.MonkeyPatch) -> None:
-    import mcp
-
-    sync_send_single = httpx.Client._send_single_request
-    async_send_single = httpx.AsyncClient._send_single_request
-
-    class FrozenSessionMeta(type):
-        def __setattr__(cls, name: str, value: Any) -> None:
-            if name == "call_tool":
-                raise RuntimeError("frozen")
-            super().__setattr__(name, value)
-
-    class FrozenSession(metaclass=FrozenSessionMeta):
-        async def call_tool(self, name: str) -> Any:
-            return name
-
-    monkeypatch.setattr(mcp, "ClientSession", FrozenSession)
-    runtime = PaymentRuntime([])
-    try:
-        with pytest.raises(RuntimeError, match="frozen"):
-            instrument(runtime, mcp=True)
-    finally:
-        runtime.close()
-
-    assert httpx.Client._send_single_request is sync_send_single
-    assert httpx.AsyncClient._send_single_request is async_send_single
