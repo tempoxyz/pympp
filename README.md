@@ -31,6 +31,7 @@ server = Mpp.create(
     ),
 )
 
+
 @app.get("/paid")
 @server.pay(amount="0.50")
 async def handler(request, credential: Credential, receipt: Receipt):
