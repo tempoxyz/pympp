@@ -117,6 +117,7 @@ _HTTPX_ADAPTER_RUNTIME: ContextVar[int | None] = ContextVar(
     default=None,
 )
 _HTTP_PAYMENT_ATTEMPT_EXTENSION = "mpp.payment_attempt"
+_DEFAULT_MAX_UNKNOWN_OUTCOMES = 1024
 
 
 def payment_flow_active() -> bool:
@@ -431,9 +432,16 @@ class PaymentRuntime:
         method_factories: Sequence[MethodFactory] = (),
         events: EventDispatcher | None = None,
         allowed_origins: Sequence[str] | None = None,
+        max_unknown_outcomes: int = _DEFAULT_MAX_UNKNOWN_OUTCOMES,
     ) -> None:
         if methods is not None and method_factories:
             raise ValueError("Pass either methods or method_factories, not both")
+        if (
+            isinstance(max_unknown_outcomes, bool)
+            or not isinstance(max_unknown_outcomes, int)
+            or max_unknown_outcomes < 1
+        ):
+            raise ValueError("max_unknown_outcomes must be a positive integer")
         self.methods = tuple(methods or ())
         self._method_factories = tuple(method_factories)
         self._method_stack: AsyncExitStack | None = None
@@ -451,11 +459,14 @@ class PaymentRuntime:
         self._http_challenges: dict[str, _HttpPaymentAttempt] = {}
         self._http_unknown_challenges: dict[str, _HttpPaymentTombstone] = {}
         self._http_unknown_operations: dict[str, _HttpPaymentTombstone] = {}
+        self._http_unknown_circuit: _HttpPaymentTombstone | None = None
         self._http_idempotent_operations: dict[str, _HttpPaymentAttempt] = {}
         self._mcp_attempt_lock = threading.Lock()
         self._mcp_challenges: dict[str, _McpPaymentAttempt] = {}
         self._mcp_unknown_challenges: dict[str, _McpPaymentTombstone] = {}
         self._mcp_unknown_operations: dict[str, _McpPaymentTombstone] = {}
+        self._mcp_unknown_circuit: _McpPaymentTombstone | None = None
+        self._max_unknown_outcomes = max_unknown_outcomes
 
     async def _initialize_methods(self) -> None:
         stack = AsyncExitStack()
@@ -717,11 +728,31 @@ class PaymentRuntime:
             self._http_challenges.clear()
             self._http_unknown_challenges.clear()
             self._http_unknown_operations.clear()
+            self._http_unknown_circuit = None
             self._http_idempotent_operations.clear()
         with self._mcp_attempt_lock:
             self._mcp_challenges.clear()
             self._mcp_unknown_challenges.clear()
             self._mcp_unknown_operations.clear()
+            self._mcp_unknown_circuit = None
+
+    def reset_unknown_outcomes(self, *, reconciled: bool) -> None:
+        """Reopen payments after every retained unknown outcome was reconciled.
+
+        This clears runtime-level tombstones and any fail-closed circuits.
+        Existing request objects keep their own tombstone markers and must not
+        be reused.
+        """
+        if not reconciled:
+            raise ValueError("Unknown payment outcomes must be externally reconciled before reset")
+        with self._http_attempt_lock:
+            self._http_unknown_challenges.clear()
+            self._http_unknown_operations.clear()
+            self._http_unknown_circuit = None
+        with self._mcp_attempt_lock:
+            self._mcp_unknown_challenges.clear()
+            self._mcp_unknown_operations.clear()
+            self._mcp_unknown_circuit = None
 
     def payment_transport(self, inner: httpx.AsyncBaseTransport | None = None) -> PaymentTransport:
         """Create an httpx transport using this runtime's payment methods."""
@@ -1016,6 +1047,12 @@ class PaymentRuntime:
             arguments,
         )
         with self._mcp_attempt_lock:
+            if circuit := self._mcp_unknown_circuit:
+                raise PaymentOutcomeUnknownError(
+                    circuit.challenge,
+                    circuit.cause,
+                    credential=circuit.credential,
+                )
             existing = self._mcp_challenges.get(challenge_key)
             if existing is None:
                 existing = self._mcp_unknown_challenges.get(challenge_key)
@@ -1064,12 +1101,21 @@ class PaymentRuntime:
         cause: BaseException,
     ) -> None:
         with self._mcp_attempt_lock:
+            if circuit := self._mcp_unknown_circuit:
+                attempt.cause = circuit.cause
+                if self._mcp_challenges.get(attempt.challenge_key) is attempt:
+                    self._mcp_challenges.pop(attempt.challenge_key, None)
+                return
             existing = self._mcp_unknown_operations.get(attempt.operation_key)
             if existing is not None:
                 attempt.cause = existing.cause
                 if self._mcp_challenges.get(attempt.challenge_key) is attempt:
                     self._mcp_challenges.pop(attempt.challenge_key, None)
-                self._mcp_unknown_challenges[attempt.challenge_key] = existing
+                if attempt.challenge_key not in self._mcp_unknown_challenges:
+                    if len(self._mcp_unknown_challenges) >= self._max_unknown_outcomes:
+                        self._mcp_unknown_circuit = existing
+                    else:
+                        self._mcp_unknown_challenges[attempt.challenge_key] = existing
                 return
             compact_cause = _compact_cause(cause)
             attempt.cause = compact_cause
@@ -1081,6 +1127,12 @@ class PaymentRuntime:
             )
             if self._mcp_challenges.get(attempt.challenge_key) is attempt:
                 self._mcp_challenges.pop(attempt.challenge_key, None)
+            if (
+                len(self._mcp_unknown_challenges) >= self._max_unknown_outcomes
+                or len(self._mcp_unknown_operations) >= self._max_unknown_outcomes
+            ):
+                self._mcp_unknown_circuit = tombstone
+                return
             self._mcp_unknown_challenges[attempt.challenge_key] = tombstone
             self._mcp_unknown_operations[attempt.operation_key] = tombstone
 
@@ -1348,6 +1400,13 @@ class PaymentRuntime:
                 request=tombstone.request,
             )
         with self._http_attempt_lock:
+            if circuit := self._http_unknown_circuit:
+                raise PaymentOutcomeUnknownError(
+                    circuit.challenge,
+                    circuit.cause,
+                    credential=circuit.credential,
+                    request=circuit.request,
+                )
             existing: _HttpPaymentAttempt | _HttpPaymentTombstone | None = None
             if isinstance(marker, _HttpPaymentAttempt):
                 cause = marker.cause or RuntimeError(
@@ -1443,12 +1502,28 @@ class PaymentRuntime:
         attempt: _HttpPaymentAttempt,
         cause: BaseException,
     ) -> _HttpPaymentTombstone:
+        if self._http_unknown_circuit is not None:
+            compact_cause = _compact_cause(cause)
+            attempt.cause = compact_cause
+            tombstone = _HttpPaymentTombstone(
+                challenge=attempt.challenge,
+                credential=attempt.credential,
+                cause=compact_cause,
+                request=_compact_request(attempt.request),
+            )
+            self._remove_http_attempt_locked(attempt)
+            self._set_http_request_markers(attempt, tombstone)
+            return tombstone
         existing = self._http_unknown_operations.get(attempt.operation_key)
         if existing is not None:
             attempt.cause = existing.cause
             self._remove_http_attempt_locked(attempt)
             self._set_http_request_markers(attempt, existing)
-            self._http_unknown_challenges[attempt.challenge_key] = existing
+            if attempt.challenge_key not in self._http_unknown_challenges:
+                if len(self._http_unknown_challenges) >= self._max_unknown_outcomes:
+                    self._http_unknown_circuit = existing
+                else:
+                    self._http_unknown_challenges[attempt.challenge_key] = existing
             return existing
         compact_cause = _compact_cause(cause)
         attempt.cause = compact_cause
@@ -1460,6 +1535,12 @@ class PaymentRuntime:
         )
         self._remove_http_attempt_locked(attempt)
         self._set_http_request_markers(attempt, tombstone)
+        if (
+            len(self._http_unknown_challenges) >= self._max_unknown_outcomes
+            or len(self._http_unknown_operations) >= self._max_unknown_outcomes
+        ):
+            self._http_unknown_circuit = tombstone
+            return tombstone
         self._http_unknown_challenges[attempt.challenge_key] = tombstone
         self._http_unknown_operations[attempt.operation_key] = tombstone
         return tombstone

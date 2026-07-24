@@ -118,7 +118,11 @@ outcome unknown; matching future payment attempts raise
 accidental repayment. Global and per-client adapters include redirects,
 response hooks, and body consumption in that outcome boundary. Use a stable,
 unique `Idempotency-Key` for each logical HTTP operation so retries can be
-matched reliably.
+matched reliably. Each protocol retains at most `max_unknown_outcomes`
+tombstones (1,024 by default). Reaching that limit blocks all new payments for
+the protocol instead of evicting safety state. After externally reconciling
+every unknown outcome, reopen payments explicitly with
+`runtime.reset_unknown_outcomes(reconciled=True)`.
 
 ## Examples
 

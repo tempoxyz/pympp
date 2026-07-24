@@ -564,6 +564,11 @@ class TestRuntimeLifecycle:
         with pytest.raises(ValueError, match="either methods or method_factories"):
             PaymentRuntime([], method_factories=[MockMethod])
 
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5])
+    def test_unknown_outcome_limit_must_be_positive(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="positive integer"):
+            PaymentRuntime([], max_unknown_outcomes=value)
+
     @pytest.mark.parametrize("async_close", [False, True])
     @pytest.mark.asyncio
     async def test_close_from_owned_loop_event_is_deferred(
@@ -833,6 +838,84 @@ class TestRuntimeLifecycle:
 
 
 class TestUncertaintyState:
+    def test_http_unknown_outcomes_trip_bounded_fail_closed_circuit(self) -> None:
+        runtime = PaymentRuntime([], max_unknown_outcomes=2)
+
+        for index in range(3):
+            challenge = Challenge(
+                id=f"unknown-{index}",
+                method="tempo",
+                intent="charge",
+                request={},
+            )
+            request = httpx.Request(
+                "POST",
+                f"https://example.com/pay/{index}",
+                content=str(index),
+            )
+            attempt = runtime._begin_http_payment(challenge, request)
+            runtime._mark_http_payment_sent(attempt, request)
+            runtime._mark_http_payment_unknown(attempt, TimeoutError("response lost"))
+
+        assert len(runtime._http_unknown_challenges) == 2
+        assert len(runtime._http_unknown_operations) == 2
+        assert runtime._http_unknown_circuit is not None
+
+        fresh = Challenge(id="fresh", method="tempo", intent="charge", request={})
+        with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+            runtime._begin_http_payment(
+                fresh,
+                httpx.Request("POST", "https://example.com/pay/fresh"),
+            )
+        with pytest.raises(ValueError, match="externally reconciled"):
+            runtime.reset_unknown_outcomes(reconciled=False)
+
+        runtime.reset_unknown_outcomes(reconciled=True)
+
+        assert not runtime._http_unknown_challenges
+        assert not runtime._http_unknown_operations
+        assert runtime._http_unknown_circuit is None
+        attempt = runtime._begin_http_payment(
+            fresh,
+            httpx.Request("POST", "https://example.com/pay/fresh"),
+        )
+        runtime._discard_http_payment(attempt)
+        runtime.close()
+
+    def test_mcp_unknown_outcomes_trip_bounded_fail_closed_circuit(self) -> None:
+        runtime = PaymentRuntime([], max_unknown_outcomes=2)
+
+        async def endpoint(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        for index in range(3):
+            challenge = SimpleNamespace(id=f"unknown-{index}", realm="example.com")
+            attempt = runtime._begin_mcp_payment(
+                challenge,
+                endpoint,
+                f"tool-{index}",
+                {"index": index},
+            )
+            runtime._mark_mcp_payment_sent(attempt)
+            runtime._mark_mcp_payment_unknown(attempt, TimeoutError("response lost"))
+
+        assert len(runtime._mcp_unknown_challenges) == 2
+        assert len(runtime._mcp_unknown_operations) == 2
+        assert runtime._mcp_unknown_circuit is not None
+
+        fresh = SimpleNamespace(id="fresh", realm="example.com")
+        with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+            runtime._begin_mcp_payment(fresh, endpoint, "fresh-tool", {})
+
+        runtime.reset_unknown_outcomes(reconciled=True)
+
+        assert not runtime._mcp_unknown_challenges
+        assert not runtime._mcp_unknown_operations
+        assert runtime._mcp_unknown_circuit is None
+        attempt = runtime._begin_mcp_payment(fresh, endpoint, "fresh-tool", {})
+        runtime._discard_mcp_payment(attempt)
+        runtime.close()
+
     def test_close_preserves_tombstone_for_sent_http_attempt(self) -> None:
         challenge = Challenge(id="closing", method="tempo", intent="charge", request={})
         request = httpx.Request("POST", "https://example.com/pay")

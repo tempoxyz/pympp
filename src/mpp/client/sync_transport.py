@@ -24,12 +24,14 @@ from mpp.runtime import (
 )
 
 from .transport import (
+    _apply_response_cookies,
     _bind_response_request,
     _challenged_request,
     _client_payment_failed_payload,
     _close_response,
     _copy_request,
     _payment_challenges,
+    _propagate_response_cookies,
     _SyncOutcomeStream,
 )
 
@@ -252,11 +254,12 @@ class SyncPaymentTransport(httpx.BaseTransport):
             raise
         self._runtime._set_http_payment_credential(attempt, credential)
 
-        headers = httpx.Headers(challenged_request.headers)
-        headers["Authorization"] = auth_header
-        retry_request = _copy_request(challenged_request, headers=headers)
-
         try:
+            headers = httpx.Headers(challenged_request.headers)
+            headers["Authorization"] = auth_header
+            retry_request = _copy_request(challenged_request, headers=headers)
+            _apply_response_cookies(response, retry_request)
+
             with self._runtime._paid_operation():
                 self._runtime._mark_http_payment_sent(attempt, retry_request)
                 try:
@@ -286,6 +289,7 @@ class SyncPaymentTransport(httpx.BaseTransport):
                     raise error from cause
 
                 _bind_response_request(payment_response, retry_request)
+                _propagate_response_cookies(response, payment_response)
 
                 try:
                     if payment_response.status_code == 402:

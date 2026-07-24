@@ -1,6 +1,7 @@
 """Tests for client-side transport."""
 
 import asyncio
+from http.cookies import SimpleCookie
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -134,6 +135,51 @@ class TestPaymentTransport:
         assert retry_request.headers["Authorization"].startswith("Payment ")
 
         method.create_credential.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_applies_and_propagates_challenge_cookies(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if "authorization" not in request.headers:
+                return httpx.Response(
+                    402,
+                    headers=[
+                        ("www-authenticate", payment_challenge_header()),
+                        ("set-cookie", "session=new; Path=/"),
+                        ("set-cookie", "payment_nonce=nonce-1; Path=/"),
+                    ],
+                )
+            return httpx.Response(
+                200,
+                headers={"set-cookie": "final_cookie=ok; Path=/"},
+                content=b"paid",
+            )
+
+        transport = PaymentTransport(
+            methods=[MockMethod()],
+            inner=httpx.MockTransport(handler),
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            client.cookies.set("session", "old", domain="example.com", path="/")
+            response = await client.get("https://example.com/paid")
+
+            assert response.status_code == 200
+            assert requests[0].headers["cookie"] == "session=old"
+            retry_cookies = SimpleCookie(requests[1].headers["cookie"])
+            assert retry_cookies["session"].value == "new"
+            assert retry_cookies["payment_nonce"].value == "nonce-1"
+            assert dict(client.cookies) == {
+                "session": "new",
+                "payment_nonce": "nonce-1",
+                "final_cookie": "ok",
+            }
+            assert response.headers.get_list("set-cookie") == [
+                "session=new; Path=/",
+                "payment_nonce=nonce-1; Path=/",
+                "final_cookie=ok; Path=/",
+            ]
 
     @pytest.mark.parametrize("terminal", ["complete", "error", "close"])
     @pytest.mark.asyncio

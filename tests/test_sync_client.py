@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.cookies import SimpleCookie
 from typing import Any, cast
 from unittest.mock import AsyncMock
 
@@ -104,6 +105,53 @@ class TestSyncPaymentTransport:
 
         assert response.content == b"ok"
         assert len(inner.requests) == 1
+
+    def test_paid_retry_applies_and_propagates_challenge_cookies(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if "authorization" not in request.headers:
+                return httpx.Response(
+                    402,
+                    headers=[
+                        (
+                            "www-authenticate",
+                            challenge().to_www_authenticate("example.com"),
+                        ),
+                        ("set-cookie", "session=new; Path=/"),
+                        ("set-cookie", "payment_nonce=nonce-1; Path=/"),
+                    ],
+                )
+            return httpx.Response(
+                200,
+                headers={"set-cookie": "final_cookie=ok; Path=/"},
+                content=b"paid",
+            )
+
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=httpx.MockTransport(handler),
+        )
+        with httpx.Client(transport=transport) as client:
+            client.cookies.set("session", "old", domain="example.com", path="/")
+            response = client.get("https://example.com/paid")
+
+            assert response.status_code == 200
+            assert requests[0].headers["cookie"] == "session=old"
+            retry_cookies = SimpleCookie(requests[1].headers["cookie"])
+            assert retry_cookies["session"].value == "new"
+            assert retry_cookies["payment_nonce"].value == "nonce-1"
+            assert dict(client.cookies) == {
+                "session": "new",
+                "payment_nonce": "nonce-1",
+                "final_cookie": "ok",
+            }
+            assert response.headers.get_list("set-cookie") == [
+                "session=new; Path=/",
+                "payment_nonce=nonce-1; Path=/",
+                "final_cookie=ok; Path=/",
+            ]
 
     def test_replays_bytes_and_multipart_bodies(self) -> None:
         requests = [

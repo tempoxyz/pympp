@@ -10,6 +10,7 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import logging
+from http.cookies import CookieError, SimpleCookie
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -85,6 +86,60 @@ def _copy_request(
         content=request.content,
         extensions=request.extensions,
     )
+
+
+def _apply_response_cookies(
+    response: httpx.Response,
+    request: httpx.Request,
+) -> None:
+    """Apply cookies from an internal 402 response to its immediate retry."""
+    set_cookie_headers = response.headers.get_list("set-cookie")
+    if not set_cookie_headers:
+        return
+
+    _bind_response_request(response, request)
+    cookies = httpx.Cookies()
+    cookies.extract_cookies(response)
+    cookie_request = httpx.Request(request.method, request.url)
+    cookies.set_cookie_header(cookie_request)
+
+    replacement = SimpleCookie()
+    for header in set_cookie_headers:
+        try:
+            replacement.load(header)
+        except CookieError:
+            continue
+    replacement_names = set(replacement)
+
+    existing_parts = [
+        part.strip() for part in request.headers.get("cookie", "").split(";") if part.strip()
+    ]
+    retained_parts = [
+        part for part in existing_parts if part.split("=", 1)[0].strip() not in replacement_names
+    ]
+    replacement_parts = [
+        part.strip() for part in cookie_request.headers.get("cookie", "").split(";") if part.strip()
+    ]
+    merged = "; ".join((*replacement_parts, *retained_parts))
+    if merged:
+        request.headers["cookie"] = merged
+    else:
+        request.headers.pop("cookie", None)
+
+
+def _propagate_response_cookies(
+    source: httpx.Response,
+    target: httpx.Response,
+) -> None:
+    """Expose cookies from an internal 402 response on the returned response."""
+    if source is target:
+        return
+    source_values = source.headers.get_list("set-cookie")
+    if not source_values:
+        return
+    target_values = target.headers.get_list("set-cookie")
+    target.headers.pop("set-cookie", None)
+    target.headers.update([("set-cookie", value) for value in (*source_values, *target_values)])
 
 
 def _bind_response_request(response: httpx.Response, request: httpx.Request) -> None:
@@ -501,12 +556,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             raise
         self._runtime._set_http_payment_credential(attempt, credential)
 
-        headers = httpx.Headers(challenged_request.headers)
-        headers["Authorization"] = auth_header
-
-        retry_request = _copy_request(challenged_request, headers=headers)
-
         try:
+            headers = httpx.Headers(challenged_request.headers)
+            headers["Authorization"] = auth_header
+            retry_request = _copy_request(challenged_request, headers=headers)
+            _apply_response_cookies(response, retry_request)
+
             with self._runtime._paid_operation():
                 self._runtime._mark_http_payment_sent(attempt, retry_request)
                 try:
@@ -536,6 +591,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     raise error from cause
 
                 _bind_response_request(payment_response, retry_request)
+                _propagate_response_cookies(response, payment_response)
 
                 try:
                     if payment_response.status_code == 402:
