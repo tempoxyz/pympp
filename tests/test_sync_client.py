@@ -73,6 +73,13 @@ class TrackingStream(httpx.SyncByteStream):
         self.closed = True
 
 
+class BrokenTrackingStream(TrackingStream):
+    def __iter__(self):
+        self.started = True
+        raise httpx.ReadError("body lost")
+        yield b""  # pragma: no cover
+
+
 def challenge(**overrides: Any) -> Challenge:
     values = {"id": "test-id", "method": "tempo", "intent": "charge", "request": {}}
     values.update(overrides)
@@ -148,13 +155,18 @@ class TestSyncPaymentTransport:
             yield b"one-shot"
 
         requests: list[httpx.Request] = []
+        response_stream = TrackingStream([b"payment explanation"])
 
         class OneShotTransport(httpx.BaseTransport):
             def handle_request(self, request: httpx.Request) -> httpx.Response:
                 requests.append(request)
                 stream = cast(httpx.SyncByteStream, request.stream)
                 _ = b"".join(stream)
-                return payment_required()
+                return httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge().to_www_authenticate("example.com")},
+                    stream=response_stream,
+                )
 
         transport = SyncPaymentTransport(
             methods=[MockMethod()],
@@ -169,6 +181,7 @@ class TestSyncPaymentTransport:
             transport.close()
 
         assert len(requests) == 1
+        assert response_stream.closed is True
 
     def test_paid_stream_remains_lazy(self) -> None:
         stream = TrackingStream([b"one", b"two"])
@@ -176,10 +189,48 @@ class TestSyncPaymentTransport:
         transport = SyncPaymentTransport(methods=[MockMethod()], inner=inner)
         try:
             response = transport.handle_request(httpx.Request("GET", "https://example.com"))
+            outcome_stream = cast(Any, response.stream)
+            assert outcome_stream._runtime is not None
+            assert outcome_stream._attempt is not None
             assert stream.started is False
             assert response.read() == b"onetwo"
             assert stream.started is True
+            assert outcome_stream._runtime is None
+            assert outcome_stream._attempt is None
         finally:
+            transport.close()
+
+    @pytest.mark.parametrize("terminal", ["error", "close"])
+    def test_paid_stream_releases_attempt_on_noncomplete_terminal(
+        self,
+        terminal: str,
+    ) -> None:
+        stream: TrackingStream = (
+            BrokenTrackingStream([]) if terminal == "error" else TrackingStream([b"paid"])
+        )
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=MockTransport(
+                [
+                    payment_required(),
+                    httpx.Response(200, stream=stream),
+                ]
+            ),
+        )
+        response = transport.handle_request(httpx.Request("GET", "https://example.com"))
+        outcome_stream = cast(Any, response.stream)
+        assert outcome_stream._runtime is not None
+        assert outcome_stream._attempt is not None
+        try:
+            if terminal == "error":
+                with pytest.raises(httpx.ReadError, match="body lost"):
+                    response.read()
+            else:
+                response.close()
+            assert outcome_stream._runtime is None
+            assert outcome_stream._attempt is None
+        finally:
+            response.close()
             transport.close()
 
     @pytest.mark.parametrize(
@@ -221,6 +272,127 @@ class TestSyncPaymentTransport:
         assert failed[0]["credential"] is None
         assert failed[0]["protocol"] == "http"
         assert failed[0]["response"] is response
+
+    @pytest.mark.parametrize(
+        "www_authenticate",
+        [
+            pytest.param("Bearer realm=test", id="non-payment"),
+            pytest.param("Payment invalid-base64!!", id="malformed"),
+            pytest.param(
+                challenge(method="stripe").to_www_authenticate("example.com"),
+                id="unsupported",
+            ),
+            pytest.param(
+                challenge(expires="2020-01-01T00:00:00Z").to_www_authenticate("example.com"),
+                id="expired",
+            ),
+        ],
+    )
+    def test_nonpayable_402_body_remains_lazy(self, www_authenticate: str) -> None:
+        stream = TrackingStream([b"explanation"])
+        response = httpx.Response(
+            402,
+            headers={"www-authenticate": www_authenticate},
+            stream=stream,
+        )
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=MockTransport([response]),
+        )
+        try:
+            returned = transport.handle_request(httpx.Request("GET", "https://example.com"))
+            assert returned is response
+            assert stream.started is False
+            assert stream.closed is False
+            assert returned.read() == b"explanation"
+            assert stream.started is True
+            assert stream.closed is True
+        finally:
+            transport.close()
+
+    def test_disallowed_402_body_remains_lazy(self) -> None:
+        stream = TrackingStream([b"explanation"])
+        response = httpx.Response(
+            402,
+            headers={"www-authenticate": challenge().to_www_authenticate("example.com")},
+            stream=stream,
+        )
+        runtime = PaymentRuntime(
+            [MockMethod()],
+            allowed_origins=["https://allowed.example"],
+        )
+        transport = SyncPaymentTransport(
+            runtime=runtime,
+            inner=MockTransport([response]),
+        )
+        try:
+            returned = transport.handle_request(httpx.Request("GET", "https://disallowed.example"))
+            assert returned is response
+            assert stream.started is False
+            assert stream.closed is False
+        finally:
+            response.close()
+            transport.close()
+            runtime.close()
+
+    def test_handles_comma_combined_authentication_challenges(self) -> None:
+        payment = challenge(
+            request={"description": "one,two"},
+            description='quoted, comma and \\"escape',
+        ).to_www_authenticate("example.com")
+        method = MockMethod()
+        transport = SyncPaymentTransport(
+            methods=[method],
+            inner=MockTransport(
+                [
+                    httpx.Response(
+                        402,
+                        headers={
+                            "www-authenticate": (
+                                'Bearer realm="legacy", error="expired", '
+                                f'{payment}, Basic realm="fallback"'
+                            )
+                        },
+                    ),
+                    httpx.Response(200, content=b"paid"),
+                ]
+            ),
+        )
+        try:
+            response = transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert response.status_code == 200
+        method.create_credential.assert_awaited_once()
+
+    def test_initial_payment_failed_event_abort_closes_response(self) -> None:
+        class EventAbort(BaseException):
+            pass
+
+        def abort(_payload: Any) -> None:
+            raise EventAbort
+
+        stream = TrackingStream([b"payment explanation"])
+        response = httpx.Response(
+            402,
+            headers={
+                "www-authenticate": challenge(method="stripe").to_www_authenticate("example.com")
+            },
+            stream=stream,
+        )
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=MockTransport([response]),
+        )
+        transport.on_payment_failed(abort)
+        try:
+            with pytest.raises(EventAbort):
+                transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert stream.closed is True
 
     @pytest.mark.parametrize("failure_stage", ["credential", "serialization", "retry"])
     def test_payment_failures_emit_and_propagate(
@@ -285,6 +457,39 @@ class TestSyncPaymentTransport:
 
         assert len(inner.requests) == 2
         method.create_credential.assert_awaited_once()
+
+    @pytest.mark.parametrize("status_code", [200, 402, 503])
+    def test_event_abort_closes_unreturned_paid_response(
+        self,
+        status_code: int,
+    ) -> None:
+        class EventAbort(BaseException):
+            pass
+
+        def abort(_payload: Any) -> None:
+            raise EventAbort
+
+        stream = TrackingStream([b"paid response"])
+        transport = SyncPaymentTransport(
+            methods=[MockMethod()],
+            inner=MockTransport(
+                [
+                    payment_required(),
+                    httpx.Response(status_code, stream=stream),
+                ]
+            ),
+        )
+        if status_code == 200:
+            transport.on_payment_response(abort)
+        else:
+            transport.on_payment_failed(abort)
+        try:
+            with pytest.raises(EventAbort):
+                transport.handle_request(httpx.Request("GET", "https://example.com"))
+        finally:
+            transport.close()
+
+        assert stream.closed is True
 
     def test_lifecycle_handler_can_supply_sync_credential(self) -> None:
         method = MockMethod()

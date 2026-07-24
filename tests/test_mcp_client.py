@@ -239,31 +239,39 @@ class TestMcpClientPaidTool:
     async def test_payment_flow(self) -> None:
         """First call raises -32042, retry succeeds with receipt."""
         session = AsyncMock()
+        payment_error = FakeMcpError(
+            -32042,
+            message="Payment Required",
+            data={
+                "httpStatus": 402,
+                "challenges": [_make_challenge_dict()],
+            },
+        )
+        retry_result = FakeCallToolResult(
+            content=[{"type": "text", "text": "premium result"}],
+            meta=_make_receipt_meta(),
+        )
+        session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-        import sys
-        from unittest.mock import MagicMock
+        client = McpClient(session, methods=[FakeMethod()])
+        result = await client.call_tool("premium_tool", {"query": "test"})
 
-        # Ensure mcp.shared.exceptions is importable with our FakeMcpError
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-            sys.modules[mod_name] = (
-                mcp_mock
-                if mod_name == "mcp"
-                else getattr(
-                    mcp_mock,
-                    mod_name.split(".", 1)[-1].replace(".", ".") if "." in mod_name else mod_name,
-                    mcp_mock,
-                )
-            )
-        # Set it properly
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+        assert result.content[0]["text"] == "premium result"
+        assert result.receipt is not None
+        assert result.receipt.status == "success"
+        assert result.receipt.reference == "0xtxhash"
+        assert session.call_tool.call_count == 2
 
-        try:
-            payment_error = FakeMcpError(
+        retry_call = session.call_tool.call_args_list[1]
+        retry_meta = retry_call.kwargs.get("meta") or retry_call[1].get("meta")
+        assert META_CREDENTIAL in retry_meta
+
+    @pytest.mark.asyncio
+    async def test_payment_flow_with_current_sdk_error_shape(self) -> None:
+        """Current mcp SDK stores ErrorData on McpError.error."""
+        session = AsyncMock()
+        payment_error = FakeCurrentMcpError(
+            FakeMcpErrorData(
                 -32042,
                 message="Payment Required",
                 data={
@@ -271,84 +279,21 @@ class TestMcpClientPaidTool:
                     "challenges": [_make_challenge_dict()],
                 },
             )
+        )
+        retry_result = FakeCallToolResult(
+            content=[{"type": "text", "text": "premium result"}],
+            meta=_make_receipt_meta(),
+        )
+        session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-            retry_result = FakeCallToolResult(
-                content=[{"type": "text", "text": "premium result"}],
-                meta=_make_receipt_meta(),
-            )
+        client = McpClient(session, methods=[FakeMethod()])
+        result = await client.call_tool("premium_tool", {"query": "test"})
 
-            session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
-
-            client = McpClient(session, methods=[FakeMethod()])
-            result = await client.call_tool("premium_tool", {"query": "test"})
-
-            assert result.content[0]["text"] == "premium result"
-            assert result.receipt is not None
-            assert result.receipt.status == "success"
-            assert result.receipt.reference == "0xtxhash"
-
-            assert session.call_tool.call_count == 2
-
-            # Verify retry included credential in meta
-            retry_call_kwargs = session.call_tool.call_args_list[1]
-            retry_meta = retry_call_kwargs.kwargs.get("meta") or retry_call_kwargs[1].get("meta")
-            assert META_CREDENTIAL in retry_meta
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
-
-    @pytest.mark.asyncio
-    async def test_payment_flow_with_current_sdk_error_shape(self) -> None:
-        """Current mcp SDK stores ErrorData on McpError.error."""
-        session = AsyncMock()
-
-        import sys
-        from unittest.mock import MagicMock
-
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeCurrentMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
-
-        try:
-            payment_error = FakeCurrentMcpError(
-                FakeMcpErrorData(
-                    -32042,
-                    message="Payment Required",
-                    data={
-                        "httpStatus": 402,
-                        "challenges": [_make_challenge_dict()],
-                    },
-                )
-            )
-            retry_result = FakeCallToolResult(
-                content=[{"type": "text", "text": "premium result"}],
-                meta=_make_receipt_meta(),
-            )
-            session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
-
-            client = McpClient(session, methods=[FakeMethod()])
-            result = await client.call_tool("premium_tool", {"query": "test"})
-
-            assert result.content[0]["text"] == "premium result"
-            assert result.receipt is not None
-            assert result.receipt.reference == "0xtxhash"
-
-            retry_meta = session.call_tool.call_args_list[1].kwargs.get("meta", {})
-            assert META_CREDENTIAL in retry_meta
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
+        assert result.content[0]["text"] == "premium result"
+        assert result.receipt is not None
+        assert result.receipt.reference == "0xtxhash"
+        retry_meta = session.call_tool.call_args_list[1].kwargs.get("meta", {})
+        assert META_CREDENTIAL in retry_meta
 
     @pytest.mark.asyncio
     async def test_no_matching_method_raises(self) -> None:
@@ -357,18 +302,6 @@ class TestMcpClientPaidTool:
         runtime = PaymentRuntime([FakeMethod(name="tempo")])
         failed: list[dict[str, Any]] = []
         runtime.events.on("payment.failed", failed.append)
-
-        import sys
-        from unittest.mock import MagicMock
-
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
 
         try:
             payment_error = FakeMcpError(
@@ -388,44 +321,19 @@ class TestMcpClientPaidTool:
             assert failed[0]["protocol"] == "mcp"
         finally:
             runtime.close()
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
 
     @pytest.mark.asyncio
     async def test_non_payment_error_propagates(self) -> None:
         """Non-payment McpErrors propagate unchanged."""
         session = AsyncMock()
+        other_error = FakeMcpError(-32601, message="Method not found")
+        session.call_tool = AsyncMock(side_effect=other_error)
 
-        import sys
-        from unittest.mock import MagicMock
+        client = McpClient(session, methods=[FakeMethod()])
 
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
-
-        try:
-            other_error = FakeMcpError(-32601, message="Method not found")
-            session.call_tool = AsyncMock(side_effect=other_error)
-
-            client = McpClient(session, methods=[FakeMethod()])
-
-            with pytest.raises(FakeMcpError) as exc_info:
-                await client.call_tool("tool", {})
-            assert exc_info.value.code == -32601
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
+        with pytest.raises(FakeMcpError) as exc_info:
+            await client.call_tool("tool", {})
+        assert exc_info.value.code == -32601
 
     @pytest.mark.asyncio
     async def test_timeout_forwarded(self) -> None:
@@ -496,111 +404,51 @@ class TestMcpClientPaidTool:
     async def test_meta_preserved_on_retry(self) -> None:
         """Custom meta is preserved and merged with credential on retry."""
         session = AsyncMock()
+        payment_error = FakeMcpError(
+            -32042,
+            data={"challenges": [_make_challenge_dict()]},
+        )
+        retry_result = FakeCallToolResult(meta=_make_receipt_meta())
+        session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-        import sys
-        from unittest.mock import MagicMock
+        client = McpClient(session, methods=[FakeMethod()])
+        await client.call_tool("tool", {}, meta={"trace_id": "abc"})
 
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
-
-        try:
-            payment_error = FakeMcpError(
-                -32042,
-                data={"challenges": [_make_challenge_dict()]},
-            )
-            retry_result = FakeCallToolResult(meta=_make_receipt_meta())
-            session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
-
-            client = McpClient(session, methods=[FakeMethod()])
-            await client.call_tool("tool", {}, meta={"trace_id": "abc"})
-
-            retry_kwargs = session.call_tool.call_args_list[1].kwargs
-            retry_meta = retry_kwargs.get("meta", {})
-            assert retry_meta.get("trace_id") == "abc"
-            assert META_CREDENTIAL in retry_meta
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
+        retry_kwargs = session.call_tool.call_args_list[1].kwargs
+        retry_meta = retry_kwargs.get("meta", {})
+        assert retry_meta.get("trace_id") == "abc"
+        assert META_CREDENTIAL in retry_meta
 
     @pytest.mark.asyncio
     async def test_malformed_server_challenges_raise_clean_error(self) -> None:
         session = AsyncMock()
+        payment_error = FakeMcpError(
+            -32042,
+            data={"challenges": ["bad", {"id": "missing-fields"}]},
+        )
+        session.call_tool = AsyncMock(side_effect=payment_error)
 
-        import sys
-        from unittest.mock import MagicMock
+        client = McpClient(session, methods=[FakeMethod()])
 
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
-
-        try:
-            payment_error = FakeMcpError(
-                -32042,
-                data={"challenges": ["bad", {"id": "missing-fields"}]},
-            )
-            session.call_tool = AsyncMock(side_effect=payment_error)
-
-            client = McpClient(session, methods=[FakeMethod()])
-
-            with pytest.raises(ValueError, match="Server returned malformed payment challenges"):
-                await client.call_tool("tool", {})
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
+        with pytest.raises(ValueError, match="Server returned malformed payment challenges"):
+            await client.call_tool("tool", {})
 
     @pytest.mark.asyncio
     async def test_retry_failure_raises_payment_outcome_unknown(self) -> None:
         session = AsyncMock()
+        payment_error = FakeMcpError(
+            -32042,
+            data={"challenges": [_make_challenge_dict()]},
+        )
+        session.call_tool = AsyncMock(side_effect=[payment_error, TimeoutError("timed out")])
 
-        import sys
-        from unittest.mock import MagicMock
+        client = McpClient(session, methods=[FakeMethod()])
 
-        mcp_mock = MagicMock()
-        mcp_mock.shared.exceptions.McpError = FakeMcpError
-        original_modules = {}
-        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
-            original_modules[mod_name] = sys.modules.get(mod_name)
-        sys.modules["mcp"] = mcp_mock
-        sys.modules["mcp.shared"] = mcp_mock.shared
-        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+        with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+            await client.call_tool("premium_tool", {"query": "test"})
 
-        try:
-            payment_error = FakeMcpError(
-                -32042,
-                data={"challenges": [_make_challenge_dict()]},
-            )
-            session.call_tool = AsyncMock(side_effect=[payment_error, TimeoutError("timed out")])
-
-            client = McpClient(session, methods=[FakeMethod()])
-
-            with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
-                await client.call_tool("premium_tool", {"query": "test"})
-
-            assert exc_info.value.challenge.id == "ch_test123"
-            assert isinstance(exc_info.value.__cause__, TimeoutError)
-        finally:
-            for mod_name, orig in original_modules.items():
-                if orig is None:
-                    sys.modules.pop(mod_name, None)
-                else:
-                    sys.modules[mod_name] = orig
+        assert exc_info.value.challenge.id == "ch_test123"
+        assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
 class TestPaymentRuntimeMethodMatching:

@@ -88,8 +88,8 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         self.request = request
         challenge_id = getattr(challenge, "id", "unknown")
         super().__init__(
-            "Request failed after sending a payment credential; "
-            f"payment outcome is unknown for challenge {challenge_id}. "
+            "Payment outcome is unknown after sending a credential "
+            f"for challenge {challenge_id}. "
             "Do not blindly retry."
         )
 

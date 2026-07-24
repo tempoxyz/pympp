@@ -79,6 +79,20 @@ with PaymentRuntime(
         response = httpx.get("https://api.example.com/paid")
 ```
 
+MCP stays explicit. Inside the same runtime's lifetime, inject it into
+`McpClient`:
+
+```python
+from mpp.extensions.mcp import McpClient
+
+async with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    async with McpClient(session, runtime=runtime) as mcp:
+        result = await mcp.call_tool("premium_tool", {"query": "hello"})
+```
+
 `PaymentRuntime` owns one event loop. Factories construct loop-bound methods on
 that loop and async context-manager results are closed there. Direct `methods`
 are borrowed and must be loop-independent.

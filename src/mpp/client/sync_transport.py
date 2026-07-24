@@ -27,6 +27,7 @@ from .transport import (
     _bind_response_request,
     _challenged_request,
     _client_payment_failed_payload,
+    _close_response,
     _copy_request,
     _payment_challenges,
     _SyncOutcomeStream,
@@ -95,14 +96,22 @@ class SyncPaymentTransport(httpx.BaseTransport):
         if response.status_code != 402:
             return response
 
-        response.read()
-        challenged_request = _challenged_request(response, request)
-        if not self._runtime.allows_http_payment(challenged_request.url):
+        try:
+            challenged_request = _challenged_request(response, request)
+            allowed = self._runtime.allows_http_payment(challenged_request.url)
+        except BaseException:
+            _close_response(response)
+            raise
+        if not allowed:
             return response
 
-        challenges, parse_error = _payment_challenges(response)
-        if challenges:
-            self._runtime.start()
+        try:
+            challenges, parse_error = _payment_challenges(response)
+            if challenges:
+                self._runtime.start()
+        except BaseException:
+            _close_response(response)
+            raise
         try:
             challenge, method = self._runtime.match_challenge(
                 challenges,
@@ -112,38 +121,54 @@ class SyncPaymentTransport(httpx.BaseTransport):
         except ValueError:
             challenge = None
             method = None
+        except BaseException:
+            _close_response(response)
+            raise
 
         if challenge is None or method is None:
             if parse_error is not None or challenges:
+                try:
+                    self._runtime.emit_event_sync(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=None,
+                            challenges=challenges,
+                            credential=None,
+                            error=parse_error
+                            or ValueError("No compatible payment method for challenges"),
+                            method=None,
+                            request=challenged_request,
+                            response=response,
+                        ),
+                    )
+                except BaseException:
+                    _close_response(response)
+                    raise
+            return response
+
+        try:
+            expired = _challenge_is_expired(challenge)
+        except BaseException:
+            _close_response(response)
+            raise
+        if expired:
+            logger.warning("Challenge expired at %s, not paying", challenge.expires)
+            try:
                 self._runtime.emit_event_sync(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
-                        challenge=None,
+                        challenge=challenge,
                         challenges=challenges,
                         credential=None,
-                        error=parse_error
-                        or ValueError("No compatible payment method for challenges"),
-                        method=None,
+                        error=ValueError(f"Challenge expired at {challenge.expires}"),
+                        method=method,
                         request=challenged_request,
                         response=response,
                     ),
                 )
-            return response
-
-        if _challenge_is_expired(challenge):
-            logger.warning("Challenge expired at %s, not paying", challenge.expires)
-            self._runtime.emit_event_sync(
-                PAYMENT_FAILED,
-                _client_payment_failed_payload(
-                    challenge=challenge,
-                    challenges=challenges,
-                    credential=None,
-                    error=ValueError(f"Challenge expired at {challenge.expires}"),
-                    method=method,
-                    request=challenged_request,
-                    response=response,
-                ),
-            )
+            except BaseException:
+                _close_response(response)
+                raise
             return response
 
         try:
@@ -153,19 +178,31 @@ class SyncPaymentTransport(httpx.BaseTransport):
                 "Streaming request bodies cannot be replayed after a payment challenge. "
                 "Use a buffered body for paid requests."
             )
-            self._runtime.emit_event_sync(
-                PAYMENT_FAILED,
-                _client_payment_failed_payload(
-                    challenge=challenge,
-                    challenges=challenges,
-                    credential=None,
-                    error=error,
-                    method=method,
-                    request=challenged_request,
-                    response=response,
-                ),
-            )
+            try:
+                self._runtime.emit_event_sync(
+                    PAYMENT_FAILED,
+                    _client_payment_failed_payload(
+                        challenge=challenge,
+                        challenges=challenges,
+                        credential=None,
+                        error=error,
+                        method=method,
+                        request=challenged_request,
+                        response=response,
+                    ),
+                )
+            finally:
+                _close_response(response)
             raise error from cause
+        except BaseException:
+            _close_response(response)
+            raise
+
+        try:
+            response.read()
+        except BaseException:
+            _close_response(response)
+            raise
 
         try:
             attempt = self._runtime._begin_http_payment(challenge, challenged_request)
@@ -250,76 +287,79 @@ class SyncPaymentTransport(httpx.BaseTransport):
 
                 _bind_response_request(payment_response, retry_request)
 
-                if payment_response.status_code == 402:
-                    cause = RuntimeError(
-                        "Server returned another payment challenge after receiving a credential"
-                    )
-                    self._runtime._mark_http_payment_unknown(attempt, cause)
-                    error = PaymentOutcomeUnknownError(
-                        challenge,
-                        cause,
-                        credential=credential,
-                        request=challenged_request,
-                    )
-                    self._runtime.emit_event_sync(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
+                try:
+                    if payment_response.status_code == 402:
+                        cause = RuntimeError(
+                            "Server returned another payment challenge after receiving a credential"
+                        )
+                        self._runtime._mark_http_payment_unknown(attempt, cause)
+                        error = PaymentOutcomeUnknownError(
+                            challenge,
+                            cause,
                             credential=credential,
-                            error=error,
-                            method=method,
                             request=challenged_request,
-                            response=payment_response,
-                        ),
-                    )
-                    payment_response.close()
-                    raise error from cause
-
-                if payment_response.status_code >= 400:
-                    cause = RuntimeError(
-                        f"Credentialed request returned HTTP {payment_response.status_code}"
-                    )
-                    self._runtime._mark_http_payment_unknown(attempt, cause)
-                    self._runtime.emit_event_sync(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
-                            credential=credential,
-                            error=PaymentOutcomeUnknownError(
-                                challenge,
-                                cause,
+                        )
+                        self._runtime.emit_event_sync(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
                                 credential=credential,
+                                error=error,
+                                method=method,
                                 request=challenged_request,
+                                response=payment_response,
                             ),
-                            method=method,
-                            request=challenged_request,
-                            response=payment_response,
-                        ),
-                    )
-                elif payment_response.is_stream_consumed:
-                    self._runtime._mark_http_response_body_complete(attempt)
-                else:
-                    payment_response.stream = _SyncOutcomeStream(
-                        payment_response.stream,
-                        self._runtime,
-                        attempt,
-                    )
+                        )
+                        raise error from cause
 
-                if payment_response.is_success:
-                    self._runtime.emit_event_sync(
-                        PAYMENT_RESPONSE,
-                        {
-                            "challenge": challenge,
-                            "challenges": challenges,
-                            "credential": credential,
-                            "method": method,
-                            "request": challenged_request,
-                            "response": payment_response,
-                            "protocol": "http",
-                        },
-                    )
+                    if payment_response.status_code >= 400:
+                        cause = RuntimeError(
+                            f"Credentialed request returned HTTP {payment_response.status_code}"
+                        )
+                        self._runtime._mark_http_payment_unknown(attempt, cause)
+                        self._runtime.emit_event_sync(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
+                                credential=credential,
+                                error=PaymentOutcomeUnknownError(
+                                    challenge,
+                                    cause,
+                                    credential=credential,
+                                    request=challenged_request,
+                                ),
+                                method=method,
+                                request=challenged_request,
+                                response=payment_response,
+                            ),
+                        )
+                    elif payment_response.is_stream_consumed:
+                        self._runtime._mark_http_response_body_complete(attempt)
+                    else:
+                        payment_response.stream = _SyncOutcomeStream(
+                            payment_response.stream,
+                            self._runtime,
+                            attempt,
+                        )
+
+                    if payment_response.is_success:
+                        self._runtime.emit_event_sync(
+                            PAYMENT_RESPONSE,
+                            {
+                                "challenge": challenge,
+                                "challenges": challenges,
+                                "credential": credential,
+                                "method": method,
+                                "request": challenged_request,
+                                "response": payment_response,
+                                "protocol": "http",
+                            },
+                        )
+                except BaseException:
+                    _close_response(payment_response)
+                    raise
                 return payment_response
         except BaseException:
             if not attempt.sent:

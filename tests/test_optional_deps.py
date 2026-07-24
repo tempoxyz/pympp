@@ -121,6 +121,11 @@ def test_mcp_lazy_attr_error_message():
 
         import mpp.extensions.mcp
 
+        assert (
+            mpp.extensions.mcp.PaymentOutcomeUnknownError
+            is mpp.PaymentOutcomeUnknownError
+        )
+
         try:
             _ = mpp.extensions.mcp.PaymentRequiredError
             print("ERROR: should have raised ImportError")

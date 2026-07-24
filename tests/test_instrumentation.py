@@ -56,19 +56,26 @@ def restore_instrumentation():
     sync_send = httpx.Client.send
     async_send = httpx.AsyncClient.send
     thread_start = threading.Thread.start
+    executor_submit = ThreadPoolExecutor.submit
     token = instrumentation._bindings.set(None)
     active_token = instrumentation._httpx_active.set(False)
+    internal_token = instrumentation._payment_internal_work.set(None)
+    instrumentation._payment_worker_state.internal = None
     yield
     httpx.Client._send_single_request = sync_send_single
     httpx.AsyncClient._send_single_request = async_send_single
     httpx.Client.send = sync_send
     httpx.AsyncClient.send = async_send
     threading.Thread.start = thread_start
+    ThreadPoolExecutor.submit = executor_submit
     instrumentation._bindings.reset(token)
     instrumentation._httpx_active.reset(active_token)
+    instrumentation._payment_internal_work.reset(internal_token)
+    instrumentation._payment_worker_state.internal = None
     instrumentation._state.bindings = []
     instrumentation._state.patches = ()
     assert threading.Thread.start is thread_start
+    assert ThreadPoolExecutor.submit is executor_submit
 
 
 def test_global_sync_instrumentation_covers_existing_and_future_clients() -> None:
@@ -196,6 +203,7 @@ def test_nested_bindings_choose_innermost_and_restore_exactly() -> None:
     original_sync_send = httpx.Client.send
     original_async_send = httpx.AsyncClient.send
     original_thread_start = threading.Thread.start
+    original_executor_submit = ThreadPoolExecutor.submit
     methods = [Method(), Method()]
     runtimes = [PaymentRuntime([method]) for method in methods]
 
@@ -225,6 +233,7 @@ def test_nested_bindings_choose_innermost_and_restore_exactly() -> None:
     assert httpx.Client.send is original_sync_send
     assert httpx.AsyncClient.send is original_async_send
     assert threading.Thread.start is original_thread_start
+    assert ThreadPoolExecutor.submit is original_executor_submit
 
 
 def test_disabling_does_not_overwrite_a_later_third_party_patch() -> None:
@@ -310,6 +319,141 @@ def test_raw_method_thread_is_marked_internal_for_process_scope() -> None:
     assert len(internal_requests) == 1
     assert internal_statuses == [402]
     assert method.calls == 1
+
+
+def test_prestarted_executor_work_is_suppressed_only_during_payment_flow() -> None:
+    method = Method()
+    internal_statuses: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required(request.url.path)
+
+    def send(path: str) -> int:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            return client.get(f"https://example.com/{path}").status_code
+
+    async def on_create() -> None:
+        if method.calls == 1:
+            loop = asyncio.get_running_loop()
+            internal_statuses.append(await loop.run_in_executor(executor, send, "internal"))
+
+    method.on_create = on_create
+    runtime = PaymentRuntime([method])
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        # Ensure payment handling cannot rely on marking a newly-created worker.
+        executor.submit(lambda: None).result()
+        try:
+            with instrument(runtime, scope="process", allow_unrestricted=True):
+                assert send("outer") == 200
+                # The same worker must become payment-aware again after the
+                # internal unit of work returns.
+                assert executor.submit(send, "unrelated").result() == 200
+        finally:
+            runtime.close()
+
+    assert internal_statuses == [402]
+    assert method.calls == 2
+
+
+def test_executor_started_during_payment_flow_is_not_permanently_internal() -> None:
+    method = Method()
+    executor: ThreadPoolExecutor | None = None
+    internal_statuses: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required(request.url.path)
+
+    def send(path: str) -> int:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            return client.get(f"https://example.com/{path}").status_code
+
+    async def on_create() -> None:
+        nonlocal executor
+        if method.calls == 1:
+            executor = ThreadPoolExecutor(max_workers=1)
+            loop = asyncio.get_running_loop()
+            internal_statuses.append(await loop.run_in_executor(executor, send, "internal"))
+
+    method.on_create = on_create
+    runtime = PaymentRuntime([method])
+    try:
+        with instrument(runtime, scope="process", allow_unrestricted=True):
+            assert send("outer") == 200
+            assert executor is not None
+            assert executor.submit(send, "unrelated").result() == 200
+    finally:
+        if executor is not None:
+            executor.shutdown()
+        runtime.close()
+
+    assert internal_statuses == [402]
+    assert method.calls == 2
+
+
+def test_marked_executor_worker_allows_later_normal_to_thread_work() -> None:
+    method = Method()
+    executor: ThreadPoolExecutor | None = None
+    internal_statuses: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("authorization", "").startswith("Payment "):
+            return httpx.Response(200, content=b"paid")
+        return payment_required(request.url.path)
+
+    def send(path: str) -> int:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            return client.get(f"https://example.com/{path}").status_code
+
+    async def on_create() -> None:
+        nonlocal executor
+        if method.calls == 1:
+            executor = ThreadPoolExecutor(max_workers=1)
+            asyncio.get_running_loop().set_default_executor(executor)
+            internal_statuses.append(await asyncio.to_thread(send, "internal"))
+
+    async def send_from_copied_context() -> int:
+        assert executor is not None
+        asyncio.get_running_loop().set_default_executor(executor)
+        return await asyncio.to_thread(send, "unrelated")
+
+    method.on_create = on_create
+    runtime = PaymentRuntime([method])
+    try:
+        with instrument(runtime, scope="process", allow_unrestricted=True):
+            assert send("outer") == 200
+            assert asyncio.run(send_from_copied_context()) == 200
+    finally:
+        runtime.close()
+        if executor is not None:
+            executor.shutdown()
+
+    assert internal_statuses == [402]
+    assert method.calls == 2
+
+
+def test_executor_patch_accepts_opaque_callable_objects() -> None:
+    class OpaqueCallable:
+        __slots__ = ()
+
+        def __getattribute__(self, name: str) -> Any:
+            if name == "__dict__":
+                return None
+            return super().__getattribute__(name)
+
+        def __call__(self) -> int:
+            return 42
+
+    runtime = PaymentRuntime([])
+    try:
+        with instrument(runtime, allow_unrestricted=True):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                assert executor.submit(OpaqueCallable()).result() == 42
+    finally:
+        runtime.close()
 
 
 def test_paid_send_loss_blocks_outer_retry_from_minting_again() -> None:
@@ -852,6 +996,7 @@ def test_unrestricted_runtime_requires_explicit_opt_in() -> None:
     original_sync_send = httpx.Client.send
     original_async_send = httpx.AsyncClient.send
     original_thread_start = threading.Thread.start
+    original_executor_submit = ThreadPoolExecutor.submit
     runtime = PaymentRuntime([])
 
     with pytest.raises(ValueError, match="allow_unrestricted=True"):
@@ -862,6 +1007,7 @@ def test_unrestricted_runtime_requires_explicit_opt_in() -> None:
     assert httpx.Client.send is original_sync_send
     assert httpx.AsyncClient.send is original_async_send
     assert threading.Thread.start is original_thread_start
+    assert ThreadPoolExecutor.submit is original_executor_submit
 
     with instrument(runtime, allow_unrestricted=True):
         assert httpx.Client._send_single_request is not original_sync_single
@@ -872,6 +1018,7 @@ def test_unrestricted_runtime_requires_explicit_opt_in() -> None:
     assert httpx.Client.send is original_sync_send
     assert httpx.AsyncClient.send is original_async_send
     assert threading.Thread.start is original_thread_start
+    assert ThreadPoolExecutor.submit is original_executor_submit
 
 
 def test_unsupported_httpx_version_fails_before_patching(

@@ -6,6 +6,7 @@ import asyncio
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -15,11 +16,10 @@ import pytest
 from mpp import Challenge, ChallengeEcho, Credential
 from mpp.extensions.mcp import (
     META_CREDENTIAL,
-    META_PAYMENT_REQUIRED,
     McpClient,
     PaymentOutcomeUnknownError,
 )
-from mpp.runtime import Method, PaymentRuntime
+from mpp.runtime import Method, PaymentRuntime, payment_flow_active
 
 
 class MockMethod:
@@ -112,18 +112,6 @@ def mcp_payment_error(
     if expires is not None:
         error.data["challenges"][0]["expires"] = expires
     return error
-
-
-def mcp_payment_result(*, expires: str | None = None) -> FakeCallToolResult:
-    return FakeCallToolResult(
-        "payment required",
-        meta={
-            META_PAYMENT_REQUIRED: {
-                "httpStatus": 402,
-                "challenges": mcp_payment_error(expires=expires).data["challenges"],
-            }
-        },
-    )
 
 
 class TestHttpxRuntime:
@@ -479,6 +467,99 @@ class TestRuntimeLifecycle:
         with pytest.raises(RuntimeError, match="failed to start"):
             runtime.start()
 
+    def test_thread_start_failure_closes_runtime_without_waiting(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = PaymentRuntime([])
+
+        def fail_start(_thread: threading.Thread) -> None:
+            raise OSError("thread unavailable")
+
+        monkeypatch.setattr(threading.Thread, "start", fail_start)
+        with pytest.raises(RuntimeError, match="background loop failed") as exc_info:
+            runtime.start()
+
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert runtime._state == "closed"
+        assert runtime._bridge._ready.is_set()
+        assert runtime._bridge._stopped.is_set()
+
+    @pytest.mark.parametrize("stage", ["new", "set"])
+    def test_loop_initialization_failure_is_published_and_stopped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: str,
+    ) -> None:
+        runtime = PaymentRuntime([])
+
+        def fail() -> None:
+            raise OSError(f"{stage} loop failed")
+
+        if stage == "new":
+            monkeypatch.setattr(asyncio, "new_event_loop", fail)
+        else:
+            monkeypatch.setattr(asyncio, "set_event_loop", lambda _loop: fail())
+
+        with pytest.raises(RuntimeError, match="background loop failed") as exc_info:
+            runtime.start()
+
+        assert isinstance(exc_info.value.__cause__, OSError)
+        assert runtime._state == "closed"
+        assert runtime._bridge._ready.is_set()
+        assert runtime._bridge._stopped.is_set()
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+
+    def test_shutdown_runs_all_cleanup_and_reraises_first_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = PaymentRuntime([]).start()
+        original_close = runtime._bridge.close
+        closed = False
+
+        def fail_cancel() -> None:
+            raise ValueError("first cleanup failure")
+
+        def close_then_fail() -> None:
+            nonlocal closed
+            original_close()
+            closed = True
+            raise RuntimeError("later cleanup failure")
+
+        monkeypatch.setattr(runtime._bridge, "cancel_pending", fail_cancel)
+        monkeypatch.setattr(runtime._bridge, "close", close_then_fail)
+
+        with pytest.raises(ValueError, match="first cleanup failure"):
+            runtime.close()
+
+        assert closed
+        assert runtime._state == "closed"
+        assert runtime._bridge._stopped.is_set()
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+
+    def test_loop_cleanup_failure_is_published_after_thread_stops(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = PaymentRuntime([]).start()
+        loop = runtime._bridge._loop
+        assert loop is not None
+
+        async def fail_shutdown(_loop: Any) -> None:
+            raise OSError("async generator cleanup failed")
+
+        monkeypatch.setattr(type(loop), "shutdown_asyncgens", fail_shutdown)
+        with pytest.raises(OSError, match="async generator cleanup failed"):
+            runtime.close()
+
+        assert runtime._state == "closed"
+        assert runtime._bridge._stopped.is_set()
+        assert runtime._bridge._thread is not None
+        assert not runtime._bridge._thread.is_alive()
+
     def test_methods_and_factories_are_mutually_exclusive(self) -> None:
         with pytest.raises(ValueError, match="either methods or method_factories"):
             PaymentRuntime([], method_factories=[MockMethod])
@@ -663,8 +744,304 @@ class TestRuntimeLifecycle:
         assert finalized.is_set()
         assert runtime._state == "closed"
 
+    @pytest.mark.asyncio
+    async def test_inherited_paid_lease_counts_child_until_it_exits(self) -> None:
+        runtime = PaymentRuntime([])
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def child() -> None:
+            with runtime._paid_operation():
+                entered.set()
+                await release.wait()
+
+        with runtime._paid_operation():
+            task = asyncio.create_task(child())
+            await asyncio.wait_for(entered.wait(), 1)
+
+        assert runtime._active_paid_operations == 1
+        close = asyncio.create_task(asyncio.to_thread(runtime.close))
+        await asyncio.sleep(0.01)
+        assert not close.done()
+
+        release.set()
+        await asyncio.wait_for(task, 1)
+        await asyncio.wait_for(close, 1)
+        assert runtime._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_deferred_close_waits_for_inherited_runtime_lease_child(self) -> None:
+        runtime = PaymentRuntime([])
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def child() -> None:
+            with runtime._runtime_operation():
+                entered.set()
+                await release.wait()
+
+        with runtime._runtime_operation():
+            task = asyncio.create_task(child())
+            await asyncio.wait_for(entered.wait(), 1)
+            runtime.close()
+
+        assert runtime._state == "closing"
+        assert runtime._active_runtime_operations == 1
+        release.set()
+        await asyncio.wait_for(task, 1)
+        assert runtime._state == "closed"
+
+    @pytest.mark.asyncio
+    async def test_payment_flow_marker_expires_in_detached_child(self) -> None:
+        runtime = PaymentRuntime([])
+        child: asyncio.Task[None] | None = None
+        started = asyncio.Event()
+        release = asyncio.Event()
+        states: list[bool] = []
+
+        class SpawningMethod:
+            name = "tempo"
+            intents = MappingProxyType({"charge": True})
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                nonlocal child
+
+                async def detached() -> None:
+                    states.append(payment_flow_active())
+                    started.set()
+                    await release.wait()
+                    states.append(payment_flow_active())
+
+                child = asyncio.create_task(detached())
+                await started.wait()
+                return Credential(challenge=challenge.to_echo(), payload={"ok": True})
+
+        method = SpawningMethod()
+        await runtime.create_credential(
+            Challenge(id="flow", method="tempo", intent="charge", request={}),
+            method,
+        )
+
+        async def finish_child() -> None:
+            release.set()
+            assert child is not None
+            await child
+
+        await runtime.run_async(finish_child())
+        await runtime.aclose()
+        assert states == [True, False]
+
+
+class TestUncertaintyState:
+    def test_close_preserves_tombstone_for_sent_http_attempt(self) -> None:
+        challenge = Challenge(id="closing", method="tempo", intent="charge", request={})
+        request = httpx.Request("POST", "https://example.com/pay")
+        retry = httpx.Request("POST", "https://example.com/pay")
+        runtime = PaymentRuntime([])
+        attempt = runtime._begin_http_payment(challenge, request)
+        runtime._mark_http_payment_sent(attempt, retry)
+
+        runtime.close()
+
+        replacement = PaymentRuntime([])
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+                replacement._begin_http_payment(challenge, request)
+            with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+                replacement._begin_http_payment(challenge, retry)
+        finally:
+            replacement.close()
+
+    def test_http_attempt_markers_are_cleared_after_success_and_discard(self) -> None:
+        runtime = PaymentRuntime([])
+        challenge = Challenge(id="marker", method="tempo", intent="charge", request={})
+        request = httpx.Request("POST", "https://example.com/pay")
+        retry = httpx.Request("POST", "https://example.com/pay")
+        attempt = runtime._begin_http_payment(challenge, request)
+        runtime._mark_http_payment_sent(attempt, retry)
+
+        runtime._mark_http_response_body_complete(attempt)
+        runtime._mark_http_send_complete(attempt)
+
+        assert "mpp.payment_attempt" not in request.extensions
+        assert "mpp.payment_attempt" not in retry.extensions
+
+        discarded = runtime._begin_http_payment(
+            Challenge(id="discard", method="tempo", intent="charge", request={}),
+            httpx.Request("POST", "https://example.com/other"),
+        )
+        discarded.request.extensions["mpp.payment_attempt"] = discarded
+        runtime._discard_http_payment(discarded)
+        assert "mpp.payment_attempt" not in discarded.request.extensions
+        runtime.close()
+
+    def test_colliding_unknown_operations_tombstone_every_sent_challenge(self) -> None:
+        runtime = PaymentRuntime([])
+        first = Challenge(id="first", method="tempo", intent="charge", request={})
+        second = Challenge(id="second", method="tempo", intent="charge", request={})
+        first_attempt = runtime._begin_http_payment(
+            first,
+            httpx.Request("POST", "https://example.com/pay", content=b"same"),
+        )
+        second_attempt = runtime._begin_http_payment(
+            second,
+            httpx.Request("POST", "https://example.com/pay", content=b"same"),
+        )
+        runtime._mark_http_payment_sent(first_attempt, first_attempt.request)
+        runtime._mark_http_payment_sent(second_attempt, second_attempt.request)
+        runtime._mark_http_payment_unknown(first_attempt, TimeoutError("first lost"))
+        runtime._mark_http_payment_unknown(second_attempt, TimeoutError("second lost"))
+
+        assert len(runtime._http_unknown_operations) == 1
+        assert len(runtime._http_unknown_challenges) == 2
+        assert not runtime._http_challenges
+
+        async def endpoint(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        first_mcp = runtime._begin_mcp_payment(
+            SimpleNamespace(id="first", realm="example.com"),
+            endpoint,
+            "tool",
+            {},
+        )
+        second_mcp = runtime._begin_mcp_payment(
+            SimpleNamespace(id="second", realm="example.com"),
+            endpoint,
+            "tool",
+            {},
+        )
+        runtime._mark_mcp_payment_sent(first_mcp)
+        runtime._mark_mcp_payment_sent(second_mcp)
+        runtime._mark_mcp_payment_unknown(first_mcp, TimeoutError("first lost"))
+        runtime._mark_mcp_payment_unknown(second_mcp, TimeoutError("second lost"))
+
+        assert len(runtime._mcp_unknown_operations) == 1
+        assert len(runtime._mcp_unknown_challenges) == 2
+        assert not runtime._mcp_challenges
+
+    def test_http_unknown_tombstone_drops_body_and_traceback_permanently(self) -> None:
+        runtime = PaymentRuntime([])
+        challenge = Challenge(id="unknown", method="tempo", intent="charge", request={})
+        request = httpx.Request("POST", "https://example.com/pay", content=b"x" * 4096)
+        retry = httpx.Request("POST", "https://example.com/pay", content=request.content)
+        attempt = runtime._begin_http_payment(challenge, request)
+        runtime._mark_http_payment_sent(attempt, retry)
+        try:
+            raise httpx.ReadTimeout("response lost", request=request)
+        except httpx.ReadTimeout as cause:
+            assert cause.__traceback__ is not None
+            tombstone = runtime._mark_http_payment_unknown(attempt, cause)
+
+        assert isinstance(tombstone.cause, httpx.ReadTimeout)
+        assert tombstone.cause.__traceback__ is None
+        assert tombstone.request is not request
+        assert tombstone.request.content == b""
+        assert not runtime._http_challenges
+        assert request.extensions["mpp.payment_attempt"] is tombstone
+        assert retry.extensions["mpp.payment_attempt"] is tombstone
+        assert not hasattr(tombstone, "runtime")
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            runtime._begin_http_payment(
+                challenge,
+                httpx.Request("POST", "https://example.com/pay", content=b"x" * 4096),
+            )
+        runtime.close()
+
+        assert not runtime._http_unknown_challenges
+        assert not runtime._http_unknown_operations
+        with pytest.raises(RuntimeError, match="closed"):
+            with runtime._paid_operation():
+                raise AssertionError("closed runtime must not enter a paid operation")
+
+    def test_mcp_unknown_tombstone_drops_endpoint_and_traceback(self) -> None:
+        runtime = PaymentRuntime([])
+        challenge = SimpleNamespace(
+            id="unknown",
+            realm="example.com",
+            method="tempo",
+            intent="charge",
+        )
+
+        async def endpoint(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        attempt = runtime._begin_mcp_payment(challenge, endpoint, "tool", {"large": "x" * 4096})
+        runtime._mark_mcp_payment_sent(attempt)
+        try:
+            raise TimeoutError("response lost")
+        except TimeoutError as cause:
+            assert cause.__traceback__ is not None
+            runtime._mark_mcp_payment_unknown(attempt, cause)
+
+        tombstone = next(iter(runtime._mcp_unknown_operations.values()))
+        assert isinstance(tombstone.cause, TimeoutError)
+        assert tombstone.cause.__traceback__ is None
+        assert not hasattr(tombstone, "endpoint")
+        assert not runtime._mcp_challenges
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            runtime._begin_mcp_payment(challenge, endpoint, "tool", {"large": "x" * 4096})
+        runtime.close()
+
+        assert not runtime._mcp_unknown_challenges
+        assert not runtime._mcp_unknown_operations
+        with pytest.raises(RuntimeError, match="closed"):
+            with runtime._paid_operation():
+                raise AssertionError("closed runtime must not enter a paid operation")
+
 
 class TestMcpRuntime:
+    def test_method_public_intents_accepts_any_mapping(self) -> None:
+        class PublicMethod:
+            name = "tempo"
+            intents = MappingProxyType({"subscription": object()})
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        method = PublicMethod()
+        runtime = PaymentRuntime([method])
+        subscription = Challenge(
+            id="subscription",
+            method="tempo",
+            intent="subscription",
+            request={},
+        )
+        charge = Challenge(id="charge", method="tempo", intent="charge", request={})
+
+        assert runtime.match_challenge([subscription]) == (subscription, method)
+        with pytest.raises(ValueError, match="No compatible payment method"):
+            runtime.match_challenge([charge])
+
+    def test_method_without_intents_keeps_legacy_charge_fallback(self) -> None:
+        class LegacyMethod:
+            name = "tempo"
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        method = LegacyMethod()
+        runtime = PaymentRuntime([method])
+        charge = Challenge(id="charge", method="tempo", intent="charge", request={})
+
+        assert runtime.match_challenge([charge]) == (charge, method)
+
+    def test_invalid_public_intents_capability_is_rejected(self) -> None:
+        class InvalidMethod:
+            name = "tempo"
+            intents: Any = ["charge"]
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        runtime = PaymentRuntime([InvalidMethod()])
+        charge = Challenge(id="charge", method="tempo", intent="charge", request={})
+
+        with pytest.raises(TypeError, match="intents must be a Mapping"):
+            runtime.match_challenge([charge])
+
     def test_mcp_does_not_use_legacy_name_only_matching(self) -> None:
         class NameOnlyMethod:
             name = "tempo"
@@ -825,20 +1202,11 @@ class TestMcpRuntime:
         assert len(session.calls) == 1
         method.create_credential.assert_not_called()
 
-    @pytest.mark.parametrize("shape", ["error", "result"])
     @pytest.mark.asyncio
-    async def test_expired_mcp_challenge_emits_failure_without_paying(
-        self,
-        shape: str,
-    ) -> None:
+    async def test_expired_mcp_challenge_emits_failure_without_paying(self) -> None:
         method = MockMethod()
         expires = "2020-01-01T00:00:00Z"
-        challenge = (
-            mcp_payment_error(expires=expires)
-            if shape == "error"
-            else mcp_payment_result(expires=expires)
-        )
-        session = FakeClientSession([challenge])
+        session = FakeClientSession([mcp_payment_error(expires=expires)])
         runtime = PaymentRuntime([method])
         events: list[Any] = []
         runtime.events.on("*", events.append)
@@ -853,6 +1221,26 @@ class TestMcpRuntime:
         assert [event.name for event in events] == ["payment.failed"]
         assert events[-1].payload["challenge"].expires == expires
         assert events[-1].payload["credential"] is None
+
+    @pytest.mark.parametrize(
+        "expires",
+        ["", "not-a-timestamp", "2030-01-01T00:00:00", 123],
+    )
+    @pytest.mark.asyncio
+    async def test_invalid_explicit_mcp_expiry_fails_closed(self, expires: Any) -> None:
+        method = MockMethod()
+        challenge = mcp_payment_error()
+        challenge.data["challenges"][0]["expires"] = expires
+        session = FakeClientSession([challenge])
+        runtime = PaymentRuntime([method])
+        try:
+            with pytest.raises(ValueError, match="Challenge expired"):
+                await runtime.call_mcp_tool(session.call_tool, "premium_tool")
+        finally:
+            await runtime.aclose()
+
+        assert len(session.calls) == 1
+        method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_malformed_mcp_url_realm_fails_closed(self) -> None:
@@ -876,29 +1264,11 @@ class TestMcpRuntime:
         assert events[-1].payload["credential"] is None
 
     @pytest.mark.asyncio
-    async def test_result_metadata_payment_preserves_raw_result_and_meta(self) -> None:
-        raw_result = FakeCallToolResult("paid")
-        session = FakeClientSession([mcp_payment_result(), raw_result])
-        runtime = PaymentRuntime([MockMethod()])
-
-        result = await runtime.call_mcp_tool(
-            session.call_tool,
-            "premium_tool",
-            meta={"trace_id": "abc"},
-        )
-
-        assert result is raw_result
-        assert len(session.calls) == 2
-        retry_meta = session.calls[1][3]["meta"]
-        assert retry_meta["trace_id"] == "abc"
-        assert META_CREDENTIAL in retry_meta
-
-    @pytest.mark.asyncio
     async def test_shared_runtime_emits_mcp_payment_events(self) -> None:
         events: list[Any] = []
         runtime = PaymentRuntime([MockMethod()])
         runtime.events.on("*", events.append)
-        session = FakeClientSession([mcp_payment_result(), FakeCallToolResult("paid")])
+        session = FakeClientSession([mcp_payment_error(), FakeCallToolResult("paid")])
 
         await runtime.call_mcp_tool(session.call_tool, "premium_tool")
 
@@ -924,7 +1294,7 @@ class TestMcpRuntime:
             payload={"hash": "0xevent"},
         )
         runtime.events.on("challenge.received", lambda _: credential)
-        session = FakeClientSession([mcp_payment_result(), FakeCallToolResult("paid")])
+        session = FakeClientSession([mcp_payment_error(), FakeCallToolResult("paid")])
 
         await runtime.call_mcp_tool(session.call_tool, "premium_tool")
 
@@ -935,13 +1305,25 @@ class TestMcpRuntime:
         events: list[Any] = []
         runtime = PaymentRuntime([MockMethod()])
         runtime.events.on("*", events.append)
-        session = FakeClientSession([mcp_payment_result(), TimeoutError("timed out")])
+        session = FakeClientSession([mcp_payment_error(), TimeoutError("timed out")])
 
         with pytest.raises(PaymentOutcomeUnknownError):
             await runtime.call_mcp_tool(session.call_tool, "premium_tool")
 
         assert events[-1].name == "payment.failed"
         assert isinstance(events[-1].payload["error"], PaymentOutcomeUnknownError)
+
+    @pytest.mark.asyncio
+    async def test_repeated_mcp_error_after_credential_never_pays_twice(self) -> None:
+        method = MockMethod()
+        session = FakeClientSession([mcp_payment_error(), mcp_payment_error()])
+        runtime = PaymentRuntime([method])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await runtime.call_mcp_tool(session.call_tool, "premium_tool")
+
+        assert len(session.calls) == 2
+        assert method.create_credential.await_count == 1
 
     @pytest.mark.asyncio
     async def test_cancelled_mcp_retry_blocks_same_operation_from_paying_again(self) -> None:
@@ -1010,25 +1392,3 @@ class TestMcpRuntime:
         assert result is paid
         assert len(session.calls) == 3
         assert method.create_credential.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_repeated_result_payment_challenge_fails_without_retrying_again(self) -> None:
-        events: list[Any] = []
-        first = mcp_payment_result()
-        second = mcp_payment_result()
-        runtime = PaymentRuntime([MockMethod()])
-        runtime.events.on("*", events.append)
-        session = FakeClientSession([first, second])
-        try:
-            with pytest.raises(PaymentOutcomeUnknownError):
-                await runtime.call_mcp_tool(session.call_tool, "premium_tool")
-        finally:
-            await runtime.aclose()
-
-        assert len(session.calls) == 2
-        assert [event.name for event in events] == [
-            "challenge.received",
-            "credential.created",
-            "payment.failed",
-        ]
-        assert events[-1].payload["response"] is second

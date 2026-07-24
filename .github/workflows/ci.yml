@@ -96,7 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        httpx-version: ["0.27.0", "0.27.2", "0.28.0", "0.28.1"]
+        httpx-version: ["0.27.0", "0.27.1", "0.27.2", "0.28.0", "0.28.1"]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -271,6 +271,7 @@ jobs:
 
           assert tempo.CHAIN_ID == 4217
           assert mcp.CODE_PAYMENT_REQUIRED == -32042
+          assert mcp.PaymentOutcomeUnknownError is mpp.PaymentOutcomeUnknownError
           assert SyncPaymentTransport.__name__ == "SyncPaymentTransport"
 
           runtime = PaymentRuntime([], allowed_origins=["https://example.com"])
@@ -308,8 +309,9 @@ jobs:
         if: matrix.profile == 'mcp'
         run: |
           .smoke-venv/bin/python - <<'PY'
-          from mpp.extensions.mcp import PaymentRequiredError, pay, verify_or_challenge
+          from mpp.extensions.mcp import McpClient, PaymentRequiredError, pay, verify_or_challenge
 
+          assert McpClient.__name__ == "McpClient"
           assert PaymentRequiredError.__name__ == "PaymentRequiredError"
           assert pay.__name__ == "pay"
           assert verify_or_challenge.__name__ == "verify_or_challenge"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
@@ -44,6 +45,19 @@ _bindings: ContextVar[tuple[_Binding, ...] | None] = ContextVar(
     default=None,
 )
 _httpx_active: ContextVar[bool] = ContextVar("mpp_httpx_instrumentation_active", default=False)
+# Executor workers may be marked when they are created during payment handling.
+# Override that marker per submitted task so pooled threads remain reusable.
+_payment_internal_work: ContextVar[bool | None] = ContextVar(
+    "mpp_payment_internal_work",
+    default=None,
+)
+
+
+class _PaymentWorkerState(threading.local):
+    internal: bool | None = None
+
+
+_payment_worker_state = _PaymentWorkerState()
 
 
 @dataclass(slots=True)
@@ -114,15 +128,24 @@ class _InstrumentationState:
 _state = _InstrumentationState()
 
 
+def _internal_payment_work() -> bool:
+    if _payment_worker_state.internal is not None:
+        return _payment_worker_state.internal
+    override = _payment_internal_work.get()
+    if override is not None:
+        return override
+    return bool(getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False))
+
+
 def _select_runtime() -> PaymentRuntime | None:
+    if _internal_payment_work():
+        return None
+
     local = _bindings.get()
     if local is not None:
         for binding in reversed(local):
             if binding.active:
                 return binding.runtime
-
-    if getattr(threading.current_thread(), _PAYMENT_INTERNAL_THREAD, False):
-        return None
 
     with _state.lock:
         runtimes: list[PaymentRuntime] = []
@@ -252,6 +275,7 @@ def _install_httpx_patches() -> None:
         original_async_send,
     ) = _validate_httpx_compatibility()
     original_thread_start = threading.Thread.start
+    original_executor_submit = ThreadPoolExecutor.submit
 
     @wraps(original_sync_send_single)
     def sync_send_single(
@@ -262,6 +286,7 @@ def _install_httpx_patches() -> None:
             getattr(self, "_mpp_payment_wrapped", False)
             or payment_flow_active()
             or _httpx_active.get()
+            or _internal_payment_work()
         ):
             return original_sync_send_single(self, request)
         runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
@@ -285,6 +310,7 @@ def _install_httpx_patches() -> None:
             getattr(self, "_mpp_payment_wrapped", False)
             or payment_flow_active()
             or _httpx_active.get()
+            or _internal_payment_work()
         ):
             return await original_async_send_single(self, request)
         runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
@@ -310,6 +336,7 @@ def _install_httpx_patches() -> None:
             getattr(self, "_mpp_payment_wrapped", False)
             or payment_flow_active()
             or _httpx_active.get()
+            or _internal_payment_work()
         ):
             return original_sync_send(self, request, *args, **kwargs)
         runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
@@ -329,6 +356,7 @@ def _install_httpx_patches() -> None:
             getattr(self, "_mpp_payment_wrapped", False)
             or payment_flow_active()
             or _httpx_active.get()
+            or _internal_payment_work()
         ):
             return await original_async_send(self, request, *args, **kwargs)
         runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
@@ -339,13 +367,31 @@ def _install_httpx_patches() -> None:
 
     @wraps(original_thread_start)
     def thread_start(self: threading.Thread, *args: Any, **kwargs: Any) -> Any:
-        if payment_flow_active() or getattr(
-            threading.current_thread(),
-            _PAYMENT_INTERNAL_THREAD,
-            False,
-        ):
+        if payment_flow_active() or _internal_payment_work():
             setattr(self, _PAYMENT_INTERNAL_THREAD, True)
         return original_thread_start(self, *args, **kwargs)
+
+    @wraps(original_executor_submit)
+    def executor_submit(
+        self: ThreadPoolExecutor,
+        fn: Any,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        internal = payment_flow_active() or _internal_payment_work()
+
+        def run_with_payment_context() -> Any:
+            previous = _payment_worker_state.internal
+            _payment_worker_state.internal = internal
+            token = _payment_internal_work.set(internal)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _payment_internal_work.reset(token)
+                _payment_worker_state.internal = previous
+
+        return original_executor_submit(self, run_with_payment_context)
 
     patches = (
         _Patch(
@@ -363,6 +409,12 @@ def _install_httpx_patches() -> None:
         _Patch(httpx.Client, "send", original_sync_send, sync_send),
         _Patch(httpx.AsyncClient, "send", original_async_send, async_send),
         _Patch(threading.Thread, "start", original_thread_start, thread_start),
+        _Patch(
+            ThreadPoolExecutor,
+            "submit",
+            original_executor_submit,
+            executor_submit,
+        ),
     )
     installed: list[_Patch] = []
     try:

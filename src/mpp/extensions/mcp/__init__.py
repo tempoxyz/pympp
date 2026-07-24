@@ -66,7 +66,6 @@ from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_REQUIRED,
     CODE_PAYMENT_VERIFICATION_FAILED,
     META_CREDENTIAL,
-    META_PAYMENT_REQUIRED,
     META_RECEIPT,
 )
 
@@ -77,8 +76,8 @@ _LAZY_EXPORTS = {
     "mpp.extensions.mcp.client": (
         "McpClient",
         "McpToolResult",
-        "PaymentOutcomeUnknownError",
     ),
+    "mpp.errors": ("PaymentOutcomeUnknownError",),
     "mpp.extensions.mcp.decorator": ("pay",),
     "mpp.extensions.mcp.errors": (
         "MalformedCredentialError",

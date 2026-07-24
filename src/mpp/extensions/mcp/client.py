@@ -33,7 +33,6 @@ from typing import Any
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_REQUIRED,
-    META_PAYMENT_REQUIRED,
     META_RECEIPT,
 )
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
@@ -104,8 +103,9 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
         return None
 
 
-def _extract_challenges_from_data(data: Any) -> list[MCPChallenge]:
-    """Extract valid payment challenges from payment-required data."""
+def _extract_challenges(error: Exception) -> list[MCPChallenge]:
+    """Extract valid payment challenges from a payment required error."""
+    data = _error_data(error)
     if not isinstance(data, dict):
         return []
 
@@ -121,11 +121,6 @@ def _extract_challenges_from_data(data: Any) -> list[MCPChallenge]:
     return challenges
 
 
-def _extract_challenges(error: Exception) -> list[MCPChallenge]:
-    """Extract valid payment challenges from a payment required error."""
-    return _extract_challenges_from_data(_error_data(error))
-
-
 def _result_meta(result: Any) -> dict[str, Any] | None:
     """Read MCP result metadata from SDK objects or raw wire dictionaries."""
     if isinstance(result, dict):
@@ -133,20 +128,6 @@ def _result_meta(result: Any) -> dict[str, Any] | None:
     else:
         meta = getattr(result, "meta", None) or getattr(result, "_meta", None)
     return meta if isinstance(meta, dict) else None
-
-
-def _extract_result_challenges(result: Any) -> list[MCPChallenge]:
-    """Extract payment challenges returned as MCP tool-result metadata."""
-    meta = _result_meta(result)
-    if meta is None:
-        return []
-    return _extract_challenges_from_data(meta.get(META_PAYMENT_REQUIRED))
-
-
-def _is_payment_required_result(result: Any) -> bool:
-    """Check whether a tool result carries payment-required metadata."""
-    meta = _result_meta(result)
-    return meta is not None and META_PAYMENT_REQUIRED in meta
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,10 +154,15 @@ class McpClient:
 
     Args:
         session: An initialized ``mcp.ClientSession``.
-        methods: Payment methods available for credential creation.
+        methods: Payment methods available for credential creation. Mutually
+            exclusive with ``runtime``.
+        runtime: An existing shared payment runtime. Mutually exclusive with
+            ``methods`` and not closed by this client.
+
+    Exactly one of ``methods`` or ``runtime`` must be provided.
 
     Example:
-        async with McpClient(session, methods=[tempo(...)]) as client:
+        async with McpClient(session, runtime=runtime) as client:
             result = await client.call_tool("premium_tool", {"query": "hello"})
             print(result.receipt)
     """
