@@ -192,9 +192,6 @@ class _BoundSendTransport(httpx.AsyncBaseTransport):
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         return await self._send(request)
 
-    async def aclose(self) -> None:
-        return None
-
 
 class _BoundSyncSendTransport(httpx.BaseTransport):
     def __init__(self, send: Any) -> None:
@@ -202,9 +199,6 @@ class _BoundSyncSendTransport(httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         return self._send(request)
-
-    def close(self) -> None:
-        return None
 
 
 class _AsyncBridge:
@@ -266,9 +260,9 @@ class _AsyncBridge:
         initialized = False
         try:
             loop = asyncio.new_event_loop()
-            self._loop = loop
             asyncio.set_event_loop(loop)
             initialized = True
+            self._loop = loop
             self._ready.set()
             loop.run_forever()
         except BaseException as error:
@@ -279,7 +273,7 @@ class _AsyncBridge:
         finally:
             self._ready.set()
             try:
-                if loop is not None:
+                if loop is not None and initialized:
                     try:
                         pending = asyncio.all_tasks(loop)
                     except BaseException as error:
@@ -309,6 +303,7 @@ class _AsyncBridge:
                             if coroutine is not None:
                                 coroutine.close()
                             self._record_stop_error(error)
+                if loop is not None:
                     try:
                         loop.close()
                     except BaseException as error:
@@ -461,6 +456,7 @@ class PaymentRuntime:
         self._http_unknown_operations: dict[str, _HttpPaymentTombstone] = {}
         self._http_unknown_circuit: _HttpPaymentTombstone | None = None
         self._http_idempotent_operations: dict[str, _HttpPaymentAttempt] = {}
+        self._http_active_idempotent_operations: dict[str, int] = {}
         self._mcp_attempt_lock = threading.Lock()
         self._mcp_challenges: dict[str, _McpPaymentAttempt] = {}
         self._mcp_unknown_challenges: dict[str, _McpPaymentTombstone] = {}
@@ -730,6 +726,7 @@ class PaymentRuntime:
             self._http_unknown_operations.clear()
             self._http_unknown_circuit = None
             self._http_idempotent_operations.clear()
+            self._http_active_idempotent_operations.clear()
         with self._mcp_attempt_lock:
             self._mcp_challenges.clear()
             self._mcp_unknown_challenges.clear()
@@ -1154,28 +1151,20 @@ class PaymentRuntime:
         allow_name_only: bool = False,
     ) -> tuple[Any, Method]:
         """Match payment challenges against configured methods."""
-        if prefer_method_order:
-            for method in self.methods:
-                supported_intents = _intent_names(method)
-                for challenge in challenges:
-                    if challenge.method != method.name:
-                        continue
-                    if not allow_name_only and challenge.intent not in (
-                        supported_intents if supported_intents is not None else {"charge"}
-                    ):
-                        continue
-                    return challenge, method
-        else:
-            for challenge in challenges:
-                for method in self.methods:
-                    if challenge.method != method.name:
-                        continue
-                    supported_intents = _intent_names(method)
-                    if not allow_name_only and challenge.intent not in (
-                        supported_intents if supported_intents is not None else {"charge"}
-                    ):
-                        continue
-                    return challenge, method
+        pairs = (
+            ((challenge, method) for method in self.methods for challenge in challenges)
+            if prefer_method_order
+            else ((challenge, method) for challenge in challenges for method in self.methods)
+        )
+        for challenge, method in pairs:
+            if challenge.method != method.name:
+                continue
+            supported_intents = _intent_names(method)
+            if not allow_name_only and challenge.intent not in (
+                supported_intents if supported_intents is not None else {"charge"}
+            ):
+                continue
+            return challenge, method
 
         available = [challenge.method for challenge in challenges]
         installed = [method.name for method in self.methods]
@@ -1344,7 +1333,13 @@ class PaymentRuntime:
             yield operation
             return
 
+        operation_key = _http_idempotency_key(request)
         operation = _HttpxOperation()
+        if operation_key is not None:
+            with self._http_attempt_lock:
+                self._http_active_idempotent_operations[operation_key] = (
+                    self._http_active_idempotent_operations.get(operation_key, 0) + 1
+                )
         token = _HTTPX_OPERATIONS.set({**operations, id(self): operation})
         try:
             yield operation
@@ -1355,6 +1350,15 @@ class PaymentRuntime:
             self._complete_httpx_operation(operation)
         finally:
             operation.active = False
+            if operation_key is not None:
+                with self._http_attempt_lock:
+                    remaining = self._http_active_idempotent_operations.get(operation_key, 0) - 1
+                    if remaining > 0:
+                        self._http_active_idempotent_operations[operation_key] = remaining
+                    else:
+                        self._http_active_idempotent_operations.pop(operation_key, None)
+                    if attempt := self._http_idempotent_operations.get(operation_key):
+                        self._remove_completed_http_attempt_locked(attempt)
             _HTTPX_OPERATIONS.reset(token)
 
     def _complete_httpx_operation(
@@ -1561,7 +1565,12 @@ class PaymentRuntime:
                 self._remove_http_attempt_locked(attempt)
 
     def _remove_completed_http_attempt_locked(self, attempt: _HttpPaymentAttempt) -> None:
-        if attempt.cause is None and attempt.body_complete and attempt.send_complete:
+        if attempt.cause is not None or not attempt.body_complete or not attempt.send_complete:
+            return
+        active = self._http_active_idempotent_operations.get(attempt.operation_key, 0)
+        if attempt.operation is not None and attempt.operation.active:
+            active -= 1
+        if not attempt.idempotent or active <= 0:
             self._remove_http_attempt_locked(attempt)
 
     def _remove_http_attempt_locked(self, attempt: _HttpPaymentAttempt) -> None:
@@ -1625,14 +1634,8 @@ def _http_attempt_keys(
 ) -> tuple[str, str, bool]:
     origin = repr(_httpx_origin(request.url))
     challenge_key = _http_attempt_digest("challenge", origin, challenge.id)
-    if idempotency_key := request.headers.get("idempotency-key"):
+    if operation_key := _http_idempotency_key(request):
         idempotent = True
-        operation_key = _http_attempt_digest(
-            "idempotency",
-            request.method,
-            str(request.url).split("#", 1)[0],
-            idempotency_key,
-        )
     else:
         idempotent = False
         try:
@@ -1646,6 +1649,17 @@ def _http_attempt_keys(
             hashlib.sha256(body).hexdigest(),
         )
     return challenge_key, operation_key, idempotent
+
+
+def _http_idempotency_key(request: httpx.Request) -> str | None:
+    if not (idempotency_key := request.headers.get("idempotency-key")):
+        return None
+    return _http_attempt_digest(
+        "idempotency",
+        request.method,
+        str(request.url).split("#", 1)[0],
+        idempotency_key,
+    )
 
 
 def _mcp_attempt_keys(

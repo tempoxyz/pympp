@@ -744,6 +744,7 @@ async def test_direct_transport_nested_calls_use_independent_operations() -> Non
 
 def test_concurrent_requests_with_same_idempotency_key_pay_once() -> None:
     barrier = threading.Barrier(2)
+    first_request_finished = threading.Event()
     counter_lock = threading.Lock()
     challenge_number = 0
     paid_requests = 0
@@ -758,6 +759,8 @@ def test_concurrent_requests_with_same_idempotency_key_pay_once() -> None:
             challenge_number += 1
             challenge_id = f"challenge-{challenge_number}"
         barrier.wait(timeout=1)
+        if challenge_id == "challenge-2":
+            assert first_request_finished.wait(timeout=5)
         return payment_required(challenge_id)
 
     method = Method()
@@ -765,11 +768,13 @@ def test_concurrent_requests_with_same_idempotency_key_pay_once() -> None:
     client = httpx.Client(transport=httpx.MockTransport(handler))
 
     def send() -> httpx.Response:
-        return client.post(
+        response = client.post(
             "https://example.com/paid",
             content=b"same",
             headers={"Idempotency-Key": "same-operation"},
         )
+        first_request_finished.set()
+        return response
 
     try:
         with instrument(runtime, scope="process", allow_unrestricted=True):
@@ -781,6 +786,8 @@ def test_concurrent_requests_with_same_idempotency_key_pay_once() -> None:
                         outcomes.append(future.result())
                     except PaymentOutcomeUnknownError as error:
                         outcomes.append(error)
+            assert not runtime._http_active_idempotent_operations
+            assert not runtime._http_idempotent_operations
     finally:
         client.close()
         runtime.close()

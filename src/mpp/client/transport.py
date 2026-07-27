@@ -230,7 +230,27 @@ def _payment_challenges(response: httpx.Response) -> tuple[list[Challenge], Pars
     return challenges, parse_error
 
 
-class _AsyncOutcomeStream(httpx.AsyncByteStream):
+class _EventHandlers:
+    _events: EventDispatcher
+
+    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
+        """Register a client payment event handler."""
+        return self._events.on(name, handler)
+
+    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
+        return self.on(CHALLENGE_RECEIVED, handler)
+
+    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
+        return self.on(CREDENTIAL_CREATED, handler)
+
+    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
+        return self.on(PAYMENT_RESPONSE, handler)
+
+    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
+        return self.on(PAYMENT_FAILED, handler)
+
+
+class _OutcomeStream:
     def __init__(
         self,
         stream: Any,
@@ -257,6 +277,8 @@ class _AsyncOutcomeStream(httpx.AsyncByteStream):
         if state := self._take_attempt():
             state[0]._mark_http_payment_unknown(state[1], error)
 
+
+class _AsyncOutcomeStream(_OutcomeStream, httpx.AsyncByteStream):
     async def __aiter__(self):
         try:
             async for chunk in self._stream:
@@ -274,33 +296,7 @@ class _AsyncOutcomeStream(httpx.AsyncByteStream):
             self._mark_unknown(RuntimeError("Paid response body was not fully consumed"))
 
 
-class _SyncOutcomeStream(httpx.SyncByteStream):
-    def __init__(
-        self,
-        stream: Any,
-        runtime: PaymentRuntime,
-        attempt: _HttpPaymentAttempt,
-    ) -> None:
-        self._stream = stream
-        self._runtime: PaymentRuntime | None = runtime
-        self._attempt: _HttpPaymentAttempt | None = attempt
-
-    def _take_attempt(self) -> tuple[PaymentRuntime, _HttpPaymentAttempt] | None:
-        runtime, attempt = self._runtime, self._attempt
-        self._runtime = None
-        self._attempt = None
-        if runtime is None or attempt is None:
-            return None
-        return runtime, attempt
-
-    def _mark_complete(self) -> None:
-        if state := self._take_attempt():
-            state[0]._mark_http_response_body_complete(state[1])
-
-    def _mark_unknown(self, error: BaseException) -> None:
-        if state := self._take_attempt():
-            state[0]._mark_http_payment_unknown(state[1], error)
-
+class _SyncOutcomeStream(_OutcomeStream, httpx.SyncByteStream):
     def __iter__(self):
         try:
             yield from self._stream
@@ -317,7 +313,7 @@ class _SyncOutcomeStream(httpx.SyncByteStream):
             self._mark_unknown(RuntimeError("Paid response body was not fully consumed"))
 
 
-class PaymentTransport(httpx.AsyncBaseTransport):
+class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
     """httpx transport that handles 402 Payment Required responses.
 
     Wraps an inner transport and automatically:
@@ -356,26 +352,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
 
-    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
-        """Register a client payment event handler."""
-        return self._events.on(name, handler)
-
-    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for selected payment challenges."""
-        return self.on(CHALLENGE_RECEIVED, handler)
-
-    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for created credentials."""
-        return self.on(CREDENTIAL_CREATED, handler)
-
-    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for successful payment-aware responses."""
-        return self.on(PAYMENT_RESPONSE, handler)
-
-    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for failed automatic payment handling."""
-        return self.on(PAYMENT_FAILED, handler)
-
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
         with self._runtime._httpx_operation_scope(
@@ -394,43 +370,31 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         if response.status_code != 402:
             return response
 
-        # A high-level send may have followed redirects before returning the
-        # 402. Apply policy and retry against the request that was challenged.
         try:
+            # A high-level send may have followed redirects before returning the
+            # 402. Apply policy and retry against the request that was challenged.
             challenged_request = _challenged_request(response, request)
-            allowed = self._runtime.allows_http_payment(challenged_request.url)
-        except BaseException:
-            await _aclose_response(response)
-            raise
-        if not allowed:
-            return response
+            if not self._runtime.allows_http_payment(challenged_request.url):
+                return response
 
-        try:
             challenges, parse_error = _payment_challenges(response)
             if challenges:
                 await self._runtime.astart()
-        except BaseException:
-            await _aclose_response(response)
-            raise
 
-        try:
-            challenge, matched_method = self._runtime.match_challenge(
-                challenges,
-                prefer_method_order=False,
-                allow_name_only=True,
-            )
-        except ValueError:
-            challenge = None
-            matched_method = None
-        except BaseException:
-            await _aclose_response(response)
-            raise
+            try:
+                challenge, matched_method = self._runtime.match_challenge(
+                    challenges,
+                    prefer_method_order=False,
+                    allow_name_only=True,
+                )
+            except ValueError:
+                challenge = None
+                matched_method = None
 
-        if challenge is None or matched_method is None:
-            if parse_error is not None or challenges:
-                # Surface parse/method-selection failures to observers while
-                # preserving the original 402 response for the caller.
-                try:
+            if challenge is None or matched_method is None:
+                if parse_error is not None or challenges:
+                    # Surface parse/method-selection failures to observers while
+                    # preserving the original 402 response for the caller.
                     await self._runtime.emit_event(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(
@@ -444,20 +408,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             response=response,
                         ),
                     )
-                except BaseException:
-                    await _aclose_response(response)
-                    raise
-            return response
+                return response
 
-        # Check expiry before paying (client-side guardrail)
-        try:
             expired = _challenge_is_expired(challenge)
-        except BaseException:
-            await _aclose_response(response)
-            raise
-        if expired:
-            logger.warning("Challenge expired at %s, not paying", challenge.expires)
-            try:
+            if expired:
+                logger.warning("Challenge expired at %s, not paying", challenge.expires)
                 await self._runtime.emit_event(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
@@ -470,19 +425,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         response=response,
                     ),
                 )
-            except BaseException:
-                await _aclose_response(response)
-                raise
-            return response
+                return response
 
-        try:
-            await challenged_request.aread()
-        except httpx.StreamConsumed as cause:
-            error = PaymentError(
-                "Streaming request bodies cannot be replayed after a payment challenge. "
-                "Use a buffered body for paid requests."
-            )
             try:
+                await challenged_request.aread()
+            except httpx.StreamConsumed as cause:
+                error = PaymentError(
+                    "Streaming request bodies cannot be replayed after a payment challenge. "
+                    "Use a buffered body for paid requests."
+                )
                 await self._runtime.emit_event(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
@@ -495,14 +446,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         response=response,
                     ),
                 )
-            finally:
-                await _aclose_response(response)
-            raise error from cause
-        except BaseException:
-            await _aclose_response(response)
-            raise
+                raise error from cause
 
-        try:
             await response.aread()
         except BaseException:
             await _aclose_response(response)
@@ -681,7 +626,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 await self._runtime.aclose()
 
 
-class Client:
+class Client(_EventHandlers):
     """HTTP client with automatic payment handling.
 
     Example:
@@ -697,26 +642,7 @@ class Client:
     ) -> None:
         self._transport = PaymentTransport(methods=methods, runtime=runtime)
         self._client = httpx.AsyncClient(transport=self._transport)
-
-    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
-        """Register a client payment event handler."""
-        return self._transport.on(name, handler)
-
-    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for selected payment challenges."""
-        return self.on(CHALLENGE_RECEIVED, handler)
-
-    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for created credentials."""
-        return self.on(CREDENTIAL_CREATED, handler)
-
-    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for successful payment-aware responses."""
-        return self.on(PAYMENT_RESPONSE, handler)
-
-    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
-        """Register a handler for failed automatic payment handling."""
-        return self.on(PAYMENT_FAILED, handler)
+        self._events = self._transport._events
 
     async def __aenter__(self) -> Client:
         await self._client.__aenter__()

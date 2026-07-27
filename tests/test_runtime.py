@@ -492,6 +492,8 @@ class TestRuntimeLifecycle:
         stage: str,
     ) -> None:
         runtime = PaymentRuntime([])
+        loop: asyncio.AbstractEventLoop | None = None
+        shutdown_asyncgens = AsyncMock()
 
         def fail() -> None:
             raise OSError(f"{stage} loop failed")
@@ -499,6 +501,15 @@ class TestRuntimeLifecycle:
         if stage == "new":
             monkeypatch.setattr(asyncio, "new_event_loop", fail)
         else:
+            original_new_event_loop = asyncio.new_event_loop
+
+            def capture_loop() -> asyncio.AbstractEventLoop:
+                nonlocal loop
+                loop = original_new_event_loop()
+                monkeypatch.setattr(loop, "shutdown_asyncgens", shutdown_asyncgens)
+                return loop
+
+            monkeypatch.setattr(asyncio, "new_event_loop", capture_loop)
             monkeypatch.setattr(asyncio, "set_event_loop", lambda _loop: fail())
 
         with pytest.raises(RuntimeError, match="background loop failed") as exc_info:
@@ -510,6 +521,9 @@ class TestRuntimeLifecycle:
         assert runtime._bridge._stopped.is_set()
         assert runtime._bridge._thread is not None
         assert not runtime._bridge._thread.is_alive()
+        assert runtime._bridge._loop is None
+        assert loop is None or loop.is_closed()
+        shutdown_asyncgens.assert_not_called()
 
     def test_shutdown_runs_all_cleanup_and_reraises_first_error(
         self,

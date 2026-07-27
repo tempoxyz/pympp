@@ -157,6 +157,17 @@ def _select_runtime() -> PaymentRuntime | None:
         return runtimes[0] if len(runtimes) == 1 else None
 
 
+def _runtime_for(client: httpx.Client | httpx.AsyncClient) -> PaymentRuntime | None:
+    if (
+        getattr(client, "_mpp_payment_wrapped", False)
+        or payment_flow_active()
+        or _httpx_active.get()
+        or _internal_payment_work()
+    ):
+        return None
+    return getattr(client, "_mpp_payment_runtime", None) or _select_runtime()
+
+
 def _httpx_minor(installed: str) -> tuple[int, int]:
     try:
         major, minor, *_ = installed.split(".")
@@ -226,30 +237,18 @@ def _validate_httpx_compatibility() -> tuple[Any, Any, Any, Any]:
         ("auth", keyword_only),
         ("follow_redirects", keyword_only),
     )
-    _validate_method_shape(
-        "Client._send_single_request",
-        sync_send_single,
-        parameters=private_parameters,
-        asynchronous=False,
-    )
-    _validate_method_shape(
-        "AsyncClient._send_single_request",
-        async_send_single,
-        parameters=private_parameters,
-        asynchronous=True,
-    )
-    _validate_method_shape(
-        "Client.send",
-        sync_send,
-        parameters=public_parameters,
-        asynchronous=False,
-    )
-    _validate_method_shape(
-        "AsyncClient.send",
-        async_send,
-        parameters=public_parameters,
-        asynchronous=True,
-    )
+    for name, method, parameters, asynchronous in (
+        ("Client._send_single_request", sync_send_single, private_parameters, False),
+        ("AsyncClient._send_single_request", async_send_single, private_parameters, True),
+        ("Client.send", sync_send, public_parameters, False),
+        ("AsyncClient.send", async_send, public_parameters, True),
+    ):
+        _validate_method_shape(
+            name,
+            method,
+            parameters=parameters,
+            asynchronous=asynchronous,
+        )
     return sync_send_single, async_send_single, sync_send, async_send
 
 
@@ -282,14 +281,7 @@ def _install_httpx_patches() -> None:
         self: httpx.Client,
         request: httpx.Request,
     ) -> httpx.Response:
-        if (
-            getattr(self, "_mpp_payment_wrapped", False)
-            or payment_flow_active()
-            or _httpx_active.get()
-            or _internal_payment_work()
-        ):
-            return original_sync_send_single(self, request)
-        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        runtime = _runtime_for(self)
         if runtime is None:
             return original_sync_send_single(self, request)
         token = _httpx_active.set(True)
@@ -306,14 +298,7 @@ def _install_httpx_patches() -> None:
         self: httpx.AsyncClient,
         request: httpx.Request,
     ) -> httpx.Response:
-        if (
-            getattr(self, "_mpp_payment_wrapped", False)
-            or payment_flow_active()
-            or _httpx_active.get()
-            or _internal_payment_work()
-        ):
-            return await original_async_send_single(self, request)
-        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        runtime = _runtime_for(self)
         if runtime is None:
             return await original_async_send_single(self, request)
         token = _httpx_active.set(True)
@@ -332,14 +317,7 @@ def _install_httpx_patches() -> None:
         *args: Any,
         **kwargs: Any,
     ) -> httpx.Response:
-        if (
-            getattr(self, "_mpp_payment_wrapped", False)
-            or payment_flow_active()
-            or _httpx_active.get()
-            or _internal_payment_work()
-        ):
-            return original_sync_send(self, request, *args, **kwargs)
-        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        runtime = _runtime_for(self)
         if runtime is None:
             return original_sync_send(self, request, *args, **kwargs)
         with runtime._httpx_operation_scope(request):
@@ -352,14 +330,7 @@ def _install_httpx_patches() -> None:
         *args: Any,
         **kwargs: Any,
     ) -> httpx.Response:
-        if (
-            getattr(self, "_mpp_payment_wrapped", False)
-            or payment_flow_active()
-            or _httpx_active.get()
-            or _internal_payment_work()
-        ):
-            return await original_async_send(self, request, *args, **kwargs)
-        runtime = getattr(self, "_mpp_payment_runtime", None) or _select_runtime()
+        runtime = _runtime_for(self)
         if runtime is None:
             return await original_async_send(self, request, *args, **kwargs)
         with runtime._httpx_operation_scope(request):

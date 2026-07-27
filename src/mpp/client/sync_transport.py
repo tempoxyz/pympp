@@ -9,13 +9,9 @@ import httpx
 
 from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.events import (
-    CHALLENGE_RECEIVED,
-    CREDENTIAL_CREATED,
     PAYMENT_FAILED,
     PAYMENT_RESPONSE,
     EventDispatcher,
-    EventHandler,
-    Unsubscribe,
 )
 from mpp.runtime import (
     Method,
@@ -30,6 +26,7 @@ from .transport import (
     _client_payment_failed_payload,
     _close_response,
     _copy_request,
+    _EventHandlers,
     _payment_challenges,
     _propagate_response_cookies,
     _SyncOutcomeStream,
@@ -41,7 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class SyncPaymentTransport(httpx.BaseTransport):
+class SyncPaymentTransport(_EventHandlers, httpx.BaseTransport):
     """httpx transport that synchronously handles 402 payment challenges."""
 
     def __init__(
@@ -64,22 +61,6 @@ class SyncPaymentTransport(httpx.BaseTransport):
         self._inner = inner or httpx.HTTPTransport()
         self._events = self._runtime.events
 
-    def on(self, name: str, handler: EventHandler) -> Unsubscribe:
-        """Register a client payment event handler."""
-        return self._events.on(name, handler)
-
-    def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
-        return self.on(CHALLENGE_RECEIVED, handler)
-
-    def on_credential_created(self, handler: EventHandler) -> Unsubscribe:
-        return self.on(CREDENTIAL_CREATED, handler)
-
-    def on_payment_response(self, handler: EventHandler) -> Unsubscribe:
-        return self.on(PAYMENT_RESPONSE, handler)
-
-    def on_payment_failed(self, handler: EventHandler) -> Unsubscribe:
-        return self.on(PAYMENT_FAILED, handler)
-
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         """Send a request and retry one 402 with a payment credential."""
         with self._runtime._httpx_operation_scope(
@@ -100,36 +81,25 @@ class SyncPaymentTransport(httpx.BaseTransport):
 
         try:
             challenged_request = _challenged_request(response, request)
-            allowed = self._runtime.allows_http_payment(challenged_request.url)
-        except BaseException:
-            _close_response(response)
-            raise
-        if not allowed:
-            return response
+            if not self._runtime.allows_http_payment(challenged_request.url):
+                return response
 
-        try:
             challenges, parse_error = _payment_challenges(response)
             if challenges:
                 self._runtime.start()
-        except BaseException:
-            _close_response(response)
-            raise
-        try:
-            challenge, method = self._runtime.match_challenge(
-                challenges,
-                prefer_method_order=False,
-                allow_name_only=True,
-            )
-        except ValueError:
-            challenge = None
-            method = None
-        except BaseException:
-            _close_response(response)
-            raise
 
-        if challenge is None or method is None:
-            if parse_error is not None or challenges:
-                try:
+            try:
+                challenge, method = self._runtime.match_challenge(
+                    challenges,
+                    prefer_method_order=False,
+                    allow_name_only=True,
+                )
+            except ValueError:
+                challenge = None
+                method = None
+
+            if challenge is None or method is None:
+                if parse_error is not None or challenges:
                     self._runtime.emit_event_sync(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(
@@ -143,19 +113,11 @@ class SyncPaymentTransport(httpx.BaseTransport):
                             response=response,
                         ),
                     )
-                except BaseException:
-                    _close_response(response)
-                    raise
-            return response
+                return response
 
-        try:
             expired = _challenge_is_expired(challenge)
-        except BaseException:
-            _close_response(response)
-            raise
-        if expired:
-            logger.warning("Challenge expired at %s, not paying", challenge.expires)
-            try:
+            if expired:
+                logger.warning("Challenge expired at %s, not paying", challenge.expires)
                 self._runtime.emit_event_sync(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
@@ -168,19 +130,15 @@ class SyncPaymentTransport(httpx.BaseTransport):
                         response=response,
                     ),
                 )
-            except BaseException:
-                _close_response(response)
-                raise
-            return response
+                return response
 
-        try:
-            challenged_request.read()
-        except httpx.StreamConsumed as cause:
-            error = PaymentError(
-                "Streaming request bodies cannot be replayed after a payment challenge. "
-                "Use a buffered body for paid requests."
-            )
             try:
+                challenged_request.read()
+            except httpx.StreamConsumed as cause:
+                error = PaymentError(
+                    "Streaming request bodies cannot be replayed after a payment challenge. "
+                    "Use a buffered body for paid requests."
+                )
                 self._runtime.emit_event_sync(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
@@ -193,14 +151,8 @@ class SyncPaymentTransport(httpx.BaseTransport):
                         response=response,
                     ),
                 )
-            finally:
-                _close_response(response)
-            raise error from cause
-        except BaseException:
-            _close_response(response)
-            raise
+                raise error from cause
 
-        try:
             response.read()
         except BaseException:
             _close_response(response)
