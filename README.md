@@ -119,6 +119,25 @@ the client when its adapter seam is incompatible. The explicit
 `PaymentTransport` and `SyncPaymentTransport` remain available on newer HTTPX
 versions.
 
+For harnesses that create their own standard HTTPX clients, instrumentation can
+apply the same behavior within a scope:
+
+```python
+from mpp.instrumentation import instrument
+
+with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    with instrument(runtime):
+        existing_harness.run()
+```
+
+Context scope is the default. Use `scope="process"` for independent worker
+threads in a single-wallet process; ambiguous process bindings fail closed.
+Process propagation covers raw threads and `ThreadPoolExecutor`, including
+`asyncio.to_thread`, but not custom executors or process pools.
+
 ## Examples
 
 | Example | Description |

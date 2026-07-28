@@ -46,9 +46,18 @@ class _BridgeBaseException(Exception):
         self.error = error
 
 
+@dataclass(slots=True)
+class _PaymentFlow:
+    active: bool = True
+
+
 _RUNTIME_CONTEXT: ContextVar[tuple[tuple[object, str], ...]] = ContextVar(
     "mpp_runtime_context",
     default=(),
+)
+_PAYMENT_FLOW: ContextVar[_PaymentFlow | None] = ContextVar(
+    "mpp_payment_flow",
+    default=None,
 )
 
 
@@ -110,6 +119,23 @@ def _scope_active(key: object, kind: str) -> bool:
         current_key is key and current_kind == kind
         for current_key, current_kind in _RUNTIME_CONTEXT.get()
     )
+
+
+@contextmanager
+def _payment_flow():
+    flow = _PaymentFlow()
+    token = _PAYMENT_FLOW.set(flow)
+    try:
+        yield
+    finally:
+        flow.active = False
+        _PAYMENT_FLOW.reset(token)
+
+
+def payment_flow_active() -> bool:
+    """Return whether the current context is handling a payment flow."""
+    flow = _PAYMENT_FLOW.get()
+    return flow is not None and flow.active
 
 
 async def _wait_for_task(task: asyncio.Task[_T]) -> _T:
@@ -383,7 +409,7 @@ class PaymentRuntime:
         return _scope_active(self._scope_key, "paid")
 
     async def _initialize_methods(self) -> None:
-        with _runtime_scope(self._scope_key, "lifecycle"):
+        with _runtime_scope(self._scope_key, "lifecycle"), _payment_flow():
             async with AsyncExitStack() as stack:
                 methods: list[Method] = []
                 for factory in self._method_factories:
@@ -402,7 +428,7 @@ class PaymentRuntime:
     async def _teardown_methods(self) -> None:
         stack, self._method_stack = self._method_stack, None
         if stack is not None:
-            with _runtime_scope(self._scope_key, "lifecycle"):
+            with _runtime_scope(self._scope_key, "lifecycle"), _payment_flow():
                 await stack.aclose()
 
     def start(self) -> Self:
@@ -678,6 +704,9 @@ class PaymentRuntime:
     def allows_http_payment(self, url: httpx.URL) -> bool:
         """Return whether credentials may be created for an HTTP origin."""
         return self._allowed.http_url(url)
+
+    def _allows_all_http_origins(self) -> bool:
+        return self._allowed._allow_all
 
     def _httpx_adapter_active(self) -> bool:
         return _HTTPX_ADAPTER_RUNTIME.get() == id(self)
@@ -1052,35 +1081,46 @@ class PaymentRuntime:
         *,
         event_payload: dict[str, Any] | None = None,
     ) -> Credential:
-        payload = {
-            **(event_payload or {}),
-            "challenge": challenge,
-            "method": method,
-        }
-        payload.setdefault("challenges", [challenge])
-        event_credential = await self.events.emit(
-            CHALLENGE_RECEIVED,
-            payload,
-            first_result=True,
-        )
-        credential = (
-            event_credential
-            if isinstance(event_credential, Credential)
-            else await method.create_credential(challenge)
-        )
-        await self.events.emit(
-            CREDENTIAL_CREATED,
-            {**payload, "credential": credential},
-        )
-        return credential
+        with _payment_flow():
+            payload = {
+                **(event_payload or {}),
+                "challenge": challenge,
+                "method": method,
+            }
+            payload.setdefault("challenges", [challenge])
+            event_credential = await self.events.emit(
+                CHALLENGE_RECEIVED,
+                payload,
+                first_result=True,
+            )
+            credential = (
+                event_credential
+                if isinstance(event_credential, Credential)
+                else await method.create_credential(challenge)
+            )
+            await self.events.emit(
+                CREDENTIAL_CREATED,
+                {**payload, "credential": credential},
+            )
+            return credential
 
     async def emit_event(self, name: str, payload: EventPayload) -> Any:
         """Emit an event on the runtime-owned loop."""
-        return await self._run_async(self.events.emit(name, payload))
+        return await self._run_async(self._emit_event(name, payload))
+
+    async def _emit_event(
+        self,
+        name: str,
+        payload: EventPayload,
+        *,
+        first_result: bool = False,
+    ) -> Any:
+        with _payment_flow():
+            return await self.events.emit(name, payload, first_result=first_result)
 
     def emit_event_sync(self, name: str, payload: EventPayload) -> Any:
         """Synchronously emit an event on the runtime-owned loop."""
-        return self._run_sync(self.events.emit(name, payload))
+        return self._run_sync(self._emit_event(name, payload))
 
     def close(self) -> None:
         """Close method resources and the owned event loop."""
