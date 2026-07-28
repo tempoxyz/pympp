@@ -32,6 +32,7 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
+    PaymentOutcomeUnknownError,
     PaymentRequiredError,
     VerificationFailedError,
 )

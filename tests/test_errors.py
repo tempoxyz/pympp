@@ -2,6 +2,7 @@
 
 import pytest
 
+from mpp import PaymentOutcomeUnknownError as PublicPaymentOutcomeUnknownError
 from mpp.errors import (
     BadRequestError,
     InvalidChallengeError,
@@ -12,9 +13,16 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
+    PaymentOutcomeUnknownError,
     PaymentRequiredError,
     VerificationFailedError,
 )
+
+
+def test_unknown_outcome_preserves_runtime_error_compatibility() -> None:
+    assert PublicPaymentOutcomeUnknownError is PaymentOutcomeUnknownError
+    assert issubclass(PaymentOutcomeUnknownError, PaymentError)
+    assert issubclass(PaymentOutcomeUnknownError, RuntimeError)
 
 
 class TestToProblemDetails:
@@ -74,6 +82,7 @@ class TestAutoSlug:
             (VerificationFailedError, "/verification-failed"),
             (PaymentExpiredError, "/payment-expired"),
             (PaymentInsufficientError, "/payment-insufficient"),
+            (PaymentOutcomeUnknownError, "/payment-outcome-unknown"),
             (PaymentActionRequiredError, "/payment-action-required"),
             (PaymentRequiredError, "/payment-required"),
         ],
@@ -94,6 +103,7 @@ class TestAutoTitle:
             (PaymentExpiredError, "Payment Expired"),
             (PaymentInsufficientError, "Payment Insufficient"),
             (PaymentMethodUnsupportedError, "Method Unsupported"),
+            (PaymentOutcomeUnknownError, "Payment Outcome Unknown"),
             (PaymentActionRequiredError, "Payment Action Required"),
             (PaymentRequiredError, "Payment Required"),
             (BadRequestError, "Bad Request"),

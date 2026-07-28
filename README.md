@@ -69,6 +69,25 @@ Factories run once on the owned loop. Async context-manager results are closed
 on that same loop; direct `methods=` are borrowed and must be loop-independent.
 Factories and methods must finish any work they spawn before returning.
 
+The runtime can also power the existing asynchronous HTTP client while enforcing
+an exact origin allowlist:
+
+```python
+from mpp.client import Client
+
+async with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    async with Client(runtime=runtime) as client:
+        response = await client.get("https://api.example.com/paid")
+```
+
+If a credential is sent but its outcome cannot be confirmed, matching attempts
+raise `PaymentOutcomeUnknownError` instead of paying again. Reconcile those
+payments externally before calling
+`runtime.reset_unknown_outcomes(reconciled=True)`.
+
 ## Examples
 
 | Example | Description |

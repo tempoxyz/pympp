@@ -10,9 +10,10 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from types import MappingProxyType
 from typing import Any
 
+import httpx
 import pytest
 
-from mpp import Challenge, Credential
+from mpp import Challenge, Credential, PaymentOutcomeUnknownError
 from mpp.runtime import Method, PaymentRuntime
 
 
@@ -583,4 +584,201 @@ class TestRuntimeMethods:
             )[1]
             is tempo
         )
+        runtime.close()
+
+
+class TestHttpRuntimePolicy:
+    @pytest.mark.parametrize(
+        ("allowed", "url"),
+        [
+            ("HTTPS://EXAMPLE.COM:443/path", "https://example.com/resource"),
+            ("https://[2001:DB8::1]:443/path", "https://[2001:db8::1]/resource"),
+            ("https://bücher.example", "https://xn--bcher-kva.example/resource"),
+            ("https://xn--bcher-kva.example", "https://bücher.example/resource"),
+        ],
+    )
+    def test_allowed_origins_are_normalized(self, allowed: str, url: str) -> None:
+        runtime = PaymentRuntime([], allowed_origins=[allowed])
+
+        assert runtime.allows_http_payment(httpx.URL(url))
+        runtime.close()
+
+    def test_non_origin_allowlist_entries_fail_closed(self) -> None:
+        runtime = PaymentRuntime([], allowed_origins=["example.com", "not a URL"])
+
+        assert not runtime.allows_http_payment(httpx.URL("https://example.com"))
+        runtime.close()
+
+
+class TestHttpRuntimeSafety:
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5])
+    def test_unknown_outcome_limit_must_be_positive(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="positive integer"):
+            PaymentRuntime([], max_unknown_outcomes=value)
+
+    def test_unknown_outcomes_trip_bounded_fail_closed_circuit(self) -> None:
+        runtime = PaymentRuntime([], max_unknown_outcomes=2)
+
+        for index in range(3):
+            offered = challenge(f"unknown-{index}")
+            request = httpx.Request(
+                "POST",
+                f"https://example.com/pay/{index}",
+                content=str(index),
+            )
+            attempt = runtime._begin_http_payment(offered, request)
+            runtime._mark_http_payment_sent(attempt, request)
+            runtime._mark_http_payment_unknown(attempt, TimeoutError("response lost"))
+
+        assert len(runtime._http_unknown_challenges) == 2
+        assert len(runtime._http_unknown_operations) == 2
+        assert runtime._http_unknown_circuit is not None
+
+        fresh = challenge("fresh")
+        with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+            runtime._begin_http_payment(
+                fresh,
+                httpx.Request("POST", "https://example.com/pay/fresh"),
+            )
+        with pytest.raises(ValueError, match="externally reconciled"):
+            runtime.reset_unknown_outcomes(reconciled=False)
+
+        runtime.reset_unknown_outcomes(reconciled=True)
+
+        assert not runtime._http_unknown_challenges
+        assert not runtime._http_unknown_operations
+        assert runtime._http_unknown_circuit is None
+        attempt = runtime._begin_http_payment(
+            fresh,
+            httpx.Request("POST", "https://example.com/pay/fresh"),
+        )
+        runtime._discard_http_payment(attempt)
+        runtime.close()
+
+    def test_close_preserves_sent_attempt_markers(self) -> None:
+        offered = challenge("closing")
+        request = httpx.Request("POST", "https://example.com/pay")
+        retry = httpx.Request("POST", "https://example.com/pay")
+        runtime = PaymentRuntime([])
+        attempt = runtime._begin_http_payment(offered, request)
+        runtime._mark_http_payment_sent(attempt, retry)
+
+        runtime.close()
+
+        replacement = PaymentRuntime([])
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+                replacement._begin_http_payment(offered, request)
+            with pytest.raises(PaymentOutcomeUnknownError, match="outcome is unknown"):
+                replacement._begin_http_payment(offered, retry)
+        finally:
+            replacement.close()
+
+    def test_attempt_markers_clear_after_success_and_discard(self) -> None:
+        runtime = PaymentRuntime([])
+        request = httpx.Request("POST", "https://example.com/pay")
+        retry = httpx.Request("POST", "https://example.com/pay")
+        attempt = runtime._begin_http_payment(challenge("marker"), request)
+        runtime._mark_http_payment_sent(attempt, retry)
+
+        runtime._mark_http_response_body_complete(attempt)
+        runtime._mark_http_send_complete(attempt)
+
+        assert "mpp.payment_attempt" not in request.extensions
+        assert "mpp.payment_attempt" not in retry.extensions
+
+        discarded = runtime._begin_http_payment(
+            challenge("discard"),
+            httpx.Request("POST", "https://example.com/other"),
+        )
+        discarded.request.extensions["mpp.payment_attempt"] = discarded
+        runtime._discard_http_payment(discarded)
+        assert "mpp.payment_attempt" not in discarded.request.extensions
+        runtime.close()
+
+    def test_colliding_unknown_operations_keep_each_challenge(self) -> None:
+        runtime = PaymentRuntime([])
+        first_attempt = runtime._begin_http_payment(
+            challenge("first"),
+            httpx.Request("POST", "https://example.com/pay", content=b"same"),
+        )
+        second_attempt = runtime._begin_http_payment(
+            challenge("second"),
+            httpx.Request("POST", "https://example.com/pay", content=b"same"),
+        )
+        runtime._mark_http_payment_sent(first_attempt, first_attempt.request)
+        runtime._mark_http_payment_sent(second_attempt, second_attempt.request)
+        first_credential = Credential(
+            challenge=first_attempt.challenge.to_echo(),
+            payload={"payment": "first"},
+        )
+        second_credential = Credential(
+            challenge=second_attempt.challenge.to_echo(),
+            payload={"payment": "second"},
+        )
+        runtime._set_http_payment_credential(first_attempt, first_credential)
+        runtime._set_http_payment_credential(second_attempt, second_credential)
+        first = runtime._mark_http_payment_unknown(first_attempt, TimeoutError("first lost"))
+        second = runtime._mark_http_payment_unknown(second_attempt, TimeoutError("second lost"))
+
+        assert len(runtime._http_unknown_operations) == 1
+        assert len(runtime._http_unknown_challenges) == 2
+        assert (first.challenge.id, first.credential, str(first.cause)) == (
+            "first",
+            first_credential,
+            "first lost",
+        )
+        assert (second.challenge.id, second.credential, str(second.cause)) == (
+            "second",
+            second_credential,
+            "second lost",
+        )
+        assert first_attempt.request.extensions["mpp.payment_attempt"] is first
+        assert second_attempt.request.extensions["mpp.payment_attempt"] is second
+        assert not runtime._http_challenges
+        runtime.close()
+
+    def test_unknown_circuit_blocks_attempt_committed_after_it_trips(self) -> None:
+        runtime = PaymentRuntime([], max_unknown_outcomes=1)
+        late, first, second = (
+            runtime._begin_http_payment(
+                challenge(identifier),
+                httpx.Request("POST", f"https://example.com/{identifier}"),
+            )
+            for identifier in ("late", "first", "second")
+        )
+        for attempt in (first, second):
+            runtime._mark_http_payment_sent(attempt, attempt.request)
+            runtime._mark_http_payment_unknown(
+                attempt, TimeoutError(f"{attempt.challenge.id} lost")
+            )
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            runtime._mark_http_payment_sent(late, late.request)
+
+        assert runtime._http_unknown_circuit is not None
+        assert not late.sent
+        assert late.challenge_key not in runtime._http_challenges
+        runtime.close()
+
+    def test_unknown_tombstone_drops_body_and_traceback(self) -> None:
+        runtime = PaymentRuntime([])
+        offered = challenge("unknown")
+        request = httpx.Request("POST", "https://example.com/pay", content=b"x" * 4096)
+        retry = httpx.Request("POST", "https://example.com/pay", content=request.content)
+        attempt = runtime._begin_http_payment(offered, request)
+        runtime._mark_http_payment_sent(attempt, retry)
+        try:
+            raise httpx.ReadTimeout("response lost", request=request)
+        except httpx.ReadTimeout as cause:
+            assert cause.__traceback__ is not None
+            tombstone = runtime._mark_http_payment_unknown(attempt, cause)
+
+        assert isinstance(tombstone.cause, httpx.ReadTimeout)
+        assert tombstone.cause.__traceback__ is None
+        assert tombstone.request is not request
+        assert tombstone.request.content == b""
+        assert request.extensions["mpp.payment_attempt"] is tombstone
+        assert retry.extensions["mpp.payment_attempt"] is tombstone
+        assert not hasattr(tombstone, "runtime")
         runtime.close()
