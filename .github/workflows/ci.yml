@@ -16,7 +16,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test, integration, package, install-smoke]
+    needs: [test, httpx-adapter, integration, package, install-smoke]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -88,6 +88,38 @@ jobs:
             coverage.xml
             htmlcov/
           if-no-files-found: ignore
+
+  httpx-adapter:
+    name: HTTPX adapter (${{ matrix.httpx-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        httpx-version: ["0.27.0", "0.27.1", "0.27.2", "0.28.0", "0.28.1"]
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: |
+          uv venv --python 3.12
+          uv pip install -e . "httpx==$HTTPX_VERSION" "pytest>=8" "pytest-asyncio>=0.24"
+        env:
+          HTTPX_VERSION: ${{ matrix.httpx-version }}
+
+      - name: Run adapter tests
+        run: uv run --no-sync pytest -v --confcutdir=tests/httpx tests/httpx
 
   integration:
     name: Integration Test

@@ -79,7 +79,10 @@ class SyncPaymentTransport(_EventHandlers, httpx.BaseTransport):
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         """Send a request and retry one 402 with a payment credential."""
-        with self._runtime._httpx_operation_scope(request):
+        with self._runtime._httpx_operation_scope(
+            request,
+            reuse=self._runtime._httpx_adapter_active(),
+        ):
             response = self._inner.handle_request(request)
             return self._handle_response(request, response)
 

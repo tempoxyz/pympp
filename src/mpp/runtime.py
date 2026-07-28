@@ -25,6 +25,9 @@ from anyio.abc import TaskStatus
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from mpp import Challenge, Credential
+from mpp._httpx import HTTPX_ADAPTER_VERSIONS as HTTPX_ADAPTER_VERSIONS
+from mpp._httpx import HttpxCompatibilityError as HttpxCompatibilityError
+from mpp._httpx import _validate_httpx_client
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -85,6 +88,10 @@ _HTTPX_OPERATIONS: ContextVar[dict[int, _HttpxOperation] | None] = ContextVar(
     "mpp_httpx_operations",
     default=None,
 )
+_HTTPX_ADAPTER_RUNTIME: ContextVar[int | None] = ContextVar(
+    "mpp_httpx_adapter_runtime",
+    default=None,
+)
 _HTTP_PAYMENT_ATTEMPT_EXTENSION = "mpp.payment_attempt"
 _DEFAULT_MAX_UNKNOWN_OUTCOMES = 1024
 
@@ -130,6 +137,49 @@ MethodFactory = Callable[
     [],
     _MethodFactoryResult | Awaitable[_MethodFactoryResult],
 ]
+
+
+class _BoundSendTransport(httpx.AsyncBaseTransport):
+    def __init__(self, send: Any) -> None:
+        self._send = send
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._send(request)
+
+
+class _BoundSyncSendTransport(httpx.BaseTransport):
+    def __init__(self, send: Any) -> None:
+        self._send = send
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self._send(request)
+
+
+_MISSING_CLIENT_ATTRIBUTE = object()
+
+
+def _set_client_attributes(client: Any, **updates: Any) -> None:
+    namespace = vars(client)
+    previous = {name: namespace.get(name, _MISSING_CLIENT_ATTRIBUTE) for name in updates}
+    applied: list[str] = []
+    try:
+        for name, value in updates.items():
+            setattr(client, name, value)
+            applied.append(name)
+    except BaseException as error:
+        rollback_error: BaseException | None = None
+        for name in reversed(applied):
+            try:
+                value = previous[name]
+                if value is _MISSING_CLIENT_ATTRIBUTE:
+                    delattr(client, name)
+                else:
+                    setattr(client, name, value)
+            except BaseException as cause:
+                rollback_error = rollback_error or cause
+        if rollback_error is not None:
+            raise RuntimeError("Failed to roll back HTTPX client adapter") from error
+        raise
 
 
 class _AsyncBridge:
@@ -535,13 +585,114 @@ class PaymentRuntime:
 
         return SyncPaymentTransport(inner=inner, runtime=self)
 
+    def wrap_client(self, client: httpx.Client) -> httpx.Client:
+        """Make one existing HTTPX client payment-aware."""
+        if not isinstance(client, httpx.Client):
+            raise TypeError("wrap_client requires an httpx.Client")
+        if getattr(client, "_mpp_payment_wrapped", False):
+            client._mpp_payment_runtime = self  # type: ignore[attr-defined]
+            return client
+        original_send_single, original_send = _validate_httpx_client(client)
+
+        def send_single(request: httpx.Request) -> httpx.Response:
+            runtime = client._mpp_payment_runtime  # type: ignore[attr-defined]
+            return runtime.send_httpx_sync(original_send_single, request)
+
+        def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+            runtime = client._mpp_payment_runtime  # type: ignore[attr-defined]
+            with runtime._httpx_operation_scope(request):
+                return original_send(request, *args, **kwargs)
+
+        _set_client_attributes(
+            client,
+            send=send,
+            _send_single_request=send_single,
+            _mpp_payment_runtime=self,
+            _mpp_payment_wrapped=True,
+        )
+        return client
+
+    def wrap_async_client(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
+        """Make one existing HTTPX async client payment-aware."""
+        if not isinstance(client, httpx.AsyncClient):
+            raise TypeError("wrap_async_client requires an httpx.AsyncClient")
+        if getattr(client, "_mpp_payment_wrapped", False):
+            client._mpp_payment_runtime = self  # type: ignore[attr-defined]
+            return client
+        original_send_single, original_send = _validate_httpx_client(client)
+
+        async def send_single(request: httpx.Request) -> httpx.Response:
+            runtime = client._mpp_payment_runtime  # type: ignore[attr-defined]
+            return await runtime.send_httpx(original_send_single, request)
+
+        async def send(request: httpx.Request, *args: Any, **kwargs: Any) -> httpx.Response:
+            runtime = client._mpp_payment_runtime  # type: ignore[attr-defined]
+            with runtime._httpx_operation_scope(request):
+                return await original_send(request, *args, **kwargs)
+
+        _set_client_attributes(
+            client,
+            send=send,
+            _send_single_request=send_single,
+            _mpp_payment_runtime=self,
+            _mpp_payment_wrapped=True,
+        )
+        return client
+
+    async def send_httpx(
+        self,
+        send: Callable[[httpx.Request], Awaitable[httpx.Response]],
+        request: httpx.Request,
+    ) -> httpx.Response:
+        """Send one HTTPX request with automatic 402 payment handling."""
+        with self._httpx_operation_scope(request, reuse=True):
+            token = _HTTPX_ADAPTER_RUNTIME.set(id(self))
+            try:
+                transport = _BoundSendTransport(send)
+                response = await transport.handle_async_request(request)
+                return await self.payment_transport(inner=transport)._handle_async_response(
+                    request,
+                    response,
+                )
+            finally:
+                _HTTPX_ADAPTER_RUNTIME.reset(token)
+
+    def send_httpx_sync(
+        self,
+        send: Callable[[httpx.Request], httpx.Response],
+        request: httpx.Request,
+    ) -> httpx.Response:
+        """Send one synchronous HTTPX request with automatic 402 handling."""
+        with self._httpx_operation_scope(request, reuse=True):
+            token = _HTTPX_ADAPTER_RUNTIME.set(id(self))
+            try:
+                transport = _BoundSyncSendTransport(send)
+                response = transport.handle_request(request)
+                return self.sync_payment_transport(inner=transport)._handle_response(
+                    request,
+                    response,
+                )
+            finally:
+                _HTTPX_ADAPTER_RUNTIME.reset(token)
+
     def allows_http_payment(self, url: httpx.URL) -> bool:
         """Return whether credentials may be created for an HTTP origin."""
         return self._allowed.http_url(url)
 
+    def _httpx_adapter_active(self) -> bool:
+        return _HTTPX_ADAPTER_RUNTIME.get() == id(self)
+
     @contextmanager
-    def _httpx_operation_scope(self, request: httpx.Request):
+    def _httpx_operation_scope(
+        self,
+        request: httpx.Request,
+        *,
+        reuse: bool = False,
+    ):
         operations = _HTTPX_OPERATIONS.get() or {}
+        if reuse and (operation := operations.get(id(self))) is not None and operation.active:
+            yield operation
+            return
 
         operation_key = _http_idempotency_key(request)
         operation = _HttpxOperation()

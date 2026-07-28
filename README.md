@@ -101,6 +101,24 @@ with PaymentRuntime(
         response = client.get("https://api.example.com/paid")
 ```
 
+Existing HTTPX clients can instead be adapted in place, preserving their
+authentication, redirects, hooks, and streaming behavior:
+
+```python
+with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    with runtime.wrap_client(httpx.Client()) as client:
+        response = client.get("https://api.example.com/paid")
+```
+
+Use `runtime.wrap_async_client(client)` for an `httpx.AsyncClient`. These
+per-client adapters support HTTPX `0.27.x` and `0.28.x` and fail before changing
+the client when its adapter seam is incompatible. The explicit
+`PaymentTransport` and `SyncPaymentTransport` remain available on newer HTTPX
+versions.
+
 ## Examples
 
 | Example | Description |

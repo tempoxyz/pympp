@@ -417,7 +417,10 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        with self._runtime._httpx_operation_scope(request):
+        with self._runtime._httpx_operation_scope(
+            request,
+            reuse=self._runtime._httpx_adapter_active(),
+        ):
             response = await self._inner.handle_async_request(request)
             return await self._handle_async_response(request, response)
 
