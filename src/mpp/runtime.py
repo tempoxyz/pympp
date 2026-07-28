@@ -1,11 +1,13 @@
-"""Shared payment runtime for asynchronous HTTP clients."""
+"""Shared payment runtime for HTTP and MCP clients."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import inspect
+import json
 import threading
+import weakref
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import (
@@ -31,6 +33,8 @@ from mpp._httpx import _validate_httpx_client
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
+    PAYMENT_FAILED,
+    PAYMENT_RESPONSE,
     EventDispatcher,
     EventPayload,
 )
@@ -69,6 +73,14 @@ class _HttpPaymentTombstone:
     request: httpx.Request
 
 
+@dataclass(frozen=True, slots=True)
+class _McpPaymentTombstone:
+    challenge: Any
+    credential: Credential | None
+    cause: BaseException
+    endpoint_ref: weakref.ReferenceType[Any] | None
+
+
 @dataclass(eq=False, slots=True)
 class _HttpPaymentAttempt:
     runtime: PaymentRuntime
@@ -91,6 +103,17 @@ class _HttpxOperation:
     attempts: list[_HttpPaymentAttempt] = field(default_factory=list)
     payment_sent: bool = False
     active: bool = True
+
+
+@dataclass(eq=False, slots=True)
+class _McpPaymentAttempt:
+    challenge_key: str
+    operation_key: str
+    challenge: Any
+    endpoint: Any
+    credential: Credential | None = None
+    cause: BaseException | None = None
+    sent: bool = False
 
 
 _HTTPX_OPERATIONS: ContextVar[dict[int, _HttpxOperation] | None] = ContextVar(
@@ -397,6 +420,11 @@ class PaymentRuntime:
         self._http_unknown_circuit: _HttpPaymentTombstone | None = None
         self._http_idempotent_operations: dict[str, _HttpPaymentAttempt] = {}
         self._http_active_idempotent_operations: dict[str, int] = {}
+        self._mcp_attempt_lock = threading.Lock()
+        self._mcp_challenges: dict[str, _McpPaymentAttempt] = {}
+        self._mcp_unknown_challenges: dict[str, _McpPaymentTombstone] = {}
+        self._mcp_unknown_operations: dict[str, _McpPaymentTombstone] = {}
+        self._mcp_unknown_circuit: _McpPaymentTombstone | None = None
         self._max_unknown_outcomes = max_unknown_outcomes
 
     def _in_method_lifecycle(self) -> bool:
@@ -578,6 +606,11 @@ class PaymentRuntime:
             self._http_unknown_circuit = None
             self._http_idempotent_operations.clear()
             self._http_active_idempotent_operations.clear()
+        with self._mcp_attempt_lock:
+            self._mcp_challenges.clear()
+            self._mcp_unknown_challenges.clear()
+            self._mcp_unknown_operations.clear()
+            self._mcp_unknown_circuit = None
 
     def reset_unknown_outcomes(self, *, reconciled: bool) -> None:
         """Reopen payments after every retained unknown outcome was reconciled.
@@ -592,6 +625,10 @@ class PaymentRuntime:
             self._http_unknown_challenges.clear()
             self._http_unknown_operations.clear()
             self._http_unknown_circuit = None
+        with self._mcp_attempt_lock:
+            self._mcp_unknown_challenges.clear()
+            self._mcp_unknown_operations.clear()
+            self._mcp_unknown_circuit = None
 
     def payment_transport(self, inner: httpx.AsyncBaseTransport | None = None) -> PaymentTransport:
         """Create an httpx transport using this runtime's payment methods."""
@@ -983,6 +1020,306 @@ class PaymentRuntime:
         if attempt.retry_request is not None:
             attempt.retry_request.extensions[_HTTP_PAYMENT_ATTEMPT_EXTENSION] = tombstone
 
+    async def call_mcp_tool(
+        self,
+        call_tool: Any,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Call an MCP tool with automatic payment handling."""
+        from mpp.errors import PaymentOutcomeUnknownError
+        from mpp.extensions.mcp.client import (
+            _extract_challenges,
+            _is_payment_required_error,
+        )
+        from mpp.extensions.mcp.types import MCPCredential
+
+        try:
+            result = await call_tool(name, arguments, *args, **kwargs)
+        except Exception as error:
+            if not _is_payment_required_error(error):
+                raise
+            challenge_response = error
+        else:
+            return result
+
+        challenges = _extract_challenges(challenge_response)
+        allowed = [
+            challenge for challenge in challenges if self._allowed.mcp_realm(challenge.realm)
+        ]
+        core_challenges = [challenge.to_core() for challenge in allowed]
+
+        async def fail(
+            error: Exception,
+            *,
+            challenge: Challenge | None = None,
+            credential: Credential | None = None,
+            method: Method | None = None,
+            response: Any = challenge_response,
+        ) -> None:
+            await self.emit_event(
+                PAYMENT_FAILED,
+                {
+                    "challenge": challenge,
+                    "challenges": core_challenges,
+                    "credential": credential,
+                    "error": error,
+                    "method": method,
+                    "response": response,
+                    "protocol": "mcp",
+                },
+            )
+
+        if not allowed:
+            error = ValueError(
+                "Server returned malformed payment challenges or disallowed payment origins"
+            )
+            await fail(error)
+            raise error from challenge_response
+
+        await self.astart()
+        attempt: _McpPaymentAttempt | None = None
+        challenge: Any = None
+        method: Method | None = None
+        core_challenge: Challenge | None = None
+        core_credential: Credential | None = None
+        try:
+            current = [item for item in allowed if not _challenge_is_expired(item)]
+            try:
+                challenge, method = self.match_challenge(current)
+            except ValueError:
+                challenge, method = self.match_challenge(allowed)
+
+            core_challenge = challenge.to_core()
+            assert core_challenge is not None
+            if _challenge_is_expired(challenge):
+                raise ValueError(f"Challenge expired at {challenge.expires}")
+            attempt = self._begin_mcp_payment(challenge, call_tool, name, arguments)
+            core_credential = await self.create_credential(
+                core_challenge,
+                method,
+                event_payload={
+                    "challenges": core_challenges,
+                    "response": challenge_response,
+                    "protocol": "mcp",
+                },
+            )
+            mcp_credential = MCPCredential.from_core(core_credential, challenge)
+            self._set_mcp_payment_credential(attempt, core_credential)
+
+            retry_kwargs = dict(kwargs)
+            retry_meta = dict(retry_kwargs.get("meta") or {})
+            retry_meta.update(mcp_credential.to_meta())
+            retry_kwargs["meta"] = retry_meta
+        except BaseException as error:
+            if attempt is not None:
+                self._discard_mcp_payment(attempt)
+            if not isinstance(error, Exception):
+                raise
+            await fail(
+                error,
+                challenge=core_challenge,
+                credential=core_credential or getattr(error, "credential", None),
+                method=method,
+            )
+            raise
+
+        assert attempt is not None
+        assert core_credential is not None
+        try:
+            with self._paid_operation():
+                try:
+                    self._mark_mcp_payment_sent(attempt)
+                except PaymentOutcomeUnknownError as error:
+                    await fail(
+                        error,
+                        challenge=core_challenge,
+                        credential=core_credential,
+                        method=method,
+                    )
+                    raise
+
+                try:
+                    payment_response = await call_tool(name, arguments, *args, **retry_kwargs)
+                except BaseException as cause:
+                    self._mark_mcp_payment_unknown(attempt, cause)
+                    outcome_error = PaymentOutcomeUnknownError(
+                        challenge,
+                        cause,
+                        credential=core_credential,
+                    )
+                    if not isinstance(cause, Exception):
+                        try:
+                            await fail(
+                                outcome_error,
+                                challenge=core_challenge,
+                                credential=core_credential,
+                                method=method,
+                            )
+                        except BaseException:
+                            pass
+                        raise
+                    await fail(
+                        outcome_error,
+                        challenge=core_challenge,
+                        credential=core_credential,
+                        method=method,
+                    )
+                    raise outcome_error from cause
+
+                try:
+                    await self.emit_event(
+                        PAYMENT_RESPONSE,
+                        {
+                            "challenge": core_challenge,
+                            "challenges": core_challenges,
+                            "credential": core_credential,
+                            "method": method,
+                            "response": payment_response,
+                            "protocol": "mcp",
+                        },
+                    )
+                except BaseException as error:
+                    self._mark_mcp_payment_unknown(attempt, error)
+                    raise
+                self._complete_mcp_payment(attempt)
+                return payment_response
+        except BaseException:
+            if not attempt.sent:
+                self._discard_mcp_payment(attempt)
+            raise
+
+    def _begin_mcp_payment(
+        self,
+        challenge: Any,
+        call_tool: Any,
+        name: str,
+        arguments: dict[str, Any] | None,
+    ) -> _McpPaymentAttempt:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        endpoint = getattr(call_tool, "__self__", None)
+        if endpoint is None:
+            endpoint = call_tool
+        challenge_key, operation_key = _mcp_attempt_keys(
+            challenge,
+            endpoint,
+            name,
+            arguments,
+        )
+        with self._mcp_attempt_lock:
+            if circuit := self._mcp_unknown_circuit:
+                raise PaymentOutcomeUnknownError(
+                    circuit.challenge,
+                    circuit.cause,
+                    credential=circuit.credential,
+                )
+            existing = self._mcp_challenges.get(challenge_key)
+            if existing is None:
+                existing = self._mcp_unknown_challenges.get(challenge_key)
+            if existing is None:
+                existing = self._mcp_unknown_operations.get(operation_key)
+                if (
+                    isinstance(existing, _McpPaymentTombstone)
+                    and existing.endpoint_ref is not None
+                    and existing.endpoint_ref() is not endpoint
+                ):
+                    self._mcp_unknown_operations.pop(operation_key, None)
+                    existing = None
+            if existing is not None:
+                cause = existing.cause or RuntimeError(
+                    "A matching MCP payment attempt is already in progress"
+                )
+                raise PaymentOutcomeUnknownError(
+                    existing.challenge,
+                    cause,
+                    credential=existing.credential,
+                )
+            attempt = _McpPaymentAttempt(
+                challenge_key=challenge_key,
+                operation_key=operation_key,
+                challenge=challenge,
+                endpoint=endpoint,
+            )
+            self._mcp_challenges[challenge_key] = attempt
+            return attempt
+
+    def _set_mcp_payment_credential(
+        self,
+        attempt: _McpPaymentAttempt,
+        credential: Credential,
+    ) -> None:
+        with self._mcp_attempt_lock:
+            attempt.credential = credential
+
+    def _mark_mcp_payment_sent(self, attempt: _McpPaymentAttempt) -> None:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        with self._mcp_attempt_lock:
+            existing = self._mcp_unknown_circuit or self._mcp_unknown_operations.get(
+                attempt.operation_key
+            )
+            if existing is not None:
+                self._remove_mcp_attempt_locked(attempt)
+                raise PaymentOutcomeUnknownError(
+                    existing.challenge,
+                    existing.cause,
+                    credential=existing.credential,
+                )
+            attempt.sent = True
+
+    def _mark_mcp_payment_unknown(
+        self,
+        attempt: _McpPaymentAttempt,
+        cause: BaseException,
+    ) -> _McpPaymentTombstone:
+        with self._mcp_attempt_lock:
+            compact_cause = _compact_cause(cause)
+            attempt.cause = compact_cause
+            tombstone = _McpPaymentTombstone(
+                challenge=attempt.challenge,
+                credential=attempt.credential,
+                cause=compact_cause,
+                endpoint_ref=_weakref(attempt.endpoint),
+            )
+            self._remove_mcp_attempt_locked(attempt)
+            if self._mcp_unknown_circuit is not None:
+                return tombstone
+
+            if attempt.operation_key in self._mcp_unknown_operations:
+                if attempt.challenge_key not in self._mcp_unknown_challenges:
+                    if len(self._mcp_unknown_challenges) >= self._max_unknown_outcomes:
+                        self._mcp_unknown_circuit = tombstone
+                    else:
+                        self._mcp_unknown_challenges[attempt.challenge_key] = tombstone
+                return tombstone
+
+            if (
+                len(self._mcp_unknown_challenges) >= self._max_unknown_outcomes
+                or len(self._mcp_unknown_operations) >= self._max_unknown_outcomes
+            ):
+                self._mcp_unknown_circuit = tombstone
+                return tombstone
+            self._mcp_unknown_challenges[attempt.challenge_key] = tombstone
+            self._mcp_unknown_operations[attempt.operation_key] = tombstone
+            return tombstone
+
+    def _discard_mcp_payment(self, attempt: _McpPaymentAttempt) -> None:
+        with self._mcp_attempt_lock:
+            if not attempt.sent:
+                self._remove_mcp_attempt_locked(attempt)
+
+    def _complete_mcp_payment(self, attempt: _McpPaymentAttempt) -> None:
+        with self._mcp_attempt_lock:
+            if attempt.cause is None:
+                self._remove_mcp_attempt_locked(attempt)
+
+    def _remove_mcp_attempt_locked(self, attempt: _McpPaymentAttempt) -> None:
+        if self._mcp_challenges.get(attempt.challenge_key) is attempt:
+            self._mcp_challenges.pop(attempt.challenge_key, None)
+
     def match_challenge(
         self,
         challenges: Sequence[Any],
@@ -1228,6 +1565,36 @@ def _http_idempotency_key(request: httpx.Request) -> str | None:
     )
 
 
+def _mcp_attempt_keys(
+    challenge: Any,
+    endpoint: Any,
+    name: str,
+    arguments: dict[str, Any] | None,
+) -> tuple[str, str]:
+    realm = (
+        repr(origin)
+        if (origin := _origin(challenge.realm)) is not None
+        else (_bare_host(challenge.realm) or challenge.realm.casefold())
+    )
+    challenge_key = _http_attempt_digest("mcp-challenge", realm, challenge.id)
+    try:
+        arguments_key = json.dumps(
+            arguments or {},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        arguments_key = repr(arguments)
+    operation_key = _http_attempt_digest(
+        "mcp-operation",
+        str(id(endpoint)),
+        name,
+        arguments_key,
+    )
+    return challenge_key, operation_key
+
+
 def _http_attempt_digest(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
 
@@ -1245,6 +1612,13 @@ def _compact_cause(cause: BaseException) -> BaseException:
 
 def _compact_request(request: httpx.Request) -> httpx.Request:
     return httpx.Request(request.method, request.url)
+
+
+def _weakref(value: Any) -> weakref.ReferenceType[Any] | None:
+    try:
+        return weakref.ref(value)
+    except TypeError:
+        return None
 
 
 def _challenge_is_expired(challenge: Any) -> bool:
@@ -1265,12 +1639,43 @@ def _challenge_is_expired(challenge: Any) -> bool:
 class _AllowedOrigins:
     def __init__(self, allowed_origins: Sequence[str] | None) -> None:
         self._allow_all = allowed_origins is None
-        self._origins = {
-            origin for value in allowed_origins or () if (origin := _origin(str(value))) is not None
-        }
+        self._origins = set[tuple[str, str, int | None]]()
+        self._origin_hosts = set[str]()
+        self._realms = set[str]()
+        if allowed_origins is None:
+            return
+        for value in allowed_origins:
+            origin = _origin(str(value))
+            if origin is not None:
+                self._origins.add(origin)
+                self._origin_hosts.add(origin[1])
+            else:
+                realm = str(value)
+                self._realms.add(realm.casefold())
+                if host := _bare_host(realm):
+                    self._realms.add(host)
 
     def http_url(self, url: httpx.URL) -> bool:
         return self._allow_all or _httpx_origin(url) in self._origins
+
+    def mcp_realm(self, realm: str) -> bool:
+        if not isinstance(realm, str):
+            return False
+        origin = _origin(realm)
+        if "://" in realm and origin is None:
+            return False
+        if self._allow_all:
+            return True
+        if origin is not None:
+            return origin in self._origins or origin[1] in self._realms
+        normalized = realm.casefold()
+        host = _bare_host(realm)
+        return (
+            normalized in self._realms
+            or normalized in self._origin_hosts
+            or host is not None
+            and (host in self._realms or host in self._origin_hosts)
+        )
 
 
 def _origin(value: str) -> tuple[str, str, int | None] | None:
@@ -1281,6 +1686,15 @@ def _origin(value: str) -> tuple[str, str, int | None] | None:
     if not url.scheme or not url.raw_host:
         return None
     return _httpx_origin(url)
+
+
+def _bare_host(value: str) -> str | None:
+    if not value or any(character.isspace() or character in "/@?#%" for character in value):
+        return None
+    try:
+        return httpx.URL(scheme="https", host=value).raw_host.decode("ascii").casefold()
+    except (httpx.InvalidURL, TypeError, UnicodeError):
+        return None
 
 
 def _httpx_origin(url: httpx.URL) -> tuple[str, str, int | None]:

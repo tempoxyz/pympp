@@ -16,7 +16,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test, httpx-adapter, integration, package, install-smoke]
+    needs: [test, httpx-adapter, mcp-compat, integration, package, install-smoke]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -120,6 +120,32 @@ jobs:
 
       - name: Run adapter tests
         run: uv run --no-sync pytest -v --confcutdir=tests/httpx tests/httpx
+
+  mcp-compat:
+    name: MCP 1.19.0
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install minimum supported MCP SDK
+        run: |
+          uv venv .compat-venv --python 3.12
+          uv pip install --python .compat-venv/bin/python \
+            -e ".[mcp]" "mcp==1.19.0" pytest pytest-asyncio
+
+      - name: Run MCP client tests
+        run: |
+          .compat-venv/bin/python -m pytest -q --noconftest \
+            tests/test_mcp_client.py tests/test_mcp_runtime.py
 
   integration:
     name: Integration Test

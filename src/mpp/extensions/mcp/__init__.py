@@ -76,8 +76,8 @@ _LAZY_EXPORTS = {
     "mpp.extensions.mcp.client": (
         "McpClient",
         "McpToolResult",
-        "PaymentOutcomeUnknownError",
     ),
+    "mpp.errors": ("PaymentOutcomeUnknownError",),
     "mpp.extensions.mcp.decorator": ("pay",),
     "mpp.extensions.mcp.errors": (
         "MalformedCredentialError",

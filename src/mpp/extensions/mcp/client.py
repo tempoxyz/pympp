@@ -18,64 +18,44 @@ Example:
         async with ClientSession(streams[0], streams[1]) as session:
             await session.initialize()
 
-            client = McpClient(session, methods=[method])
-            result = await client.call_tool("premium_tool", {"query": "hello"})
-            print(result.receipt)
+            async with McpClient(session, methods=[method]) as client:
+                result = await client.call_tool("premium_tool", {"query": "hello"})
+                print(result.receipt)
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from datetime import timedelta
+from typing import Any
 
+from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
-from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-
-if TYPE_CHECKING:
-    from mpp import Challenge, Credential
+from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+from mpp.runtime import Method, PaymentRuntime, _CallerLoopRuntime
 
 logger = logging.getLogger(__name__)
 
 
-class PaymentOutcomeUnknownError(RuntimeError):
-    """Raised when a paid retry fails after a credential was attached."""
-
-    def __init__(self, challenge: MCPChallenge, cause: Exception) -> None:
-        self.challenge = challenge
-        self.cause = cause
-        super().__init__(
-            "Tool call failed after sending a payment credential; "
-            f"payment outcome is unknown for challenge {challenge.id}. "
-            "Do not blindly retry."
-        )
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for MCP client credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
+def _error_detail(error: Exception) -> Any:
+    nested = getattr(error, "error", None)
+    return nested if nested is not None else (error.args[0] if error.args else None)
 
 
 def _error_code(error: Exception) -> int | None:
     code = getattr(error, "code", None)
     if code is not None:
         return code
-    nested = getattr(error, "error", None)
-    return getattr(nested, "code", None)
+    return getattr(_error_detail(error), "code", None)
 
 
 def _error_data(error: Exception) -> Any:
     data = getattr(error, "data", None)
     if data is not None:
         return data
-    nested = getattr(error, "error", None)
-    return getattr(nested, "data", None)
+    return getattr(_error_detail(error), "data", None)
 
 
 def _is_payment_required_error(error: Exception) -> bool:
@@ -163,28 +143,69 @@ class McpClient:
 
     Args:
         session: An initialized ``mcp.ClientSession``.
-        methods: Payment methods available for credential creation.
+        methods: Payment methods available for credential creation. Mutually
+            exclusive with ``runtime``.
+        runtime: An existing shared payment runtime. Mutually exclusive with
+            ``methods`` and not closed by this client.
 
     Example:
-        client = McpClient(session, methods=[tempo(...)])
-        result = await client.call_tool("premium_tool", {"query": "hello"})
-        print(result.receipt)
+        async with McpClient(session, runtime=runtime) as client:
+            result = await client.call_tool("premium_tool", {"query": "hello"})
+            print(result.receipt)
     """
 
-    def __init__(self, session: Any, methods: list[Method]) -> None:
+    def __init__(
+        self,
+        session: Any,
+        methods: list[Method] | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
+    ) -> None:
         self._session = session
-        self._methods = methods
+        if runtime is not None and methods is not None:
+            raise ValueError("Pass either methods or runtime, not both")
+        if runtime is None and methods is None:
+            raise ValueError("Pass methods or runtime")
+        self._owns_runtime = runtime is None
+        if runtime is None:
+            assert methods is not None
+            self._runtime = _CallerLoopRuntime(methods)
+        else:
+            self._runtime = runtime
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
+
+    async def __aenter__(self) -> McpClient:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        await self.aclose()
+
+    def close(self) -> None:
+        """Close an owned runtime from synchronous code."""
+        if not self._owns_runtime:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._runtime.close()
+            return
+        raise RuntimeError("Use 'await client.aclose()' inside a running event loop")
+
+    async def aclose(self) -> None:
+        """Asynchronously close the runtime created by this client, if any."""
+        if self._owns_runtime:
+            await self._runtime.aclose()
 
     async def call_tool(
         self,
         name: str,
         arguments: dict[str, Any] | None = None,
-        *,
+        *args: Any,
         timeout: float | None = None,
         meta: dict[str, Any] | None = None,
+        **kwargs: Any,
     ) -> McpToolResult:
         """Call an MCP tool with automatic payment handling.
 
@@ -197,6 +218,8 @@ class McpClient:
             arguments: Tool arguments.
             timeout: Per-call timeout override (passed as ``read_timeout_seconds``).
             meta: Additional ``_meta`` fields to include in the request.
+            *args: Positional arguments accepted by the underlying MCP session.
+            **kwargs: Keyword arguments accepted by the underlying MCP session.
 
         Returns:
             An ``McpToolResult`` with the tool result and an optional receipt.
@@ -206,72 +229,22 @@ class McpClient:
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
             ValueError: If no installed method matches the server's challenge.
         """
-        from mcp.shared.exceptions import McpError
-
-        call_kwargs: dict[str, Any] = {}
+        call_kwargs = dict(kwargs)
         if timeout is not None:
-            call_kwargs["read_timeout_seconds"] = timeout
+            if args or "read_timeout_seconds" in call_kwargs:
+                raise TypeError("Pass either timeout or read_timeout_seconds, not both")
+            call_kwargs["read_timeout_seconds"] = timedelta(seconds=timeout)
         if meta is not None:
             call_kwargs["meta"] = meta
 
-        try:
-            result = await self._session.call_tool(name, arguments, **call_kwargs)
-            receipt = self._extract_receipt(result)
-            return McpToolResult(result=result, receipt=receipt)
-
-        except McpError as e:
-            if not _is_payment_required_error(e):
-                raise
-
-            challenges = _extract_challenges(e)
-            if not challenges:
-                raise ValueError("Server returned malformed payment challenges") from e
-
-            challenge, method = self._match_challenge(challenges)
-
-            core_credential = await method.create_credential(challenge.to_core())
-            mcp_credential = MCPCredential.from_core(core_credential, challenge)
-
-            retry_meta = dict(meta) if meta else {}
-            retry_meta.update(mcp_credential.to_meta())
-
-            retry_kwargs: dict[str, Any] = {"meta": retry_meta}
-            if timeout is not None:
-                retry_kwargs["read_timeout_seconds"] = timeout
-
-            try:
-                retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
-            except Exception as exc:
-                raise PaymentOutcomeUnknownError(challenge, exc) from exc
-
-            receipt = self._extract_receipt(retry_result)
-            return McpToolResult(result=retry_result, receipt=receipt)
-
-    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
-        """Match a challenge to an installed method.
-
-        Iterates installed methods in order (client preference) and returns
-        the first match by ``name`` and ``intent``.
-        """
-        for method in self._methods:
-            supported_intents = self._intent_names(method)
-            for challenge in challenges:
-                if challenge.method == method.name and challenge.intent in supported_intents:
-                    return challenge, method
-
-        available = [challenge.method for challenge in challenges]
-        installed = [m.name for m in self._methods]
-        raise ValueError(
-            f"No compatible payment method. Server offered: {available}, client has: {installed}"
+        result = await self._runtime.call_mcp_tool(
+            self._session.call_tool,
+            name,
+            arguments,
+            *args,
+            **call_kwargs,
         )
-
-    @staticmethod
-    def _intent_names(method: Method) -> set[str]:
-        """Get intent names supported by a method."""
-        intents = getattr(method, "intents", None) or getattr(method, "_intents", None)
-        if isinstance(intents, dict):
-            return set(intents.keys())
-        return {"charge"}
+        return McpToolResult(result=result, receipt=self._extract_receipt(result))
 
     @staticmethod
     def _extract_receipt(result: Any) -> MCPReceipt | None:

@@ -58,9 +58,9 @@ class ClientChallengeReceivedPayload(TypedDict):
     challenge: Challenge
     challenges: list[Challenge]
     method: Any
-    protocol: NotRequired[Literal["http"]]
-    request: httpx.Request
-    response: httpx.Response
+    protocol: NotRequired[Literal["http", "mcp"]]
+    request: NotRequired[httpx.Request]
+    response: Any
 
 
 class ClientCredentialCreatedPayload(ClientChallengeReceivedPayload):
@@ -68,7 +68,7 @@ class ClientCredentialCreatedPayload(ClientChallengeReceivedPayload):
 
 
 class ClientPaymentResponsePayload(ClientCredentialCreatedPayload):
-    response: httpx.Response
+    pass
 
 
 class ClientPaymentFailedPayload(TypedDict):
@@ -77,9 +77,9 @@ class ClientPaymentFailedPayload(TypedDict):
     credential: Credential | None
     error: Exception
     method: Any | None
-    protocol: NotRequired[Literal["http"]]
-    request: httpx.Request
-    response: httpx.Response
+    protocol: NotRequired[Literal["http", "mcp"]]
+    request: NotRequired[httpx.Request]
+    response: Any
 
 
 class ServerChallengeCreatedPayload(TypedDict):

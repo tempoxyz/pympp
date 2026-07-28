@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -18,6 +19,7 @@ from mpp.extensions.mcp import (
 )
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+from mpp.runtime import PaymentRuntime
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -146,6 +148,15 @@ class TestIsPaymentRequiredError:
 
         assert _is_payment_required_error(err) is True
         assert _extract_challenges(err) == [_make_challenge()]
+
+    def test_args_error_data(self) -> None:
+        detail = FakeMcpErrorData(
+            -32042,
+            data={"challenges": [_make_challenge_dict()]},
+        )
+
+        assert _is_payment_required_error(Exception(detail))
+        assert _extract_challenges(Exception(detail)) == [_make_challenge()]
 
     def test_wrong_code(self) -> None:
         err = FakeMcpError(-32000, data={"challenges": [_make_challenge_dict()]})
@@ -413,7 +424,31 @@ class TestMcpClientPaidTool:
         await client.call_tool("tool", {}, timeout=60.0)
 
         _, kwargs = session.call_tool.call_args
-        assert kwargs.get("read_timeout_seconds") == 60.0
+        assert kwargs.get("read_timeout_seconds") == timedelta(seconds=60)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("positional", [True, False])
+    async def test_supported_call_shapes_are_forwarded(self, positional: bool) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(return_value=FakeCallToolResult())
+        timeout = timedelta(seconds=30)
+        progress = AsyncMock()
+        client = McpClient(session, methods=[FakeMethod()])
+
+        if positional:
+            await client.call_tool("tool", {}, timeout, progress, meta={"trace": "abc"})
+            assert session.call_tool.call_args.args == ("tool", {}, timeout, progress)
+        else:
+            await client.call_tool(
+                "tool",
+                {},
+                read_timeout_seconds=timeout,
+                progress_callback=progress,
+            )
+            assert session.call_tool.call_args.kwargs == {
+                "read_timeout_seconds": timeout,
+                "progress_callback": progress,
+            }
 
     @pytest.mark.asyncio
     async def test_meta_forwarded(self) -> None:
@@ -538,14 +573,14 @@ class TestMcpClientPaidTool:
                     sys.modules[mod_name] = orig
 
 
-class TestMcpClientMethodMatching:
+class TestPaymentRuntimeMethodMatching:
     """Tests for challenge-to-method matching logic."""
 
     def test_match_by_method_and_intent(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
-        challenge, matched = client._match_challenge([_make_challenge()])
+        challenge, matched = runtime.match_challenge([_make_challenge()])
         assert isinstance(challenge, MCPChallenge)
         assert matched is method
 
@@ -554,28 +589,28 @@ class TestMcpClientMethodMatching:
         stripe_method = FakeMethod(name="stripe", _intents={"charge": True})
         tempo_method = FakeMethod(name="tempo", _intents={"charge": True})
 
-        client = McpClient(AsyncMock(), methods=[stripe_method, tempo_method])
+        runtime = PaymentRuntime([stripe_method, tempo_method])
 
         challenges = [
             _make_challenge(method="tempo"),
             _make_challenge(method="stripe"),
         ]
-        _, matched = client._match_challenge(challenges)
+        _, matched = runtime.match_challenge(challenges)
         assert matched is stripe_method
 
     def test_no_match_raises(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="stripe")])
+            runtime.match_challenge([_make_challenge(method="stripe")])
 
     def test_intent_mismatch(self) -> None:
         method = FakeMethod(name="tempo", _intents={"session": True})
-        client = McpClient(AsyncMock(), methods=[method])
+        runtime = PaymentRuntime([method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="tempo", intent="charge")])
+            runtime.match_challenge([_make_challenge(method="tempo", intent="charge")])
 
     def test_extract_challenges_skips_malformed_entries(self) -> None:
         err = FakeMcpError(

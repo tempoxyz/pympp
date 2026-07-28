@@ -1,7 +1,7 @@
+from mpp.errors import PaymentOutcomeUnknownError as _PaymentOutcomeUnknownError
 from mpp.extensions.mcp.capabilities import payment_capabilities as _payment_capabilities
 from mpp.extensions.mcp.client import McpClient as _McpClient
 from mpp.extensions.mcp.client import McpToolResult as _McpToolResult
-from mpp.extensions.mcp.client import PaymentOutcomeUnknownError as _PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_MALFORMED_CREDENTIAL as _CODE_MALFORMED_CREDENTIAL
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED as _CODE_PAYMENT_REQUIRED
 from mpp.extensions.mcp.constants import (

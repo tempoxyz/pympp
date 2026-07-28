@@ -83,6 +83,20 @@ async with PaymentRuntime(
         response = await client.get("https://api.example.com/paid")
 ```
 
+The optional MCP client can explicitly share that runtime and its origin policy,
+events, and unknown-outcome protection:
+
+```python
+from mpp.extensions.mcp import McpClient
+
+async with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["api.example.com"],
+) as runtime:
+    async with McpClient(session, runtime=runtime) as client:
+        result = await client.call_tool("premium_tool", {"query": "hello"})
+```
+
 If a credential is sent but its outcome cannot be confirmed, matching attempts
 raise `PaymentOutcomeUnknownError` instead of paying again. Reconcile those
 payments externally before calling
