@@ -33,7 +33,7 @@ from mpp.events import (
 )
 
 if TYPE_CHECKING:
-    from mpp.client import PaymentTransport
+    from mpp.client import PaymentTransport, SyncPaymentTransport
 
 _T = TypeVar("_T")
 
@@ -525,6 +525,15 @@ class PaymentRuntime:
             inner=inner,
             runtime=self,
         )
+
+    def sync_payment_transport(
+        self,
+        inner: httpx.BaseTransport | None = None,
+    ) -> SyncPaymentTransport:
+        """Create a synchronous httpx transport using this runtime."""
+        from mpp.client import SyncPaymentTransport
+
+        return SyncPaymentTransport(inner=inner, runtime=self)
 
     def allows_http_payment(self, url: httpx.URL) -> bool:
         """Return whether credentials may be created for an HTTP origin."""

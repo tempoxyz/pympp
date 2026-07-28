@@ -88,6 +88,19 @@ raise `PaymentOutcomeUnknownError` instead of paying again. Reconcile those
 payments externally before calling
 `runtime.reset_unknown_outcomes(reconciled=True)`.
 
+Synchronous HTTPX clients can use the same runtime:
+
+```python
+import httpx
+
+with PaymentRuntime(
+    method_factories=[method_factory],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    with httpx.Client(transport=runtime.sync_payment_transport()) as client:
+        response = client.get("https://api.example.com/paid")
+```
+
 ## Examples
 
 | Example | Description |
