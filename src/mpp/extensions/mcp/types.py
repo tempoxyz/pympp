@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from mpp._parsing import canonical_json
+
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
 
@@ -85,11 +87,10 @@ class MCPChallenge:
     def to_core(self) -> Challenge:
         """Convert to core Challenge type, preserving MCP challenge metadata."""
         import base64
-        import json
 
         from mpp import Challenge
 
-        request_json = json.dumps(self.request, separators=(",", ":"), sort_keys=True)
+        request_json = canonical_json(self.request)
         request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
 
         return Challenge(
@@ -183,16 +184,15 @@ class MCPCredential:
     def to_core(self) -> Credential:
         """Convert to core Credential type."""
         import base64
-        import json
 
         from mpp import ChallengeEcho, Credential
 
-        request_json = json.dumps(self.challenge.request, separators=(",", ":"), sort_keys=True)
+        request_json = canonical_json(self.challenge.request)
         request_b64 = base64.urlsafe_b64encode(request_json.encode()).decode().rstrip("=")
 
         opaque_b64 = None
         if self.challenge.opaque is not None:
-            opaque_json = json.dumps(self.challenge.opaque, separators=(",", ":"), sort_keys=True)
+            opaque_json = canonical_json(self.challenge.opaque)
             opaque_b64 = base64.urlsafe_b64encode(opaque_json.encode()).decode().rstrip("=")
 
         echo = ChallengeEcho(
