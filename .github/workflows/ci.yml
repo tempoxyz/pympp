@@ -234,9 +234,11 @@ jobs:
           import mpp
           import mpp.extensions.mcp as mcp
           import mpp.methods.tempo as tempo
+          from mpp.runtime import PaymentRuntime
 
           assert tempo.CHAIN_ID == 4217
           assert mcp.CODE_PAYMENT_REQUIRED == -32042
+          with PaymentRuntime(): pass
 
           for expr, hint in (
               ("tempo.ChargeIntent", "pympp[tempo]"),

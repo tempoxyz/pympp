@@ -50,6 +50,24 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
     response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
+### Shared payment-method lifecycle
+
+Custom integrations can use one owned event loop for loop-bound payment methods:
+
+```python
+from mpp.runtime import PaymentRuntime
+
+method_factory = ...
+challenges = ...
+
+async with PaymentRuntime(method_factories=[method_factory]) as runtime:
+    challenge, method = runtime.match_challenge(challenges)
+    credential = await runtime.create_credential(challenge, method)
+```
+
+Factories run once on the owned loop. Async context-manager results are closed
+on that same loop; direct `methods=` are borrowed and must be loop-independent.
+
 ## Examples
 
 | Example | Description |
