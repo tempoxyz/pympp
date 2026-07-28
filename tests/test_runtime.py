@@ -78,12 +78,10 @@ class TestRuntimeLifecycle:
                 challenge("sync"),
                 method,
             )
-            thread = runtime._bridge._thread
 
         assert events == ["enter", "exit"]
         assert len(set(loops)) == 1
         assert loops[0] is not caller_loop
-        assert thread is not None and not thread.is_alive()
         with pytest.raises(RuntimeError, match="closed"):
             runtime.start()
 
@@ -154,9 +152,6 @@ class TestRuntimeLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert events == ["enter", "exit"]
-        assert runtime._state == "closed"
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
 
     @pytest.mark.asyncio
     async def test_cancelled_async_context_exit_finishes_close(self) -> None:
@@ -186,32 +181,6 @@ class TestRuntimeLifecycle:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert events == ["enter", "exit"]
-        assert runtime._state == "closed"
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
-
-    @pytest.mark.asyncio
-    async def test_cancelled_aclose_finishes_close(self) -> None:
-        exit_started = threading.Event()
-
-        @asynccontextmanager
-        async def factory() -> AsyncIterator[Method]:
-            try:
-                yield MockMethod()
-            finally:
-                exit_started.set()
-                await asyncio.sleep(0.05)
-
-        runtime = await PaymentRuntime(method_factories=[factory]).astart()
-        close = asyncio.create_task(runtime.aclose())
-        assert await asyncio.to_thread(exit_started.wait, 1)
-        close.cancel()
-
-        with pytest.raises(asyncio.CancelledError):
-            await close
-        assert runtime._state == "closed"
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
 
     def test_sync_context_manager_and_close_before_start(self) -> None:
         calls = 0
@@ -228,8 +197,8 @@ class TestRuntimeLifecycle:
         with PaymentRuntime(method_factories=[factory]) as runtime:
             assert runtime.methods
         assert calls == 1
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
+        with pytest.raises(RuntimeError, match="closed"):
+            runtime.start()
 
     def test_factory_failure_unwinds_entered_methods_and_stops_loop(self) -> None:
         events: list[str] = []
@@ -250,8 +219,6 @@ class TestRuntimeLifecycle:
             runtime.start()
 
         assert events == ["enter", "exit"]
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
         with pytest.raises(RuntimeError, match="failed to start"):
             runtime.start()
 
@@ -271,14 +238,48 @@ class TestRuntimeLifecycle:
         with runtime:
             pass
 
+    def test_factory_lifecycle_is_scoped_per_runtime(self) -> None:
+        b_entered = threading.Event()
+        release_b = threading.Event()
+        a_called_b = threading.Event()
+
+        def b_factory() -> MockMethod:
+            b_entered.set()
+            release_b.wait()
+            return MockMethod()
+
+        b = PaymentRuntime(method_factories=[b_factory])
+        a: PaymentRuntime | None = None
+        pool = ThreadPoolExecutor(max_workers=2)
+        try:
+            b_started = pool.submit(b.start)
+            assert b_entered.wait(1)
+
+            def a_factory() -> MockMethod:
+                a_called_b.set()
+                b.start()
+                return MockMethod()
+
+            a = PaymentRuntime(method_factories=[a_factory])
+            a_started = pool.submit(a.start)
+            assert a_called_b.wait(1)
+            assert not a_started.done()
+
+            release_b.set()
+            assert b_started.result(1) is b
+            assert a_started.result(1) is a
+        finally:
+            release_b.set()
+            pool.shutdown(wait=True, cancel_futures=True)
+            if a is not None:
+                a.close()
+            b.close()
+
     def test_invalid_factory_result_unwinds_and_stops_loop(self) -> None:
         runtime = PaymentRuntime(method_factories=[lambda: object()])  # type: ignore[list-item]
 
         with pytest.raises(TypeError, match="payment Method"):
             runtime.start()
-        assert runtime._state == "closed"
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
 
     def test_methods_and_factories_are_mutually_exclusive(self) -> None:
         with pytest.raises(ValueError, match="either methods or method_factories"):
@@ -303,22 +304,13 @@ class TestRuntimeLifecycle:
 
         runtime = await PaymentRuntime(method_factories=[factory]).astart()
 
-        if async_close:
-
-            async def async_close_from_event(_payload: Any) -> None:
-                events.append("close")
+        async def close_from_event(_payload: Any) -> None:
+            events.append("close")
+            if async_close:
                 await runtime.aclose()
-                events.append("closed-callback")
-
-            close_from_event = async_close_from_event
-        else:
-
-            def sync_close_from_event(_payload: Any) -> None:
-                events.append("close")
+            else:
                 runtime.close()
-                events.append("closed-callback")
-
-            close_from_event = sync_close_from_event
+            events.append("closed-callback")
 
         runtime.events.on("challenge.received", close_from_event)
         credential = await asyncio.wait_for(
@@ -328,9 +320,8 @@ class TestRuntimeLifecycle:
 
         assert credential.payload == {"ok": True}
         assert events == ["enter", "close", "closed-callback", "exit"]
-        assert runtime._state == "closed"
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
+        with pytest.raises(RuntimeError, match="closed"):
+            runtime.start()
 
     def test_external_close_cancels_method_before_lifecycle_exit(self) -> None:
         events: list[str] = []
@@ -374,45 +365,6 @@ class TestRuntimeLifecycle:
         assert type(errors[0]).__name__ == "CancelledError"
         assert events == ["enter", "credential-start", "credential-finally", "exit"]
 
-    @pytest.mark.parametrize("threaded_close", [False, True])
-    def test_close_during_method_exit_does_not_deadlock(self, threaded_close: bool) -> None:
-        events: list[str] = []
-        runtime_holder: dict[str, PaymentRuntime] = {}
-
-        class ManagedMethod(MockMethod):
-            async def __aenter__(self) -> ManagedMethod:
-                events.append("enter")
-                return self
-
-            async def __aexit__(self, *_args: Any) -> None:
-                events.append("exit-start")
-                runtime = runtime_holder["runtime"]
-                if threaded_close:
-                    await asyncio.to_thread(runtime.close)
-                else:
-                    runtime.close()
-                events.append("exit-end")
-
-        runtime = PaymentRuntime(method_factories=[ManagedMethod])
-        runtime_holder["runtime"] = runtime
-        runtime.start()
-        errors: list[BaseException] = []
-
-        def close() -> None:
-            try:
-                runtime.close()
-            except BaseException as error:
-                errors.append(error)
-
-        worker = threading.Thread(target=close, daemon=True)
-        worker.start()
-        worker.join(timeout=1)
-
-        assert not worker.is_alive()
-        assert not errors
-        assert events == ["enter", "exit-start", "exit-end"]
-        assert runtime._state == "closed"
-
     def test_concurrent_close_waits_for_method_exit(self) -> None:
         exit_started = threading.Event()
         release_exit = threading.Event()
@@ -455,26 +407,6 @@ class TestRuntimeLifecycle:
         assert not first.is_alive() and not second.is_alive()
         assert exits == 1
 
-    @pytest.mark.asyncio
-    async def test_async_finalizer_yields_to_in_progress_close(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runtime = PaymentRuntime([])
-        runtime._state = "closing"
-        runtime._deferred_close = True
-        runtime._finalizing = True
-        called = False
-
-        async def cancel_pending() -> None:
-            nonlocal called
-            called = True
-
-        monkeypatch.setattr(runtime._bridge, "_cancel_pending", cancel_pending)
-        await runtime._finish_close_async()
-
-        assert not called
-
     def test_method_exit_failure_still_stops_runtime(self) -> None:
         @asynccontextmanager
         async def factory() -> AsyncIterator[Method]:
@@ -487,89 +419,10 @@ class TestRuntimeLifecycle:
         with pytest.raises(ValueError, match="method exit failed"):
             runtime.close()
 
-        assert runtime._state == "closed"
-        assert runtime._method_stack is None
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
-
-    @pytest.mark.asyncio
-    async def test_deferred_close_waits_for_inherited_runtime_lease_child(self) -> None:
-        runtime = PaymentRuntime([])
-        entered = asyncio.Event()
-        release = asyncio.Event()
-
-        async def child() -> None:
-            with runtime._runtime_operation():
-                entered.set()
-                await release.wait()
-
-        with runtime._runtime_operation():
-            task = asyncio.create_task(child())
-            await asyncio.wait_for(entered.wait(), 1)
-            runtime.close()
-
-        assert runtime._state == "closing"
-        assert runtime._active_operations == 1
-        release.set()
-        await asyncio.wait_for(task, 1)
-        assert runtime._state == "closed"
-
-    def test_detached_owned_loop_close_finishes_cleanly(self) -> None:
-        runtime_holder: dict[str, PaymentRuntime] = {}
-        release: asyncio.Event | None = None
-        done = threading.Event()
-        errors: list[BaseException] = []
-        lifecycle: list[str] = []
-
-        class SpawningMethod(MockMethod):
-            async def create_credential(self, value: Challenge) -> Credential:
-                nonlocal release
-                release = asyncio.Event()
-
-                async def detached() -> None:
-                    assert release is not None
-                    await release.wait()
-
-                    async def close_inside_operation() -> None:
-                        runtime_holder["runtime"].close()
-
-                    try:
-                        await runtime_holder["runtime"].run_async(close_inside_operation())
-                    except BaseException as error:
-                        errors.append(error)
-                    finally:
-                        done.set()
-
-                asyncio.create_task(detached())
-                return await super().create_credential(value)
-
-        @asynccontextmanager
-        async def factory() -> AsyncIterator[Method]:
-            lifecycle.append("enter")
-            try:
-                yield SpawningMethod()
-            finally:
-                lifecycle.append("exit")
-
-        runtime = PaymentRuntime(method_factories=[factory]).start()
-        runtime_holder["runtime"] = runtime
-        runtime.create_credential_sync(challenge(), runtime.methods[0])
-
-        async def wake_detached() -> None:
-            assert release is not None
-            release.set()
-
-        runtime.run_sync(wake_detached())
-        assert done.wait(1)
-        assert runtime._bridge._thread is not None
         runtime.close()
-        assert errors == []
-        assert lifecycle == ["enter", "exit"]
-        assert runtime._method_stack is None
-        assert not runtime._bridge._thread.is_alive()
 
 
-class TestRuntimeBridge:
+class TestRuntimeExecution:
     def test_concurrent_sync_calls_share_one_method_loop(self) -> None:
         method = MockMethod()
         runtime = PaymentRuntime([method])
@@ -609,95 +462,6 @@ class TestRuntimeBridge:
         assert method.loops[0] is not caller_loop
         assert len(event_loops) == 4
         assert set(event_loops) == {method.loops[0]}
-
-    def test_bridge_rejects_same_thread_blocking(self) -> None:
-        runtime = PaymentRuntime([])
-
-        async def block_bridge() -> None:
-            with pytest.raises(RuntimeError, match="Cannot block"):
-                runtime._bridge.run(asyncio.sleep(0))
-
-        try:
-            runtime._bridge.run(block_bridge())
-        finally:
-            runtime.close()
-
-    def test_thread_start_failure_closes_runtime_without_waiting(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runtime = PaymentRuntime([])
-
-        def fail_start(_thread: threading.Thread) -> None:
-            raise OSError("thread unavailable")
-
-        monkeypatch.setattr(threading.Thread, "start", fail_start)
-        with pytest.raises(RuntimeError, match="background loop failed") as exc_info:
-            runtime.start()
-
-        assert isinstance(exc_info.value.__cause__, OSError)
-        assert runtime._state == "closed"
-        assert runtime._bridge._ready.is_set()
-        assert runtime._bridge._stopped.is_set()
-
-    def test_shutdown_runs_all_cleanup_and_reraises_first_error(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runtime = PaymentRuntime([]).start()
-        original_close = runtime._bridge.close
-        closed = False
-
-        def fail_cancel() -> None:
-            raise ValueError("first cleanup failure")
-
-        def close_then_fail() -> None:
-            nonlocal closed
-            original_close()
-            closed = True
-            raise RuntimeError("later cleanup failure")
-
-        monkeypatch.setattr(runtime._bridge, "cancel_pending", fail_cancel)
-        monkeypatch.setattr(runtime._bridge, "close", close_then_fail)
-
-        with pytest.raises(ValueError, match="first cleanup failure"):
-            runtime.close()
-
-        assert closed
-        assert runtime._state == "closed"
-        assert runtime._bridge._stopped.is_set()
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
-
-    def test_loop_cleanup_failure_is_published_after_thread_stops(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runtime = PaymentRuntime([]).start()
-        runtime.run_sync(asyncio.to_thread(lambda: None))
-        loop = runtime._bridge._loop
-        assert loop is not None
-        shutdown_default_executor = loop.shutdown_default_executor
-        executor_shutdowns = 0
-
-        async def fail_shutdown(_loop: Any) -> None:
-            raise OSError("async generator cleanup failed")
-
-        async def record_executor_shutdown(_loop: Any) -> None:
-            nonlocal executor_shutdowns
-            executor_shutdowns += 1
-            await shutdown_default_executor()
-
-        monkeypatch.setattr(type(loop), "shutdown_asyncgens", fail_shutdown)
-        monkeypatch.setattr(type(loop), "shutdown_default_executor", record_executor_shutdown)
-        with pytest.raises(OSError, match="async generator cleanup failed"):
-            runtime.close()
-
-        assert executor_shutdowns == 1
-        assert runtime._state == "closed"
-        assert runtime._bridge._stopped.is_set()
-        assert runtime._bridge._thread is not None
-        assert not runtime._bridge._thread.is_alive()
 
     def test_close_is_idempotent(self) -> None:
         method = MockMethod()

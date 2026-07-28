@@ -67,6 +67,7 @@ async with PaymentRuntime(method_factories=[method_factory]) as runtime:
 
 Factories run once on the owned loop. Async context-manager results are closed
 on that same loop; direct `methods=` are borrowed and must be loop-independent.
+Factories and methods must finish any work they spawn before returning.
 
 ## Examples
 
