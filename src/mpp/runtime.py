@@ -31,15 +31,15 @@ from mpp.events import (
 _T = TypeVar("_T")
 
 
-_RUNTIME_CONTEXT: ContextVar[tuple[object, str] | None] = ContextVar(
+_RUNTIME_CONTEXT: ContextVar[tuple[tuple[object, str], ...]] = ContextVar(
     "mpp_runtime_context",
-    default=None,
+    default=(),
 )
 
 
 @contextmanager
 def _runtime_scope(key: object, kind: str):
-    token = _RUNTIME_CONTEXT.set((key, kind))
+    token = _RUNTIME_CONTEXT.set((*_RUNTIME_CONTEXT.get(), (key, kind)))
     try:
         yield
     finally:
@@ -47,8 +47,10 @@ def _runtime_scope(key: object, kind: str):
 
 
 def _scope_active(key: object, kind: str) -> bool:
-    current = _RUNTIME_CONTEXT.get()
-    return current is not None and current[0] is key and current[1] == kind
+    return any(
+        current_key is key and current_kind == kind
+        for current_key, current_kind in _RUNTIME_CONTEXT.get()
+    )
 
 
 async def _wait_for_task(task: asyncio.Task[_T]) -> _T:

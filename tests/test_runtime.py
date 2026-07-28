@@ -275,6 +275,24 @@ class TestRuntimeLifecycle:
                 a.close()
             b.close()
 
+    def test_nested_factory_cycle_fails_without_deadlock(self) -> None:
+        runtimes: dict[str, PaymentRuntime] = {}
+
+        def a_factory() -> MockMethod:
+            runtimes["b"].start()
+            return MockMethod()
+
+        def b_factory() -> MockMethod:
+            with pytest.raises(RuntimeError, match="while method factories start"):
+                runtimes["a"].start()
+            return MockMethod()
+
+        runtimes["a"] = PaymentRuntime(method_factories=[a_factory])
+        runtimes["b"] = PaymentRuntime(method_factories=[b_factory])
+        with runtimes["a"]:
+            pass
+        runtimes["b"].close()
+
     def test_invalid_factory_result_unwinds_and_stops_loop(self) -> None:
         runtime = PaymentRuntime(method_factories=[lambda: object()])  # type: ignore[list-item]
 
