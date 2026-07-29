@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.cookies import CookieError, SimpleCookie
@@ -20,7 +21,7 @@ from mpp.events import ClientPaymentFailedPayload
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from mpp.runtime import Method, PaymentRuntime
+    from mpp.runtime import Method, OwnedPaymentRuntime, PaymentRuntime
 
 _COOKIE_ESCAPE = re.compile(r"%[0-9a-fA-F]{2}")
 _PAYMENT_MARKER = "mpp.payment_attempt"
@@ -80,8 +81,13 @@ class _HttpPaymentLedger:
         self._unreconciled_count = 0
         self._circuit: _UnknownOutcome | None = None
         self._reconciliation = _Reconciliation()
+        self._lock = threading.RLock()
 
     def begin(self, challenge: Challenge, request: httpx.Request) -> _HttpPaymentAttempt:
+        with self._lock:
+            return self._begin(challenge, request)
+
+    def _begin(self, challenge: Challenge, request: httpx.Request) -> _HttpPaymentAttempt:
         marker = request.extensions.get(_PAYMENT_MARKER)
         if isinstance(marker, _HttpPaymentAttempt):
             raise _outcome_error(marker)
@@ -112,6 +118,10 @@ class _HttpPaymentLedger:
         return attempt
 
     def mark_sent(self, attempt: _HttpPaymentAttempt, request: httpx.Request) -> None:
+        with self._lock:
+            self._mark_sent(attempt, request)
+
+    def _mark_sent(self, attempt: _HttpPaymentAttempt, request: httpx.Request) -> None:
         if self._circuit is not None:
             self.discard(attempt)
             raise _outcome_error(self._circuit)
@@ -125,6 +135,14 @@ class _HttpPaymentLedger:
             current.extensions[_PAYMENT_SENT] = id(current)
 
     def mark_unknown(
+        self,
+        attempt: _HttpPaymentAttempt,
+        cause: BaseException,
+    ) -> _UnknownOutcome:
+        with self._lock:
+            return self._mark_unknown(attempt, cause)
+
+    def _mark_unknown(
         self,
         attempt: _HttpPaymentAttempt,
         cause: BaseException,
@@ -155,6 +173,10 @@ class _HttpPaymentLedger:
         return outcome
 
     def complete(self, attempt: _HttpPaymentAttempt) -> None:
+        with self._lock:
+            self._complete(attempt)
+
+    def _complete(self, attempt: _HttpPaymentAttempt) -> None:
         if attempt.completed or attempt.unknown_outcome is not None:
             return
         attempt.completed = True
@@ -164,21 +186,25 @@ class _HttpPaymentLedger:
                 request.extensions.pop(_PAYMENT_MARKER, None)
 
     def discard(self, attempt: _HttpPaymentAttempt) -> None:
-        if not attempt.sent:
-            self.complete(attempt)
+        with self._lock:
+            if not attempt.sent:
+                self._complete(attempt)
 
     def reset(self, *, reconciled: bool) -> None:
-        if not reconciled:
-            raise ValueError("Unknown payment outcomes must be externally reconciled before reset")
-        self._reconciliation.reconciled = True
-        self._reconciliation = _Reconciliation()
-        self._entries = {
-            key: entry
-            for key, entry in self._entries.items()
-            if isinstance(entry, _HttpPaymentAttempt)
-        }
-        self._unreconciled_count = 0
-        self._circuit = None
+        with self._lock:
+            if not reconciled:
+                raise ValueError(
+                    "Unknown payment outcomes must be externally reconciled before reset"
+                )
+            self._reconciliation.reconciled = True
+            self._reconciliation = _Reconciliation()
+            self._entries = {
+                key: entry
+                for key, entry in self._entries.items()
+                if isinstance(entry, _HttpPaymentAttempt)
+            }
+            self._unreconciled_count = 0
+            self._circuit = None
 
     def _remove(self, attempt: _HttpPaymentAttempt) -> None:
         for key in attempt.keys:
@@ -240,6 +266,24 @@ class _HttpPayment:
         retry = _copy_request(self.request, headers=headers)
         _apply_response_cookies(self.response, self.request, retry)
         return retry
+
+
+def _settle_http_payment(
+    attempt: _HttpPaymentAttempt,
+    payment: _HttpPayment,
+    response: httpx.Response,
+) -> PaymentOutcomeUnknownError | None:
+    if response.status_code < 400:
+        attempt.complete()
+        return None
+    detail = (
+        "Server returned another payment challenge after receiving a credential"
+        if response.status_code == 402
+        else f"Credentialed request returned HTTP {response.status_code}"
+    )
+    cause = RuntimeError(detail)
+    attempt.unknown(cause)
+    return payment.unknown(cause)
 
 
 class _AllowedOrigins:
@@ -326,7 +370,7 @@ def _challenge_is_expired(challenge: Challenge) -> bool:
 
 
 def _match_http_challenge(
-    runtime: PaymentRuntime,
+    runtime: PaymentRuntime | OwnedPaymentRuntime,
     challenges: list[Challenge],
 ) -> tuple[Challenge | None, Method | None]:
     try:

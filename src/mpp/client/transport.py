@@ -24,6 +24,7 @@ from mpp.client._http import (
     _payment_challenges,
     _propagate_response_cookies,
     _response_request,
+    _settle_http_payment,
 )
 from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.events import (
@@ -35,7 +36,7 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import Method, PaymentRuntime
+from mpp.runtime import Method, OwnedPaymentRuntime, PaymentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
         inner: httpx.AsyncBaseTransport | None = None,
         events: EventDispatcher | None = None,
         *,
-        runtime: PaymentRuntime | None = None,
+        runtime: PaymentRuntime | OwnedPaymentRuntime | None = None,
     ) -> None:
         self._owns_runtime = runtime is None
         if runtime is not None:
@@ -102,18 +103,16 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
 
-    async def _fail(self, payment: _HttpPayment, error: Exception, **details: Any) -> None:
-        await self._runtime._emit_event(PAYMENT_FAILED, payment.failed(error, **details))
-
-    async def _unknown(
+    async def _fail(
         self,
         payment: _HttpPayment,
-        cause: BaseException,
-        response: httpx.Response | None = None,
-    ) -> PaymentOutcomeUnknownError:
-        error = payment.unknown(cause)
-        await self._fail(payment, error, response=response)
-        return error
+        error: Exception,
+        *,
+        continuation: bool = False,
+        **details: Any,
+    ) -> None:
+        emit = self._runtime._emit_event if continuation else self._runtime.emit_event
+        await emit(PAYMENT_FAILED, payment.failed(error, **details))
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
@@ -136,7 +135,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
         challenge = method = None
         if challenges:
             try:
-                self._runtime.start()
+                await self._runtime.astart()
                 challenge, method = _match_http_challenge(self._runtime, challenges)
             except BaseException:
                 await _close_response(response)
@@ -199,7 +198,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
             try:
                 attempt = self._runtime._begin_http_payment(challenge, request)
             except PaymentOutcomeUnknownError as error:
-                await self._fail(payment, error)
+                await self._fail(payment, error, continuation=True)
                 raise
 
             try:
@@ -215,7 +214,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
             except BaseException as error:
                 attempt.discard()
                 if isinstance(error, Exception):
-                    await self._fail(payment, error)
+                    await self._fail(payment, error, continuation=True)
                 raise
 
             try:
@@ -225,31 +224,25 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
                 if not attempt.sent:
                     attempt.discard()
                     if isinstance(cause, Exception):
-                        await self._fail(payment, cause)
+                        await self._fail(payment, cause, continuation=True)
                     raise
                 outcome = attempt.unknown(cause)
                 if not isinstance(cause, Exception):
                     raise
-                error = await self._unknown(payment, outcome.cause)
+                error = payment.unknown(outcome.cause)
+                await self._fail(payment, error, continuation=True)
                 raise error from cause
 
             try:
-                if payment_response.status_code == 402:
-                    cause = RuntimeError(
-                        "Server returned another payment challenge after receiving a credential"
+                if error := _settle_http_payment(attempt, payment, payment_response):
+                    await self._fail(
+                        payment,
+                        error,
+                        continuation=True,
+                        response=payment_response,
                     )
-                    attempt.unknown(cause)
-                    error = await self._unknown(payment, cause, response=payment_response)
-                    raise error from cause
-
-                if payment_response.status_code >= 400:
-                    cause = RuntimeError(
-                        f"Credentialed request returned HTTP {payment_response.status_code}"
-                    )
-                    attempt.unknown(cause)
-                    await self._unknown(payment, cause, response=payment_response)
-                else:
-                    attempt.complete()
+                    if payment_response.status_code == 402:
+                        raise error from error.cause
 
                 _response_request(payment_response, retry_request)
                 _propagate_response_cookies(response, payment_response)
@@ -286,7 +279,7 @@ class Client(_EventHandlers):
         self,
         methods: Sequence[Method] | None = None,
         *,
-        runtime: PaymentRuntime | None = None,
+        runtime: PaymentRuntime | OwnedPaymentRuntime | None = None,
     ) -> None:
         self._transport = PaymentTransport(methods=methods, runtime=runtime)
         self._client = httpx.AsyncClient(transport=self._transport)
@@ -330,7 +323,7 @@ async def request(
     url: str,
     *,
     methods: Sequence[Method] | None = None,
-    runtime: PaymentRuntime | None = None,
+    runtime: PaymentRuntime | OwnedPaymentRuntime | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -353,7 +346,7 @@ async def get(
     url: str,
     *,
     methods: Sequence[Method] | None = None,
-    runtime: PaymentRuntime | None = None,
+    runtime: PaymentRuntime | OwnedPaymentRuntime | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send a GET request with automatic payment handling."""
@@ -364,7 +357,7 @@ async def post(
     url: str,
     *,
     methods: Sequence[Method] | None = None,
-    runtime: PaymentRuntime | None = None,
+    runtime: PaymentRuntime | OwnedPaymentRuntime | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send a POST request with automatic payment handling."""

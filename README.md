@@ -78,6 +78,22 @@ If a credential is sent but its outcome cannot be confirmed, matching attempts
 raise `mpp.errors.PaymentOutcomeUnknownError`. Reconcile them externally before
 calling `runtime.reset_unknown_outcomes(reconciled=True)`.
 
+Synchronous and mixed sync/async integrations use an explicit owned asyncio loop
+runtime:
+
+```python
+import httpx
+from mpp.client import SyncPaymentTransport
+from mpp.runtime import OwnedPaymentRuntime
+
+with OwnedPaymentRuntime([method]) as runtime:
+    with httpx.Client(transport=SyncPaymentTransport(runtime=runtime)) as client:
+        response = client.get("https://api.example.com/paid")
+```
+
+For loop-bound resources, pass async-context-manager factories with
+`method_factories=` so they are created and closed on the owned loop.
+
 ## Examples
 
 | Example | Description |
