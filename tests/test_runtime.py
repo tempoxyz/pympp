@@ -122,6 +122,8 @@ def test_sync_context_and_close_are_idempotent() -> None:
     runtime.close()
     with pytest.raises(RuntimeError, match="closed"):
         runtime.start()
+    with pytest.raises(RuntimeError, match="closed"):
+        runtime.match_challenge([])
 
 
 async def test_async_context_closes_runtime() -> None:
@@ -178,7 +180,7 @@ def test_matching_uses_intent_capabilities() -> None:
         runtime.match_challenge([challenge()])
 
 
-def test_legacy_methods_default_to_charge() -> None:
+async def test_legacy_methods_default_to_charge() -> None:
     class LegacyMethod:
         name = "tempo"
 
@@ -191,13 +193,12 @@ def test_legacy_methods_default_to_charge() -> None:
     assert runtime.match_challenge([challenge()]) == (challenge(), method)
     with pytest.raises(ValueError, match="No compatible payment method"):
         runtime.match_challenge([challenge(intent="subscription")])
-    assert (
-        runtime.match_challenge(
-            [challenge(intent="subscription")],
-            allow_name_only=True,
-        )[1]
-        is method
+    matched = runtime.match_challenge(
+        [challenge(intent="subscription")],
+        allow_name_only=True,
     )
+    assert matched[1] is method
+    assert (await runtime.create_credential(*matched, allow_name_only=True)).payload == {}
 
 
 @pytest.mark.parametrize(

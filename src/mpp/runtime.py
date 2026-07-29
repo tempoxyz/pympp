@@ -71,6 +71,7 @@ class PaymentRuntime:
         allow_name_only: bool = False,
     ) -> tuple[Challenge, Method]:
         """Return the first compatible challenge and method."""
+        self.start()
         pairs = (
             ((challenge, method) for method in self.methods for challenge in challenges)
             if prefer_method_order
@@ -93,13 +94,16 @@ class PaymentRuntime:
         challenge: Challenge,
         method: Method,
         *,
+        allow_name_only: bool = False,
         event_payload: dict[str, Any] | None = None,
     ) -> Credential:
         """Create a credential and emit its lifecycle events."""
         self.start()
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
-        if challenge.method != method.name or challenge.intent not in _method_intents(method):
+        if challenge.method != method.name or (
+            not allow_name_only and challenge.intent not in _method_intents(method)
+        ):
             raise ValueError(
                 f"Method {method.name!r} does not support {challenge.method!r}/{challenge.intent!r}"
             )
