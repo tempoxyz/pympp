@@ -50,6 +50,18 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
     response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
+Custom integrations can share method matching, events, and credential creation:
+
+```python
+from mpp.runtime import PaymentRuntime
+
+async with PaymentRuntime([method]) as runtime:
+    challenge, method = runtime.match_challenge(challenges)
+    credential = await runtime.create_credential(challenge, method)
+```
+
+The runtime borrows its methods and runs them on the caller's event loop.
+
 ## Examples
 
 | Example | Description |

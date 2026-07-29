@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -28,22 +28,12 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
+from mpp.runtime import Method
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for client-side credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _client_payment_failed_payload(
