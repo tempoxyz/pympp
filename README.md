@@ -62,6 +62,22 @@ async with PaymentRuntime([method]) as runtime:
 
 The runtime borrows its methods and runs them on the caller's event loop.
 
+The same runtime can power asynchronous HTTP clients while limiting which
+origins may receive payment credentials:
+
+```python
+async with PaymentRuntime(
+    [method],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    async with Client(runtime=runtime) as client:
+        response = await client.get("https://api.example.com/paid")
+```
+
+If a credential is sent but its outcome cannot be confirmed, matching attempts
+raise `mpp.errors.PaymentOutcomeUnknownError`. Reconcile them externally before
+calling `runtime.reset_unknown_outcomes(reconciled=True)`.
+
 ## Examples
 
 | Example | Description |

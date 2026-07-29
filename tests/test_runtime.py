@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from types import MappingProxyType
 from typing import Any
 
@@ -136,6 +138,16 @@ async def test_async_context_closes_runtime() -> None:
         await runtime.emit_event("test", {})
 
 
+async def test_async_lifecycle_aliases() -> None:
+    runtime = PaymentRuntime()
+
+    assert await runtime.astart() is runtime
+    await runtime.aclose()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        await runtime.astart()
+
+
 async def test_borrowed_methods_are_not_entered_or_closed() -> None:
     events: list[str] = []
 
@@ -152,6 +164,32 @@ async def test_borrowed_methods_are_not_entered_or_closed() -> None:
         await runtime.create_credential(challenge(), method)
 
     assert events == []
+
+
+async def test_child_scope_does_not_retain_completed_parent_task() -> None:
+    runtime = PaymentRuntime()
+    release = asyncio.Event()
+    parent_ref: weakref.ReferenceType[asyncio.Task[Any]] | None = None
+
+    async def parent() -> asyncio.Task[bool]:
+        nonlocal parent_ref
+        with runtime._paid_operation():
+            child = asyncio.create_task(release.wait())
+            task = asyncio.current_task()
+            assert task is not None
+            parent_ref = weakref.ref(task)
+            return child
+
+    parent_task = asyncio.create_task(parent())
+    child = await parent_task
+    del parent_task
+    await asyncio.sleep(0)
+    gc.collect()
+
+    assert parent_ref is not None
+    assert parent_ref() is None
+    release.set()
+    await child
 
 
 def test_matching_prefers_method_order_by_default() -> None:

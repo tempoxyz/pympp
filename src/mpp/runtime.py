@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Protocol, Self, runtime_checkable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, Protocol, Self, runtime_checkable
+
+import httpx
+from anyio import get_current_task
 
 from mpp import Challenge, Credential
 from mpp.events import (
@@ -12,6 +17,25 @@ from mpp.events import (
     EventDispatcher,
     EventPayload,
 )
+
+if TYPE_CHECKING:
+    from mpp.client import PaymentTransport
+    from mpp.client._http import _HttpPaymentAttempt
+
+_PAID_RUNTIMES: ContextVar[tuple[tuple[object, int], ...]] = ContextVar(
+    "mpp_paid_runtimes",
+    default=(),
+)
+
+
+def _scope_active(key: object) -> bool:
+    try:
+        owner = get_current_task().id
+    except RuntimeError:
+        return False
+    return any(
+        scope_key is key and scope_owner == owner for scope_key, scope_owner in _PAID_RUNTIMES.get()
+    )
 
 
 @runtime_checkable
@@ -36,18 +60,26 @@ class PaymentRuntime:
         methods: Sequence[Method] = (),
         *,
         events: EventDispatcher | None = None,
+        allowed_origins: Sequence[str] | None = None,
     ) -> None:
+        from mpp.client._http import _AllowedOrigins, _HttpPaymentLedger
+
         self.methods = tuple(methods)
         for method in self.methods:
             if not _is_method(method):
                 raise TypeError("methods must contain payment Methods")
             _method_intents(method)
         self.events = events or EventDispatcher()
+        self._allowed_origins = _AllowedOrigins(allowed_origins)
+        self._http = _HttpPaymentLedger()
         self._closed = False
+        self._closing = False
+        self._paid_operations = 0
+        self._scope_key = object()
 
     def start(self) -> Self:
         """Open the runtime, or return it if already open."""
-        if self._closed:
+        if self._closed or (self._closing and not _scope_active(self._scope_key)):
             raise RuntimeError("PaymentRuntime is closed")
         return self
 
@@ -57,11 +89,15 @@ class PaymentRuntime:
     def __exit__(self, *_args: Any) -> None:
         self.close()
 
-    async def __aenter__(self) -> Self:
+    async def astart(self) -> Self:
+        """Asynchronously open the runtime."""
         return self.start()
 
+    async def __aenter__(self) -> Self:
+        return await self.astart()
+
     async def __aexit__(self, *_args: Any) -> None:
-        self.close()
+        await self.aclose()
 
     def match_challenge(
         self,
@@ -134,9 +170,59 @@ class PaymentRuntime:
         self.start()
         return await self.events.emit(name, payload)
 
+    def payment_transport(
+        self,
+        inner: httpx.AsyncBaseTransport | None = None,
+    ) -> PaymentTransport:
+        """Create an asynchronous HTTPX transport backed by this runtime."""
+        from mpp.client import PaymentTransport
+
+        return PaymentTransport(inner=inner, runtime=self)
+
+    def allows_http_payment(self, url: httpx.URL) -> bool:
+        """Return whether credentials may be created for an HTTP origin."""
+        return self._allowed_origins.allows(url)
+
+    def reset_unknown_outcomes(self, *, reconciled: bool) -> None:
+        """Allow new payments after retained uncertain outcomes were reconciled."""
+        self._http.reset(reconciled=reconciled)
+
+    def _begin_http_payment(
+        self,
+        challenge: Challenge,
+        request: httpx.Request,
+    ) -> _HttpPaymentAttempt:
+        self.start()
+        return self._http.begin(challenge, request)
+
+    @contextmanager
+    def _paid_operation(self):
+        """Keep a committed payment flow alive if close is requested."""
+        if _scope_active(self._scope_key):
+            yield
+            return
+        self.start()
+        # Context variables propagate to child tasks; bind this lease to its owner.
+        scope = (self._scope_key, get_current_task().id)
+        token = _PAID_RUNTIMES.set((*_PAID_RUNTIMES.get(), scope))
+        self._paid_operations += 1
+        try:
+            yield
+        finally:
+            self._paid_operations -= 1
+            _PAID_RUNTIMES.reset(token)
+            if self._closing and not self._paid_operations:
+                self._closed = True
+
     def close(self) -> None:
         """Prevent new runtime operations."""
-        self._closed = True
+        self._closing = True
+        if not self._paid_operations:
+            self._closed = True
+
+    async def aclose(self) -> None:
+        """Asynchronously close the runtime."""
+        self.close()
 
 
 def _is_method(value: Any) -> bool:
