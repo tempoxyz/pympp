@@ -94,6 +94,20 @@ with OwnedPaymentRuntime([method]) as runtime:
 For loop-bound resources, pass async-context-manager factories with
 `method_factories=` so they are created and closed on the owned loop.
 
+Existing HTTPX clients can be made payment-aware without replacing their
+configured transports:
+
+```python
+with OwnedPaymentRuntime([method]) as runtime:
+    with runtime.wrap_client(httpx.Client()) as client:
+        response = client.get("https://api.example.com/paid")
+```
+
+Use `runtime.wrap_async_client(httpx.AsyncClient())` for asynchronous clients.
+These adapters support HTTPX 0.27.x and 0.28.x and fail before changing a client
+when its version or private send seam is incompatible. Explicit `PaymentTransport`
+and `SyncPaymentTransport` integrations do not depend on those private seams.
+
 ## Examples
 
 | Example | Description |

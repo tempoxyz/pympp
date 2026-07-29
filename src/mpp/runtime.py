@@ -19,6 +19,8 @@ import httpx
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 
 from mpp import Challenge, Credential
+from mpp._httpx import HTTPX_ADAPTER_VERSIONS as HTTPX_ADAPTER_VERSIONS
+from mpp._httpx import HttpxCompatibilityError as HttpxCompatibilityError
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -628,6 +630,18 @@ class OwnedPaymentRuntime:
 
     def allows_http_payment(self, url: httpx.URL) -> bool:
         return self._allowed_origins.allows(url)
+
+    def wrap_client(self, client: httpx.Client) -> httpx.Client:
+        """Make one existing synchronous HTTPX client payment-aware."""
+        from mpp._httpx import wrap_client
+
+        return wrap_client(client, self)
+
+    def wrap_async_client(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
+        """Make one existing asynchronous HTTPX client payment-aware."""
+        from mpp._httpx import wrap_async_client
+
+        return wrap_async_client(client, self)
 
     def reset_unknown_outcomes(self, *, reconciled: bool) -> None:
         with self._lease():
