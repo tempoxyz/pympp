@@ -120,7 +120,9 @@ jobs:
           HTTPX_VERSION: ${{ matrix.httpx-version }}
 
       - name: Run HTTPX adapter tests
-        run: .venv/bin/python -m pytest --noconftest -q tests/test_httpx_adapters.py
+        run: |
+          .venv/bin/python -m pytest --noconftest -q \
+            tests/test_httpx_adapters.py tests/test_instrumentation.py
 
   integration:
     name: Integration Test

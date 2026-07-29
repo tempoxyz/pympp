@@ -104,6 +104,29 @@ class _AsyncSend(httpx.AsyncBaseTransport):
         return await self._send(request)
 
 
+def _send_sync(
+    runtime: OwnedPaymentRuntime,
+    send: Callable[[httpx.Request], httpx.Response],
+    request: httpx.Request,
+) -> httpx.Response:
+    from mpp.client import SyncPaymentTransport
+
+    return SyncPaymentTransport(inner=_SyncSend(send), runtime=runtime).handle_request(request)
+
+
+async def _send_async(
+    runtime: OwnedPaymentRuntime,
+    send: Callable[[httpx.Request], Awaitable[httpx.Response]],
+    request: httpx.Request,
+) -> httpx.Response:
+    from mpp.client import PaymentTransport
+
+    return await PaymentTransport(
+        inner=_AsyncSend(send),
+        runtime=runtime,
+    ).handle_async_request(request)
+
+
 def wrap_client(client: httpx.Client, runtime: OwnedPaymentRuntime) -> httpx.Client:
     """Make one synchronous HTTPX client payment-aware."""
     if not isinstance(client, httpx.Client):
@@ -192,11 +215,34 @@ def _wrap(client: Any, runtime: OwnedPaymentRuntime, *, asynchronous: bool) -> A
 def _validate_client(client: Any, *, asynchronous: bool) -> tuple[Any, Any]:
     _validate_version()
     owner = type(client)
+    _validate_class(owner, asynchronous=asynchronous)
     bound = []
-    for name, expected, bound_expected in (
-        ("_send_single_request", _PRIVATE, _BOUND_PRIVATE),
-        ("_send_handling_auth", _AUTH, _BOUND_AUTH),
+    for name, expected in (
+        ("_send_single_request", _BOUND_PRIVATE),
+        ("_send_handling_auth", _BOUND_AUTH),
     ):
+        value = getattr(client, name)
+        _validate_seam(
+            f"{owner.__name__} instance.{name}",
+            value,
+            expected,
+            asynchronous,
+        )
+        bound.append(value)
+    return bound[0], bound[1]
+
+
+def _validate_httpx_classes() -> tuple[Any, Any, Any, Any]:
+    _validate_version()
+    return (
+        *_validate_class(httpx.Client, asynchronous=False),
+        *_validate_class(httpx.AsyncClient, asynchronous=True),
+    )
+
+
+def _validate_class(owner: Any, *, asynchronous: bool) -> tuple[Any, Any]:
+    seams = []
+    for name, expected in (("_send_single_request", _PRIVATE), ("_send_handling_auth", _AUTH)):
         try:
             seam = inspect.getattr_static(owner, name)
         except AttributeError as error:
@@ -204,15 +250,16 @@ def _validate_client(client: Any, *, asynchronous: bool) -> tuple[Any, Any]:
                 f"HTTPX adapter seam {owner.__name__}.{name} is missing"
             ) from error
         _validate_seam(f"{owner.__name__}.{name}", seam, expected, asynchronous)
-        value = getattr(client, name)
-        _validate_seam(
-            f"{owner.__name__} instance.{name}",
-            value,
-            bound_expected,
-            asynchronous,
-        )
-        bound.append(value)
-    return bound[0], bound[1]
+        seams.append(seam)
+    return seams[0], seams[1]
+
+
+def _client_adapter_active(client: Any) -> bool:
+    adapter = client.__dict__.get(_MARKER)
+    return isinstance(adapter, _Adapter) and (
+        inspect.getattr_static(client, "_send_single_request") is adapter.private
+        and inspect.getattr_static(client, "_send_handling_auth") is adapter.auth
+    )
 
 
 def _validate_version() -> None:

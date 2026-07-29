@@ -105,8 +105,27 @@ with OwnedPaymentRuntime([method]) as runtime:
 
 Use `runtime.wrap_async_client(httpx.AsyncClient())` for asynchronous clients.
 These adapters support HTTPX 0.27.x and 0.28.x and fail before changing a client
-when its version or private send seam is incompatible. Explicit `PaymentTransport`
-and `SyncPaymentTransport` integrations do not depend on those private seams.
+when its send seams are incompatible. Explicit `PaymentTransport` and
+`SyncPaymentTransport` integrations do not depend on those private seams.
+
+To cover HTTPX clients created by other libraries, install one explicit
+process-global binding:
+
+```python
+from mpp.instrumentation import instrument
+
+with OwnedPaymentRuntime(
+    [method],
+    allowed_origins=["https://api.example.com"],
+) as runtime:
+    with instrument(runtime):
+        response = httpx.get("https://api.example.com/paid")
+```
+
+The binding applies across threads, and per-client adapters take precedence.
+Install or remove it outside concurrent HTTPX use. An unrestricted runtime must
+be enabled explicitly with `instrument(runtime, allow_unrestricted=True)`.
+Payment methods should not spawn raw threads that make instrumented HTTPX calls.
 
 ## Examples
 
