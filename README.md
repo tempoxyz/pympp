@@ -50,6 +50,20 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
     response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
+Custom transports can reuse method matching and credential creation without
+depending on HTTPX:
+
+```python
+from mpp.client import PaymentTransport
+from mpp.runtime import PaymentRuntime
+
+payments = PaymentRuntime([method])
+challenge, method = payments.match_challenge(challenges)
+credential = await payments.create_credential(challenge, method)
+
+transport = PaymentTransport(runtime=payments)
+```
+
 ## Examples
 
 | Example | Description |

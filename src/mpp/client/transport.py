@@ -9,15 +9,13 @@ Implements automatic 402 Payment Required handling by:
 
 from __future__ import annotations
 
-import logging
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
-from mpp.errors import PaymentError
+from mpp.errors import InvalidChallengeError, PaymentError, PaymentExpiredError
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -28,22 +26,10 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-
-logger = logging.getLogger(__name__)
+from mpp.runtime import Method, PaymentRuntime
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for client-side credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _client_payment_failed_payload(
@@ -88,13 +74,21 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     def __init__(
         self,
-        methods: Sequence[Method],
+        methods: Sequence[Method] | None = None,
         inner: httpx.AsyncBaseTransport | None = None,
         events: EventDispatcher | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
     ) -> None:
-        self._methods = {m.name: m for m in methods}
+        if (methods is None) == (runtime is None):
+            raise TypeError("Provide exactly one of methods or runtime")
+        if runtime is not None and events is not None:
+            raise TypeError("events belongs to the provided runtime")
+        self._runtime = (
+            runtime if runtime is not None else PaymentRuntime(methods or (), events=events)
+        )
         self._inner = inner or httpx.AsyncHTTPTransport()
-        self._events = events or EventDispatcher()
+        self._events = self._runtime.events
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -159,15 +153,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 continue
             challenges.append(parsed)
 
-        challenge = None
-        matched_method = None
-        for parsed in challenges:
-            if parsed.method in self._methods:
-                challenge = parsed
-                matched_method = self._methods[parsed.method]
-                break
-
-        if not challenge or not matched_method:
+        try:
+            challenge, matched_method = self._runtime.match_challenge(challenges)
+        except ValueError as match_error:
             if parse_error is not None or challenges:
                 # Surface parse/method-selection failures to observers while
                 # preserving the original 402 response for the caller.
@@ -177,8 +165,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         challenge=None,
                         challenges=challenges,
                         credential=None,
-                        error=parse_error
-                        or ValueError("No compatible payment method for challenges"),
+                        error=parse_error or match_error,
                         method=None,
                         request=request,
                         response=response,
@@ -186,53 +173,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 )
             return response
 
-        # Check expiry before paying (client-side guardrail)
-        if challenge.expires:
-            try:
-                expires_dt = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
-                if expires_dt < datetime.now(UTC):
-                    logger.warning("Challenge expired at %s, not paying", challenge.expires)
-                    await self._events.emit(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
-                            credential=None,
-                            error=ValueError(f"Challenge expired at {challenge.expires}"),
-                            method=matched_method,
-                            request=request,
-                            response=response,
-                        ),
-                    )
-                    return response
-            except ValueError:
-                pass  # If we can't parse, let server validate
-
         try:
-            # challenge.received is the one client event that can override the
-            # default credential creation path by returning a Credential.
-            event_credential = await self._events.emit(
-                CHALLENGE_RECEIVED,
-                {
-                    "challenge": challenge,
+            credential = await self._runtime.create_credential(
+                challenge,
+                matched_method,
+                event_payload={
                     "challenges": challenges,
-                    "method": matched_method,
-                    "request": request,
-                    "response": response,
-                },
-                first_result=True,
-            )
-            credential = (
-                event_credential
-                if isinstance(event_credential, Credential)
-                else await matched_method.create_credential(challenge)
-            )
-            await self._events.emit(
-                CREDENTIAL_CREATED,
-                {
-                    "challenge": challenge,
-                    "credential": credential,
-                    "method": matched_method,
                     "request": request,
                     "response": response,
                 },
@@ -251,6 +197,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     response=response,
                 ),
             )
+            if isinstance(error, (InvalidChallengeError, PaymentExpiredError)):
+                return response
             raise
 
         headers = httpx.Headers(request.headers)
@@ -308,8 +256,13 @@ class Client:
             response = await client.get("https://api.example.com/resource")
     """
 
-    def __init__(self, methods: Sequence[Method]) -> None:
-        self._transport = PaymentTransport(methods)
+    def __init__(
+        self,
+        methods: Sequence[Method] | None = None,
+        *,
+        runtime: PaymentRuntime | None = None,
+    ) -> None:
+        self._transport = PaymentTransport(methods, runtime=runtime)
         self._client = httpx.AsyncClient(transport=self._transport)
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:

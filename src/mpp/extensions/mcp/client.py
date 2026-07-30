@@ -27,13 +27,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-
-if TYPE_CHECKING:
-    from mpp import Challenge, Credential
+from mpp.runtime import Method as Method
 
 logger = logging.getLogger(__name__)
 
@@ -49,17 +47,6 @@ class PaymentOutcomeUnknownError(RuntimeError):
             f"payment outcome is unknown for challenge {challenge.id}. "
             "Do not blindly retry."
         )
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for MCP client credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _error_code(error: Exception) -> int | None:

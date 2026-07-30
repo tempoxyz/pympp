@@ -8,6 +8,8 @@ from pytest_httpx import HTTPXMock
 
 from mpp import Challenge, Credential
 from mpp.client import Client, PaymentTransport, get, post, request
+from mpp.events import EventDispatcher
+from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
 
@@ -44,6 +46,21 @@ class MockTransport(httpx.AsyncBaseTransport):
 
 
 class TestPaymentTransport:
+    def test_runtime_configuration_is_unambiguous(self) -> None:
+        class FalseyRuntime(PaymentRuntime):
+            def __bool__(self) -> bool:
+                return False
+
+        runtime = FalseyRuntime()
+
+        with pytest.raises(TypeError, match="exactly one"):
+            PaymentTransport()
+        with pytest.raises(TypeError, match="exactly one"):
+            PaymentTransport([], runtime=runtime)
+        with pytest.raises(TypeError, match="events belongs"):
+            PaymentTransport(runtime=runtime, events=EventDispatcher())
+        assert PaymentTransport(runtime=runtime)._runtime is runtime
+
     @pytest.mark.asyncio
     async def test_passes_through_non_402(self) -> None:
         """Should pass through non-402 responses unchanged."""
@@ -438,14 +455,18 @@ class TestPaymentTransport:
         await transport.aclose()
 
     @pytest.mark.asyncio
-    async def test_skips_expired_challenge(self) -> None:
-        """Should return 402 without paying if challenge is expired."""
+    @pytest.mark.parametrize(
+        "expires",
+        ["2020-01-01T00:00:00Z", "2020-01-01T00:00:00", "not-a-date"],
+    )
+    async def test_skips_invalid_or_expired_challenge(self, expires: str) -> None:
+        """Should return 402 without paying if challenge expiry is unsafe."""
         challenge = Challenge(
             id="test-id",
             method="tempo",
             intent="charge",
             request={"amount": "1000"},
-            expires="2020-01-01T00:00:00Z",  # Expired
+            expires=expires,
         )
         www_auth = challenge.to_www_authenticate("example.com")
 
@@ -592,6 +613,26 @@ class TestPaymentTransport:
 
 
 class TestClient:
+    @pytest.mark.asyncio
+    async def test_uses_shared_runtime(self, httpx_mock: HTTPXMock) -> None:
+        challenge = Challenge(
+            id="shared",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        httpx_mock.add_response(
+            status_code=402,
+            headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+        )
+        httpx_mock.add_response(status_code=200)
+        runtime = PaymentRuntime([MockMethod()])
+
+        async with Client(runtime=runtime) as client:
+            response = await client.get("https://example.com")
+
+        assert response.status_code == 200
+
     @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
         """Should work as async context manager."""
