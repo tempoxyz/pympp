@@ -71,6 +71,27 @@ class PaymentError(Exception):
         return details
 
 
+class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
+    """A credential was sent, but the payment result could not be confirmed."""
+
+    def __init__(
+        self,
+        challenge: Any,
+        cause: BaseException,
+        *,
+        credential: Any = None,
+        request: Any = None,
+    ) -> None:
+        self.challenge = challenge
+        self.cause = cause
+        self.credential = credential
+        self.request = request
+        super().__init__(
+            "Payment outcome is unknown after sending a credential "
+            f"for challenge {challenge.id}. Do not blindly retry."
+        )
+
+
 class PaymentRequiredError(PaymentError):
     """No credential was provided but payment is required."""
 

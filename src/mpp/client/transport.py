@@ -9,13 +9,19 @@ Implements automatic 402 Payment Required handling by:
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from mpp import Challenge, Credential
 from mpp._parsing import ParseError
-from mpp.errors import InvalidChallengeError, PaymentError, PaymentExpiredError
+from mpp.errors import (
+    InvalidChallengeError,
+    PaymentError,
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+)
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -112,31 +118,32 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        # Async-generator bodies (content=async_gen()) produce an AsyncByteStream
-        # that is not also a SyncByteStream. They cannot be safely buffered for
-        # replay: the generator may be infinite, already partially consumed, or
-        # tied to a one-shot I/O source. Reject early so callers get a clear
-        # message instead of a silent empty body on the paid retry.
-        if isinstance(request.stream, httpx.AsyncByteStream) and not isinstance(
-            request.stream, httpx.SyncByteStream
-        ):
-            raise PaymentError(
-                "Streaming request bodies (async generators) are not supported "
-                "through the payment retry flow. Use a buffered body "
-                "(bytes, str, files=, or data=) instead."
-            )
-
-        # Buffer the request body before the first dispatch so it can be replayed
-        # on a paid 402 retry. Handles bytes bodies and multipart/files= bodies.
-        # After aread() the stream is replaced with a replayable ByteStream.
-        await request.aread()
+        replayable = not (
+            isinstance(request.stream, httpx.AsyncByteStream)
+            and not isinstance(request.stream, httpx.SyncByteStream)
+        )
+        if replayable:
+            await request.aread()
 
         response = await self._inner.handle_async_request(request)
 
         if response.status_code != 402:
             return response
+        if not replayable:
+            await response.aclose()
+            raise PaymentError(
+                "Streaming request bodies cannot be replayed after a payment challenge. "
+                "Use a buffered body for paid requests."
+            )
 
-        await response.aread()
+        try:
+            await response.aread()
+        except BaseException:
+            try:
+                await response.aclose()
+            except BaseException:
+                pass
+            raise
 
         # Handle multiple WWW-Authenticate headers (per RFC 9110)
         www_auth_headers = response.headers.get_list("www-authenticate")
@@ -144,14 +151,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         challenges: list[Challenge] = []
         parse_error: ParseError | None = None
         for header in www_auth_headers:
-            if not header.lower().startswith("payment "):
-                continue
-            try:
-                parsed = Challenge.from_www_authenticate(header)
-            except ParseError as error:
-                parse_error = error
-                continue
-            challenges.append(parsed)
+            for field in _auth_challenges(header):
+                if field.partition(" ")[0].lower() != "payment":
+                    continue
+                try:
+                    parsed = Challenge.from_www_authenticate(field)
+                except ParseError as error:
+                    parse_error = error
+                    continue
+                challenges.append(parsed)
 
         try:
             challenge, matched_method = self._runtime.match_challenge(challenges)
@@ -214,7 +222,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         try:
             payment_response = await self._inner.handle_async_request(retry_request)
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as cause:
+            error = PaymentOutcomeUnknownError(
+                challenge,
+                cause,
+                credential=credential,
+                request=request,
+            )
             await self._events.emit(
                 PAYMENT_FAILED,
                 _client_payment_failed_payload(
@@ -227,7 +241,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     response=response,
                 ),
             )
-            raise
+            raise error from cause
 
         if payment_response.is_success:
             await self._events.emit(
@@ -349,3 +363,35 @@ async def get(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Re
 async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
     """Send a POST request with automatic payment handling."""
     return await request("POST", url, methods=methods, **kwargs)
+
+
+def _auth_challenges(value: str) -> list[str]:
+    """Split a merged WWW-Authenticate value without splitting quoted commas."""
+    fields: list[str] = []
+    start = 0
+    quoted = escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quoted and character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            fields.append(value[start:index])
+            start = index + 1
+    fields.append(value[start:])
+
+    challenges: list[str] = []
+    token = "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for field in fields:
+        field = field.strip()
+        end = 0
+        while end < len(field) and field[end] in token:
+            end += 1
+        new_challenge = end > 0 and not field[end:].lstrip().startswith("=")
+        if new_challenge or not challenges:
+            challenges.append(field)
+        else:
+            challenges[-1] += f", {field}"
+    return challenges

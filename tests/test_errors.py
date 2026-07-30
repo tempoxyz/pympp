@@ -12,6 +12,7 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
+    PaymentOutcomeUnknownError,
     PaymentRequiredError,
     VerificationFailedError,
 )
@@ -105,6 +106,25 @@ class TestAutoTitle:
 
 
 class TestSubclassInstantiation:
+    def test_payment_outcome_unknown_preserves_context(self) -> None:
+        challenge = type("Challenge", (), {"id": "challenge-id"})()
+        cause = TimeoutError("lost response")
+        credential = object()
+        request = object()
+
+        error = PaymentOutcomeUnknownError(
+            challenge,
+            cause,
+            credential=credential,
+            request=request,
+        )
+
+        assert "Do not blindly retry" in str(error)
+        assert error.challenge is challenge
+        assert error.cause is cause
+        assert error.credential is credential
+        assert error.request is request
+
     def test_payment_required_with_args(self) -> None:
         err = PaymentRequiredError(realm="api.example.com", description="Monthly quota")
         assert "api.example.com" in str(err)
