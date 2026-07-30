@@ -29,24 +29,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import Method as Method
 
 logger = logging.getLogger(__name__)
-
-
-class PaymentOutcomeUnknownError(RuntimeError):
-    """Raised when a paid retry fails after a credential was attached."""
-
-    def __init__(self, challenge: MCPChallenge, cause: Exception) -> None:
-        self.challenge = challenge
-        self.cause = cause
-        super().__init__(
-            "Tool call failed after sending a payment credential; "
-            f"payment outcome is unknown for challenge {challenge.id}. "
-            "Do not blindly retry."
-        )
 
 
 def _error_code(error: Exception) -> int | None:

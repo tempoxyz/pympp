@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mpp import Challenge, Credential
+from mpp import PaymentOutcomeUnknownError as CoreOutcomeUnknownError
 from mpp.extensions.mcp import (
     META_CREDENTIAL,
     META_RECEIPT,
@@ -18,6 +19,11 @@ from mpp.extensions.mcp import (
 )
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+
+
+def test_outcome_unknown_error_is_shared() -> None:
+    assert PaymentOutcomeUnknownError is CoreOutcomeUnknownError
+
 
 # ---------------------------------------------------------------------------
 # Helpers
