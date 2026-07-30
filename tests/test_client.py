@@ -712,10 +712,17 @@ class TestRuntimePaymentTransport:
 
         assert loops == [caller_loop]
 
+    @pytest.mark.parametrize(
+        "allowed_origins",
+        [["https://allowed.test:443"], "https://allowed.test:443"],
+    )
     @pytest.mark.asyncio
-    async def test_origin_policy_is_exact_and_normalizes_default_ports(self) -> None:
+    async def test_origin_policy_is_exact_and_normalizes_default_ports(
+        self,
+        allowed_origins: list[str] | str,
+    ) -> None:
         method = MockMethod()
-        runtime = PaymentRuntime([method], allowed_origins=["https://allowed.test:443"])
+        runtime = PaymentRuntime([method], allowed_origins=allowed_origins)
         blocked = MockTransport([payment_required()])
         allowed = MockTransport([payment_required(), httpx.Response(200, content=b"paid")])
 
@@ -845,6 +852,35 @@ class TestRuntimePaymentTransport:
             await child
         assert parent.content == b"parent"
         assert len(child_inner.requests) == 1
+        assert method.create_credential.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_close_rejects_nested_payment_in_same_task(self) -> None:
+        method = MockMethod()
+        runtime = PaymentRuntime([method])
+        nested_inner = MockTransport([payment_required("nested")])
+        nested = runtime.payment_transport(nested_inner)
+
+        async def close_then_pay(payload: dict[str, Any]) -> None:
+            if payload["challenge"].id != "parent":
+                return
+            runtime.close()
+            with pytest.raises(RuntimeError, match="closed"):
+                await nested.handle_async_request(
+                    httpx.Request("GET", "https://example.com/nested")
+                )
+
+        runtime.events.on("credential.created", close_then_pay)
+        parent = runtime.payment_transport(
+            MockTransport([payment_required("parent"), httpx.Response(200, content=b"parent")])
+        )
+
+        response = await parent.handle_async_request(
+            httpx.Request("GET", "https://example.com/parent")
+        )
+
+        assert response.content == b"parent"
+        assert len(nested_inner.requests) == 1
         assert method.create_credential.await_count == 1
 
     @pytest.mark.asyncio

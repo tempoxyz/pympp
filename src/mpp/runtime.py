@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Protocol, Self, runtime_checkable
 
 import httpx
-from anyio import get_current_task
 
 from mpp import Challenge, Credential
 from mpp.events import (
@@ -21,21 +19,6 @@ from mpp.events import (
 if TYPE_CHECKING:
     from mpp.client import PaymentTransport
     from mpp.client._http import _HttpPaymentAttempt
-
-_PAID_RUNTIMES: ContextVar[tuple[tuple[object, int], ...]] = ContextVar(
-    "mpp_paid_runtimes",
-    default=(),
-)
-
-
-def _scope_active(key: object) -> bool:
-    try:
-        owner = get_current_task().id
-    except RuntimeError:
-        return False
-    return any(
-        scope_key is key and scope_owner == owner for scope_key, scope_owner in _PAID_RUNTIMES.get()
-    )
 
 
 @runtime_checkable
@@ -75,11 +58,10 @@ class PaymentRuntime:
         self._closed = False
         self._closing = False
         self._paid_operations = 0
-        self._scope_key = object()
 
     def start(self) -> Self:
         """Open the runtime, or return it if already open."""
-        if self._closed or (self._closing and not _scope_active(self._scope_key)):
+        if self._closed or self._closing:
             raise RuntimeError("PaymentRuntime is closed")
         return self
 
@@ -135,6 +117,21 @@ class PaymentRuntime:
     ) -> Credential:
         """Create a credential and emit its lifecycle events."""
         self.start()
+        return await self._create_credential(
+            challenge,
+            method,
+            allow_name_only=allow_name_only,
+            event_payload=event_payload,
+        )
+
+    async def _create_credential(
+        self,
+        challenge: Challenge,
+        method: Method,
+        *,
+        allow_name_only: bool = False,
+        event_payload: dict[str, Any] | None = None,
+    ) -> Credential:
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
         if challenge.method != method.name or (
@@ -168,6 +165,9 @@ class PaymentRuntime:
     async def emit_event(self, name: str, payload: EventPayload) -> Any:
         """Emit an event on the caller's event loop."""
         self.start()
+        return await self._emit_event(name, payload)
+
+    async def _emit_event(self, name: str, payload: EventPayload) -> Any:
         return await self.events.emit(name, payload)
 
     def payment_transport(
@@ -192,25 +192,17 @@ class PaymentRuntime:
         challenge: Challenge,
         request: httpx.Request,
     ) -> _HttpPaymentAttempt:
-        self.start()
         return self._http.begin(challenge, request)
 
     @contextmanager
     def _paid_operation(self):
         """Keep a committed payment flow alive if close is requested."""
-        if _scope_active(self._scope_key):
-            yield
-            return
         self.start()
-        # Context variables propagate to child tasks; bind this lease to its owner.
-        scope = (self._scope_key, get_current_task().id)
-        token = _PAID_RUNTIMES.set((*_PAID_RUNTIMES.get(), scope))
         self._paid_operations += 1
         try:
             yield
         finally:
             self._paid_operations -= 1
-            _PAID_RUNTIMES.reset(token)
             if self._closing and not self._paid_operations:
                 self._closed = True
 

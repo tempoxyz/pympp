@@ -103,7 +103,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
         self._events = self._runtime.events
 
     async def _fail(self, payment: _HttpPayment, error: Exception, **details: Any) -> None:
-        await self._runtime.emit_event(PAYMENT_FAILED, payment.failed(error, **details))
+        await self._runtime._emit_event(PAYMENT_FAILED, payment.failed(error, **details))
 
     async def _unknown(
         self,
@@ -203,7 +203,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
                 raise
 
             try:
-                credential = await self._runtime.create_credential(
+                credential = await self._runtime._create_credential(
                     challenge,
                     method,
                     event_payload=payment.event_payload(),
@@ -254,7 +254,7 @@ class PaymentTransport(_EventHandlers, httpx.AsyncBaseTransport):
                 _response_request(payment_response, retry_request)
                 _propagate_response_cookies(response, payment_response)
                 if payment_response.is_success:
-                    await self._runtime.emit_event(
+                    await self._runtime._emit_event(
                         PAYMENT_RESPONSE,
                         payment.event_payload(payment_response),
                     )

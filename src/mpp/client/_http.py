@@ -245,9 +245,8 @@ class _HttpPayment:
 class _AllowedOrigins:
     def __init__(self, allowed: Sequence[str] | None) -> None:
         self._allow_all = allowed is None
-        self._origins = {
-            origin for value in allowed or () if (origin := _origin(str(value))) is not None
-        }
+        values = (allowed,) if isinstance(allowed, str) else allowed or ()
+        self._origins = {origin for value in values if (origin := _origin(value)) is not None}
 
     def allows(self, url: httpx.URL) -> bool:
         return self._allow_all or _httpx_origin(url) in self._origins
