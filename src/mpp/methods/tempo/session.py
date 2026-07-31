@@ -202,6 +202,9 @@ class TempoSessionMethod:
             and challenge.intent == "session"
             and isinstance(details, dict)
             and details.get("sessionProtocol") == "v2"
+            and details.get("chainId") == self.chain_id
+            and isinstance(details.get("escrowContract"), str)
+            and details["escrowContract"].lower() == self.escrow.lower()
         )
 
     async def create_credential(

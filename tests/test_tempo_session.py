@@ -185,7 +185,12 @@ def test_runtime_skips_unsupported_session_protocol(account: TempoAccount) -> No
     supported = challenge(protocol="v2")
 
     assert PaymentRuntime([payment_method]).match_challenge(
-        [challenge(protocol="v1"), supported]
+        [
+            challenge(protocol="v1"),
+            challenge(chain_id=1),
+            challenge(escrow="0x0000000000000000000000000000000000000003"),
+            supported,
+        ]
     ) == (supported, payment_method)
 
 
