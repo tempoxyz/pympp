@@ -367,7 +367,7 @@ def _inherit_request(original: httpx.Request, request: httpx.Request) -> httpx.R
             for name, value in (
                 original.headers.multi_items() if _same_origin(original.url, request.url) else ()
             )
-            if not _body_header(name)
+            if not _request_specific_header(name)
         ]
     )
     headers.update(request.headers)
@@ -376,9 +376,15 @@ def _inherit_request(original: httpx.Request, request: httpx.Request) -> httpx.R
     return request
 
 
-def _body_header(name: str) -> bool:
+def _request_specific_header(name: str) -> bool:
     name = name.lower()
-    return name.startswith("content-") or name in {"expect", "trailer", "transfer-encoding"}
+    return name.startswith(("content-", "if-")) or name in {
+        "expect",
+        "idempotency-key",
+        "range",
+        "trailer",
+        "transfer-encoding",
+    }
 
 
 def _same_origin(left: httpx.URL, right: httpx.URL) -> bool:

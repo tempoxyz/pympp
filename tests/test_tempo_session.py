@@ -24,6 +24,7 @@ from mpp.methods.tempo import (
     tempo_session,
 )
 from mpp.methods.tempo import session as session_module
+from mpp.methods.tempo._defaults import TESTNET_RPC_URL
 from mpp.runtime import PaymentRuntime
 
 PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -165,6 +166,14 @@ def test_public_factory(account: TempoAccount) -> None:
     assert result.intents.keys() == {"session"}
     assert result.channel_store is store
     assert result.max_deposit == 50
+    assert (
+        tempo_session(
+            account=account,
+            max_deposit=50,
+            chain_id=CHAIN_ID,
+        ).rpc_url
+        == TESTNET_RPC_URL
+    )
     with pytest.raises(TypeError, match="max_deposit must be an integer"):
         tempo_session(account=account, max_deposit=True)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="greater than zero"):
@@ -277,6 +286,8 @@ async def test_native_client_drives_sse_and_refreshes_management_challenge(
 ) -> None:
     deterministic_transactions(monkeypatch)
     actions: list[str] = []
+    inherited_headers: list[tuple[str | None, str | None]] = []
+    management_idempotency: list[str | None] = []
     refreshed = False
     offered = challenge(amount="2", suggested_deposit="5", min_voucher_delta="0")
 
@@ -296,6 +307,11 @@ async def test_native_client_drives_sse_and_refreshes_management_challenge(
 
     async def server(request: httpx.Request) -> httpx.Response:
         nonlocal channel_id, refreshed
+        inherited_headers.append(
+            (request.headers.get("x-client-default"), request.headers.get("cookie"))
+        )
+        if request.method == "POST":
+            management_idempotency.append(request.headers.get("idempotency-key"))
         authorization = request.headers.get("authorization")
         if authorization is None:
             return httpx.Response(
@@ -326,11 +342,17 @@ async def test_native_client_drives_sse_and_refreshes_management_challenge(
         methods=[method(account, max_deposit=10)],
         inner=httpx.MockTransport(server),
     )
-    async with httpx.AsyncClient(transport=transport) as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        headers={"idempotency-key": "original", "x-client-default": "keep"},
+        cookies={"session": "keep"},
+    ) as client:
         response = await client.get("https://example.com/stream")
 
     assert response.content == b"data: first\n\ndata: second\n\n"
     assert actions == ["open", "topUp", "topUp", "voucher"]
+    assert set(inherited_headers) == {("keep", "session=keep")}
+    assert management_idempotency == [None, None, None]
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ import httpx
 
 from mpp import Challenge, Credential, MemoryStore, ParseError, Receipt, Store
 from mpp.client.transport import _auth_challenges
-from mpp.methods.tempo._defaults import CHAIN_ID, RPC_URL
+from mpp.methods.tempo._defaults import CHAIN_ID, RPC_URL, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, get_tx_params
 from mpp.methods.tempo._session_sse import (
     wrap_async_sse_response,
@@ -1064,7 +1064,7 @@ def tempo_session(
     *,
     account: TempoAccount,
     max_deposit: int,
-    rpc_url: str = RPC_URL,
+    rpc_url: str | None = None,
     chain_id: int = CHAIN_ID,
     escrow: str = TIP20_CHANNEL_ESCROW,
     channel_store: Store | None = None,
@@ -1084,11 +1084,12 @@ def tempo_session(
 
     if not hasattr(TempoTransaction, "encode_for_signing"):
         raise RuntimeError("Tempo sessions require pytempo with encode_for_signing()")
+    resolved_chain_id = _chain_id(chain_id, "chain_id")
     return TempoSessionMethod(
         account=account,
         max_deposit=max_deposit,
-        rpc_url=rpc_url,
-        chain_id=_chain_id(chain_id, "chain_id"),
+        rpc_url=rpc_url if rpc_url is not None else rpc_url_for_chain(resolved_chain_id),
+        chain_id=resolved_chain_id,
         escrow=_address(escrow, "escrow"),
         channel_store=channel_store if channel_store is not None else MemoryStore(),
     )
