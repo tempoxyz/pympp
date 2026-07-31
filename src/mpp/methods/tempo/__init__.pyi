@@ -15,6 +15,9 @@ from mpp.methods.tempo.intents import Transfer as _Transfer
 from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
 from mpp.methods.tempo.schemas import Split as _Split
+from mpp.methods.tempo.session import TIP20_CHANNEL_ESCROW as _TIP20_CHANNEL_ESCROW
+from mpp.methods.tempo.session import TempoSessionMethod as _TempoSessionMethod
+from mpp.methods.tempo.session import tempo_session as _tempo_session
 
 CHAIN_ID = _CHAIN_ID
 ESCROW_CONTRACTS = _ESCROW_CONTRACTS
@@ -33,3 +36,6 @@ Transfer = _Transfer
 ValidateSender = _ValidateSender
 get_transfers = _get_transfers
 Split = _Split
+TIP20_CHANNEL_ESCROW = _TIP20_CHANNEL_ESCROW
+TempoSessionMethod = _TempoSessionMethod
+tempo_session = _tempo_session

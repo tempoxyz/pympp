@@ -28,11 +28,12 @@ Documentation = "https://github.com/tempoxyz/pympp#readme"
 
 [project.optional-dependencies]
 tempo = [
-    "pytempo>=0.2.1",
+    "pytempo>=0.6.0",
     "pydantic>=2.0",
     "eth-account>=0.11",
     "eth-abi>=5.0,<6",
     "eth-hash[pycryptodome]>=0.7",
+    "eth-keys>=0.7",
     "attrs>=23.0",
     "rlp>=4.0",
 ]
@@ -102,3 +103,6 @@ markers = [
     "integration: requires TEMPO_RPC_URL (real Tempo node)",
     "redis: requires REDIS_URL (real Redis instance)",
 ]
+
+[tool.uv.sources]
+pytempo = { git = "https://github.com/tempoxyz/pytempo.git", rev = "77660a0298b250b0ac0bb7b092bd99963c4ced06" }

@@ -51,6 +51,11 @@ _LAZY_EXPORTS = {
         "get_transfers",
     ),
     "mpp.methods.tempo.schemas": ("Split",),
+    "mpp.methods.tempo.session": (
+        "TIP20_CHANNEL_ESCROW",
+        "TempoSessionMethod",
+        "tempo_session",
+    ),
 }
 
 

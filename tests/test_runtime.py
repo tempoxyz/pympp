@@ -58,6 +58,35 @@ def test_matching_preserves_transport_selection() -> None:
         runtime.match_challenge([challenge(method="other")])
 
 
+def test_matching_distinguishes_same_method_intents() -> None:
+    class IntentMethod(MockMethod):
+        def __init__(self, intent: str) -> None:
+            self.intents = {intent: object()}
+
+    charge = IntentMethod("charge")
+    session = IntentMethod("session")
+    runtime = PaymentRuntime([charge, session])
+
+    assert runtime.match_challenge([challenge(intent="charge")])[1] is charge
+    assert runtime.match_challenge([challenge(intent="session")])[1] is session
+    with pytest.raises(ValueError, match="No compatible payment method"):
+        runtime.match_challenge([challenge(intent="subscription")])
+
+
+def test_matching_honors_method_capability_predicate() -> None:
+    class SelectiveMethod(MockMethod):
+        def can_handle_challenge(self, value: Challenge) -> bool:
+            return value.id == "supported"
+
+    method = SelectiveMethod()
+    supported = challenge("supported")
+
+    assert PaymentRuntime([method]).match_challenge([challenge(), supported]) == (
+        supported,
+        method,
+    )
+
+
 def test_preserves_falsey_event_dispatcher() -> None:
     class FalseyEvents(EventDispatcher):
         def __bool__(self) -> bool:
@@ -105,6 +134,21 @@ async def test_challenge_handler_can_supply_credential() -> None:
     assert created[0]["challenge"].id == "requested"
     assert created[0]["challenges"][0].id == "offered"
     assert created[0]["source"] == "adapter"
+
+
+async def test_credential_creation_passes_optional_method_context() -> None:
+    class ContextMethod(MockMethod):
+        async def create_credential(
+            self, challenge: Challenge, *, context: object | None = None
+        ) -> Credential:
+            return Credential(challenge=challenge.to_echo(), payload={"context": context})
+
+    method = ContextMethod()
+    credential = await PaymentRuntime([method]).create_credential(
+        challenge(), method, context={"action": "voucher"}
+    )
+
+    assert credential.payload == {"context": {"action": "voucher"}}
 
 
 async def test_credential_creation_validates_method() -> None:

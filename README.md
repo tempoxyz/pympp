@@ -50,6 +50,24 @@ async with Client(methods=[tempo(account=account, intents={"charge": ChargeInten
     response = await client.get("https://mpp.dev/api/ping/paid")
 ```
 
+For reusable TIP-1034 sessions, configure an explicit deposit cap in raw token
+base units:
+
+```bash
+pip install "pympp[tempo]"
+```
+
+```python
+from mpp.methods.tempo import tempo_session
+
+session = tempo_session(account=account, max_deposit=1_000_000)
+async with Client(methods=[session]) as client:
+    response = await client.get("https://api.example.com/session")
+```
+
+The default channel store is process-local memory. Pass another `mpp.Store`
+when channels must survive a process restart.
+
 Custom transports can reuse method matching and credential creation without
 depending on HTTPX:
 

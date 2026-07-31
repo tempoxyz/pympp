@@ -220,6 +220,8 @@ jobs:
               INSTALL_TARGET="$WHEEL"
               ;;
             tempo)
+              uv pip install --python .smoke-venv/bin/python \
+                "pytempo @ git+https://github.com/tempoxyz/pytempo.git@77660a0298b250b0ac0bb7b092bd99963c4ced06"
               INSTALL_TARGET="${WHEEL}[tempo]"
               ;;
             mcp)
@@ -257,10 +259,12 @@ jobs:
         if: matrix.profile == 'tempo'
         run: |
           .smoke-venv/bin/python - <<'PY'
-          from mpp.methods.tempo import ChargeIntent, TempoAccount
+          from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo_session
 
           assert ChargeIntent.__name__ == "ChargeIntent"
           assert TempoAccount.__name__ == "TempoAccount"
+          account = TempoAccount.from_key("0x" + "11" * 32)
+          assert tempo_session(account=account, max_deposit=1).name == "tempo"
 
           print("tempo install smoke test passed")
           PY

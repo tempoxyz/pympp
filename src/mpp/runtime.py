@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from mpp import Challenge, Credential
 from mpp.errors import InvalidChallengeError, PaymentExpiredError
 from mpp.events import CHALLENGE_RECEIVED, CREDENTIAL_CREATED, EventDispatcher
+
+_CONTEXT_UNSET = object()
 
 
 @runtime_checkable
@@ -32,7 +34,6 @@ class PaymentRuntime:
         events: EventDispatcher | None = None,
     ) -> None:
         self.methods = tuple(methods)
-        self._methods = {method.name: method for method in self.methods}
         self.events = events if events is not None else EventDispatcher()
 
     def match_challenge(
@@ -41,9 +42,9 @@ class PaymentRuntime:
     ) -> tuple[Challenge, Method]:
         """Return the first challenge with a configured payment method."""
         for challenge in challenges:
-            method = self._methods.get(challenge.method)
-            if method is not None:
-                return challenge, method
+            for method in reversed(self.methods):
+                if _supports(method, challenge):
+                    return challenge, method
 
         offered = [challenge.method for challenge in challenges]
         raise ValueError(f"No compatible payment method for challenges: {offered}")
@@ -54,11 +55,12 @@ class PaymentRuntime:
         method: Method,
         *,
         event_payload: dict[str, Any] | None = None,
+        context: Any = _CONTEXT_UNSET,
     ) -> Credential:
         """Create a credential and emit its lifecycle events."""
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
-        if challenge.method != method.name:
+        if not _supports(method, challenge):
             raise ValueError(f"Method {method.name!r} does not support {challenge.method!r}")
         if challenge.expires is not None:
             try:
@@ -81,13 +83,24 @@ class PaymentRuntime:
             payload,
             first_result=True,
         )
-        credential = (
-            supplied
-            if isinstance(supplied, Credential)
-            else await method.create_credential(challenge)
-        )
+        if isinstance(supplied, Credential):
+            credential = supplied
+        elif context is _CONTEXT_UNSET:
+            credential = await method.create_credential(challenge)
+        else:
+            credential = await method.create_credential(challenge, context=context)  # type: ignore[call-arg]
         await self.events.emit(
             CREDENTIAL_CREATED,
             {**payload, "credential": credential},
         )
         return credential
+
+
+def _supports(method: Method, challenge: Challenge) -> bool:
+    if challenge.method != method.name:
+        return False
+    intents = getattr(method, "intents", None)
+    if isinstance(intents, Mapping) and challenge.intent not in (intents or {"charge": None}):
+        return False
+    can_handle = getattr(method, "can_handle_challenge", None)
+    return can_handle is None or bool(can_handle(challenge))

@@ -10,6 +10,7 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -35,7 +36,21 @@ from mpp.events import (
 from mpp.runtime import Method, PaymentRuntime
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
+
+
+_PAYMENT_ACTIONS = "mpp.payment_actions"
+
+
+@dataclass(frozen=True, slots=True)
+class _AsyncResponseContext:
+    challenge: Challenge
+    credential: Credential
+    request: httpx.Request
+    response: httpx.Response
+    send: Callable[[httpx.Request], Awaitable[httpx.Response]]
+    refetch: Callable[[], Awaitable[httpx.Response]]
+    create_credential: Callable[..., Awaitable[Credential]]
 
 
 def _client_payment_failed_payload(
@@ -181,6 +196,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 )
             return response
 
+        credential: Credential | None = None
         try:
             credential = await self._runtime.create_credential(
                 challenge,
@@ -192,13 +208,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 },
             )
             auth_header = credential.to_authorization()
+            retry_extensions = _with_payment_action(request.extensions, credential)
         except Exception as error:
             await self._events.emit(
                 PAYMENT_FAILED,
                 _client_payment_failed_payload(
                     challenge=challenge,
                     challenges=challenges,
-                    credential=None,
+                    credential=credential,
                     error=error,
                     method=matched_method,
                     request=request,
@@ -217,7 +234,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             url=request.url,
             headers=headers,
             content=request.content,
-            extensions=request.extensions,
+            extensions=retry_extensions,
         )
 
         try:
@@ -243,7 +260,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             )
             raise error from cause
 
-        if payment_response.is_success:
+        settled = False
+
+        async def settle(response: httpx.Response) -> None:
+            nonlocal settled
+            if settled:
+                return
+            settled = True
             await self._events.emit(
                 PAYMENT_RESPONSE,
                 {
@@ -251,15 +274,115 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     "credential": credential,
                     "method": matched_method,
                     "request": request,
+                    "response": response,
+                },
+            )
+
+        async def refetch() -> httpx.Response:
+            await settle(payment_response)
+            await payment_response.aclose()
+            return await self.handle_async_request(
+                httpx.Request(
+                    request.method,
+                    request.url,
+                    headers=request.headers,
+                    content=request.content,
+                    extensions=retry_request.extensions,
+                )
+            )
+
+        async def create_context_credential(
+            context: object,
+            replacement: Challenge | None = None,
+        ) -> Credential:
+            selected = replacement or challenge
+            return await self._runtime.create_credential(
+                selected,
+                matched_method,
+                context=context,
+                event_payload={
+                    "challenges": [selected],
+                    "request": request,
                     "response": payment_response,
                 },
             )
+
+        async def send_hook(hook_request: httpx.Request) -> httpx.Response:
+            return await self._inner.handle_async_request(_inherit_request(request, hook_request))
+
+        handler = getattr(matched_method, "handle_async_http_response", None)
+        try:
+            if payment_response.is_success and handler is not None:
+                handled = await handler(
+                    _AsyncResponseContext(
+                        challenge,
+                        credential,
+                        request,
+                        payment_response,
+                        send_hook,
+                        refetch,
+                        create_context_credential,
+                    )
+                )
+                if not isinstance(handled, httpx.Response):
+                    raise TypeError("handle_async_http_response must return an httpx.Response")
+                payment_response = handled
+        except Exception as error:
+            await self._events.emit(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=challenge,
+                    challenges=challenges,
+                    credential=credential,
+                    error=error,
+                    method=matched_method,
+                    request=request,
+                    response=payment_response,
+                ),
+            )
+            raise
+        if payment_response.is_success:
+            await settle(payment_response)
 
         return payment_response
 
     async def aclose(self) -> None:
         """Close the inner transport."""
         await self._inner.aclose()
+
+
+def _with_payment_action(extensions: dict[str, Any], credential: Credential) -> dict[str, Any]:
+    action = str(credential.payload.get("action", "payment"))
+    history = tuple(extensions.get(_PAYMENT_ACTIONS, ()))
+    if action in history:
+        raise PaymentError(f"Repeated payment action during one request: {action}")
+    return {**extensions, _PAYMENT_ACTIONS: (*history, action)}
+
+
+def _inherit_request(original: httpx.Request, request: httpx.Request) -> httpx.Request:
+    """Apply caller headers and extensions to a method-created request."""
+    headers = httpx.Headers(
+        [
+            (name, value)
+            for name, value in (
+                original.headers.multi_items() if _same_origin(original.url, request.url) else ()
+            )
+            if not _body_header(name)
+        ]
+    )
+    headers.update(request.headers)
+    request.headers = headers
+    request.extensions = {**original.extensions, **request.extensions}
+    return request
+
+
+def _body_header(name: str) -> bool:
+    name = name.lower()
+    return name.startswith("content-") or name in {"expect", "trailer", "transfer-encoding"}
+
+
+def _same_origin(left: httpx.URL, right: httpx.URL) -> bool:
+    return (left.scheme, left.host, left.port) == (right.scheme, right.host, right.port)
 
 
 class Client:
