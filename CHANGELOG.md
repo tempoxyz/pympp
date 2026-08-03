@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 (2026-08-03)
+
+### Minor Changes
+
+- Added a transport-neutral `PaymentRuntime` class that provides reusable primitives for matching payment challenges and creating credentials without depending on HTTPX. Refactored `PaymentTransport` and `Client` to accept either a `methods` list or a pre-built `runtime` instance, and consolidated the `Method` protocol into `mpp.runtime`. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Add `hint` field to `PaymentError` problem details. `PaymentRequiredError`, `MalformedCredentialError`, and `PaymentMethodUnsupportedError` now include a default hint pointing users to wallet documentation. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Improved HTTP challenge parsing to correctly split merged `WWW-Authenticate` headers with quoted commas, added pass-through support for streaming request bodies on ordinary and unrelated 402 responses, and introduced `PaymentOutcomeUnknownError` (consolidated from the MCP client into core) to surface explicit errors when a paid retry outcome is uncertain due to network failures or task cancellation. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+
+### Patch Changes
+
+- Added Python 3.14 to the list of declared supported versions in package classifiers and added Python 3.11 to the CI test matrix. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Preserved MCP challenge metadata when converting MCP challenges to core payment challenges. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Prevent the optional MCP SDK from resolving to incompatible 2.x releases. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Handle multipart (`files=`) and streaming bodies on paid 402 retry. Multipart bodies are buffered and replayed identically; async generator bodies raise `PaymentError` before any I/O. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Preserve `subscriptionId` when parsing and formatting payment receipts. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Fixed MCP payment error detection to support the current MCP SDK's `McpError` shape, where error code and data are nested under an `error` attribute rather than directly on the exception. Added helper functions `_error_code` and `_error_data` to extract these fields from both error shapes. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+
 ## 0.9.1 (2026-07-01)
 
 ### Patch Changes
