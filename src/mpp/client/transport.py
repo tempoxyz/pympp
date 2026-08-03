@@ -129,12 +129,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         if response.status_code != 402:
             return response
-        if not replayable:
-            await response.aclose()
-            raise PaymentError(
-                "Streaming request bodies cannot be replayed after a payment challenge. "
-                "Use a buffered body for paid requests."
-            )
 
         try:
             await response.aread()
@@ -180,6 +174,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     ),
                 )
             return response
+
+        if not replayable:
+            await response.aclose()
+            raise PaymentError(
+                "Streaming request bodies cannot be replayed after a payment challenge. "
+                "Use a buffered body for paid requests."
+            )
 
         try:
             credential = await self._runtime.create_credential(

@@ -283,6 +283,36 @@ class TestPaymentTransport:
         assert len(inner.requests) == 1
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "www_authenticate",
+        [
+            None,
+            "Bearer realm=test",
+            Challenge(
+                id="test-id",
+                method="stripe",
+                intent="charge",
+                request={"amount": "1000"},
+            ).to_www_authenticate("example.com"),
+        ],
+    )
+    async def test_streaming_body_returns_unmatched_402(self, www_authenticate: str | None) -> None:
+        headers = {"www-authenticate": www_authenticate} if www_authenticate else {}
+        inner = MockTransport([httpx.Response(402, headers=headers, content=b"unmatched")])
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+
+        async def body():
+            yield b"one-shot"
+
+        response = await transport.handle_async_request(
+            httpx.Request("POST", "https://example.com", content=body())
+        )
+
+        assert response.status_code == 402
+        assert response.content == b"unmatched"
+        assert len(inner.requests) == 1
+
+    @pytest.mark.asyncio
     async def test_closes_challenge_response_when_read_fails(self) -> None:
         class FailingStream(httpx.AsyncByteStream):
             closed = False
