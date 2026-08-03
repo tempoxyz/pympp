@@ -10,6 +10,7 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -133,21 +134,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         try:
             await response.aread()
         except BaseException:
-            try:
+            with suppress(BaseException):
                 await response.aclose()
-            except BaseException:
-                pass
             raise
 
         # Handle multiple WWW-Authenticate headers (per RFC 9110)
-        www_auth_headers = response.headers.get_list("www-authenticate")
-
         challenges: list[Challenge] = []
         parse_error: ParseError | None = None
-        for header in www_auth_headers:
-            for field in _auth_challenges(header):
-                if field.partition(" ")[0].lower() != "payment":
-                    continue
+        for header in response.headers.get_list("www-authenticate"):
+            for field in _payment_challenges(header):
                 try:
                     parsed = Challenge.from_www_authenticate(field)
                 except ParseError as error:
@@ -366,8 +361,8 @@ async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.R
     return await request("POST", url, methods=methods, **kwargs)
 
 
-def _auth_challenges(value: str) -> list[str]:
-    """Split a merged WWW-Authenticate value without splitting quoted commas."""
+def _payment_challenges(value: str) -> list[str]:
+    """Return Payment challenges, preserving quoted commas and escapes."""
     fields: list[str] = []
     start = 0
     quoted = escaped = False
@@ -384,15 +379,15 @@ def _auth_challenges(value: str) -> list[str]:
     fields.append(value[start:])
 
     challenges: list[str] = []
-    token = "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    for field in fields:
-        field = field.strip()
-        end = 0
-        while end < len(field) and field[end] in token:
-            end += 1
-        new_challenge = end > 0 and not field[end:].lstrip().startswith("=")
-        if new_challenge or not challenges:
-            challenges.append(field)
-        else:
-            challenges[-1] += f", {field}"
+    current: list[str] | None = None
+    for field in map(str.strip, fields):
+        scheme, _, remainder = field.partition(" ")
+        if "=" not in scheme and not remainder.lstrip().startswith("="):
+            if current:
+                challenges.append(", ".join(current))
+            current = [field] if scheme.lower() == "payment" else None
+        elif current:
+            current.append(field)
+    if current:
+        challenges.append(", ".join(current))
     return challenges

@@ -596,7 +596,7 @@ class TestPaymentTransport:
             method="tempo",
             intent="charge",
             request={"amount": "1000"},
-            description="one, two",
+            description='one "two", three',
         )
         second = Challenge(
             id="second",
@@ -608,6 +608,7 @@ class TestPaymentTransport:
             [
                 'Bearer realm="example"',
                 first.to_www_authenticate("example.com"),
+                'Basic realm="other"',
                 second.to_www_authenticate("example.com"),
             ]
         )
@@ -626,7 +627,7 @@ class TestPaymentTransport:
 
         assert response.status_code == 200
         assert [(item.id, item.description) for item in received] == [
-            ("first", "one, two"),
+            ("first", 'one "two", three'),
             ("second", None),
         ]
         assert method.create_credential.call_args.args[0].id == "first"
