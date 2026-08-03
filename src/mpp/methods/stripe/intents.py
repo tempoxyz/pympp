@@ -223,7 +223,12 @@ class ChargeIntent:
                 "payment_method_types": list(request.methodDetails.paymentMethodTypes),
                 "shared_payment_granted_token": spt,
             }
-            options = {"idempotency_key": f"mppx_{challenge_id}_{spt}"}
+            # Key idempotency on the challenge alone. The challenge id is HMAC-bound
+            # to the charge parameters (amount/currency/recipient/realm), so it is the
+            # stable identity of the charge. Including the (single-use, regenerated)
+            # SPT would make every retry a fresh key and let Stripe create a second
+            # PaymentIntent for the same logical charge -> double charge.
+            options = {"idempotency_key": f"mppx_{challenge_id}"}
 
             create_async = getattr(payment_intents, "create_async", None)
             if callable(create_async):
@@ -265,7 +270,7 @@ class ChargeIntent:
             headers={
                 "Authorization": f"Basic {auth_value}",
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Idempotency-Key": f"mppx_{challenge_id}_{spt}",
+                "Idempotency-Key": f"mppx_{challenge_id}",
             },
             data=body,
         )
