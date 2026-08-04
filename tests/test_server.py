@@ -1,10 +1,30 @@
 """Tests for server-side verification."""
 
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
 from mpp import BodyDigest, Challenge, Credential, Receipt
+from mpp.errors import (
+    InvalidChallengeError,
+    MalformedCredentialError,
+    PaymentExpiredError,
+    PaymentMethodUnsupportedError,
+    VerificationFailedError,
+)
 from mpp.events import EventDispatcher
-from mpp.server import Mpp, intent, pay, verify_or_challenge
+from mpp.server import (
+    Intent,
+    Mpp,
+    Validation,
+    broadcast_credential,
+    intent,
+    pay,
+    validate_credential,
+    verify_credential,
+    verify_or_challenge,
+)
 from mpp.server.intent import VerificationError
 from tests import make_bound_credential, make_credential
 
@@ -309,6 +329,370 @@ class TestClassBasedIntent:
         assert isinstance(result, tuple)
         _, receipt = result
         assert receipt.reference == "custom-ref"
+
+
+class TestSplitIntentLifecycle:
+    class SplitCharge:
+        name = "charge"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def validate(self, credential: Credential, request: dict) -> Validation:
+            self.calls.append("validate")
+            return Validation(
+                challenge=credential.challenge,
+                credential=credential,
+                details={"mode": "pull"},
+                intent=self.name,
+                method=credential.challenge.method,
+                request=request,
+                source=credential.source,
+            )
+
+        async def broadcast(self, credential: Credential, request: dict) -> Receipt:
+            self.calls.append("broadcast")
+            return Receipt.success("split-ref")
+
+        async def verify(self, credential: Credential, request: dict) -> Receipt:
+            self.calls.append("legacy-verify")
+            return Receipt.success("legacy-ref")
+
+    @staticmethod
+    def server(split: Intent) -> Mpp:
+        class TestMethod:
+            name = "tempo"
+            intents: dict[str, Intent] = {"charge": split}
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        return Mpp.create(
+            method=TestMethod(),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+    @pytest.mark.asyncio
+    async def test_validate_does_not_broadcast(self) -> None:
+        split = self.SplitCharge()
+        credential = make_credential(payload={})
+
+        result = await validate_credential(intent=split, credential=credential, request={})
+
+        assert result.details == {"mode": "pull"}
+        assert split.calls == ["validate"]
+
+    @pytest.mark.asyncio
+    async def test_broadcast_revalidates_before_terminal_operation(self) -> None:
+        split = self.SplitCharge()
+        credential = make_credential(payload={})
+
+        receipt = await broadcast_credential(intent=split, credential=credential, request={})
+
+        assert receipt.reference == "split-ref"
+        assert split.calls == ["validate", "broadcast"]
+
+    @pytest.mark.asyncio
+    async def test_mpp_broadcast_calls_validate_hook_first(self) -> None:
+        split = self.SplitCharge()
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        receipt = await self.server(split).broadcast_credential(credential)
+
+        assert receipt.reference == "split-ref"
+        assert split.calls == ["validate", "broadcast"]
+
+    @pytest.mark.asyncio
+    async def test_mpp_broadcast_stops_when_validate_hook_fails(self) -> None:
+        class RejectingSplit(self.SplitCharge):
+            async def validate(self, credential: Credential, request: dict) -> Validation:
+                self.calls.append("validate")
+                raise VerificationFailedError("rejected")
+
+        split = RejectingSplit()
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(VerificationFailedError, match="rejected"):
+            await self.server(split).broadcast_credential(credential)
+
+        assert split.calls == ["validate"]
+
+    @pytest.mark.asyncio
+    async def test_route_uses_split_lifecycle(self) -> None:
+        split = self.SplitCharge()
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=split,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, tuple)
+        assert result[1].reference == "split-ref"
+        assert split.calls == ["validate", "broadcast"]
+
+    @pytest.mark.asyncio
+    async def test_validation_failure_prevents_broadcast(self) -> None:
+        class FailingSplit(self.SplitCharge):
+            async def validate(self, credential: Credential, request: dict) -> Validation:
+                self.calls.append("validate")
+                raise VerificationFailedError("invalid")
+
+        split = FailingSplit()
+
+        with pytest.raises(VerificationFailedError, match="invalid"):
+            await broadcast_credential(
+                intent=split,
+                credential=make_credential(payload={}),
+                request={},
+            )
+
+        assert split.calls == ["validate"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_intent_only_supports_terminal_lifecycle(self) -> None:
+        calls: list[str] = []
+
+        class LegacyCharge:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                calls.append("verify")
+                return Receipt.success("legacy-ref")
+
+        legacy = LegacyCharge()
+        credential = make_credential(payload={})
+
+        with pytest.raises(VerificationFailedError, match="does not support non-mutating"):
+            await validate_credential(intent=legacy, credential=credential, request={})
+
+        receipt = await broadcast_credential(intent=legacy, credential=credential, request={})
+        assert receipt.reference == "legacy-ref"
+        assert calls == ["verify"]
+
+    @pytest.mark.asyncio
+    async def test_broadcast_hook_requires_non_mutating_validation(self) -> None:
+        class UnsafeBroadcast:
+            name = "charge"
+
+            async def broadcast(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success("unsafe-ref")
+
+        with pytest.raises(VerificationFailedError, match="does not support non-mutating"):
+            await broadcast_credential(
+                intent=UnsafeBroadcast(),  # type: ignore[arg-type]
+                credential=make_credential(payload={}),
+                request={},
+            )
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_validation_result(self) -> None:
+        class InvalidSplit(self.SplitCharge):
+            async def validate(  # type: ignore[override]
+                self, credential: Credential, request: dict
+            ) -> dict:
+                return {}
+
+        with pytest.raises(VerificationFailedError, match="invalid validation result"):
+            await validate_credential(
+                intent=InvalidSplit(),
+                credential=make_credential(payload={}),
+                request={},
+            )
+
+    @pytest.mark.asyncio
+    async def test_mpp_exposes_bound_standalone_lifecycle(self) -> None:
+        split = self.SplitCharge()
+        server = self.server(split)
+        request = {"amount": "1000"}
+        credential = make_bound_credential(
+            payload={},
+            request=request,
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        validation = await server.validate_credential(
+            credential.to_authorization(), request=request
+        )
+        receipt = await server.broadcast_credential(credential, intent="charge", request=request)
+        bare_credential = credential.to_authorization().removeprefix("Payment ")
+        legacy_receipt = await server.verify_credential(bare_credential)
+
+        assert validation.request == request
+        assert receipt.reference == "split-ref"
+        assert legacy_receipt.reference == "split-ref"
+        assert split.calls == [
+            "validate",
+            "validate",
+            "broadcast",
+            "validate",
+            "broadcast",
+        ]
+
+        with pytest.raises(InvalidChallengeError, match="credential request does not match"):
+            await server.validate_credential(credential, request={"amount": "2000"})
+
+    @pytest.mark.asyncio
+    async def test_low_level_verify_alias_uses_split_lifecycle(self) -> None:
+        split = self.SplitCharge()
+
+        receipt = await verify_credential(
+            intent=split,
+            credential=make_credential(payload={}),
+            request={},
+        )
+
+        assert receipt.reference == "split-ref"
+        assert split.calls == ["validate", "broadcast"]
+
+    @pytest.mark.asyncio
+    async def test_rejects_intent_without_terminal_hook(self) -> None:
+        class ValidationOnly:
+            name = "charge"
+
+            async def validate(self, credential: Credential, request: dict) -> Validation:
+                return Validation(
+                    challenge=credential.challenge,
+                    credential=credential,
+                    details={},
+                    intent=self.name,
+                    method=credential.challenge.method,
+                    request=request,
+                )
+
+        with pytest.raises(VerificationFailedError, match="does not support credential broadcast"):
+            await broadcast_credential(
+                intent=ValidationOnly(),  # type: ignore[arg-type]
+                credential=make_credential(payload={}),
+                request={},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("field", "value", "error"),
+        [
+            ("realm", "other.example.com", InvalidChallengeError),
+            ("method", "stripe", PaymentMethodUnsupportedError),
+            ("id", "tampered", InvalidChallengeError),
+        ],
+    )
+    async def test_standalone_rejects_mismatched_challenge_fields(
+        self,
+        field: str,
+        value: str,
+        error: type[Exception],
+    ) -> None:
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        credential = replace(
+            credential,
+            challenge=replace(credential.challenge, **{field: value}),
+        )
+
+        with pytest.raises(error):
+            await self.server(self.SplitCharge()).validate_credential(credential)
+
+    @pytest.mark.asyncio
+    async def test_standalone_rejects_requested_intent_mismatch(self) -> None:
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(InvalidChallengeError):
+            await self.server(self.SplitCharge()).validate_credential(
+                credential,
+                intent="refund",
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["not-a-credential", "Payment not-base64"])
+    async def test_standalone_rejects_malformed_serialized_credential(self, value: str) -> None:
+        with pytest.raises(MalformedCredentialError):
+            await self.server(self.SplitCharge()).validate_credential(value)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["request", "opaque"])
+    async def test_standalone_rejects_malformed_bound_fields(self, field: str) -> None:
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        credential = replace(
+            credential,
+            challenge=replace(credential.challenge, **{field: "not-base64"}),
+        )
+
+        with pytest.raises(MalformedCredentialError):
+            await self.server(self.SplitCharge()).validate_credential(credential)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "expires",
+        [
+            None,
+            "not-a-date",
+            (datetime.now() + timedelta(hours=1)).isoformat(),
+            (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+        ],
+    )
+    async def test_standalone_rejects_missing_or_invalid_expiry(
+        self,
+        expires: str | None,
+    ) -> None:
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={},
+            expires=expires,
+        )
+        credential = Credential(challenge=challenge.to_echo(), payload={})
+
+        with pytest.raises(PaymentExpiredError):
+            await self.server(self.SplitCharge()).validate_credential(credential)
+
+    @pytest.mark.asyncio
+    async def test_standalone_rejects_unregistered_intent(self) -> None:
+        credential = make_bound_credential(
+            payload={},
+            request={},
+            realm="api.example.com",
+            secret_key="test-secret",
+            intent="refund",
+        )
+
+        with pytest.raises(PaymentMethodUnsupportedError):
+            await self.server(self.SplitCharge()).validate_credential(credential)
 
 
 class TestVerificationError:

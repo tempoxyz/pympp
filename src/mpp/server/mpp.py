@@ -6,8 +6,15 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from mpp import Challenge, Credential, Receipt
-from mpp._units import parse_units
+from mpp import Challenge, Credential, Receipt, _constant_time_equal, generate_challenge_id
+from mpp._parsing import ParseError, _b64_decode
+from mpp._units import parse_units, transform_units
+from mpp.errors import (
+    InvalidChallengeError,
+    MalformedCredentialError,
+    PaymentExpiredError,
+    PaymentMethodUnsupportedError,
+)
 from mpp.events import (
     CHALLENGE_CREATED,
     PAYMENT_FAILED,
@@ -23,11 +30,21 @@ from mpp.server.decorator import (
     resolve_body_param,
     wrap_payment_handler,
 )
+from mpp.server.intent import (
+    Validation,
+)
+from mpp.server.intent import (
+    broadcast_credential as broadcast_intent_credential,
+)
+from mpp.server.intent import (
+    validate_credential as validate_intent_credential,
+)
 from mpp.server.method import transform_request
 from mpp.server.verify import verify_or_challenge
 from mpp.store import Store
 
 if TYPE_CHECKING:
+    from mpp.server.intent import Intent
     from mpp.server.method import Method
 
 R = TypeVar("R")
@@ -119,6 +136,122 @@ class Mpp:
         for intent_obj in intents.values():
             if hasattr(intent_obj, "_store") and intent_obj._store is None:
                 intent_obj._store = store
+
+    def _prepare_standalone_credential(
+        self,
+        value: Credential | str,
+        *,
+        intent: str | None,
+        request: dict[str, Any] | None,
+    ) -> tuple[Credential, Intent, dict[str, Any]]:
+        """Authenticate and resolve a credential outside the HTTP challenge flow."""
+        if isinstance(value, Credential):
+            credential = value
+        else:
+            value = value.strip()
+            authorization = value if value.lower().startswith("payment ") else f"Payment {value}"
+            try:
+                credential = Credential.from_authorization(authorization)
+            except ParseError as err:
+                raise MalformedCredentialError() from err
+
+        echo = credential.challenge
+        try:
+            echoed_request = _b64_decode(echo.request) if echo.request else {}
+            echoed_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+        except ParseError as err:
+            raise MalformedCredentialError() from err
+
+        if echo.realm != self.realm:
+            raise InvalidChallengeError(echo.id)
+        if echo.method != self.method.name:
+            raise PaymentMethodUnsupportedError(echo.method)
+        if intent is not None and echo.intent != intent:
+            raise InvalidChallengeError(echo.id)
+
+        expected_id = generate_challenge_id(
+            secret_key=self.secret_key,
+            realm=echo.realm,
+            method=echo.method,
+            intent=echo.intent,
+            request=echoed_request,
+            expires=echo.expires,
+            digest=echo.digest,
+            opaque=echoed_opaque,
+        )
+        if not _constant_time_equal(echo.id, expected_id):
+            raise InvalidChallengeError(echo.id)
+
+        if not echo.expires:
+            raise PaymentExpiredError()
+        try:
+            expires_at = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
+            if expires_at.tzinfo is None:
+                raise ValueError("expires must include a timezone")
+        except (TypeError, ValueError) as err:
+            raise PaymentExpiredError() from err
+        if expires_at < datetime.now(UTC):
+            raise PaymentExpiredError(echo.expires)
+
+        if request is not None and transform_units(request) != echoed_request:
+            raise InvalidChallengeError(echo.id, "credential request does not match")
+
+        intent_obj = self.method.intents.get(echo.intent)
+        if intent_obj is None:
+            raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
+        return credential, intent_obj, echoed_request
+
+    async def validate_credential(
+        self,
+        credential: Credential | str,
+        *,
+        intent: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> Validation:
+        """Validate a bound credential without consuming or broadcasting it."""
+        prepared, intent_obj, echoed_request = self._prepare_standalone_credential(
+            credential,
+            intent=intent,
+            request=request,
+        )
+        return await validate_intent_credential(
+            intent=intent_obj,
+            credential=prepared,
+            request=echoed_request,
+        )
+
+    async def broadcast_credential(
+        self,
+        credential: Credential | str,
+        *,
+        intent: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> Receipt:
+        """Revalidate and perform the terminal operation for a bound credential."""
+        prepared, intent_obj, echoed_request = self._prepare_standalone_credential(
+            credential,
+            intent=intent,
+            request=request,
+        )
+        return await broadcast_intent_credential(
+            intent=intent_obj,
+            credential=prepared,
+            request=echoed_request,
+        )
+
+    async def verify_credential(
+        self,
+        credential: Credential | str,
+        *,
+        intent: str | None = None,
+        request: dict[str, Any] | None = None,
+    ) -> Receipt:
+        """Legacy alias for :meth:`broadcast_credential`."""
+        return await self.broadcast_credential(
+            credential,
+            intent=intent,
+            request=request,
+        )
 
     @classmethod
     def create(
