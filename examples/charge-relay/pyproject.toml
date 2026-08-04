@@ -1,0 +1,13 @@
+[project]
+name = "charge-relay-example"
+version = "0.1.0"
+description = "Tempo API relay-backed pympp charge example"
+requires-python = ">=3.12"
+dependencies = [
+    "pympp[tempo,server]",
+    "fastapi",
+    "uvicorn",
+]
+
+[tool.uv.sources]
+pympp = { path = "../.." }

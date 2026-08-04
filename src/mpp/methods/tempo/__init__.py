@@ -44,6 +44,7 @@ _LAZY_EXPORTS = {
     "mpp.methods.tempo.account": ("TempoAccount",),
     "mpp.methods.tempo.client": ("TempoMethod", "TransactionError", "tempo"),
     "mpp.methods.tempo.intents": ("ChargeIntent", "Transfer", "get_transfers"),
+    "mpp.methods.tempo.relay": ("Relay", "RelayErrorCode"),
     "mpp.methods.tempo.schemas": ("Split",),
 }
 

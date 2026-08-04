@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from mpp import Challenge, Credential, Receipt, _constant_time_equal, generate_challenge_id
 from mpp._parsing import ParseError, _b64_decode
 from mpp._units import transform_units
+from mpp.server.intent import broadcast_credential
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -158,7 +159,11 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return new_challenge()
 
-    receipt: Receipt = await intent.verify(credential, request)
+    receipt: Receipt = await broadcast_credential(
+        intent=intent,
+        credential=credential,
+        request=request,
+    )
 
     return (credential, receipt)
 
