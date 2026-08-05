@@ -23,6 +23,7 @@ from mpp.methods.tempo.fee_payer_policy import get_policy
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.relay import Relay
     from mpp.server.intent import Intent
 
 
@@ -393,6 +394,7 @@ def tempo(
     recipient: str | None = None,
     decimals: int = 6,
     client_id: str | None = None,
+    relay: Relay | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -414,6 +416,7 @@ def tempo(
         recipient: Default recipient address for charges.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
+        relay: Optional server-side Tempo API relay for the charge intent.
 
     Returns:
         A configured TempoMethod instance.
@@ -468,5 +471,11 @@ def tempo(
             intent.rpc_url = rpc_url  # type: ignore[union-attr]
         if hasattr(intent, "_method"):
             intent._method = method  # type: ignore[union-attr]
-    method._intents = dict(intents)
+    configured_intents = dict(intents)
+    if relay is not None:
+        charge = configured_intents.get("charge")
+        if charge is None:
+            raise ValueError("relay requires a charge intent")
+        configured_intents["charge"] = relay.configure(charge)
+    method._intents = configured_intents
     return method

@@ -21,6 +21,7 @@ from mpp.errors import (
     PaymentExpiredError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
+from mpp.server.intent import broadcast_credential
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -210,7 +211,11 @@ async def verify_or_challenge(
         return await fail(PaymentExpiredError(echo.expires), credential)
 
     try:
-        receipt: Receipt = await intent.verify(credential, request)
+        receipt = await broadcast_credential(
+            intent=intent,
+            credential=credential,
+            request=request,
+        )
     except Exception as error:
         if events is not None:
             await events.emit(

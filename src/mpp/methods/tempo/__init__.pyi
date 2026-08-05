@@ -14,6 +14,8 @@ from mpp.methods.tempo.intents import SenderValidation as _SenderValidation
 from mpp.methods.tempo.intents import Transfer as _Transfer
 from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
+from mpp.methods.tempo.relay import Relay as _Relay
+from mpp.methods.tempo.relay import RelayErrorCode as _RelayErrorCode
 from mpp.methods.tempo.schemas import Split as _Split
 
 CHAIN_ID = _CHAIN_ID
@@ -32,4 +34,6 @@ SenderValidation = _SenderValidation
 Transfer = _Transfer
 ValidateSender = _ValidateSender
 get_transfers = _get_transfers
+Relay = _Relay
+RelayErrorCode = _RelayErrorCode
 Split = _Split

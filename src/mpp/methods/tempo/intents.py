@@ -18,6 +18,7 @@ from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._validation import Validation
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.fee_payer_policy import get_policy
@@ -547,23 +548,12 @@ class ChargeIntent:
             self._http_client = httpx.AsyncClient(timeout=self._timeout)
         return self._http_client
 
-    async def verify(
+    def _prepare_credential(
         self,
         credential: Credential,
         request: dict[str, Any],
-    ) -> Receipt:
-        """Verify a charge credential.
-
-        Args:
-            credential: The payment credential from the client.
-            request: The original payment request parameters.
-
-        Returns:
-            A receipt indicating success or failure.
-
-        Raises:
-            VerificationError: If verification fails.
-        """
+    ) -> tuple[ChargeRequest, CredentialPayload]:
+        """Parse the charge request and credential payload."""
         req = ChargeRequest.model_validate(request)
 
         # Expiry is conveyed via the challenge-level expires auth-param,
@@ -587,21 +577,83 @@ class ChargeIntent:
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
+        return req, payload
+
+    async def validate(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Validation:
+        """Validate a charge credential without consuming or broadcasting it."""
+        req, payload = self._prepare_credential(credential, request)
+
         if isinstance(payload, HashCredentialPayload):
-            return await self._verify_hash(
+            await self._validate_hash(
                 payload,
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
                 source=credential.source,
             )
+            details: dict[str, Any] = {"mode": "push"}
         else:
-            return await self._verify_transaction(
-                payload,
-                req,
-                challenge_id=credential.challenge.id,
-                realm=credential.challenge.realm,
-            )
+            self._validate_transaction_payload(payload.signature, req)
+            details = {"mode": "pull", "serializedTransaction": payload.signature}
+
+        return Validation(
+            challenge=credential.challenge,
+            credential=credential,
+            details=details,
+            intent=self.name,
+            method=credential.challenge.method,
+            request=dict(request),
+            source=credential.source,
+        )
+
+    async def broadcast(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Receipt:
+        """Perform the terminal charge operation."""
+        req, payload = self._prepare_credential(credential, request)
+
+        if isinstance(payload, HashCredentialPayload):
+            store_key = await self._reserve_hash(payload.hash)
+            try:
+                return await self._validate_hash(
+                    payload,
+                    req,
+                    challenge_id=credential.challenge.id,
+                    realm=credential.challenge.realm,
+                    source=credential.source,
+                )
+            except Exception:
+                if store_key is not None and self._store is not None:
+                    await self._store.delete(store_key)
+                raise
+        return await self._broadcast_transaction(
+            payload,
+            req,
+            challenge_id=credential.challenge.id,
+            realm=credential.challenge.realm,
+        )
+
+    async def verify(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Receipt:
+        """Backward-compatible terminal charge hook."""
+        return await self.broadcast(credential, request)
+
+    async def _reserve_hash(self, tx_hash: str) -> str | None:
+        if self._store is None:
+            return None
+        store_key = f"mpp:charge:{tx_hash.lower()}"
+        if not await self._store.put_if_absent(store_key, tx_hash):
+            raise VerificationError("Transaction hash already used")
+        return store_key
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
@@ -644,7 +696,7 @@ class ChargeIntent:
             )
         )
 
-    async def _verify_hash(
+    async def _validate_hash(
         self,
         payload: HashCredentialPayload,
         request: ChargeRequest,
@@ -652,33 +704,20 @@ class ChargeIntent:
         realm: str,
         source: str | None = None,
     ) -> Receipt:
-        """Verify a credential with a transaction hash."""
-        # Validate the source before reserving the hash.
+        """Validate a transaction hash without consuming its replay key."""
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         client = await self._get_client()
-
-        store_key: str | None = None
-        if self._store is not None:
-            store_key = f"mpp:charge:{payload.hash.lower()}"
-            if not await self._store.put_if_absent(store_key, payload.hash):
-                raise VerificationError("Transaction hash already used")
-
-        try:
-            receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-            self._verify_receipt_transfers(
-                receipt_data,
-                request,
-                challenge_id=challenge_id,
-                realm=realm,
-                source=source,
-                source_address=source_address,
-                validate_sender=self._validate_sender,
-            )
-        except Exception:
-            if self._store is not None and store_key is not None:
-                await self._store.delete(store_key)
-            raise
+        receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
+        self._verify_receipt_transfers(
+            receipt_data,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+            source=source,
+            source_address=source_address,
+            validate_sender=self._validate_sender,
+        )
 
         return Receipt.success(payload.hash)
 
@@ -951,7 +990,7 @@ class ChargeIntent:
 
         return all_matches
 
-    async def _verify_transaction(
+    async def _broadcast_transaction(
         self,
         payload: TransactionCredentialPayload,
         request: ChargeRequest,

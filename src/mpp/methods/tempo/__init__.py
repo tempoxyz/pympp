@@ -50,6 +50,7 @@ _LAZY_EXPORTS = {
         "ValidateSender",
         "get_transfers",
     ),
+    "mpp.methods.tempo.relay": ("Relay", "RelayErrorCode"),
     "mpp.methods.tempo.schemas": ("Split",),
 }
 

@@ -56,6 +56,10 @@ class PaymentError(Exception):
 
     type: str = f"{_BASE_URI}/payment-error"
 
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details = details
+
     def to_problem_details(self, challenge_id: str | None = None) -> dict[str, Any]:
         """Convert to RFC 9457 Problem Details format."""
         details: dict[str, Any] = {
@@ -68,6 +72,8 @@ class PaymentError(Exception):
             details["challengeId"] = challenge_id
         if self.hint is not None:
             details["hint"] = self.hint
+        if self.details is not None:
+            details["details"] = self.details
         return details
 
 
@@ -128,11 +134,16 @@ class InvalidChallengeError(PaymentError):
 class VerificationFailedError(PaymentError):
     """Payment proof is invalid or verification failed."""
 
-    def __init__(self, reason: str | None = None) -> None:
+    def __init__(
+        self,
+        reason: str | None = None,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         msg = (
             f"Payment verification failed: {reason}." if reason else "Payment verification failed."
         )
-        super().__init__(msg)
+        super().__init__(msg, details=details)
 
 
 class PaymentExpiredError(PaymentError):
