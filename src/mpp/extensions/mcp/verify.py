@@ -194,12 +194,16 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return new_challenge()
 
-    from mpp.server.intent import VerificationError
+    from mpp.server.intent import VerificationError, broadcast_credential
 
     core_credential = mcp_credential.to_core()
 
     try:
-        core_receipt = await intent.verify(core_credential, request)
+        core_receipt = await broadcast_credential(
+            intent=intent,
+            credential=core_credential,
+            request=request,
+        )
     except VerificationError as e:
         raise PaymentVerificationError(
             challenges=[new_challenge()],

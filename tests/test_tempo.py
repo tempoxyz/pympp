@@ -1154,6 +1154,41 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
+    async def test_validate_hash_is_non_mutating_until_broadcast(self) -> None:
+        from mpp import Receipt
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            expires=future,
+        )
+        request = {
+            "amount": "1000",
+            "currency": "0x1234567890123456789012345678901234567890",
+            "recipient": "0x4567890123456789012345678901234567890123",
+        }
+
+        with patch.object(
+            intent,
+            "_validate_hash",
+            new=AsyncMock(return_value=Receipt.success("0xabc123")),
+        ) as validate_hash:
+            validation = await intent.validate(credential, request)
+            assert validation.details == {"mode": "push"}
+            assert await store.get("mpp:charge:0xabc123") is None
+
+            receipt = await intent.broadcast(credential, request)
+            assert receipt.reference == "0xabc123"
+            assert await store.get("mpp:charge:0xabc123") == "0xabc123"
+            assert validate_hash.await_count == 2
+
+            with pytest.raises(VerificationError, match="Transaction hash already used"):
+                await intent.broadcast(credential, request)
+
+    @pytest.mark.asyncio
     async def test_verify_transaction_records_hash_and_blocks_hash_reuse(self) -> None:
         from mpp.store import MemoryStore
 

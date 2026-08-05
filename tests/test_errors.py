@@ -159,6 +159,10 @@ class TestSubclassInstantiation:
         err = VerificationFailedError()
         assert "verification failed" in str(err).lower()
 
+    def test_verification_failed_safe_details(self) -> None:
+        err = VerificationFailedError(details={"code": "insufficient_funds"})
+        assert err.to_problem_details()["details"] == {"code": "insufficient_funds"}
+
     def test_payment_expired_with_timestamp(self) -> None:
         err = PaymentExpiredError(expires="2024-01-01T00:00:00Z")
         assert "2024-01-01" in str(err)
