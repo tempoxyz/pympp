@@ -64,7 +64,14 @@ class Intent(Protocol):
 
 @runtime_checkable
 class SplitIntent(Intent, Protocol):
-    """Intent with separate validation and terminal broadcast hooks."""
+    """Intent with separate non-mutating validation and terminal broadcast hooks.
+
+    Implement both hooks to participate in the split lifecycle; intents that
+    implement only ``verify`` are dispatched through that legacy combined hook
+    instead. ``validate`` must not settle, reserve, or otherwise consume
+    payment state, so it can back a safe pre-check. ``broadcast`` performs the
+    terminal payment operation and returns its receipt.
+    """
 
     async def validate(
         self,
@@ -85,7 +92,19 @@ async def validate_credential(
     credential: Credential,
     request: dict[str, Any],
 ) -> Validation:
-    """Validate a credential without consuming payment state."""
+    """Run an intent's non-mutating validation hook.
+
+    Legacy intents that only implement ``verify`` are rejected: verification
+    may consume payment state, so it cannot back a safe pre-check. This is the
+    low-level dispatcher — it does not authenticate that the credential's
+    challenge was issued by a particular server. Use
+    :meth:`~mpp.server.Mpp.validate_credential` for credentials from
+    untrusted callers.
+
+    Raises:
+        VerificationFailedError: If the intent does not support non-mutating
+            validation or returns an invalid validation result.
+    """
     if not isinstance(intent, SplitIntent):
         raise VerificationFailedError(
             f"{intent.name} does not support non-mutating credential validation"
@@ -102,7 +121,14 @@ async def broadcast_credential(
     credential: Credential,
     request: dict[str, Any],
 ) -> Receipt:
-    """Revalidate and perform the credential's terminal payment operation."""
+    """Revalidate and perform the credential's terminal payment operation.
+
+    Split intents run ``validate`` before ``broadcast`` so a credential that
+    is no longer acceptable fails before settlement; legacy intents fall back
+    to their combined ``verify`` hook. Like :func:`validate_credential`, this
+    does not authenticate challenge issuance — use
+    :meth:`~mpp.server.Mpp.broadcast_credential` for untrusted input.
+    """
     if isinstance(intent, SplitIntent):
         await validate_credential(intent=intent, credential=credential, request=request)
         return await intent.broadcast(credential, request)

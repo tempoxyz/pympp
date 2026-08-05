@@ -584,7 +584,23 @@ class ChargeIntent:
         credential: Credential,
         request: dict[str, Any],
     ) -> Validation:
-        """Validate a charge credential without consuming or broadcasting it."""
+        """Validate a charge credential without consuming or broadcasting it.
+
+        Push-mode credentials are verified against the chain without
+        consuming the transaction hash's replay key; pull-mode transactions
+        are decoded and checked against the request without being broadcast.
+
+        Args:
+            credential: The payment credential from the client.
+            request: The original payment request parameters.
+
+        Returns:
+            A validation record whose ``details`` carry the settlement
+            ``mode`` and, in pull mode, the serialized transaction.
+
+        Raises:
+            VerificationError: If the credential is invalid.
+        """
         req, payload = self._prepare_credential(credential, request)
 
         if isinstance(payload, HashCredentialPayload):
@@ -612,7 +628,24 @@ class ChargeIntent:
         credential: Credential,
         request: dict[str, Any],
     ) -> Receipt:
-        """Perform the terminal charge operation."""
+        """Perform the terminal charge operation.
+
+        Push-mode credentials reserve the transaction hash's replay key
+        before re-verification — so concurrent duplicates fail fast — and
+        release it again if verification fails. Pull-mode transactions are
+        broadcast to the network.
+
+        Args:
+            credential: The payment credential from the client.
+            request: The original payment request parameters.
+
+        Returns:
+            A receipt for the settled payment.
+
+        Raises:
+            VerificationError: If verification fails or the transaction hash
+                was already used.
+        """
         req, payload = self._prepare_credential(credential, request)
 
         if isinstance(payload, HashCredentialPayload):
@@ -641,7 +674,11 @@ class ChargeIntent:
         credential: Credential,
         request: dict[str, Any],
     ) -> Receipt:
-        """Backward-compatible terminal charge hook."""
+        """Backward-compatible terminal charge hook.
+
+        Equivalent to :meth:`broadcast`; prefer :meth:`validate` for the
+        non-mutating pre-check and :meth:`broadcast` for settlement.
+        """
         return await self.broadcast(credential, request)
 
     async def _reserve_hash(self, tx_hash: str) -> str | None:

@@ -35,7 +35,10 @@ RelayErrorCode = Literal[
     "unsupported",
     "unknown",
 ]
+"""Stable machine-readable failure codes returned by the Tempo API relay."""
 
+# Only these codes surface to payers in problem details; everything else stays
+# opaque so relay internals and policy decisions do not leak.
 _SAFE_ERROR_CODES = frozenset(
     {
         "already_used",
@@ -50,7 +53,22 @@ _SAFE_ERROR_CODES = frozenset(
 
 
 class Relay:
-    """Delegate Tempo charge validation and finalization to an MPP relay."""
+    """Delegate Tempo charge validation and finalization to an MPP relay.
+
+    The relay receives every submitted credential: it validates both modes,
+    broadcasts pull-mode transactions, and finalizes push-mode transaction
+    hashes that are already on chain without sending them again. Relay
+    failures surface as payment errors that stay opaque except for the safe
+    machine-readable codes exposed in error ``details``.
+
+    Pass a relay to :func:`~mpp.methods.tempo.tempo` to serve a charge
+    intent's lifecycle through the Tempo API::
+
+        method = tempo(
+            intents={"charge": ChargeIntent()},
+            relay=Relay(api_key=os.environ["TEMPO_API_KEY"]),
+        )
+    """
 
     def __init__(
         self,
@@ -59,6 +77,17 @@ class Relay:
         http_client: httpx.AsyncClient | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
+        """Create a relay adapter.
+
+        Args:
+            api_key: Tempo API key with the ``mpp:write`` scope.
+            api_base_url: Tempo API or compatible relay base URL; a path
+                prefix is preserved.
+            http_client: Optional HTTP client to reuse. An injected client is
+                owned by the caller; otherwise the relay creates one lazily
+                and ``aclose()`` (or ``async with``) closes it.
+            timeout: HTTP timeout for the internally created client.
+        """
         if not api_key:
             raise ValueError("api_key is required")
         if not api_base_url:
@@ -70,7 +99,14 @@ class Relay:
         self._timeout = timeout
 
     def configure(self, intent: Intent) -> SplitIntent:
-        """Replace a charge intent's lifecycle hooks with relay calls."""
+        """Wrap a charge intent so its lifecycle is served by the relay.
+
+        The returned intent delegates ``validate``, ``broadcast``, and the
+        legacy ``verify`` entirely to ``/v1/mpp/validate`` and
+        ``/v1/mpp/broadcast``; the wrapped intent's local verification
+        configuration (RPC URL, replay store, sender validation) is not
+        consulted because the relay performs those checks itself.
+        """
         if intent.name != "charge":
             raise ValueError("Relay can only configure a charge intent")
         return _RelayCharge(self)
@@ -189,6 +225,12 @@ def _relay_input(credential: Credential) -> dict[str, Any]:
 
 
 def _idempotency_key(body: dict[str, Any]) -> str:
+    """Derive a deterministic broadcast idempotency key.
+
+    Pull-mode credentials use the signed transaction's hash so retries of the
+    same transaction collapse server-side; other payloads fall back to a hash
+    of the canonical relay input.
+    """
     payload = body.get("payload")
     if isinstance(payload, dict):
         signature = payload.get("signature")

@@ -192,7 +192,37 @@ class Mpp:
         intent: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> Validation:
-        """Validate a bound credential without consuming payment state."""
+        """Validate a bound credential without consuming payment state.
+
+        Authenticates the credential's echoed challenge against this server's
+        secret key (HMAC challenge ID, realm, method, expiry) before running
+        the intent's non-mutating ``validate`` hook. The result is advisory —
+        it confirms the credential is currently acceptable but does not
+        settle, reserve, or consume the payment — so no payment events are
+        emitted.
+
+        Args:
+            credential: A parsed ``Credential`` or its serialized form (the
+                ``Authorization`` header value, with or without the
+                ``Payment`` scheme prefix).
+            intent: If provided, also require the credential to be bound to
+                this intent name.
+            request: If provided, also require the credential's echoed
+                request to match these request parameters.
+
+        Returns:
+            The intent's validation record for the accepted credential.
+
+        Raises:
+            MalformedCredentialError: If the credential cannot be parsed.
+            InvalidChallengeError: If the challenge was not issued by this
+                server or does not match the requested binding.
+            PaymentExpiredError: If the echoed challenge has expired.
+            PaymentMethodUnsupportedError: If the credential names a method
+                or intent this server does not serve.
+            VerificationFailedError: If the intent does not support
+                non-mutating validation or rejects the credential.
+        """
         prepared, intent_obj, echoed_request, _ = self._prepare_credential(
             credential,
             intent=intent,
@@ -211,7 +241,30 @@ class Mpp:
         intent: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> Receipt:
-        """Revalidate and perform a bound credential's terminal operation."""
+        """Revalidate and perform a bound credential's terminal operation.
+
+        Applies the same challenge authentication as
+        :meth:`validate_credential`, then runs the intent's split lifecycle —
+        the non-mutating ``validate`` hook followed by the terminal
+        ``broadcast`` (legacy intents fall back to their combined ``verify``
+        hook). Emits the same payment success/failure events as HTTP route
+        handlers.
+
+        Args:
+            credential: A parsed ``Credential`` or its serialized form.
+            intent: If provided, also require the credential to be bound to
+                this intent name.
+            request: If provided, also require the credential's echoed
+                request to match these request parameters.
+
+        Returns:
+            The settlement receipt from the intent's terminal operation.
+
+        Raises:
+            The same challenge-authentication errors as
+            :meth:`validate_credential`, or the intent's verification error
+            if validation or settlement fails.
+        """
         prepared, intent_obj, echoed_request, challenge = self._prepare_credential(
             credential,
             intent=intent,
@@ -243,7 +296,11 @@ class Mpp:
         intent: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> Receipt:
-        """Backward-compatible alias for :meth:`broadcast_credential`."""
+        """Backward-compatible alias for :meth:`broadcast_credential`.
+
+        Prefer :meth:`validate_credential` for the non-mutating pre-check and
+        :meth:`broadcast_credential` for settlement.
+        """
         return await self.broadcast_credential(
             credential,
             intent=intent,
