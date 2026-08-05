@@ -1,12 +1,19 @@
 """Tests for split credential validation and broadcast."""
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from mpp import Challenge, Credential, Receipt
-from mpp.errors import InvalidChallengeError, VerificationFailedError
+from mpp.errors import (
+    InvalidChallengeError,
+    MalformedCredentialError,
+    PaymentExpiredError,
+    PaymentMethodUnsupportedError,
+    VerificationFailedError,
+)
 from mpp.server import (
     Intent,
     Mpp,
@@ -50,6 +57,20 @@ class FakeMethod:
 
     async def create_credential(self, challenge: Challenge) -> Credential:  # pragma: no cover
         raise NotImplementedError
+
+
+def _server(intent: SplitCharge | None = None) -> Mpp:
+    return Mpp.create(
+        method=FakeMethod(intent or SplitCharge()),
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+
+
+def _bound(request: dict[str, Any] | None = None, **kwargs: Any) -> Credential:
+    kwargs.setdefault("realm", "api.example.com")
+    kwargs.setdefault("secret_key", "test-secret")
+    return make_bound_credential(payload={}, request=request or {}, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -237,27 +258,78 @@ async def test_bound_broadcast_and_alias_emit_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mpp_rejects_tampered_bound_credential() -> None:
+@pytest.mark.parametrize("field", ["id", "realm", "method", "request", "expires"])
+async def test_mpp_rejects_tampered_bound_credential(field: str) -> None:
     intent = SplitCharge()
-    server = Mpp.create(
-        method=FakeMethod(intent),
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
-    credential = make_bound_credential(
-        payload={},
-        request={},
-        realm=server.realm,
-        secret_key=server.secret_key,
-    )
+    credential = _bound()
     credential = replace(
         credential,
-        challenge=replace(credential.challenge, id="tampered"),
+        challenge=replace(credential.challenge, **{field: "tampered"}),
     )
 
-    with pytest.raises(InvalidChallengeError):
-        await server.validate_credential(credential)
+    with pytest.raises((InvalidChallengeError, MalformedCredentialError)):
+        await _server(intent).validate_credential(credential)
     assert intent.calls == []
+
+
+@pytest.mark.asyncio
+async def test_mpp_rejects_credential_bound_to_other_realm_or_method() -> None:
+    server = _server()
+
+    with pytest.raises(InvalidChallengeError, match="realm does not match"):
+        await server.validate_credential(_bound(realm="other.example.com"))
+    with pytest.raises(PaymentMethodUnsupportedError):
+        await server.validate_credential(_bound(method="stripe"))
+
+
+@pytest.mark.asyncio
+async def test_mpp_rejects_intent_mismatches() -> None:
+    server = _server()
+
+    with pytest.raises(InvalidChallengeError, match="intent does not match"):
+        await server.validate_credential(_bound(), intent="refund")
+    with pytest.raises(PaymentMethodUnsupportedError):
+        await server.validate_credential(_bound(intent="refund"))
+
+
+@pytest.mark.asyncio
+async def test_mpp_rejects_request_mismatch() -> None:
+    credential = _bound(request={"amount": "1000"})
+
+    with pytest.raises(InvalidChallengeError, match="request does not match"):
+        await _server().validate_credential(credential, request={"amount": "2000"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["not-a-credential", "Payment ???"])
+async def test_mpp_rejects_malformed_serialized_credential(value: str) -> None:
+    with pytest.raises(MalformedCredentialError):
+        await _server().validate_credential(value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "expires",
+    [
+        None,
+        "not-a-date",
+        (datetime.now() + timedelta(hours=1)).isoformat(),  # naive: no timezone
+        (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+    ],
+)
+async def test_mpp_rejects_missing_or_invalid_expiry(expires: str | None) -> None:
+    challenge = Challenge.create(
+        secret_key="test-secret",
+        realm="api.example.com",
+        method="tempo",
+        intent="charge",
+        request={},
+        expires=expires,
+    )
+    credential = Credential(challenge=challenge.to_echo(), payload={})
+
+    with pytest.raises(PaymentExpiredError):
+        await _server().validate_credential(credential)
 
 
 @pytest.mark.asyncio
