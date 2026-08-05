@@ -2,16 +2,17 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 from eth_hash.auto import keccak
 
-from mpp import Credential, Receipt
+from mpp import Challenge, Credential, Receipt
 from mpp.errors import PaymentExpiredError, VerificationFailedError
 from mpp.methods.tempo import ChargeIntent, Relay, tempo
-from mpp.server import broadcast_credential
+from mpp.server import broadcast_credential, pay
 from mpp.store import MemoryStore
 from tests import make_bound_credential, make_credential
 
@@ -157,6 +158,71 @@ async def test_relay_hides_policy_errors() -> None:
 
     assert raised.value.details is None
     assert "policy" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_relay_rejection_returns_retryable_http_challenge() -> None:
+    def relay_handler(request: httpx.Request) -> httpx.Response:
+        return response(
+            {
+                "success": False,
+                "error": {"code": "insufficient_funds", "message": "private balance"},
+            }
+        )
+
+    class Request:
+        def __init__(self, authorization: str | None = None) -> None:
+            self.headers = {"Authorization": authorization} if authorization else {}
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(relay_handler)) as client:
+        method = tempo(
+            intents={"charge": ChargeIntent()},
+            relay=Relay(api_key="key", http_client=client),
+        )
+
+        @pay(
+            intent=method.intents["charge"],
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(
+            request: Request,
+            credential: Credential,
+            receipt: Receipt,
+        ) -> dict[str, bool]:
+            return {"paid": True}
+
+        initial: Any = await handler(Request())
+        initial_headers = initial.headers if hasattr(initial, "headers") else initial["headers"]
+        challenge = Challenge.from_www_authenticate(initial_headers["WWW-Authenticate"])
+        rejected: Any = await handler(
+            Request(
+                Credential(
+                    challenge=challenge.to_echo(),
+                    payload={"type": "transaction", "signature": "0x1234"},
+                ).to_authorization()
+            )
+        )
+
+    if hasattr(rejected, "status_code"):
+        status = rejected.status_code
+        headers = rejected.headers
+        body = json.loads(rejected.body)
+    else:
+        status = rejected["status"]
+        headers = rejected["headers"]
+        body = json.loads(rejected["body"])
+
+    retry = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
+    assert status == 402
+    assert headers["Content-Type"] == "application/problem+json"
+    assert retry.id != challenge.id
+    assert body["type"].endswith("/verification-failed")
+    assert body["status"] == 402
+    assert body["challengeId"] == retry.id
+    assert body["details"] == {"code": "insufficient_funds"}
+    assert "private balance" not in json.dumps(body)
 
 
 @pytest.mark.asyncio

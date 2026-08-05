@@ -34,7 +34,7 @@ from mpp.server.intent import Validation
 from mpp.server.intent import broadcast_credential as broadcast_intent_credential
 from mpp.server.intent import validate_credential as validate_intent_credential
 from mpp.server.method import transform_request
-from mpp.server.verify import _authenticate_echo, verify_or_challenge
+from mpp.server.verify import _authenticate_echo, _challenge_from_echo, verify_or_challenge
 from mpp.store import Store
 
 if TYPE_CHECKING:
@@ -137,7 +137,7 @@ class Mpp:
         *,
         intent: str | None,
         request: dict[str, Any] | None,
-    ) -> tuple[Credential, Intent, dict[str, Any]]:
+    ) -> tuple[Credential, Intent, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         if isinstance(value, Credential):
             credential = value
@@ -149,7 +149,10 @@ class Mpp:
                 raise MalformedCredentialError(str(error)) from error
 
         echo = credential.challenge
-        echoed_request, _ = _authenticate_echo(credential, secret_key=self.secret_key)
+        echoed_request, echoed_opaque = _authenticate_echo(
+            credential,
+            secret_key=self.secret_key,
+        )
 
         if echo.realm != self.realm:
             raise InvalidChallengeError(echo.id, "credential realm does not match")
@@ -179,7 +182,8 @@ class Mpp:
         intent_obj = self.method.intents.get(echo.intent)
         if intent_obj is None:
             raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
-        return credential, intent_obj, echoed_request
+        challenge = _challenge_from_echo(echo, echoed_request, echoed_opaque)
+        return credential, intent_obj, echoed_request, challenge
 
     async def validate_credential(
         self,
@@ -189,7 +193,7 @@ class Mpp:
         request: dict[str, Any] | None = None,
     ) -> Validation:
         """Validate a bound credential without consuming payment state."""
-        prepared, intent_obj, echoed_request = self._prepare_credential(
+        prepared, intent_obj, echoed_request, _ = self._prepare_credential(
             credential,
             intent=intent,
             request=request,
@@ -208,16 +212,29 @@ class Mpp:
         request: dict[str, Any] | None = None,
     ) -> Receipt:
         """Revalidate and perform a bound credential's terminal operation."""
-        prepared, intent_obj, echoed_request = self._prepare_credential(
+        prepared, intent_obj, echoed_request, challenge = self._prepare_credential(
             credential,
             intent=intent,
             request=request,
         )
-        return await broadcast_intent_credential(
-            intent=intent_obj,
-            credential=prepared,
-            request=echoed_request,
-        )
+        context = {
+            "challenge": challenge,
+            "credential": prepared,
+            "intent": intent_obj.name,
+            "method": self.method.name,
+            "request": echoed_request,
+        }
+        try:
+            receipt = await broadcast_intent_credential(
+                intent=intent_obj,
+                credential=prepared,
+                request=echoed_request,
+            )
+        except Exception as error:
+            await self._events.emit(PAYMENT_FAILED, {**context, "error": error})
+            raise
+        await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
+        return receipt
 
     async def verify_credential(
         self,

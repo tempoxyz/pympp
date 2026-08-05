@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from mpp import Challenge, Credential, Receipt, generate_challenge_id
+from mpp.errors import VerificationFailedError
 from mpp.extensions.mcp import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -734,6 +735,46 @@ class TestVerifyOrChallenge:
             )
 
         assert exc_info.value.detail == "Payment failed"
+
+    async def test_maps_split_payment_error_to_mcp_verification_error(self) -> None:
+        class SplitIntent:
+            name = "charge"
+
+            async def validate(self, credential: object, request: dict) -> object:
+                raise VerificationFailedError(
+                    details={"code": "insufficient_funds"},
+                )
+
+            async def broadcast(self, credential: object, request: dict) -> Receipt:
+                raise AssertionError("broadcast must not run after failed validation")
+
+            async def verify(self, credential: object, request: dict) -> Receipt:
+                raise AssertionError("split intent must not use the legacy hook")
+
+        challenge = _make_bound_mcp_challenge(request={"amount": "1000"})
+        mcp_credential = MCPCredential(
+            challenge=challenge,
+            payload={"type": "transaction", "signature": "0x1234"},
+        )
+
+        with pytest.raises(PaymentVerificationError) as exc_info:
+            await verify_or_challenge(
+                meta=mcp_credential.to_meta(),
+                intent=SplitIntent(),  # type: ignore[arg-type]
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key=MCP_TEST_SECRET,
+            )
+
+        error = exc_info.value.to_jsonrpc_error()
+        retry = error["data"]["challenges"][0]
+        assert error["code"] == CODE_PAYMENT_VERIFICATION_FAILED
+        assert error["data"]["httpStatus"] == 402
+        assert retry["id"] != challenge.id
+        assert error["data"]["failure"] == {
+            "reason": "verification-failed",
+            "detail": "Payment verification failed.",
+        }
 
     async def test_rejects_credential_with_wrong_realm(self) -> None:
         """Credential issued for realm-A should be rejected at realm-B."""

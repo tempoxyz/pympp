@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from mpp import Challenge
+from mpp import Credential, Receipt
 from mpp.methods.tempo import ChargeIntent, Relay, TempoAccount, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID
 from mpp.server import Mpp
@@ -52,20 +52,8 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/photo")
-async def photo(request: Request):
-    payment = await payments.charge(
-        authorization=request.headers.get("Authorization"),
-        amount="0.01",
-        description="Random photo",
-    )
-    if isinstance(payment, Challenge):
-        return JSONResponse(
-            {"error": "Payment required"},
-            status_code=402,
-            headers={"WWW-Authenticate": payment.to_www_authenticate(payments.realm)},
-        )
-
-    _, receipt = payment
+@payments.pay(amount="0.01", description="Random photo")
+async def photo(request: Request, credential: Credential, receipt: Receipt):
     return JSONResponse(
         {"url": "https://picsum.photos/1024/1024"},
         headers={"Payment-Receipt": receipt.to_payment_receipt()},

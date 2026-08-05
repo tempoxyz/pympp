@@ -18,6 +18,7 @@ from mpp._units import transform_units
 from mpp.errors import (
     InvalidChallengeError,
     MalformedCredentialError,
+    PaymentError,
     PaymentExpiredError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
@@ -199,6 +200,9 @@ async def verify_or_challenge(
             credential=credential,
             request=request,
         )
+    except PaymentError as error:
+        error.retry_challenge = await fail(error, credential)
+        raise
     except Exception as error:
         if events is not None:
             await events.emit(

@@ -1,6 +1,7 @@
 """Tests for split credential validation and broadcast."""
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -159,6 +160,80 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
         "validate",
         "broadcast",
     ]
+
+
+@pytest.mark.asyncio
+async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> None:
+    intent = SplitCharge()
+    server = Mpp.create(
+        method=FakeMethod(intent),
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+    events: list[tuple[str, dict[str, Any]]] = []
+    server.on_payment_success(lambda payload: events.append(("success", payload)))
+    server.on_payment_failed(lambda payload: events.append(("failed", payload)))
+    request = {"amount": "1000"}
+    credential = make_bound_credential(
+        payload={},
+        request=request,
+        realm=server.realm,
+        secret_key=server.secret_key,
+    )
+
+    await server.validate_credential(credential)
+    assert events == []
+
+    receipt = await server.broadcast_credential(credential)
+
+    assert len(events) == 1
+    name, payload = events[0]
+    assert name == "success"
+    assert payload["challenge"].id == credential.challenge.id
+    assert payload["credential"] == credential
+    assert payload["intent"] == "charge"
+    assert payload["method"] == "tempo"
+    assert payload["receipt"] == receipt
+    assert payload["request"] == request
+
+
+@pytest.mark.asyncio
+async def test_bound_broadcast_and_alias_emit_failures() -> None:
+    class RejectingCharge(SplitCharge):
+        async def validate(self, credential: Credential, request: dict) -> Validation:
+            self.calls.append("validate")
+            raise VerificationFailedError("risk denied")
+
+    intent = RejectingCharge()
+    server = Mpp.create(
+        method=FakeMethod(intent),
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+    failures: list[dict[str, Any]] = []
+    server.on_payment_failed(failures.append)
+    request = {"amount": "1000"}
+    credential = make_bound_credential(
+        payload={},
+        request=request,
+        realm=server.realm,
+        secret_key=server.secret_key,
+    )
+
+    with pytest.raises(VerificationFailedError, match="risk denied"):
+        await server.broadcast_credential(credential)
+    with pytest.raises(VerificationFailedError, match="risk denied"):
+        await server.verify_credential(credential)
+
+    assert len(failures) == 2
+    for payload in failures:
+        assert payload["challenge"].id == credential.challenge.id
+        assert payload["credential"] == credential
+        assert payload["intent"] == "charge"
+        assert payload["method"] == "tempo"
+        assert isinstance(payload["error"], VerificationFailedError)
+        assert payload["request"] == request
+    assert intent.calls == ["validate", "validate"]
 
 
 @pytest.mark.asyncio

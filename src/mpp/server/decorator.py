@@ -9,7 +9,7 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
-from mpp.errors import PaymentRequiredError
+from mpp.errors import PaymentError, PaymentRequiredError
 from mpp.events import EventDispatcher
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
@@ -119,13 +119,17 @@ def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> di
     return {**request_params, "_mppx_scope": scope}
 
 
-def make_challenge_response(challenge: Challenge, realm: str) -> Any:
+def make_challenge_response(
+    challenge: Challenge,
+    realm: str,
+    error: PaymentError | None = None,
+) -> Any:
     """Build a 402 response for a payment challenge with RFC 9457 problem details body.
 
     Returns a Starlette ``Response`` when starlette is installed,
     otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
     """
-    error = PaymentRequiredError(realm=realm, description=challenge.description)
+    error = error or PaymentRequiredError(realm=realm, description=challenge.description)
     body = _json.dumps(error.to_problem_details(challenge.id))
     headers = {
         "WWW-Authenticate": challenge.to_www_authenticate(realm),
@@ -203,7 +207,12 @@ def wrap_payment_handler(
 
         authorization = get_authorization(request_obj)
 
-        result = await verify_fn(authorization, request_obj)
+        try:
+            result = await verify_fn(authorization, request_obj)
+        except PaymentError as error:
+            if not isinstance(error.retry_challenge, Challenge):
+                raise
+            return make_challenge_response(error.retry_challenge, realm_fn(), error)
 
         if isinstance(result, Challenge):
             return make_challenge_response(result, realm_fn())

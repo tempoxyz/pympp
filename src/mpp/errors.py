@@ -47,6 +47,7 @@ class PaymentError(Exception):
     title: str = "Payment Error"
     hint: str | None = None
     details: dict[str, Any] | None = None
+    retry_challenge: Any | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
