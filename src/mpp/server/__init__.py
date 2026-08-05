@@ -49,7 +49,6 @@ from mpp.server.intent import (
     broadcast_credential,
     intent,
     validate_credential,
-    verify_credential,
 )
 from mpp.server.method import Method, transform_request
 from mpp.server.mpp import Mpp

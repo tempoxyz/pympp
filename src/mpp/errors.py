@@ -46,6 +46,7 @@ class PaymentError(Exception):
     status: int = 402
     title: str = "Payment Error"
     hint: str | None = None
+    details: dict[str, Any] | None = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -55,10 +56,6 @@ class PaymentError(Exception):
             cls.title = _to_title(cls.__name__)
 
     type: str = f"{_BASE_URI}/payment-error"
-
-    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.details = details
 
     def to_problem_details(self, challenge_id: str | None = None) -> dict[str, Any]:
         """Convert to RFC 9457 Problem Details format."""
@@ -143,7 +140,8 @@ class VerificationFailedError(PaymentError):
         msg = (
             f"Payment verification failed: {reason}." if reason else "Payment verification failed."
         )
-        super().__init__(msg, details=details)
+        super().__init__(msg)
+        self.details = details
 
 
 class PaymentExpiredError(PaymentError):

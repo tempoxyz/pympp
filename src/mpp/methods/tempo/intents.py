@@ -601,13 +601,10 @@ class ChargeIntent:
             details = {"mode": "pull", "serializedTransaction": payload.signature}
 
         return Validation(
-            challenge=credential.challenge,
             credential=credential,
             details=details,
             intent=self.name,
-            method=credential.challenge.method,
             request=dict(request),
-            source=credential.source,
         )
 
     async def broadcast(
