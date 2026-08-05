@@ -5,14 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
-from mpp._parsing import ParseError, _b64_decode
+from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._validation import Validation
-from mpp.errors import PaymentExpiredError, VerificationFailedError
+from mpp.errors import PaymentExpiredError, VerificationError, VerificationFailedError
 
 if TYPE_CHECKING:
     import httpx
@@ -37,7 +36,6 @@ RelayErrorCode = Literal[
     "unknown",
 ]
 
-_ERROR_CODES = frozenset(get_args(RelayErrorCode))
 _SAFE_ERROR_CODES = frozenset(
     {
         "already_used",
@@ -103,7 +101,7 @@ class Relay:
         body: dict[str, Any],
         *,
         idempotency_key: str | None = None,
-    ) -> Any:
+    ) -> dict[str, Any]:
         headers = {
             "Accept": "application/json",
             "content-type": "application/json",
@@ -119,18 +117,15 @@ class Relay:
                 json=body,
                 headers=headers,
             )
-            if not response.is_success:
-                raise _failure()
-            return response.json()
-        except (PaymentExpiredError, VerificationFailedError):
-            raise
+            result = response.json() if response.is_success else None
         except Exception:
             raise _failure() from None
-
-    async def _validate(self, body: dict[str, Any]) -> None:
-        result = await self._post("v1/mpp/validate", body)
         if not isinstance(result, dict) or result.get("success") is not True:
             raise _failure(result)
+        return result
+
+    async def _validate(self, body: dict[str, Any]) -> None:
+        await self._post("v1/mpp/validate", body)
 
     async def _broadcast(self, body: dict[str, Any]) -> Receipt:
         result = await self._post(
@@ -138,8 +133,6 @@ class Relay:
             body,
             idempotency_key=_idempotency_key(body),
         )
-        if not isinstance(result, dict) or result.get("success") is not True:
-            raise _failure(result)
         return _receipt(result.get("receipt"))
 
 
@@ -157,13 +150,10 @@ class _RelayCharge:
         body = _relay_input(credential)
         await self._relay._validate(body)
         return Validation(
-            challenge=credential.challenge,
             credential=credential,
             details={},
             intent=self.name,
-            method=credential.challenge.method,
             request=dict(request),
-            source=credential.source,
         )
 
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
@@ -203,14 +193,12 @@ def _idempotency_key(body: dict[str, Any]) -> str:
     if isinstance(payload, dict):
         signature = payload.get("signature")
         if payload.get("type") == "transaction" and isinstance(signature, str):
-            try:
-                raw = bytes.fromhex(signature.removeprefix("0x"))
-            except ValueError:
-                pass
-            else:
-                from eth_hash.auto import keccak
+            from mpp.methods.tempo.intents import _raw_transaction_hash
 
-                return f"pympp_0x{keccak(raw).hex()}"
+            try:
+                return f"pympp_{_raw_transaction_hash(signature)}"
+            except VerificationError:
+                pass
 
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return f"pympp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
@@ -231,8 +219,8 @@ def _receipt(value: Any) -> Receipt:
     ):
         raise _failure()
     try:
-        parsed_timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    except ValueError:
+        parsed_timestamp = _parse_timestamp(timestamp)
+    except ParseError:
         raise _failure() from None
     if parsed_timestamp.tzinfo is None:
         raise _failure()
@@ -260,4 +248,4 @@ def _error_code(value: Any) -> str | None:
     if not isinstance(value, dict) or not isinstance(value.get("error"), dict):
         return None
     code = value["error"].get("code")
-    return code if isinstance(code, str) and code in _ERROR_CODES else None
+    return code if isinstance(code, str) else None

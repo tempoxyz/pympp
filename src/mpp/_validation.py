@@ -13,10 +13,19 @@ if TYPE_CHECKING:
 class Validation:
     """Result of non-mutating credential validation."""
 
-    challenge: ChallengeEcho
     credential: Credential
     details: Any
     intent: str
-    method: str
     request: dict[str, Any]
-    source: str | None = None
+
+    @property
+    def challenge(self) -> ChallengeEcho:
+        return self.credential.challenge
+
+    @property
+    def method(self) -> str:
+        return self.credential.challenge.method
+
+    @property
+    def source(self) -> str | None:
+        return self.credential.source

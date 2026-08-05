@@ -6,8 +6,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from mpp import Challenge, Credential, Receipt, _constant_time_equal, generate_challenge_id
-from mpp._parsing import ParseError, _b64_decode
+from mpp import Challenge, Credential, Receipt
+from mpp._parsing import ParseError, _parse_timestamp
 from mpp._units import parse_units, transform_units
 from mpp.errors import (
     InvalidChallengeError,
@@ -34,7 +34,7 @@ from mpp.server.intent import Validation
 from mpp.server.intent import broadcast_credential as broadcast_intent_credential
 from mpp.server.intent import validate_credential as validate_intent_credential
 from mpp.server.method import transform_request
-from mpp.server.verify import verify_or_challenge
+from mpp.server.verify import _authenticate_echo, verify_or_challenge
 from mpp.store import Store
 
 if TYPE_CHECKING:
@@ -149,11 +149,7 @@ class Mpp:
                 raise MalformedCredentialError(str(error)) from error
 
         echo = credential.challenge
-        try:
-            echoed_request = _b64_decode(echo.request) if echo.request else {}
-            echoed_opaque = _b64_decode(echo.opaque) if echo.opaque else None
-        except ParseError as error:
-            raise MalformedCredentialError(str(error)) from error
+        echoed_request, _ = _authenticate_echo(credential, secret_key=self.secret_key)
 
         if echo.realm != self.realm:
             raise InvalidChallengeError(echo.id, "credential realm does not match")
@@ -162,26 +158,13 @@ class Mpp:
         if intent is not None and echo.intent != intent:
             raise InvalidChallengeError(echo.id, "credential intent does not match")
 
-        expected_id = generate_challenge_id(
-            secret_key=self.secret_key,
-            realm=echo.realm,
-            method=echo.method,
-            intent=echo.intent,
-            request=echoed_request,
-            expires=echo.expires,
-            digest=echo.digest,
-            opaque=echoed_opaque,
-        )
-        if not _constant_time_equal(echo.id, expected_id):
-            raise InvalidChallengeError(echo.id, "challenge was not issued by this server")
-
+        if not echo.expires:
+            raise PaymentExpiredError(echo.expires)
         try:
-            expires = datetime.fromisoformat((echo.expires or "").replace("Z", "+00:00"))
-            if expires.tzinfo is None:
-                raise ValueError
-        except (TypeError, ValueError) as error:
+            expires = _parse_timestamp(echo.expires)
+        except ParseError as error:
             raise PaymentExpiredError(echo.expires) from error
-        if expires < datetime.now(UTC):
+        if expires.tzinfo is None or expires < datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
         if request is not None:

@@ -26,13 +26,10 @@ class SplitCharge:
     async def validate(self, credential: Credential, request: dict) -> Validation:
         self.calls.append("validate")
         return Validation(
-            challenge=credential.challenge,
             credential=credential,
             details={"mode": "pull"},
             intent=self.name,
-            method=credential.challenge.method,
             request=request,
-            source=credential.source,
         )
 
     async def broadcast(self, credential: Credential, request: dict) -> Receipt:
