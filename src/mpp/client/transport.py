@@ -150,8 +150,31 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     continue
                 challenges.append(parsed)
 
+        from mpp.methods.tempo.session import is_tip1034_session_challenge
+
+        session_match = next(
+            (
+                (candidate, method)
+                for candidate in challenges
+                if is_tip1034_session_challenge(candidate)
+                for method in self._runtime.methods
+                if method.name == candidate.method
+                and (manager := getattr(method, "session_manager", None)) is not None
+                and manager.can_handle_challenge(candidate)
+            ),
+            None,
+        )
+        non_session_challenges = [
+            candidate
+            for candidate in challenges
+            if not (candidate.method == "tempo" and candidate.intent == "session")
+        ]
         try:
-            challenge, matched_method = self._runtime.match_challenge(challenges)
+            challenge, matched_method = (
+                session_match
+                if session_match is not None
+                else self._runtime.match_challenge(non_session_challenges)
+            )
         except ValueError as match_error:
             if parse_error is not None or challenges:
                 # Surface parse/method-selection failures to observers while
@@ -175,6 +198,20 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             raise PaymentError(
                 "Streaming request bodies cannot be replayed after a payment challenge. "
                 "Use a buffered body for paid requests."
+            )
+
+        session_manager = getattr(matched_method, "session_manager", None)
+        if challenge.intent == "session" and session_manager is not None:
+            from mpp.methods.tempo.session import AsyncSessionPaymentTransport
+
+            session_transport = AsyncSessionPaymentTransport(
+                session_manager,
+                inner=self._inner,
+            )
+            return await session_transport.handle_payment_required(
+                request,
+                response,
+                replayable=replayable,
             )
 
         try:

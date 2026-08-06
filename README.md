@@ -71,6 +71,7 @@ transport = PaymentTransport(runtime=payments)
 | [api-server](./examples/api-server/) | Payment-gated API server |
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
+| [tempo-session-httpx](./examples/tempo-session-httpx.md) | Durable TIP-1034 HTTP and SSE client |
 
 ## Protocol
 
