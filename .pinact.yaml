@@ -8,9 +8,9 @@ rules:
       - expr: |
           ActionRepoFullName in ["tempoxyz/gh-actions", "tempoxyz/mpp-tools"]
       - expr: ActionVersion matches "^[0-9a-f]{40}$"
-  # The changelog action is pinned to the commit trusted by PyPI's OIDC
-  # publishing policy rather than to a release tag.
+  # The changelog action may be pinned to an unreleased commit trusted by
+  # PyPI's OIDC publishing policy rather than to a release tag.
   - ignore: true
     conditions:
-      - expr: |
-          ActionName == "wevm/changelogs" && ActionVersion == "466632795bfca34dc9bb7f7bcab9f50c6e3f3726"
+      - expr: ActionName == "wevm/changelogs"
+      - expr: ActionVersion matches "^[0-9a-f]{40}$"
