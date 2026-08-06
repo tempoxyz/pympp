@@ -131,12 +131,7 @@ async def test_legacy_intent_falls_back_to_verify() -> None:
 async def test_route_uses_split_lifecycle() -> None:
     intent = SplitCharge()
     request = {"amount": "1000"}
-    credential = make_bound_credential(
-        payload={},
-        request=request,
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
+    credential = _bound(request)
 
     result = await verify_or_challenge(
         authorization=credential.to_authorization(),
@@ -154,18 +149,9 @@ async def test_route_uses_split_lifecycle() -> None:
 @pytest.mark.asyncio
 async def test_mpp_exposes_bound_lifecycle() -> None:
     intent = SplitCharge()
-    server = Mpp.create(
-        method=FakeMethod(intent),
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
+    server = _server(intent)
     request = {"amount": "1000"}
-    credential = make_bound_credential(
-        payload={},
-        request=request,
-        realm=server.realm,
-        secret_key=server.secret_key,
-    )
+    credential = _bound(request)
 
     validation = await server.validate_credential(credential.to_authorization(), request=request)
     receipt = await server.broadcast_credential(credential, intent="charge", request=request)
@@ -186,21 +172,12 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
 @pytest.mark.asyncio
 async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> None:
     intent = SplitCharge()
-    server = Mpp.create(
-        method=FakeMethod(intent),
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
+    server = _server(intent)
     events: list[tuple[str, dict[str, Any]]] = []
     server.on_payment_success(lambda payload: events.append(("success", payload)))
     server.on_payment_failed(lambda payload: events.append(("failed", payload)))
     request = {"amount": "1000"}
-    credential = make_bound_credential(
-        payload={},
-        request=request,
-        realm=server.realm,
-        secret_key=server.secret_key,
-    )
+    credential = _bound(request)
 
     await server.validate_credential(credential)
     assert events == []
@@ -226,20 +203,11 @@ async def test_bound_broadcast_and_alias_emit_failures() -> None:
             raise VerificationFailedError("risk denied")
 
     intent = RejectingCharge()
-    server = Mpp.create(
-        method=FakeMethod(intent),
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
+    server = _server(intent)
     failures: list[dict[str, Any]] = []
     server.on_payment_failed(failures.append)
     request = {"amount": "1000"}
-    credential = make_bound_credential(
-        payload={},
-        request=request,
-        realm=server.realm,
-        secret_key=server.secret_key,
-    )
+    credential = _bound(request)
 
     with pytest.raises(VerificationFailedError, match="risk denied"):
         await server.broadcast_credential(credential)

@@ -6,7 +6,7 @@ from mpp import BodyDigest, Challenge, Credential, Receipt
 from mpp.events import EventDispatcher
 from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
-from tests import make_bound_credential, make_credential
+from tests import MockRequest, challenge_from_402, make_bound_credential, make_credential
 
 try:
     from starlette.responses import Response as StarletteResponse
@@ -633,37 +633,11 @@ class TestCrossEndpointReplay:
         assert result.intent == "charge"
 
 
-class MockRequest:
-    """Mock request object for testing."""
-
-    def __init__(
-        self,
-        authorization: str | None = None,
-        body: bytes | None = None,
-        path: str | None = None,
-        route: str | None = None,
-        query_string: str | None = None,
-    ) -> None:
-        self.headers = {"authorization": authorization} if authorization else {}
-        self.body = body
-        if path is not None:
-            self.path = path
-        if route is not None:
-            self.route = route
-        if query_string is not None:
-            self.query_string = query_string
-
-
 class DjangoStyleRequest:
     """Mock Django-style request object for testing."""
 
     def __init__(self, authorization: str | None = None) -> None:
         self.META = {"HTTP_AUTHORIZATION": authorization} if authorization else {}
-
-
-def challenge_from_402(result) -> Challenge:
-    headers = result.headers if HAS_STARLETTE else result["headers"]
-    return Challenge.from_www_authenticate(headers["WWW-Authenticate"])
 
 
 class TestWrapPaymentHandler:

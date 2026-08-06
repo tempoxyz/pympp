@@ -774,6 +774,7 @@ class TestVerifyOrChallenge:
         assert error["data"]["failure"] == {
             "reason": "verification-failed",
             "detail": "Payment verification failed.",
+            "details": {"code": "insufficient_funds"},
         }
 
     async def test_rejects_credential_with_wrong_realm(self) -> None:

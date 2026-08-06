@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import secrets
-from typing import Any
 
 import httpx
 
@@ -12,29 +11,19 @@ from mpp import Receipt
 from mpp.client import Client
 from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
-
-
-async def rpc(client: httpx.AsyncClient, method: str, params: list[Any]) -> Any:
-    response = await client.post(
-        TESTNET_RPC_URL,
-        json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-    )
-    response.raise_for_status()
-    result = response.json()
-    if "error" in result:
-        raise RuntimeError(str(result["error"]))
-    return result["result"]
+from mpp.methods.tempo._rpc import _rpc_call
 
 
 async def fund(account: TempoAccount) -> None:
     balance_call = "0x70a08231" + "0" * 24 + account.address[2:].lower()
     async with httpx.AsyncClient(timeout=30) as client:
-        await rpc(client, "tempo_fundAddress", [account.address])
+        await _rpc_call(TESTNET_RPC_URL, "tempo_fundAddress", [account.address], client=client)
         for _ in range(60):
-            balance = await rpc(
-                client,
+            balance = await _rpc_call(
+                TESTNET_RPC_URL,
                 "eth_call",
                 [{"to": PATH_USD, "data": balance_call}, "latest"],
+                client=client,
             )
             if int(balance, 16) > 0:
                 return

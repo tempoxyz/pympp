@@ -210,6 +210,7 @@ async def verify_or_challenge(
             challenges=[new_challenge()],
             reason="verification-failed",
             detail=str(e),
+            details=getattr(e, "details", None),
         ) from e
 
     mcp_receipt = MCPReceipt.from_core(

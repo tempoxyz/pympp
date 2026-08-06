@@ -1,6 +1,8 @@
 """Tests for the Tempo API relay adapter."""
 
 import json
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -11,10 +13,10 @@ from eth_hash.auto import keccak
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import PaymentExpiredError, VerificationFailedError
-from mpp.methods.tempo import ChargeIntent, Relay, tempo
+from mpp.methods.tempo import ChargeIntent, Relay, TempoMethod, tempo
 from mpp.server import broadcast_credential, pay
 from mpp.store import MemoryStore
-from tests import make_bound_credential, make_credential
+from tests import MockRequest, challenge_from_402, make_bound_credential, make_credential
 
 
 def credential(payload: dict | None = None) -> Credential:
@@ -27,6 +29,20 @@ def credential(payload: dict | None = None) -> Credential:
 
 def response(body: dict, status: int = 200) -> httpx.Response:
     return httpx.Response(status, json=body)
+
+
+@asynccontextmanager
+async def relay_method(
+    handler: Callable[[httpx.Request], httpx.Response],
+    **relay_kwargs: Any,
+) -> AsyncIterator[TempoMethod]:
+    """Yield a tempo method whose charge intent is served by a mock relay."""
+    relay_kwargs.setdefault("api_key", "key")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        yield tempo(
+            intents={"charge": ChargeIntent()},
+            relay=Relay(http_client=client, **relay_kwargs),
+        )
 
 
 @pytest.mark.asyncio
@@ -48,15 +64,11 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
             }
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(
-                api_key="tempo:sk:test",
-                api_base_url="https://relay.example/mpp",
-                http_client=client,
-            ),
-        )
+    async with relay_method(
+        handler,
+        api_key="tempo:sk:test",
+        api_base_url="https://relay.example/mpp",
+    ) as method:
         result = await broadcast_credential(
             intent=method.intents["charge"],
             credential=credential(),
@@ -69,7 +81,7 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
         "/mpp/v1/mpp/broadcast",
     ]
     assert calls[0].headers["tempo-api-key"] == "tempo:sk:test"
-    expected_key = "pympp_0x" + keccak(bytes.fromhex("1234")).hex()
+    expected_key = "mppx_0x" + keccak(bytes.fromhex("1234")).hex()
     assert calls[1].headers["idempotency-key"] == expected_key
     body = json.loads(calls[0].content)
     assert body["challenge"]["request"] == {"amount": "1000"}
@@ -95,11 +107,7 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
             }
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(handler) as method:
         result = await broadcast_credential(
             intent=method.intents["charge"],
             credential=credential({"type": "hash", "hash": "0xpushed"}),
@@ -108,6 +116,23 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
 
     assert result.reference == "0xpushed"
     assert paths == ["/v1/mpp/validate", "/v1/mpp/broadcast"]
+
+
+@pytest.mark.asyncio
+async def test_relay_validate_posts_to_validate_endpoint() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return response({"success": True})
+
+    async with relay_method(handler) as method:
+        validation = await method.intents["charge"].validate(  # type: ignore[attr-defined]
+            credential(), {"amount": "1000"}
+        )
+
+    assert paths == ["/v1/mpp/validate"]
+    assert validation.request == {"amount": "1000"}
 
 
 @pytest.mark.asyncio
@@ -125,11 +150,7 @@ async def test_relay_exposes_only_safe_error_details(code: str, details: dict) -
     def handler(request: httpx.Request) -> httpx.Response:
         return response({"success": False, "error": {"code": code, "message": "private"}})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(handler) as method:
         with pytest.raises(VerificationFailedError) as raised:
             await method.intents["charge"].validate(credential(), {"amount": "1000"})  # type: ignore[attr-defined]
 
@@ -148,11 +169,7 @@ async def test_relay_hides_policy_errors() -> None:
             }
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(handler) as method:
         with pytest.raises(VerificationFailedError) as raised:
             await method.intents["charge"].validate(credential(), {})  # type: ignore[attr-defined]
 
@@ -170,15 +187,7 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
             }
         )
 
-    class Request:
-        def __init__(self, authorization: str | None = None) -> None:
-            self.headers = {"Authorization": authorization} if authorization else {}
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(relay_handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(relay_handler) as method:
 
         @pay(
             intent=method.intents["charge"],
@@ -187,17 +196,16 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
             secret_key="test-secret",
         )
         async def handler(
-            request: Request,
+            request: MockRequest,
             credential: Credential,
             receipt: Receipt,
         ) -> dict[str, bool]:
             return {"paid": True}
 
-        initial: Any = await handler(Request())
-        initial_headers = initial.headers if hasattr(initial, "headers") else initial["headers"]
-        challenge = Challenge.from_www_authenticate(initial_headers["WWW-Authenticate"])
+        initial: Any = await handler(MockRequest())
+        challenge = challenge_from_402(initial)
         rejected: Any = await handler(
-            Request(
+            MockRequest(
                 Credential(
                     challenge=challenge.to_echo(),
                     payload={"type": "transaction", "signature": "0x1234"},
@@ -230,11 +238,7 @@ async def test_relay_maps_expired_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return response({"success": False, "error": {"code": "expired"}})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(handler) as method:
         with pytest.raises(PaymentExpiredError):
             await method.intents["charge"].validate(credential(), {})  # type: ignore[attr-defined]
 
@@ -246,11 +250,7 @@ async def test_relay_rejects_invalid_receipt() -> None:
             return response({"success": True})
         return response({"success": True, "receipt": {"method": "stripe"}})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key="key", http_client=client),
-        )
+    async with relay_method(handler) as method:
         with pytest.raises(VerificationFailedError):
             await broadcast_credential(
                 intent=method.intents["charge"],

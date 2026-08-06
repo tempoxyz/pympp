@@ -99,7 +99,7 @@ class Relay:
         self._timeout = timeout
 
     def configure(self, intent: Intent) -> SplitIntent:
-        """Wrap a charge intent so its lifecycle is served by the relay.
+        """Wrap an intent so its lifecycle is served by the relay.
 
         The returned intent delegates ``validate``, ``broadcast``, and the
         legacy ``verify`` entirely to ``/v1/mpp/validate`` and
@@ -107,9 +107,7 @@ class Relay:
         configuration (RPC URL, replay store, sender validation) is not
         consulted because the relay performs those checks itself.
         """
-        if intent.name != "charge":
-            raise ValueError("Relay can only configure a charge intent")
-        return _RelayCharge(self)
+        return _RelayIntent(self, intent.name)
 
     async def __aenter__(self) -> Relay:
         await self._get_client()
@@ -160,22 +158,10 @@ class Relay:
             raise _failure(result)
         return result
 
-    async def _validate(self, body: dict[str, Any]) -> None:
-        await self._post("v1/mpp/validate", body)
 
-    async def _broadcast(self, body: dict[str, Any]) -> Receipt:
-        result = await self._post(
-            "v1/mpp/broadcast",
-            body,
-            idempotency_key=_idempotency_key(body),
-        )
-        return _receipt(result.get("receipt"))
-
-
-class _RelayCharge:
-    name = "charge"
-
-    def __init__(self, relay: Relay) -> None:
+class _RelayIntent:
+    def __init__(self, relay: Relay, name: str = "charge") -> None:
+        self.name = name
         self._relay = relay
 
     async def validate(
@@ -184,18 +170,28 @@ class _RelayCharge:
         request: dict[str, Any],
     ) -> Validation:
         body = _relay_input(credential)
-        await self._relay._validate(body)
+        await self._relay._post("v1/mpp/validate", body)
+        # The relay validated the credential's echoed challenge request, so
+        # the validation record reports that request (mirrors mppx).
         return Validation(
             credential=credential,
             details={},
             intent=self.name,
-            request=dict(request),
+            request=body["challenge"]["request"],
         )
 
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        return await self._relay._broadcast(_relay_input(credential))
+        body = _relay_input(credential)
+        result = await self._relay._post(
+            "v1/mpp/broadcast",
+            body,
+            idempotency_key=_idempotency_key(body),
+        )
+        return _receipt(result.get("receipt"))
 
     async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
+        # Preserve the legacy combined hook for direct intent consumers,
+        # mirroring mppx's relay adapter.
         await self.validate(credential, request)
         return await self.broadcast(credential, request)
 
@@ -228,8 +224,9 @@ def _idempotency_key(body: dict[str, Any]) -> str:
     """Derive a deterministic broadcast idempotency key.
 
     Pull-mode credentials use the signed transaction's hash so retries of the
-    same transaction collapse server-side; other payloads fall back to a hash
-    of the canonical relay input.
+    same transaction collapse server-side — the ``mppx_`` namespace is shared
+    across MPP SDKs; other payloads fall back to a hash of the canonical
+    relay input.
     """
     payload = body.get("payload")
     if isinstance(payload, dict):
@@ -238,12 +235,12 @@ def _idempotency_key(body: dict[str, Any]) -> str:
             from mpp.methods.tempo.intents import _raw_transaction_hash
 
             try:
-                return f"pympp_{_raw_transaction_hash(signature)}"
+                return f"mppx_{_raw_transaction_hash(signature)}"
             except VerificationError:
                 pass
 
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return f"pympp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return f"mppx_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _receipt(value: Any) -> Receipt:

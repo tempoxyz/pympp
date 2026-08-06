@@ -79,7 +79,9 @@ class PaymentVerificationError(McpError):
     """Payment verification failed.
 
     Raised when a credential was provided but verification failed.
-    Returns error code -32043 with a fresh challenge.
+    Returns error code -32043 with a fresh challenge. Machine-readable
+    ``details`` (e.g. safe relay error codes) are included in the failure
+    payload when provided.
 
     Example:
         raise PaymentVerificationError(
@@ -94,49 +96,44 @@ class PaymentVerificationError(McpError):
         challenges: list[MCPChallenge],
         reason: str | None = None,
         detail: str | None = None,
+        details: dict[str, Any] | None = None,
         message: str = "Payment Verification Failed",
     ) -> None:
         self.challenges = challenges
         self.reason = reason
         self.detail = detail
+        self.details = details
         self.message = message
-
-        data: dict[str, Any] = {
-            "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
-            "challenges": [c.to_dict() for c in challenges],
-        }
-        if reason is not None or detail is not None:
-            failure: dict[str, str] = {}
-            if reason is not None:
-                failure["reason"] = reason
-            if detail is not None:
-                failure["detail"] = detail
-            data["failure"] = failure
 
         error = ErrorData(
             code=CODE_PAYMENT_VERIFICATION_FAILED,
             message=message,
-            data=data,
+            data=self._error_data(),
         )
         super().__init__(error)
 
-    def to_jsonrpc_error(self) -> dict[str, Any]:
-        """Convert to JSON-RPC error response format."""
+    def _error_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
             "challenges": [c.to_dict() for c in self.challenges],
         }
-        if self.reason is not None or self.detail is not None:
-            failure: dict[str, str] = {}
-            if self.reason is not None:
-                failure["reason"] = self.reason
-            if self.detail is not None:
-                failure["detail"] = self.detail
+        failure: dict[str, Any] = {}
+        if self.reason is not None:
+            failure["reason"] = self.reason
+        if self.detail is not None:
+            failure["detail"] = self.detail
+        if self.details is not None:
+            failure["details"] = self.details
+        if failure:
             data["failure"] = failure
+        return data
+
+    def to_jsonrpc_error(self) -> dict[str, Any]:
+        """Convert to JSON-RPC error response format."""
         return {
             "code": CODE_PAYMENT_VERIFICATION_FAILED,
             "message": self.message,
-            "data": data,
+            "data": self._error_data(),
         }
 
 

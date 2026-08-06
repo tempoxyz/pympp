@@ -124,9 +124,10 @@ async def broadcast_credential(
     """Revalidate and perform the credential's terminal payment operation.
 
     Split intents run ``validate`` before ``broadcast`` so a credential that
-    is no longer acceptable fails before settlement; legacy intents fall back
-    to their combined ``verify`` hook. Like :func:`validate_credential`, this
-    does not authenticate challenge issuance — use
+    is no longer acceptable fails before settlement, matching mppx's
+    ``broadcastCredential`` dispatch; legacy intents fall back to their
+    combined ``verify`` hook. Like :func:`validate_credential`, this does not
+    authenticate challenge issuance — use
     :meth:`~mpp.server.Mpp.broadcast_credential` for untrusted input.
     """
     if isinstance(intent, SplitIntent):
