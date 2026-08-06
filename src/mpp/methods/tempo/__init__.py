@@ -51,6 +51,20 @@ _LAZY_EXPORTS = {
         "get_transfers",
     ),
     "mpp.methods.tempo.schemas": ("Split",),
+    "mpp.methods.tempo.session": (
+        "AsyncSessionPaymentTransport",
+        "ChannelDescriptor",
+        "MemorySessionStore",
+        "SQLiteSessionStore",
+        "SessionCredentialProvider",
+        "SessionPaymentTransport",
+        "SessionPolicy",
+        "SessionRecord",
+        "TempoAccountCredentialProvider",
+        "TempoSessionManager",
+        "TempoSessionProtocol",
+        "TempoSessionRpc",
+    ),
 }
 
 

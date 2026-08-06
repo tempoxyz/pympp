@@ -23,6 +23,7 @@ from mpp.methods.tempo.fee_payer_policy import get_policy
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.session import TempoSessionManager
     from mpp.server.intent import Intent
 
 
@@ -74,6 +75,7 @@ class TempoMethod:
     recipient: str | None = None
     decimals: int = 6
     client_id: str | None = None
+    session_manager: TempoSessionManager | None = None
     _intents: dict[str, Intent] = field(default_factory=dict)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
@@ -136,6 +138,11 @@ class TempoMethod:
             ValueError: If no account is configured or intent is unsupported.
             TransactionError: If transaction building fails.
         """
+        if challenge.intent == "session":
+            if self.session_manager is None:
+                raise ValueError("No Tempo session manager configured")
+            return await self.session_manager.prepare(challenge, resource_url="")
+
         if self.account is None:
             raise ValueError("No account configured for signing")
 
@@ -393,6 +400,7 @@ def tempo(
     recipient: str | None = None,
     decimals: int = 6,
     client_id: str | None = None,
+    session_manager: TempoSessionManager | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -414,6 +422,7 @@ def tempo(
         recipient: Default recipient address for charges.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
+        session_manager: Reusable TIP-1034 session lifecycle manager.
 
     Returns:
         A configured TempoMethod instance.
@@ -460,6 +469,7 @@ def tempo(
         recipient=recipient,
         decimals=decimals,
         client_id=client_id,
+        session_manager=session_manager,
     )
     method._chain_id_explicit = chain_id_explicit
     method._rpc_url_explicit = rpc_url_explicit

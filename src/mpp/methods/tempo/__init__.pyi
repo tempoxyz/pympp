@@ -15,6 +15,22 @@ from mpp.methods.tempo.intents import Transfer as _Transfer
 from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
 from mpp.methods.tempo.schemas import Split as _Split
+from mpp.methods.tempo.session import (
+    AsyncSessionPaymentTransport as _AsyncSessionPaymentTransport,
+)
+from mpp.methods.tempo.session import ChannelDescriptor as _ChannelDescriptor
+from mpp.methods.tempo.session import MemorySessionStore as _MemorySessionStore
+from mpp.methods.tempo.session import SessionCredentialProvider as _SessionCredentialProvider
+from mpp.methods.tempo.session import SessionPaymentTransport as _SessionPaymentTransport
+from mpp.methods.tempo.session import SessionPolicy as _SessionPolicy
+from mpp.methods.tempo.session import SessionRecord as _SessionRecord
+from mpp.methods.tempo.session import SQLiteSessionStore as _SQLiteSessionStore
+from mpp.methods.tempo.session import (
+    TempoAccountCredentialProvider as _TempoAccountCredentialProvider,
+)
+from mpp.methods.tempo.session import TempoSessionManager as _TempoSessionManager
+from mpp.methods.tempo.session import TempoSessionProtocol as _TempoSessionProtocol
+from mpp.methods.tempo.session import TempoSessionRpc as _TempoSessionRpc
 
 CHAIN_ID = _CHAIN_ID
 ESCROW_CONTRACTS = _ESCROW_CONTRACTS
@@ -33,3 +49,15 @@ Transfer = _Transfer
 ValidateSender = _ValidateSender
 get_transfers = _get_transfers
 Split = _Split
+AsyncSessionPaymentTransport = _AsyncSessionPaymentTransport
+ChannelDescriptor = _ChannelDescriptor
+MemorySessionStore = _MemorySessionStore
+SQLiteSessionStore = _SQLiteSessionStore
+SessionCredentialProvider = _SessionCredentialProvider
+SessionPaymentTransport = _SessionPaymentTransport
+SessionPolicy = _SessionPolicy
+SessionRecord = _SessionRecord
+TempoAccountCredentialProvider = _TempoAccountCredentialProvider
+TempoSessionManager = _TempoSessionManager
+TempoSessionProtocol = _TempoSessionProtocol
+TempoSessionRpc = _TempoSessionRpc
