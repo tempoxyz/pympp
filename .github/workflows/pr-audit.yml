@@ -29,7 +29,7 @@ jobs:
     needs: authorize
     permissions:
       contents: read
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@98b1081dcf34361b576aca2ab3041772708582ef
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@483bda4a2a4b5e04a51edff03768c1590d271f80
     secrets:
       EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
       EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
