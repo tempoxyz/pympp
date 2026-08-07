@@ -38,7 +38,7 @@ from mpp.server.verify import _authenticate_echo, _challenge_from_echo, verify_o
 from mpp.store import Store
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
     from mpp.server.method import Method
 
 R = TypeVar("R")
@@ -137,7 +137,7 @@ class Mpp:
         *,
         intent: str | None,
         request: dict[str, Any] | None,
-    ) -> tuple[Credential, Intent | SplitIntent, dict[str, Any], Challenge]:
+    ) -> tuple[Credential, Intent | VerifiableIntent, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         if isinstance(value, Credential):
             credential = value
@@ -244,8 +244,8 @@ class Mpp:
         """Revalidate and perform a bound credential's terminal operation.
 
         Applies the same challenge authentication as
-        :meth:`validate_credential`, then runs the intent's split lifecycle —
-        the non-mutating ``validate`` hook followed by the terminal
+        :meth:`validate_credential`, then runs the intent's validate-then-broadcast
+        lifecycle — the non-mutating ``validate`` hook followed by the terminal
         ``broadcast`` (legacy intents fall back to their combined ``verify``
         hook). Emits the same payment success/failure events as HTTP route
         handlers.

@@ -43,8 +43,8 @@ from mpp.events import (
 from mpp.server.decorator import pay
 from mpp.server.intent import (
     Intent,
-    SplitIntent,
     Validation,
+    VerifiableIntent,
     VerificationError,
     broadcast_credential,
     intent,

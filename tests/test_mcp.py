@@ -736,8 +736,8 @@ class TestVerifyOrChallenge:
 
         assert exc_info.value.detail == "Payment failed"
 
-    async def test_maps_split_payment_error_to_mcp_verification_error(self) -> None:
-        class SplitIntent:
+    async def test_maps_verifiable_payment_error_to_mcp_verification_error(self) -> None:
+        class VerifiableIntent:
             name = "charge"
 
             async def validate(self, credential: object, request: dict) -> object:
@@ -757,7 +757,7 @@ class TestVerifyOrChallenge:
         with pytest.raises(PaymentVerificationError) as exc_info:
             await verify_or_challenge(
                 meta=mcp_credential.to_meta(),
-                intent=SplitIntent(),  # type: ignore[arg-type]
+                intent=VerifiableIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
                 realm="api.example.com",
                 secret_key=MCP_TEST_SECRET,

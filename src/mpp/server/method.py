@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mpp import Challenge, Credential
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 
 @runtime_checkable
@@ -25,7 +25,7 @@ class Method(Protocol):
             name = "stripe"
 
             @property
-            def intents(self) -> Mapping[str, Intent | SplitIntent]:
+            def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
                 return {"charge": StripeChargeIntent(self.api_key)}
 
             async def create_credential(self, challenge: Challenge) -> Credential:
@@ -36,7 +36,7 @@ class Method(Protocol):
     name: str
 
     @property
-    def intents(self) -> Mapping[str, Intent | SplitIntent]:
+    def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
         """Available intents for this method."""
         ...
 

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 class Validation:
     """Result of non-mutating credential validation.
 
-    Returned by ``SplitIntent.validate`` and exposed from
+    Returned by ``VerifiableIntent.validate`` and exposed from
     ``Mpp.validate_credential()``. A validation confirms that a credential is
     currently acceptable to the payment method; it does not settle, reserve,
     or otherwise consume the payment, and a later broadcast may still fail.

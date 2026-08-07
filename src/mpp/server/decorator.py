@@ -15,7 +15,7 @@ from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 R = TypeVar("R")
 
@@ -227,7 +227,7 @@ def wrap_payment_handler(
 
 def pay(
     *,
-    intent: Intent | SplitIntent,
+    intent: Intent | VerifiableIntent,
     request: RequestParamsType,
     realm: str | None = None,
     secret_key: str | None = None,

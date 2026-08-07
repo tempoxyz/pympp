@@ -1,4 +1,4 @@
-"""Tests for split credential validation and broadcast."""
+"""Tests for credential validation and broadcast."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,8 +17,8 @@ from mpp.errors import (
 from mpp.server import (
     Intent,
     Mpp,
-    SplitIntent,
     Validation,
+    VerifiableIntent,
     broadcast_credential,
     validate_credential,
     verify_or_challenge,
@@ -26,7 +26,7 @@ from mpp.server import (
 from tests import make_bound_credential, make_credential
 
 
-class SplitCharge:
+class VerifiableCharge:
     name = "charge"
 
     def __init__(self) -> None:
@@ -43,22 +43,22 @@ class SplitCharge:
 
     async def broadcast(self, credential: Credential, request: dict) -> Receipt:
         self.calls.append("broadcast")
-        return Receipt.success("split-reference")
+        return Receipt.success("verifiable-reference")
 
 
 class FakeMethod:
     name = "tempo"
 
-    def __init__(self, charge: SplitCharge) -> None:
-        self.intents: dict[str, Intent | SplitIntent] = {"charge": charge}
+    def __init__(self, charge: VerifiableCharge) -> None:
+        self.intents: dict[str, Intent | VerifiableIntent] = {"charge": charge}
 
     async def create_credential(self, challenge: Challenge) -> Credential:  # pragma: no cover
         raise NotImplementedError
 
 
-def _server(intent: SplitCharge | None = None) -> Mpp:
+def _server(intent: VerifiableCharge | None = None) -> Mpp:
     return Mpp.create(
-        method=FakeMethod(intent or SplitCharge()),
+        method=FakeMethod(intent or VerifiableCharge()),
         realm="api.example.com",
         secret_key="test-secret",
     )
@@ -72,7 +72,7 @@ def _bound(request: dict[str, Any] | None = None, **kwargs: Any) -> Credential:
 
 @pytest.mark.asyncio
 async def test_validation_is_non_mutating() -> None:
-    intent = SplitCharge()
+    intent = VerifiableCharge()
     result = await validate_credential(
         intent=intent,
         credential=make_credential(payload={}),
@@ -85,14 +85,14 @@ async def test_validation_is_non_mutating() -> None:
 
 @pytest.mark.asyncio
 async def test_broadcast_revalidates_before_terminal_hook() -> None:
-    intent = SplitCharge()
+    intent = VerifiableCharge()
     receipt = await broadcast_credential(
         intent=intent,
         credential=make_credential(payload={}),
         request={},
     )
 
-    assert receipt.reference == "split-reference"
+    assert receipt.reference == "verifiable-reference"
     assert intent.calls == ["validate", "broadcast"]
 
 
@@ -125,8 +125,8 @@ async def test_legacy_intent_falls_back_to_verify() -> None:
 
 
 @pytest.mark.asyncio
-async def test_route_uses_split_lifecycle() -> None:
-    intent = SplitCharge()
+async def test_route_uses_verifiable_lifecycle() -> None:
+    intent = VerifiableCharge()
     request = {"amount": "1000"}
     credential = _bound(request)
 
@@ -139,13 +139,13 @@ async def test_route_uses_split_lifecycle() -> None:
     )
 
     assert isinstance(result, tuple)
-    assert result[1].reference == "split-reference"
+    assert result[1].reference == "verifiable-reference"
     assert intent.calls == ["validate", "broadcast"]
 
 
 @pytest.mark.asyncio
 async def test_mpp_exposes_bound_lifecycle() -> None:
-    intent = SplitCharge()
+    intent = VerifiableCharge()
     server = _server(intent)
     request = {"amount": "1000"}
     credential = _bound(request)
@@ -154,13 +154,13 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
     receipt = await server.broadcast_credential(credential, intent="charge", request=request)
 
     assert validation.request == request
-    assert receipt.reference == "split-reference"
+    assert receipt.reference == "verifiable-reference"
     assert intent.calls == ["validate", "validate", "broadcast"]
 
 
 @pytest.mark.asyncio
 async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> None:
-    intent = SplitCharge()
+    intent = VerifiableCharge()
     server = _server(intent)
     events: list[tuple[str, dict[str, Any]]] = []
     server.on_payment_success(lambda payload: events.append(("success", payload)))
@@ -186,7 +186,7 @@ async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> Non
 
 @pytest.mark.asyncio
 async def test_bound_broadcast_emits_failures() -> None:
-    class RejectingCharge(SplitCharge):
+    class RejectingCharge(VerifiableCharge):
         async def validate(self, credential: Credential, request: dict) -> Validation:
             self.calls.append("validate")
             raise VerificationFailedError("risk denied")
@@ -228,7 +228,7 @@ async def test_invalid_intent_has_a_typed_failure() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["id", "realm", "method", "request", "expires"])
 async def test_mpp_rejects_tampered_bound_credential(field: str) -> None:
-    intent = SplitCharge()
+    intent = VerifiableCharge()
     credential = _bound()
     credential = replace(
         credential,
@@ -302,13 +302,13 @@ async def test_mpp_rejects_missing_or_invalid_expiry(expires: str | None) -> Non
 
 @pytest.mark.asyncio
 async def test_invalid_validation_result_is_rejected() -> None:
-    class InvalidSplit(SplitCharge):
+    class InvalidVerifiable(VerifiableCharge):
         async def validate(self, credential: Credential, request: dict) -> Validation:
             return {}  # type: ignore[return-value]
 
     with pytest.raises(VerificationFailedError, match="invalid validation result"):
         await validate_credential(
-            intent=InvalidSplit(),
+            intent=InvalidVerifiable(),
             credential=make_credential(payload={}),
             request={},
         )

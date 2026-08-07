@@ -16,7 +16,7 @@ from mpp.errors import PaymentExpiredError, VerificationError, VerificationFaile
 if TYPE_CHECKING:
     import httpx
 
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class Relay:
         self._owns_client = http_client is None
         self._timeout = timeout
 
-    def configure(self, intent: Intent | SplitIntent) -> SplitIntent:
+    def configure(self, intent: Intent | VerifiableIntent) -> VerifiableIntent:
         """Wrap an intent so its lifecycle is served by the relay.
 
         The returned intent delegates ``validate`` and ``broadcast`` to

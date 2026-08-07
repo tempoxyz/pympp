@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.relay import Relay
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 
 # Tempo AA (type-0x76) transactions have higher intrinsic gas than legacy txs
@@ -77,14 +77,14 @@ class TempoMethod:
     recipient: str | None = None
     decimals: int = 6
     client_id: str | None = None
-    _intents: dict[str, Intent | SplitIntent] = field(default_factory=dict)
+    _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
 
     @property
-    def intents(self) -> dict[str, Intent | SplitIntent]:
+    def intents(self) -> dict[str, Intent | VerifiableIntent]:
         """Available intents for this method."""
         return self._intents
 
@@ -386,7 +386,7 @@ class TempoMethod:
 
 
 def tempo(
-    intents: Mapping[str, Intent | SplitIntent],
+    intents: Mapping[str, Intent | VerifiableIntent],
     account: TempoAccount | None = None,
     fee_payer: TempoAccount | None = None,
     chain_id: int | None | object = _CHAIN_ID_UNSET,

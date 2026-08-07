@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mpp import Credential as CredentialType
-    from mpp.server.intent import Intent, SplitIntent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 
 @dataclass(frozen=True)
@@ -66,10 +66,10 @@ class StripeMethod:
     recipient: str | None = None
     network_id: str | None = None
     payment_method_types: list[str] = field(default_factory=lambda: ["card"])
-    _intents: dict[str, Intent | SplitIntent] = field(default_factory=dict)
+    _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
 
     @property
-    def intents(self) -> dict[str, Intent | SplitIntent]:
+    def intents(self) -> dict[str, Intent | VerifiableIntent]:
         """Available intents for this method."""
         return self._intents
 
@@ -185,7 +185,7 @@ def _parse_iso_timestamp(iso_str: str) -> float:
 
 
 def stripe(
-    intents: Mapping[str, Intent | SplitIntent],
+    intents: Mapping[str, Intent | VerifiableIntent],
     create_token: CreateTokenFn | None = None,
     payment_method: str | None = None,
     external_id: str | None = None,
