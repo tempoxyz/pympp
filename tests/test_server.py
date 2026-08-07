@@ -797,7 +797,7 @@ class TestPay:
             challenge = Challenge.from_www_authenticate(
                 challenge_response.headers["WWW-Authenticate"]
             )
-            assert challenge.request["_mpp_scope"] == {
+            assert challenge.request["_mppx_scope"] == {
                 "route": "/paid/{id}",
                 "resource": "/paid/one",
                 "query": "view=full",
@@ -835,7 +835,7 @@ class TestPay:
             MockRequest(path="/paid/one", route="/paid/{id}", query_string="view=full")
         )
         challenge = challenge_from_402(challenge_result)
-        assert challenge.request["_mpp_scope"] == {
+        assert challenge.request["_mppx_scope"] == {
             "route": "/paid/{id}",
             "resource": "/paid/one",
             "query": "view=full",
@@ -1154,7 +1154,7 @@ class TestMppPay:
 
     @pytest.mark.asyncio
     async def test_exposes_server_event_helpers(self) -> None:
-        """Mpp should expose server event helper methods."""
+        """Mpp should expose challenge and payment event helpers."""
         events: list[str] = []
 
         @intent(name="charge")
@@ -1246,7 +1246,7 @@ class TestMppPay:
             MockRequest(path="/paid/one", route="/paid/{id}", query_string="view=full")
         )
         challenge = challenge_from_402(challenge_result)
-        assert challenge.request["_mpp_scope"] == {
+        assert challenge.request["_mppx_scope"] == {
             "route": "/paid/{id}",
             "resource": "/paid/one",
             "query": "view=full",

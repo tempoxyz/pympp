@@ -17,7 +17,8 @@ uv run server.py
 `TEMPO_API_URL` can target a compatible self-hosted or preview Tempo API
 (default `https://api.tempo.xyz`). `MPP_SECRET_KEY` protects the
 server-issued challenges; the example has a development-only default so it
-can run locally without one.
+can run locally without one. The server listens on port 8000 by default; set
+`PORT` to override it.
 
 Then run the included payer in another terminal:
 
@@ -39,7 +40,6 @@ The server flow is:
 
 `Mpp.validate_credential()` exposes the advisory phase independently;
 `Mpp.broadcast_credential()` revalidates before the terminal phase.
-`Mpp.verify_credential()` remains available as a terminal compatibility alias.
 
 When the relay declines a payment, the route responds with a 402
 problem-details body carrying only safe machine-readable error codes (for

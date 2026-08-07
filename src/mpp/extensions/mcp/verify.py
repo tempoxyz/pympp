@@ -48,7 +48,7 @@ from mpp.extensions.mcp.errors import (
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, SplitIntent
 
 DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 
@@ -56,7 +56,7 @@ DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 async def verify_or_challenge(
     *,
     meta: dict[str, Any] | None,
-    intent: Intent,
+    intent: Intent | SplitIntent,
     request: dict[str, Any],
     realm: str,
     secret_key: str,

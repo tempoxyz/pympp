@@ -17,6 +17,7 @@ from mpp.errors import (
 from mpp.server import (
     Intent,
     Mpp,
+    SplitIntent,
     Validation,
     broadcast_credential,
     validate_credential,
@@ -44,16 +45,12 @@ class SplitCharge:
         self.calls.append("broadcast")
         return Receipt.success("split-reference")
 
-    async def verify(self, credential: Credential, request: dict) -> Receipt:
-        self.calls.append("verify")
-        return Receipt.success("legacy-reference")
-
 
 class FakeMethod:
     name = "tempo"
 
     def __init__(self, charge: SplitCharge) -> None:
-        self.intents: dict[str, Intent] = {"charge": charge}
+        self.intents: dict[str, Intent | SplitIntent] = {"charge": charge}
 
     async def create_credential(self, challenge: Challenge) -> Credential:  # pragma: no cover
         raise NotImplementedError
@@ -155,18 +152,10 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
 
     validation = await server.validate_credential(credential.to_authorization(), request=request)
     receipt = await server.broadcast_credential(credential, intent="charge", request=request)
-    alias_receipt = await server.verify_credential(credential)
 
     assert validation.request == request
     assert receipt.reference == "split-reference"
-    assert alias_receipt.reference == "split-reference"
-    assert intent.calls == [
-        "validate",
-        "validate",
-        "broadcast",
-        "validate",
-        "broadcast",
-    ]
+    assert intent.calls == ["validate", "validate", "broadcast"]
 
 
 @pytest.mark.asyncio
@@ -196,7 +185,7 @@ async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> Non
 
 
 @pytest.mark.asyncio
-async def test_bound_broadcast_and_alias_emit_failures() -> None:
+async def test_bound_broadcast_emits_failures() -> None:
     class RejectingCharge(SplitCharge):
         async def validate(self, credential: Credential, request: dict) -> Validation:
             self.calls.append("validate")
@@ -211,10 +200,8 @@ async def test_bound_broadcast_and_alias_emit_failures() -> None:
 
     with pytest.raises(VerificationFailedError, match="risk denied"):
         await server.broadcast_credential(credential)
-    with pytest.raises(VerificationFailedError, match="risk denied"):
-        await server.verify_credential(credential)
 
-    assert len(failures) == 2
+    assert len(failures) == 1
     for payload in failures:
         assert payload["challenge"].id == credential.challenge.id
         assert payload["credential"] == credential
@@ -222,7 +209,20 @@ async def test_bound_broadcast_and_alias_emit_failures() -> None:
         assert payload["method"] == "tempo"
         assert isinstance(payload["error"], VerificationFailedError)
         assert payload["request"] == request
-    assert intent.calls == ["validate", "validate"]
+    assert intent.calls == ["validate"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_intent_has_a_typed_failure() -> None:
+    class InvalidCharge:
+        name = "charge"
+
+    with pytest.raises(VerificationFailedError, match="verification or broadcast"):
+        await broadcast_credential(
+            intent=InvalidCharge(),  # type: ignore[arg-type]
+            credential=make_credential(payload={}),
+            request={},
+        )
 
 
 @pytest.mark.asyncio

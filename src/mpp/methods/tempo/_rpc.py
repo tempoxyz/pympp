@@ -1,4 +1,4 @@
-"""Low-level JSON-RPC helpers for Tempo transactions."""
+"""Low-level JSON-RPC helpers for Tempo."""
 
 from __future__ import annotations
 
@@ -31,6 +31,24 @@ async def _rpc_call(
     if "error" in result:
         raise RuntimeError(f"RPC error: {result['error']}")
     return result["result"]
+
+
+async def _tip20_balance(
+    rpc_url: str,
+    token: str,
+    address: str,
+    *,
+    client: Any | None = None,
+) -> int:
+    """Return an address's TIP-20 balance."""
+    data = "0x70a08231" + address.removeprefix("0x").lower().zfill(64)
+    result = await _rpc_call(
+        rpc_url,
+        "eth_call",
+        [{"to": token, "data": data}, "latest"],
+        client=client,
+    )
+    return int(result, 16)
 
 
 async def get_tx_params(

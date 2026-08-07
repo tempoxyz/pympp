@@ -23,6 +23,7 @@ from mpp.methods.tempo import (
 )
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
+from mpp.methods.tempo._rpc import _tip20_balance
 from mpp.methods.tempo.client import TempoMethod
 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 from mpp.methods.tempo.fee_payer_policy import get_policy
@@ -65,6 +66,37 @@ def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Res
 
 def amount_data(amount: int) -> str:
     return "0x" + hex(amount)[2:].zfill(64)
+
+
+@pytest.mark.asyncio
+async def test_tip20_balance() -> None:
+    client = AsyncMock()
+    client.post.return_value = mock_response(json={"result": "0x2a"})
+    address = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+    balance = await _tip20_balance(
+        "https://rpc.test",
+        "0x20c0000000000000000000000000000000000000",
+        address,
+        client=client,
+    )
+
+    assert balance == 42
+    client.post.assert_awaited_once_with(
+        "https://rpc.test",
+        json={
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [
+                {
+                    "to": "0x20c0000000000000000000000000000000000000",
+                    "data": "0x70a08231" + "0" * 24 + address[2:].lower(),
+                },
+                "latest",
+            ],
+            "id": 1,
+        },
+    )
 
 
 class TestTempoAccount:

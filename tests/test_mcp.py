@@ -748,9 +748,6 @@ class TestVerifyOrChallenge:
             async def broadcast(self, credential: object, request: dict) -> Receipt:
                 raise AssertionError("broadcast must not run after failed validation")
 
-            async def verify(self, credential: object, request: dict) -> Receipt:
-                raise AssertionError("split intent must not use the legacy hook")
-
         challenge = _make_bound_mcp_challenge(request={"amount": "1000"})
         mcp_credential = MCPCredential(
             challenge=challenge,

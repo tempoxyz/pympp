@@ -15,7 +15,7 @@ from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, SplitIntent
 
 R = TypeVar("R")
 
@@ -111,12 +111,12 @@ def framework_scope(request: Any) -> dict[str, str]:
 
 def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
     """Return request params with automatic framework scope when available."""
-    if "_mpp_scope" in request_params:
+    if "_mppx_scope" in request_params:
         return request_params
     scope = framework_scope(request_obj)
     if not scope:
         return request_params
-    return {**request_params, "_mpp_scope": scope}
+    return {**request_params, "_mppx_scope": scope}
 
 
 def make_challenge_response(
@@ -227,7 +227,7 @@ def wrap_payment_handler(
 
 def pay(
     *,
-    intent: Intent,
+    intent: Intent | SplitIntent,
     request: RequestParamsType,
     realm: str | None = None,
     secret_key: str | None = None,

@@ -98,14 +98,14 @@ class Relay:
         self._owns_client = http_client is None
         self._timeout = timeout
 
-    def configure(self, intent: Intent) -> SplitIntent:
+    def configure(self, intent: Intent | SplitIntent) -> SplitIntent:
         """Wrap an intent so its lifecycle is served by the relay.
 
-        The returned intent delegates ``validate``, ``broadcast``, and the
-        legacy ``verify`` entirely to ``/v1/mpp/validate`` and
-        ``/v1/mpp/broadcast``; the wrapped intent's local verification
-        configuration (RPC URL, replay store, sender validation) is not
-        consulted because the relay performs those checks itself.
+        The returned intent delegates ``validate`` and ``broadcast`` to
+        ``/v1/mpp/validate`` and ``/v1/mpp/broadcast``; the wrapped intent's
+        local verification configuration (RPC URL, replay store, sender
+        validation) is not consulted because the relay performs those checks
+        itself.
         """
         return _RelayIntent(self, intent.name)
 
@@ -188,11 +188,6 @@ class _RelayIntent:
             idempotency_key=_idempotency_key(body),
         )
         return _receipt(result.get("receipt"))
-
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        # Preserve the legacy combined hook for direct intent consumers.
-        await self.validate(credential, request)
-        return await self.broadcast(credential, request)
 
 
 def _relay_input(credential: Credential) -> dict[str, Any]:

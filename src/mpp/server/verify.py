@@ -27,13 +27,13 @@ from mpp.server.intent import broadcast_credential
 DEFAULT_EXPIRES_MINUTES = 5
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, SplitIntent
 
 
 async def verify_or_challenge(
     *,
     authorization: str | None,
-    intent: Intent,
+    intent: Intent | SplitIntent,
     request: dict[str, Any],
     realm: str,
     secret_key: str,

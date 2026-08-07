@@ -337,7 +337,7 @@ class TestPaymentTransport:
 
     @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
-        """Should emit client payment lifecycle events."""
+        """Should emit challenge, credential, and response events in order."""
         events: list[str] = []
         challenge = Challenge(
             id="test-id",

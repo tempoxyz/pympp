@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mpp import Challenge, Credential
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, SplitIntent
 
 
 @runtime_checkable
@@ -23,7 +25,7 @@ class Method(Protocol):
             name = "stripe"
 
             @property
-            def intents(self) -> dict[str, Intent]:
+            def intents(self) -> Mapping[str, Intent | SplitIntent]:
                 return {"charge": StripeChargeIntent(self.api_key)}
 
             async def create_credential(self, challenge: Challenge) -> Credential:
@@ -34,7 +36,7 @@ class Method(Protocol):
     name: str
 
     @property
-    def intents(self) -> dict[str, Intent]:
+    def intents(self) -> Mapping[str, Intent | SplitIntent]:
         """Available intents for this method."""
         ...
 

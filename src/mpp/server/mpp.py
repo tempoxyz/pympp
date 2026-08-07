@@ -38,7 +38,7 @@ from mpp.server.verify import _authenticate_echo, _challenge_from_echo, verify_o
 from mpp.store import Store
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, SplitIntent
     from mpp.server.method import Method
 
 R = TypeVar("R")
@@ -137,7 +137,7 @@ class Mpp:
         *,
         intent: str | None,
         request: dict[str, Any] | None,
-    ) -> tuple[Credential, Intent, dict[str, Any], Challenge]:
+    ) -> tuple[Credential, Intent | SplitIntent, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         if isinstance(value, Credential):
             credential = value
@@ -288,25 +288,6 @@ class Mpp:
             raise
         await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
         return receipt
-
-    async def verify_credential(
-        self,
-        credential: Credential | str,
-        *,
-        intent: str | None = None,
-        request: dict[str, Any] | None = None,
-    ) -> Receipt:
-        """Terminal alias for :meth:`broadcast_credential` and the intent
-        protocol's combined ``verify`` hook.
-
-        Prefer :meth:`validate_credential` for the non-mutating pre-check and
-        :meth:`broadcast_credential` for settlement.
-        """
-        return await self.broadcast_credential(
-            credential,
-            intent=intent,
-            request=request,
-        )
 
     @classmethod
     def create(

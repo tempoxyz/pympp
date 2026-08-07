@@ -22,10 +22,10 @@ from mpp.errors import VerificationFailedError
 
 @runtime_checkable
 class Intent(Protocol):
-    """Payment intent interface.
+    """Payment intent with a combined verification hook.
 
-    Implement this protocol to define custom payment intents.
-    Duck typing is supported - just implement the required attributes.
+    This is the original intent interface and remains supported for custom
+    intents that combine validation and settlement in ``verify``.
 
     Example:
         class MyChargeIntent:
@@ -63,15 +63,16 @@ class Intent(Protocol):
 
 
 @runtime_checkable
-class SplitIntent(Intent, Protocol):
+class SplitIntent(Protocol):
     """Intent with separate non-mutating validation and terminal broadcast hooks.
 
-    Implement both hooks to participate in the split lifecycle; intents that
-    implement only ``verify`` are dispatched through that legacy combined hook
-    instead. ``validate`` must not settle, reserve, or otherwise consume
-    payment state, so it can back a safe pre-check. ``broadcast`` performs the
-    terminal payment operation and returns its receipt.
+    Implement both hooks to participate in the split lifecycle. ``validate``
+    must not settle, reserve, or otherwise consume payment state, so it can
+    back a safe pre-check. ``broadcast`` performs the terminal payment
+    operation and returns its receipt.
     """
+
+    name: str
 
     async def validate(
         self,
@@ -88,7 +89,7 @@ class SplitIntent(Intent, Protocol):
 
 async def validate_credential(
     *,
-    intent: Intent,
+    intent: Intent | SplitIntent,
     credential: Credential,
     request: dict[str, Any],
 ) -> Validation:
@@ -117,7 +118,7 @@ async def validate_credential(
 
 async def broadcast_credential(
     *,
-    intent: Intent,
+    intent: Intent | SplitIntent,
     credential: Credential,
     request: dict[str, Any],
 ) -> Receipt:
@@ -132,7 +133,11 @@ async def broadcast_credential(
     if isinstance(intent, SplitIntent):
         await validate_credential(intent=intent, credential=credential, request=request)
         return await intent.broadcast(credential, request)
-    return await intent.verify(credential, request)
+    if isinstance(intent, Intent):
+        return await intent.verify(credential, request)
+    raise VerificationFailedError(
+        f"{intent.name} does not support credential verification or broadcast"
+    )
 
 
 class FunctionalIntent:
