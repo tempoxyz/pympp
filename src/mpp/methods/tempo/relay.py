@@ -171,8 +171,8 @@ class _RelayIntent:
     ) -> Validation:
         body = _relay_input(credential)
         await self._relay._post("v1/mpp/validate", body)
-        # The relay validated the credential's echoed challenge request, so
-        # the validation record reports that request (mirrors mppx).
+        # The relay validates the echoed challenge request, so report the
+        # exact request that was checked.
         return Validation(
             credential=credential,
             details={},
@@ -190,8 +190,7 @@ class _RelayIntent:
         return _receipt(result.get("receipt"))
 
     async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        # Preserve the legacy combined hook for direct intent consumers,
-        # mirroring mppx's relay adapter.
+        # Preserve the legacy combined hook for direct intent consumers.
         await self.validate(credential, request)
         return await self.broadcast(credential, request)
 
@@ -224,9 +223,8 @@ def _idempotency_key(body: dict[str, Any]) -> str:
     """Derive a deterministic broadcast idempotency key.
 
     Pull-mode credentials use the signed transaction's hash so retries of the
-    same transaction collapse server-side — the ``mppx_`` namespace is shared
-    across MPP SDKs; other payloads fall back to a hash of the canonical
-    relay input.
+    same transaction collapse server-side. Other payloads fall back to a hash
+    of the canonical relay input.
     """
     payload = body.get("payload")
     if isinstance(payload, dict):
@@ -235,12 +233,12 @@ def _idempotency_key(body: dict[str, Any]) -> str:
             from mpp.methods.tempo.intents import _raw_transaction_hash
 
             try:
-                return f"mppx_{_raw_transaction_hash(signature)}"
+                return f"pympp_{_raw_transaction_hash(signature)}"
             except VerificationError:
                 pass
 
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return f"mppx_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return f"pympp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _receipt(value: Any) -> Receipt:

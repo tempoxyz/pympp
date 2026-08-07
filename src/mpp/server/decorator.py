@@ -111,12 +111,12 @@ def framework_scope(request: Any) -> dict[str, str]:
 
 def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
     """Return request params with automatic framework scope when available."""
-    if "_mppx_scope" in request_params:
+    if "_mpp_scope" in request_params:
         return request_params
     scope = framework_scope(request_obj)
     if not scope:
         return request_params
-    return {**request_params, "_mppx_scope": scope}
+    return {**request_params, "_mpp_scope": scope}
 
 
 def make_challenge_response(

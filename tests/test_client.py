@@ -337,7 +337,7 @@ class TestPaymentTransport:
 
     @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
-        """Should emit mppx-compatible client payment lifecycle events."""
+        """Should emit client payment lifecycle events."""
         events: list[str] = []
         challenge = Challenge(
             id="test-id",

@@ -614,7 +614,7 @@ class ChargeIntent:
             details: dict[str, Any] = {"mode": "push"}
         else:
             self._validate_transaction_payload(payload.signature, req)
-            details = {"mode": "pull", "serializedTransaction": payload.signature}
+            details = {"mode": "pull", "serialized_transaction": payload.signature}
 
         return Validation(
             credential=credential,

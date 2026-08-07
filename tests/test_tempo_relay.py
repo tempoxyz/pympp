@@ -81,7 +81,7 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
         "/mpp/v1/mpp/broadcast",
     ]
     assert calls[0].headers["tempo-api-key"] == "tempo:sk:test"
-    expected_key = "mppx_0x" + keccak(bytes.fromhex("1234")).hex()
+    expected_key = "pympp_0x" + keccak(bytes.fromhex("1234")).hex()
     assert calls[1].headers["idempotency-key"] == expected_key
     body = json.loads(calls[0].content)
     assert body["challenge"]["request"] == {"amount": "1000"}
@@ -90,10 +90,10 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
 
 @pytest.mark.asyncio
 async def test_relay_finalizes_pushed_hash_credential() -> None:
-    paths: list[str] = []
+    calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
+        calls.append(request)
         if request.url.path.endswith("/validate"):
             return response({"success": True})
         return response(
@@ -115,7 +115,11 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
         )
 
     assert result.reference == "0xpushed"
-    assert paths == ["/v1/mpp/validate", "/v1/mpp/broadcast"]
+    assert [call.url.path for call in calls] == [
+        "/v1/mpp/validate",
+        "/v1/mpp/broadcast",
+    ]
+    assert calls[1].headers["idempotency-key"].startswith("pympp_0x")
 
 
 @pytest.mark.asyncio
@@ -289,3 +293,25 @@ async def test_charge_validation_does_not_consume_hash() -> None:
 
     assert result.details == {"mode": "push"}
     assert await store.get("mpp:charge:0xabc") is None
+
+
+@pytest.mark.asyncio
+async def test_charge_validation_uses_python_field_names() -> None:
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+    payment = make_credential(
+        payload={"type": "transaction", "signature": "0x1234"},
+        expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+    request = {
+        "amount": "1000",
+        "currency": "0x1234567890123456789012345678901234567890",
+        "recipient": "0x4567890123456789012345678901234567890123",
+    }
+
+    with patch.object(intent, "_validate_transaction_payload"):
+        result = await intent.validate(payment, request)
+
+    assert result.details == {
+        "mode": "pull",
+        "serialized_transaction": "0x1234",
+    }

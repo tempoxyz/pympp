@@ -296,8 +296,8 @@ class Mpp:
         intent: str | None = None,
         request: dict[str, Any] | None = None,
     ) -> Receipt:
-        """Terminal alias for :meth:`broadcast_credential`, matching mppx's
-        ``verifyCredential`` and the intent protocol's combined ``verify`` hook.
+        """Terminal alias for :meth:`broadcast_credential` and the intent
+        protocol's combined ``verify`` hook.
 
         Prefer :meth:`validate_credential` for the non-mutating pre-check and
         :meth:`broadcast_credential` for settlement.

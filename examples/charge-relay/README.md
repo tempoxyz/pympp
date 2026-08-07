@@ -39,7 +39,7 @@ The server flow is:
 
 `Mpp.validate_credential()` exposes the advisory phase independently;
 `Mpp.broadcast_credential()` revalidates before the terminal phase.
-`Mpp.verify_credential()` is a terminal alias matching mppx's `verifyCredential`.
+`Mpp.verify_credential()` remains available as a terminal compatibility alias.
 
 When the relay declines a payment, the route responds with a 402
 problem-details body carrying only safe machine-readable error codes (for
