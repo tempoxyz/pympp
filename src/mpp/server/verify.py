@@ -123,6 +123,14 @@ async def verify_or_challenge(
         # Preserve the existing challenge-on-failure flow while giving hooks a
         # typed reason for why the submitted credential was rejected.
         challenge = await new_challenge()
+        await emit_failure(error, challenge, credential)
+        return challenge
+
+    async def emit_failure(
+        error: Exception,
+        challenge: Challenge,
+        credential: Credential | None = None,
+    ) -> None:
         if events is not None:
             await events.emit(
                 PAYMENT_FAILED,
@@ -135,7 +143,6 @@ async def verify_or_challenge(
                     "request": request,
                 },
             )
-        return challenge
 
     if authorization is None:
         return await new_challenge()
@@ -194,6 +201,7 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return await fail(PaymentExpiredError(echo.expires), credential)
 
+    submitted_challenge = _challenge_from_echo(echo, echo_request, echo_opaque)
     try:
         receipt = await broadcast_credential(
             intent=intent,
@@ -201,28 +209,18 @@ async def verify_or_challenge(
             request=request,
         )
     except PaymentError as error:
-        error.retry_challenge = await fail(error, credential)
+        error.retry_challenge = await new_challenge()
+        await emit_failure(error, submitted_challenge, credential)
         raise
     except Exception as error:
-        if events is not None:
-            await events.emit(
-                PAYMENT_FAILED,
-                {
-                    "challenge": _challenge_from_echo(echo, echo_request, echo_opaque),
-                    "credential": credential,
-                    "error": error,
-                    "intent": intent.name,
-                    "method": method_name,
-                    "request": request,
-                },
-            )
+        await emit_failure(error, submitted_challenge, credential)
         raise
 
     if events is not None:
         await events.emit(
             PAYMENT_SUCCESS,
             {
-                "challenge": _challenge_from_echo(echo, echo_request, echo_opaque),
+                "challenge": submitted_challenge,
                 "credential": credential,
                 "intent": intent.name,
                 "method": method_name,

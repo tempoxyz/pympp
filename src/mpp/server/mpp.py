@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -125,7 +125,7 @@ class Mpp:
     def _wire_store(self, store: Store) -> None:
         """Inject *store* into intents that have a ``_store`` attribute set to None."""
         intents = getattr(self.method, "intents", None)
-        if not isinstance(intents, dict):
+        if not isinstance(intents, Mapping):
             return
         for intent_obj in intents.values():
             if hasattr(intent_obj, "_store") and intent_obj._store is None:

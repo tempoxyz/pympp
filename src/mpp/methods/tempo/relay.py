@@ -169,7 +169,7 @@ class _RelayIntent:
         credential: Credential,
         request: dict[str, Any],
     ) -> Validation:
-        body = _relay_input(credential)
+        body = _relay_input(credential, request)
         await self._relay._post("v1/mpp/validate", body)
         # The relay validates the echoed challenge request, so report the
         # exact request that was checked.
@@ -181,7 +181,7 @@ class _RelayIntent:
         )
 
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        body = _relay_input(credential)
+        body = _relay_input(credential, request)
         result = await self._relay._post(
             "v1/mpp/broadcast",
             body,
@@ -190,11 +190,13 @@ class _RelayIntent:
         return _receipt(result.get("receipt"))
 
 
-def _relay_input(credential: Credential) -> dict[str, Any]:
+def _relay_input(credential: Credential, expected_request: dict[str, Any]) -> dict[str, Any]:
     try:
         request = _b64_decode(credential.challenge.request)
     except ParseError:
         raise _failure() from None
+    if request != expected_request:
+        raise _failure()
 
     echo = credential.challenge
     challenge: dict[str, Any] = {

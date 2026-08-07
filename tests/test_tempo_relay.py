@@ -12,7 +12,7 @@ import pytest
 from eth_hash.auto import keccak
 
 from mpp import Challenge, Credential, Receipt
-from mpp.errors import PaymentExpiredError, VerificationFailedError
+from mpp.errors import PaymentExpiredError, VerificationError, VerificationFailedError
 from mpp.methods.tempo import ChargeIntent, Relay, TempoMethod, tempo
 from mpp.server import broadcast_credential, pay
 from mpp.store import MemoryStore
@@ -140,6 +140,23 @@ async def test_relay_validate_posts_to_validate_endpoint() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hook_name", ["validate", "broadcast"])
+async def test_relay_rejects_mismatched_request(hook_name: str) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return response({"success": True})
+
+    async with relay_method(handler) as method:
+        hook = getattr(method.intents["charge"], hook_name)
+        with pytest.raises(VerificationFailedError):
+            await hook(credential(), {"amount": "2000"})
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "details"),
     [
@@ -175,7 +192,9 @@ async def test_relay_hides_policy_errors() -> None:
 
     async with relay_method(handler) as method:
         with pytest.raises(VerificationFailedError) as raised:
-            await method.intents["charge"].validate(credential(), {})  # type: ignore[attr-defined]
+            await method.intents["charge"].validate(  # type: ignore[attr-defined]
+                credential(), {"amount": "1000"}
+            )
 
     assert raised.value.details is None
     assert "policy" not in str(raised.value)
@@ -244,7 +263,9 @@ async def test_relay_maps_expired_error() -> None:
 
     async with relay_method(handler) as method:
         with pytest.raises(PaymentExpiredError):
-            await method.intents["charge"].validate(credential(), {})  # type: ignore[attr-defined]
+            await method.intents["charge"].validate(  # type: ignore[attr-defined]
+                credential(), {"amount": "1000"}
+            )
 
 
 @pytest.mark.asyncio
@@ -259,7 +280,7 @@ async def test_relay_rejects_invalid_receipt() -> None:
             await broadcast_credential(
                 intent=method.intents["charge"],
                 credential=credential(),
-                request={},
+                request={"amount": "1000"},
             )
 
 
@@ -293,6 +314,32 @@ async def test_charge_validation_does_not_consume_hash() -> None:
 
     assert result.details == {"mode": "push"}
     assert await store.get("mpp:charge:0xabc") is None
+
+
+@pytest.mark.asyncio
+async def test_charge_validation_rejects_consumed_hash() -> None:
+    store = MemoryStore()
+    await store.put("mpp:charge:0xabc", "0xabc")
+    intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+    payment = make_credential(
+        payload={"type": "hash", "hash": "0xabc"},
+        expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+
+    with (
+        patch.object(intent, "_validate_hash", AsyncMock()) as validate_hash,
+        pytest.raises(VerificationError, match="Transaction hash already used"),
+    ):
+        await intent.validate(
+            payment,
+            {
+                "amount": "1000",
+                "currency": "0x1234567890123456789012345678901234567890",
+                "recipient": "0x4567890123456789012345678901234567890123",
+            },
+        )
+
+    validate_hash.assert_not_awaited()
 
 
 @pytest.mark.asyncio

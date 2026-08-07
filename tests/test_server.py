@@ -3,6 +3,7 @@
 import pytest
 
 from mpp import BodyDigest, Challenge, Credential, Receipt
+from mpp.errors import VerificationFailedError
 from mpp.events import EventDispatcher
 from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
@@ -450,6 +451,42 @@ class TestVerificationError:
             )
 
         assert events == [f"failed:{credential.challenge.id}:VerificationError"]
+
+    @pytest.mark.asyncio
+    async def test_payment_error_event_uses_submitted_challenge(self) -> None:
+        """Payment failures should identify the attempted, not retry, challenge."""
+        failed_challenge_ids: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed",
+            lambda payload: failed_challenge_ids.append(payload["challenge"].id),
+        )
+
+        @intent(name="charge")
+        async def failing_intent(credential: Credential, request: dict) -> Receipt:
+            raise VerificationFailedError("Payment verification failed")
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(VerificationFailedError) as raised:
+            await verify_or_challenge(
+                authorization=credential.to_authorization(),
+                intent=failing_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+                events=dispatcher,
+            )
+
+        retry = raised.value.retry_challenge
+        assert isinstance(retry, Challenge)
+        assert failed_challenge_ids == [credential.challenge.id]
+        assert retry.id != credential.challenge.id
 
     @pytest.mark.asyncio
     async def test_returns_receipt_for_success(self) -> None:

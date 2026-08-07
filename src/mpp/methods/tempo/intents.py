@@ -604,6 +604,7 @@ class ChargeIntent:
         req, payload = self._prepare_credential(credential, request)
 
         if isinstance(payload, HashCredentialPayload):
+            await self._ensure_hash_unused(payload.hash)
             await self._validate_hash(
                 payload,
                 req,
@@ -684,10 +685,21 @@ class ChargeIntent:
     async def _reserve_hash(self, tx_hash: str) -> str | None:
         if self._store is None:
             return None
-        store_key = f"mpp:charge:{tx_hash.lower()}"
+        store_key = self._hash_store_key(tx_hash)
         if not await self._store.put_if_absent(store_key, tx_hash):
             raise VerificationError("Transaction hash already used")
         return store_key
+
+    async def _ensure_hash_unused(self, tx_hash: str) -> None:
+        if (
+            self._store is not None
+            and await self._store.get(self._hash_store_key(tx_hash)) is not None
+        ):
+            raise VerificationError("Transaction hash already used")
+
+    @staticmethod
+    def _hash_store_key(tx_hash: str) -> str:
+        return f"mpp:charge:{tx_hash.lower()}"
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
