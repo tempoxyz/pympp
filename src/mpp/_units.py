@@ -52,16 +52,24 @@ def parse_units(value: str, decimals: int) -> int:
     unscaled = int("".join(str(digit) for digit in digits))
     scale = int(exponent) + decimals
 
+    if unscaled == 0:
+        return 0
+
     if scale >= 0:
         return unscaled * 10**scale
 
-    divisor = 10**-scale
-    if unscaled % divisor:
+    # ``unscaled`` has exactly ``len(digits)`` digits, so a divisor carrying at
+    # least that many zeros cannot divide it. Testing the exponent before
+    # building the divisor short-circuits values such as ``"1e-10000000"``,
+    # which would otherwise materialize a ten-million-digit integer only to be
+    # rejected.
+    divisor_zeros = -scale
+    if divisor_zeros >= len(digits) or unscaled % 10**divisor_zeros:
         raise ValueError(
             f"Amount {value!r} with {decimals} decimals produces fractional base units"
         )
 
-    return unscaled // divisor
+    return unscaled // 10**divisor_zeros
 
 
 def transform_units(request: dict[str, Any]) -> dict[str, Any]:

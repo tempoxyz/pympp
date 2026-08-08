@@ -129,3 +129,23 @@ class TestParseUnitsEdgeCases:
     def test_fractional_base_units_still_rejected_for_long_amounts(self) -> None:
         with pytest.raises(ValueError, match="fractional base units"):
             parse_units("0.1234567890123456789012345678901", 6)
+
+    def test_extreme_negative_exponent_is_rejected_without_building_a_divisor(
+        self,
+    ) -> None:
+        """A tiny exponent must be rejected from the exponent alone.
+
+        The scaled divisor for these values has millions of digits. Deciding
+        divisibility by comparing the exponent to the digit count avoids
+        materializing it, so this stays immediate instead of spending seconds
+        and megabytes on a value that is rejected either way.
+        """
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("1e-10000000", 6)
+
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("1e-1000000000", 6)
+
+    def test_zero_is_zero_at_any_scale(self) -> None:
+        assert parse_units("0.000", 6) == 0
+        assert parse_units("0e-10000000", 6) == 0
