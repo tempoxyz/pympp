@@ -113,3 +113,19 @@ class TestParseUnitsEdgeCases:
 
     def test_whitespace_stripped(self) -> None:
         assert parse_units(" 1.5 ", 6) == 1_500_000
+
+    def test_amount_longer_than_decimal_context_precision_is_exact(self) -> None:
+        """Amounts past 28 significant digits must not be rounded.
+
+        Scaling through the active decimal context would round these to a
+        different, still-integral value and return a silently wrong amount.
+        """
+        assert parse_units("999999999999999999999999999999", 0) == 999999999999999999999999999999
+        assert (
+            parse_units("12345678901234567890.123456789012345678", 18)
+            == 12345678901234567890123456789012345678
+        )
+
+    def test_fractional_base_units_still_rejected_for_long_amounts(self) -> None:
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("0.1234567890123456789012345678901", 6)
