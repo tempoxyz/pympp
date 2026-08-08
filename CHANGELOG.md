@@ -10,6 +10,7 @@
 
 ### Patch Changes
 
+- Handle fresh payment challenges returned after a paid retry, allowing clients to recover from failed verification and multi-round payment flows.
 - Added Python 3.14 to the list of declared supported versions in package classifiers and added Python 3.11 to the CI test matrix. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
 - Preserved MCP challenge metadata when converting MCP challenges to core payment challenges. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
 - Prevent the optional MCP SDK from resolving to incompatible 2.x releases. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
@@ -233,4 +234,3 @@
 
 **Breaking:** `tempo()` now requires an explicit `intents` parameter. The implicit `ChargeIntent` default has been removed. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
 - Initial release of pympp - HTTP 402 Payment Authentication for Python. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
-
