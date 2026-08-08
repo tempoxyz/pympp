@@ -804,15 +804,11 @@ class TestPaymentTransport:
             [
                 httpx.Response(
                     402,
-                    headers={
-                        "www-authenticate": challenges[0].to_www_authenticate("example.com")
-                    },
+                    headers={"www-authenticate": challenges[0].to_www_authenticate("example.com")},
                 ),
                 httpx.Response(
                     402,
-                    headers={
-                        "www-authenticate": challenges[1].to_www_authenticate("example.com")
-                    },
+                    headers={"www-authenticate": challenges[1].to_www_authenticate("example.com")},
                 ),
                 httpx.Response(200, content=b'{"data": "ok"}'),
             ]
@@ -824,9 +820,7 @@ class TestPaymentTransport:
         ]
         transport = PaymentTransport(methods=[method], inner=inner)
 
-        response = await transport.handle_async_request(
-            httpx.Request("GET", "https://example.com")
-        )
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
         assert response.status_code == 200
         assert len(inner.requests) == 3
