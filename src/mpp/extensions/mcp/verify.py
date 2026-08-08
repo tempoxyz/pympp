@@ -39,7 +39,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from mpp import _constant_time_equal, generate_challenge_id
-from mpp.errors import PaymentError
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
@@ -205,6 +205,8 @@ async def verify_or_challenge(
             credential=core_credential,
             request=request,
         )
+    except PaymentOutcomeUnknownError:
+        raise
     except (PaymentError, VerificationError) as e:
         raise PaymentVerificationError(
             challenges=[new_challenge()],

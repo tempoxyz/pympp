@@ -20,6 +20,7 @@ from mpp.errors import (
     MalformedCredentialError,
     PaymentError,
     PaymentExpiredError,
+    PaymentOutcomeUnknownError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 from mpp.server.intent import broadcast_credential
@@ -208,6 +209,9 @@ async def verify_or_challenge(
             credential=credential,
             request=request,
         )
+    except PaymentOutcomeUnknownError as error:
+        await emit_failure(error, submitted_challenge, credential)
+        raise
     except PaymentError as error:
         error.retry_challenge = await new_challenge()
         await emit_failure(error, submitted_challenge, credential)

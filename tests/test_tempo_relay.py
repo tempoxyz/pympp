@@ -12,7 +12,12 @@ import pytest
 from eth_hash.auto import keccak
 
 from mpp import Challenge, Credential, Receipt
-from mpp.errors import PaymentExpiredError, VerificationError, VerificationFailedError
+from mpp.errors import (
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+    VerificationError,
+    VerificationFailedError,
+)
 from mpp.methods.tempo import ChargeIntent, Relay, TempoMethod, tempo
 from mpp.server import broadcast_credential, pay
 from mpp.store import MemoryStore
@@ -254,6 +259,50 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
     assert body["challengeId"] == retry.id
     assert body["details"] == {"code": "insufficient_funds"}
     assert "private balance" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["transport", "json"])
+async def test_ambiguous_broadcast_does_not_issue_fresh_challenge(failure: str) -> None:
+    paths: list[str] = []
+
+    def relay_handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/validate"):
+            return response({"success": True})
+        if failure == "transport":
+            raise httpx.ReadError("response lost", request=request)
+        return httpx.Response(200, content=b"not-json")
+
+    async with relay_method(relay_handler) as method:
+
+        @pay(
+            intent=method.intents["charge"],
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(
+            request: MockRequest,
+            credential: Credential,
+            receipt: Receipt,
+        ) -> dict[str, bool]:
+            return {"paid": True}
+
+        initial: Any = await handler(MockRequest())
+        challenge = challenge_from_402(initial)
+        payment = Credential(
+            challenge=challenge.to_echo(),
+            payload={"type": "transaction", "signature": "0x1234"},
+        )
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await handler(MockRequest(payment.to_authorization()))
+
+    assert paths == ["/v1/mpp/validate", "/v1/mpp/broadcast"]
+    assert raised.value.challenge.id == challenge.id
+    assert raised.value.credential == payment
+    assert raised.value.request == {"amount": "1000"}
+    assert raised.value.retry_challenge is None
 
 
 @pytest.mark.asyncio

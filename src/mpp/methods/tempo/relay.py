@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -11,7 +12,13 @@ from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._validation import Validation
-from mpp.errors import PaymentExpiredError, VerificationError, VerificationFailedError
+from mpp.errors import (
+    PaymentError,
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+    VerificationError,
+    VerificationFailedError,
+)
 
 if TYPE_CHECKING:
     import httpx
@@ -145,15 +152,12 @@ class Relay:
             headers["idempotency-key"] = idempotency_key
 
         logger.debug("relay request method=POST path=/%s", path)
-        try:
-            response = await (await self._get_client()).post(
-                self.api_base_url + path,
-                json=body,
-                headers=headers,
-            )
-            result = response.json() if response.is_success else None
-        except Exception:
-            raise _failure() from None
+        response = await (await self._get_client()).post(
+            self.api_base_url + path,
+            json=body,
+            headers=headers,
+        )
+        result = response.json() if response.is_success else None
         if not isinstance(result, dict) or result.get("success") is not True:
             raise _failure(result)
         return result
@@ -170,7 +174,12 @@ class _RelayIntent:
         request: dict[str, Any],
     ) -> Validation:
         body = _relay_input(credential, request)
-        await self._relay._post("v1/mpp/validate", body)
+        try:
+            await self._relay._post("v1/mpp/validate", body)
+        except PaymentError:
+            raise
+        except Exception:
+            raise _failure() from None
         # The relay validates the echoed challenge request, so report the
         # exact request that was checked.
         return Validation(
@@ -182,12 +191,22 @@ class _RelayIntent:
 
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
         body = _relay_input(credential, request)
-        result = await self._relay._post(
-            "v1/mpp/broadcast",
-            body,
-            idempotency_key=_idempotency_key(body),
-        )
-        return _receipt(result.get("receipt"))
+        try:
+            result = await self._relay._post(
+                "v1/mpp/broadcast",
+                body,
+                idempotency_key=_idempotency_key(body),
+            )
+            return _receipt(result.get("receipt"))
+        except PaymentError:
+            raise
+        except (Exception, asyncio.CancelledError) as error:
+            raise PaymentOutcomeUnknownError(
+                credential.challenge,
+                error,
+                credential=credential,
+                request=request,
+            ) from error
 
 
 def _relay_input(credential: Credential, expected_request: dict[str, Any]) -> dict[str, Any]:
