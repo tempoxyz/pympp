@@ -212,6 +212,11 @@ async def verify_or_challenge(
         expires_dt = datetime.fromisoformat(echo.expires.replace("Z", "+00:00"))
     except ValueError:
         return await fail(InvalidChallengeError(echo.id, "invalid expires"), credential)
+    if expires_dt.tzinfo is None:
+        # A timestamp without an offset does not name an instant, and comparing
+        # it to an aware "now" raises TypeError. Reject it like any other
+        # unparseable value so the route still fails closed.
+        return await fail(InvalidChallengeError(echo.id, "invalid expires"), credential)
     if expires_dt < datetime.now(UTC):
         return await fail(PaymentExpiredError(echo.expires), credential)
 
