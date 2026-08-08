@@ -44,14 +44,24 @@ def parse_units(value: str, decimals: int) -> int:
     if d < 0:
         raise ValueError("amount must be non-negative")
 
-    result = d * (10**decimals)
+    # Scale with integer arithmetic. ``d * (10**decimals)`` is evaluated in the
+    # active decimal context, whose default precision is 28 significant digits,
+    # so amounts longer than that would be rounded into a different — and still
+    # integral — value and returned as a silently wrong base-unit amount.
+    _sign, digits, exponent = d.as_tuple()
+    unscaled = int("".join(str(digit) for digit in digits))
+    scale = int(exponent) + decimals
 
-    if result != int(result):
+    if scale >= 0:
+        return unscaled * 10**scale
+
+    divisor = 10**-scale
+    if unscaled % divisor:
         raise ValueError(
             f"Amount {value!r} with {decimals} decimals produces fractional base units"
         )
 
-    return int(result)
+    return unscaled // divisor
 
 
 def transform_units(request: dict[str, Any]) -> dict[str, Any]:
