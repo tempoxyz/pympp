@@ -40,7 +40,7 @@ class MockMethod:
         return Credential(challenge=challenge.to_echo(), payload={"ok": True})
 
 
-def test_matching_preserves_transport_selection() -> None:
+def test_matching_requires_supported_method_and_intent() -> None:
     class StripeMethod(MockMethod):
         name = "stripe"
 
@@ -57,10 +57,21 @@ def test_matching_preserves_transport_selection() -> None:
     assert runtime.match_challenge(
         [challenge("stripe", method="stripe")]
     ) == (challenge("stripe", method="stripe"), stripe)
+
+
+@pytest.mark.parametrize(
+    "offered",
+    [
+        [challenge("unsupported-intent", intent="session")],
+        [challenge("unsupported-method", method="other")],
+        [],
+    ],
+)
+def test_matching_rejects_incompatible_challenges(offered: list[Challenge]) -> None:
+    runtime = PaymentRuntime([MockMethod()])
+
     with pytest.raises(ValueError, match="No compatible payment method"):
-        runtime.match_challenge([offered[0]])
-    with pytest.raises(ValueError, match="No compatible payment method"):
-        runtime.match_challenge([challenge(method="other")])
+        runtime.match_challenge(offered)
 
 
 def test_preserves_falsey_event_dispatcher() -> None:
