@@ -31,15 +31,16 @@ def challenge(
 class MockMethod:
     name = "tempo"
 
-    def __init__(self) -> None:
+    def __init__(self, intents: tuple[str, ...] = ("charge",)) -> None:
         self.loops: list[asyncio.AbstractEventLoop] = []
+        self.intents = dict.fromkeys(intents)
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         self.loops.append(asyncio.get_running_loop())
         return Credential(challenge=challenge.to_echo(), payload={"ok": True})
 
 
-def test_matching_preserves_transport_selection() -> None:
+def test_matching_requires_supported_method_and_intent() -> None:
     class StripeMethod(MockMethod):
         name = "stripe"
 
@@ -48,14 +49,29 @@ def test_matching_preserves_transport_selection() -> None:
     stripe = StripeMethod()
     runtime = PaymentRuntime([first_tempo, stripe, last_tempo])
     offered = [
-        challenge("stripe", method="stripe", intent="subscription"),
-        challenge("tempo", intent="unsupported"),
+        challenge("unsupported", intent="session"),
+        challenge("charge"),
     ]
 
-    assert runtime.match_challenge(offered) == (offered[0], stripe)
-    assert runtime.match_challenge([offered[1]]) == (offered[1], last_tempo)
+    assert runtime.match_challenge(offered) == (offered[1], last_tempo)
+    assert runtime.match_challenge(
+        [challenge("stripe", method="stripe")]
+    ) == (challenge("stripe", method="stripe"), stripe)
+
+
+@pytest.mark.parametrize(
+    "offered",
+    [
+        [challenge("unsupported-intent", intent="session")],
+        [challenge("unsupported-method", method="other")],
+        [],
+    ],
+)
+def test_matching_rejects_incompatible_challenges(offered: list[Challenge]) -> None:
+    runtime = PaymentRuntime([MockMethod()])
+
     with pytest.raises(ValueError, match="No compatible payment method"):
-        runtime.match_challenge([challenge(method="other")])
+        runtime.match_challenge(offered)
 
 
 def test_preserves_falsey_event_dispatcher() -> None:
