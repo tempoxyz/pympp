@@ -812,6 +812,60 @@ class TestClient:
         assert response.status_code == 200
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "body"),
+        [
+            ("GET", None),
+            ("POST", b'{"prompt":"expensive question"}'),
+        ],
+    )
+    async def test_payment_request_preserves_http_request(
+        self,
+        httpx_mock: HTTPXMock,
+        method: str,
+        body: bytes | None,
+    ) -> None:
+        """Public client should preserve normalized HTTP input on its paid retry."""
+        challenge = Challenge(
+            id="payment-request",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        httpx_mock.add_response(
+            status_code=402,
+            headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+        )
+        httpx_mock.add_response(
+            status_code=200,
+            headers={"x-payment-result": "settled"},
+            content=b'{"paid":true}',
+        )
+
+        async with Client(methods=[MockMethod()]) as client:
+            response = await client.request(
+                method,
+                "https://example.com/paid",
+                headers={"x-request-id": "request-1"},
+                content=body,
+            )
+
+        assert response.status_code == 200
+        assert response.headers["x-payment-result"] == "settled"
+        assert response.content == b'{"paid":true}'
+
+        initial_request, paid_request = httpx_mock.get_requests()
+        assert initial_request.method == paid_request.method == method
+        assert initial_request.url == paid_request.url == httpx.URL(
+            "https://example.com/paid"
+        )
+        assert initial_request.headers["x-request-id"] == "request-1"
+        assert paid_request.headers["x-request-id"] == "request-1"
+        assert initial_request.content == paid_request.content == (body or b"")
+        assert "authorization" not in initial_request.headers
+        assert paid_request.headers["authorization"].startswith("Payment ")
+
+    @pytest.mark.asyncio
     async def test_context_manager(self) -> None:
         """Should work as async context manager."""
         async with Client(methods=[]) as client:
