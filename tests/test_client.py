@@ -789,6 +789,54 @@ class TestPaymentTransport:
         assert len(inner.requests) == 2
         method.create_credential.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_retries_payment_for_fresh_402_challenge(self) -> None:
+        challenges = [
+            Challenge(
+                id=challenge_id,
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            )
+            for challenge_id in ("first-id", "second-id")
+        ]
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenges[0].to_www_authenticate("example.com")},
+                ),
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenges[1].to_www_authenticate("example.com")},
+                ),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        method = MockMethod()
+        method.create_credential.side_effect = [
+            make_credential(payload={"hash": "0xfirst"}, challenge_id="first-id"),
+            make_credential(payload={"hash": "0xsecond"}, challenge_id="second-id"),
+        ]
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        assert len(inner.requests) == 3
+        credentials = [
+            Credential.from_authorization(request.headers["Authorization"])
+            for request in inner.requests[1:]
+        ]
+        assert [credential.challenge.id for credential in credentials] == [
+            "first-id",
+            "second-id",
+        ]
+        assert [call.args[0].id for call in method.create_credential.await_args_list] == [
+            "first-id",
+            "second-id",
+        ]
+
 
 class TestClient:
     @pytest.mark.asyncio

@@ -39,6 +39,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
+_MAX_PAYMENT_RETRIES = 3
+
+
 def _client_payment_failed_payload(
     *,
     challenge: Challenge | None,
@@ -127,131 +130,138 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             await request.aread()
 
         response = await self._inner.handle_async_request(request)
+        attempted_challenges: set[str] = set()
 
-        if response.status_code != 402:
-            return response
+        for _ in range(_MAX_PAYMENT_RETRIES):
+            if response.status_code != 402:
+                return response
 
-        try:
-            await response.aread()
-        except BaseException:
-            with suppress(BaseException):
+            try:
+                await response.aread()
+            except BaseException:
+                with suppress(BaseException):
+                    await response.aclose()
+                raise
+
+            # Handle multiple WWW-Authenticate headers (per RFC 9110)
+            challenges: list[Challenge] = []
+            parse_error: ParseError | None = None
+            for header in response.headers.get_list("www-authenticate"):
+                for field in _payment_challenges(header):
+                    try:
+                        parsed = Challenge.from_www_authenticate(field)
+                    except ParseError as error:
+                        parse_error = error
+                        continue
+                    challenges.append(parsed)
+
+            try:
+                challenge, matched_method = self._runtime.match_challenge(challenges)
+            except ValueError as match_error:
+                if parse_error is not None or challenges:
+                    # Surface parse/method-selection failures to observers while
+                    # preserving the 402 response for the caller.
+                    await self._events.emit(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=None,
+                            challenges=challenges,
+                            credential=None,
+                            error=parse_error or match_error,
+                            method=None,
+                            request=request,
+                            response=response,
+                        ),
+                    )
+                return response
+
+            if challenge.id in attempted_challenges:
+                return response
+            attempted_challenges.add(challenge.id)
+
+            if not replayable:
                 await response.aclose()
-            raise
+                raise PaymentError(
+                    "Streaming request bodies cannot be replayed after a payment challenge. "
+                    "Use a buffered body for paid requests."
+                )
 
-        # Handle multiple WWW-Authenticate headers (per RFC 9110)
-        challenges: list[Challenge] = []
-        parse_error: ParseError | None = None
-        for header in response.headers.get_list("www-authenticate"):
-            for field in _payment_challenges(header):
-                try:
-                    parsed = Challenge.from_www_authenticate(field)
-                except ParseError as error:
-                    parse_error = error
-                    continue
-                challenges.append(parsed)
-
-        try:
-            challenge, matched_method = self._runtime.match_challenge(challenges)
-        except ValueError as match_error:
-            if parse_error is not None or challenges:
-                # Surface parse/method-selection failures to observers while
-                # preserving the original 402 response for the caller.
+            try:
+                credential = await self._runtime.create_credential(
+                    challenge,
+                    matched_method,
+                    event_payload={
+                        "challenges": challenges,
+                        "request": request,
+                        "response": response,
+                    },
+                )
+                auth_header = credential.to_authorization()
+            except Exception as error:
                 await self._events.emit(
                     PAYMENT_FAILED,
                     _client_payment_failed_payload(
-                        challenge=None,
+                        challenge=challenge,
                         challenges=challenges,
                         credential=None,
-                        error=parse_error or match_error,
-                        method=None,
+                        error=error,
+                        method=matched_method,
                         request=request,
                         response=response,
                     ),
                 )
-            return response
+                if isinstance(error, (InvalidChallengeError, PaymentExpiredError)):
+                    return response
+                raise
 
-        if not replayable:
-            await response.aclose()
-            raise PaymentError(
-                "Streaming request bodies cannot be replayed after a payment challenge. "
-                "Use a buffered body for paid requests."
+            headers = httpx.Headers(request.headers)
+            headers["Authorization"] = auth_header
+            retry_request = httpx.Request(
+                method=request.method,
+                url=request.url,
+                headers=headers,
+                content=request.content,
+                extensions=request.extensions,
             )
 
-        try:
-            credential = await self._runtime.create_credential(
-                challenge,
-                matched_method,
-                event_payload={
-                    "challenges": challenges,
-                    "request": request,
-                    "response": response,
-                },
-            )
-            auth_header = credential.to_authorization()
-        except Exception as error:
-            await self._events.emit(
-                PAYMENT_FAILED,
-                _client_payment_failed_payload(
-                    challenge=challenge,
-                    challenges=challenges,
-                    credential=None,
-                    error=error,
-                    method=matched_method,
-                    request=request,
-                    response=response,
-                ),
-            )
-            if isinstance(error, (InvalidChallengeError, PaymentExpiredError)):
-                return response
-            raise
-
-        headers = httpx.Headers(request.headers)
-        headers["Authorization"] = auth_header
-
-        retry_request = httpx.Request(
-            method=request.method,
-            url=request.url,
-            headers=headers,
-            content=request.content,
-            extensions=request.extensions,
-        )
-
-        try:
-            payment_response = await self._inner.handle_async_request(retry_request)
-        except (Exception, asyncio.CancelledError) as cause:
-            error = PaymentOutcomeUnknownError(
-                challenge,
-                cause,
-                credential=credential,
-                request=request,
-            )
-            await self._events.emit(
-                PAYMENT_FAILED,
-                _client_payment_failed_payload(
-                    challenge=challenge,
-                    challenges=challenges,
+            try:
+                payment_response = await self._inner.handle_async_request(retry_request)
+            except (Exception, asyncio.CancelledError) as cause:
+                error = PaymentOutcomeUnknownError(
+                    challenge,
+                    cause,
                     credential=credential,
-                    error=error,
-                    method=matched_method,
                     request=request,
-                    response=response,
-                ),
-            )
-            raise error from cause
+                )
+                await self._events.emit(
+                    PAYMENT_FAILED,
+                    _client_payment_failed_payload(
+                        challenge=challenge,
+                        challenges=challenges,
+                        credential=credential,
+                        error=error,
+                        method=matched_method,
+                        request=request,
+                        response=response,
+                    ),
+                )
+                raise error from cause
 
-        if payment_response.is_success:
-            await self._events.emit(
-                PAYMENT_RESPONSE,
-                {
-                    "challenge": challenge,
-                    "credential": credential,
-                    "method": matched_method,
-                    "request": request,
-                    "response": payment_response,
-                },
-            )
+            if payment_response.is_success:
+                await self._events.emit(
+                    PAYMENT_RESPONSE,
+                    {
+                        "challenge": challenge,
+                        "credential": credential,
+                        "method": matched_method,
+                        "request": request,
+                        "response": payment_response,
+                    },
+                )
 
-        return payment_response
+            response = payment_response
+
+        return response
 
     async def aclose(self) -> None:
         """Close the inner transport."""
