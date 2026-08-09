@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.1 (2026-08-09)
+
+### Patch Changes
+
+- Preserved request details across paid retries and rejected payment challenges reached through cross-origin redirects. (by @mpp-agricola[bot], [#214](https://github.com/tempoxyz/pympp/pull/214))
+- Fixed handling of fresh 402 payment challenges returned after a paid retry, enabling clients to recover from failed verification and complete multi-round payment flows. Introduced a retry loop with a maximum attempt limit to support these sequential challenge-response exchanges. (by @mpp-agricola[bot], [#214](https://github.com/tempoxyz/pympp/pull/214))
+
 ## 0.10.0 (2026-08-03)
 
 ### Minor Changes
