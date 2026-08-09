@@ -18,6 +18,7 @@ class MockMethod:
     """Mock payment method for testing."""
 
     name = "tempo"
+    intents = {"charge": None}
 
     def __init__(self) -> None:
         self.create_credential = AsyncMock(
