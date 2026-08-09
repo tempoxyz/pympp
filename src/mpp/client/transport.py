@@ -40,6 +40,11 @@ if TYPE_CHECKING:
 
 
 _MAX_PAYMENT_RETRIES = 3
+_ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    return (url.scheme, url.host, url.port)
 
 
 def _client_payment_failed_payload(
@@ -122,6 +127,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        current_origin = _origin(request.url)
+        original_origin = request.extensions.setdefault(
+            _ORIGINAL_ORIGIN_EXTENSION,
+            current_origin,
+        )
         replayable = not (
             isinstance(request.stream, httpx.AsyncByteStream)
             and not isinstance(request.stream, httpx.SyncByteStream)
@@ -142,6 +152,23 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 with suppress(BaseException):
                     await response.aclose()
                 raise
+
+            if original_origin != current_origin:
+                error = PaymentError("Refusing to send payment credential across redirect")
+                await self._events.emit(
+                    PAYMENT_FAILED,
+                    _client_payment_failed_payload(
+                        challenge=None,
+                        challenges=[],
+                        credential=None,
+                        error=error,
+                        method=None,
+                        request=request,
+                        response=response,
+                    ),
+                )
+                await response.aclose()
+                raise error
 
             # Handle multiple WWW-Authenticate headers (per RFC 9110)
             challenges: list[Challenge] = []

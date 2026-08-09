@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpp import Challenge, Credential, PaymentOutcomeUnknownError
+from mpp import Challenge, Credential, PaymentError, PaymentOutcomeUnknownError
 from mpp.client import Client, PaymentTransport, get, post, request
 from mpp.events import EventDispatcher
 from mpp.runtime import PaymentRuntime
@@ -106,6 +106,93 @@ class TestPaymentTransport:
         assert retry_request.headers["Authorization"].startswith("Payment ")
 
         method.create_credential.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "target_url",
+        [
+            "https://target.example/paid",
+            "http://source.example/paid",
+            "https://source.example:444/paid",
+        ],
+    )
+    async def test_rejects_cross_origin_redirect_before_402(
+        self,
+        target_url: str,
+    ) -> None:
+        challenge = Challenge(
+            id="redirected",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(307, headers={"location": target_url}),
+                httpx.Response(
+                    402,
+                    headers={
+                        "www-authenticate": challenge.to_www_authenticate(
+                            httpx.URL(target_url).host
+                        )
+                    },
+                ),
+            ]
+        )
+        method = MockMethod()
+        failed: list[Exception] = []
+        transport = PaymentTransport(methods=[method], inner=inner)
+        transport.on_payment_failed(lambda payload: failed.append(payload["error"]))
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=True,
+        ) as client:
+            with pytest.raises(
+                PaymentError,
+                match="Refusing to send payment credential across redirect",
+            ):
+                await client.get("https://source.example/start")
+
+        assert len(inner.requests) == 2
+        assert all("authorization" not in request.headers for request in inner.requests)
+        method.create_credential.assert_not_awaited()
+        assert len(failed) == 1
+        assert isinstance(failed[0], PaymentError)
+        assert str(failed[0]) == "Refusing to send payment credential across redirect"
+
+    @pytest.mark.asyncio
+    async def test_allows_same_origin_redirect_before_402(self) -> None:
+        challenge = Challenge(
+            id="redirected",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(307, headers={"location": "/paid"}),
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("source.example")},
+                ),
+                httpx.Response(200, content=b'{"paid":true}'),
+            ]
+        )
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get("https://source.example/start")
+
+        assert response.status_code == 200
+        assert len(inner.requests) == 3
+        assert "authorization" not in inner.requests[1].headers
+        assert "authorization" in inner.requests[2].headers
+        method.create_credential.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_paid_retry_replays_request_body(self) -> None:
@@ -904,9 +991,7 @@ class TestClient:
 
         initial_request, paid_request = httpx_mock.get_requests()
         assert initial_request.method == paid_request.method == method
-        assert initial_request.url == paid_request.url == httpx.URL(
-            "https://example.com/paid"
-        )
+        assert initial_request.url == paid_request.url == httpx.URL("https://example.com/paid")
         assert initial_request.headers["x-request-id"] == "request-1"
         assert paid_request.headers["x-request-id"] == "request-1"
         assert initial_request.content == paid_request.content == (body or b"")
