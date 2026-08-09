@@ -149,3 +149,23 @@ class TestParseUnitsEdgeCases:
     def test_zero_is_zero_at_any_scale(self) -> None:
         assert parse_units("0.000", 6) == 0
         assert parse_units("0e-10000000", 6) == 0
+
+    @pytest.mark.parametrize(("value", "decimals"), [("100", -2), ("1000", -3), ("7", -1)])
+    def test_negative_decimals_rejected(self, value: str, decimals: int) -> None:
+        """A negative scale divides the amount rather than scaling it.
+
+        It also failed inconsistently: "100" with -2 decimals returned 1
+        while "7" with -1 raised, so an under-charge only surfaced when the
+        division left a remainder. mpp-go rejects negative decimals outright.
+        """
+        with pytest.raises(ValueError, match="decimals must be non-negative"):
+            parse_units(value, decimals)
+
+    def test_transform_units_rejects_negative_decimals(self) -> None:
+        with pytest.raises(ValueError, match="decimals must be non-negative"):
+            transform_units({"amount": "100", "decimals": -2})
+
+    def test_transform_units_rejects_bool_decimals(self) -> None:
+        """``bool`` is an ``int`` subclass, so ``true`` would scale by 1."""
+        with pytest.raises(ValueError, match="decimals must be an integer"):
+            transform_units({"amount": "1.5", "decimals": True})

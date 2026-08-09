@@ -44,6 +44,13 @@ def parse_units(value: str, decimals: int) -> int:
     if d < 0:
         raise ValueError("amount must be non-negative")
 
+    # A negative scale divides the amount instead of scaling it, and only
+    # reports the loss when the division leaves a remainder: "100" with -2
+    # decimals returns 1 while "7" with -1 raises. Reject it outright, as
+    # mpp-go does.
+    if decimals < 0:
+        raise ValueError(f"decimals must be non-negative, got {decimals}")
+
     # Scale with integer arithmetic. ``d * (10**decimals)`` is evaluated in the
     # active decimal context, whose default precision is 28 significant digits,
     # so amounts longer than that would be rounded into a different — and still
@@ -93,7 +100,9 @@ def transform_units(request: dict[str, Any]) -> dict[str, Any]:
     result = {**request}
     decimals = result.pop("decimals")
 
-    if not isinstance(decimals, int):
+    # ``bool`` is a subclass of ``int``, so an unintended ``"decimals": true``
+    # would otherwise be accepted as 1 and quietly rescale the amount.
+    if isinstance(decimals, bool) or not isinstance(decimals, int):
         raise ValueError(f"decimals must be an integer, got {type(decimals).__name__}")
 
     if "amount" in result:
