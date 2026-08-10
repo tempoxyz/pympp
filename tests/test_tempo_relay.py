@@ -411,3 +411,23 @@ async def test_charge_validation_uses_python_field_names() -> None:
         "mode": "pull",
         "serialized_transaction": "0x1234",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signature", ["0x1234", "0x76ff"])
+async def test_charge_validation_rejects_undecodable_transactions(signature: str) -> None:
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+    payment = make_credential(
+        payload={"type": "transaction", "signature": signature},
+        expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+    )
+
+    with pytest.raises(VerificationError):
+        await intent.validate(
+            payment,
+            {
+                "amount": "1000",
+                "currency": "0x1234567890123456789012345678901234567890",
+                "recipient": "0x4567890123456789012345678901234567890123",
+            },
+        )

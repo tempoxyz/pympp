@@ -213,6 +213,31 @@ async def test_bound_broadcast_emits_failures() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("credential", "route_request"),
+    [
+        (_bound(realm="other.example.com"), None),
+        (_bound({"amount": "1000"}), {"amount": "2000"}),
+    ],
+)
+async def test_bound_broadcast_emits_preparation_failures(
+    credential: Credential,
+    route_request: dict[str, Any] | None,
+) -> None:
+    server = _server()
+    failures: list[dict[str, Any]] = []
+    server.on_payment_failed(failures.append)
+
+    with pytest.raises(InvalidChallengeError):
+        await server.broadcast_credential(credential, request=route_request)
+
+    assert len(failures) == 1
+    assert failures[0]["challenge"].id == credential.challenge.id
+    assert failures[0]["credential"] == credential
+    assert isinstance(failures[0]["error"], InvalidChallengeError)
+
+
+@pytest.mark.asyncio
 async def test_invalid_intent_has_a_typed_failure() -> None:
     class InvalidCharge:
         name = "charge"

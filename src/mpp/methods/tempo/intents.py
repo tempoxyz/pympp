@@ -614,7 +614,7 @@ class ChargeIntent:
             )
             details: dict[str, Any] = {"mode": "push"}
         else:
-            self._validate_transaction_payload(payload.signature, req)
+            self._validate_transaction_payload(payload.signature, req, strict=True)
             details = {"mode": "pull", "serialized_transaction": payload.signature}
 
         return Validation(
@@ -1460,23 +1460,39 @@ class ChargeIntent:
         ]
         _validate_normalized_calls(normalized_calls, request)
 
-    def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
-        """Best-effort pre-broadcast check. Silently skips if decoding fails."""
+    def _validate_transaction_payload(
+        self,
+        signature: str,
+        request: ChargeRequest,
+        *,
+        strict: bool = False,
+    ) -> None:
+        """Validate a transaction, failing closed for advisory validation."""
         try:
             import rlp
-        except ImportError:
+        except ImportError as error:
+            if strict:
+                raise VerificationError("Transaction decoding is unavailable") from error
             return
         try:
             tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
-        except ValueError:
+        except ValueError as error:
+            if strict:
+                raise VerificationError("Invalid serialized transaction") from error
             return
         if not tx_bytes or tx_bytes[0] not in (0x76, 0x78):
+            if strict:
+                raise VerificationError("Only Tempo (0x76/0x78) transactions are supported")
             return
         try:
             decoded = rlp.decode(tx_bytes[1:])
-        except Exception:
+        except Exception as error:
+            if strict:
+                raise VerificationError("Invalid serialized transaction") from error
             return
         if not isinstance(decoded, list) or len(decoded) < 5:
+            if strict:
+                raise VerificationError("Invalid serialized transaction")
             return
 
         calls_data = decoded[4] if len(decoded) > 4 else []

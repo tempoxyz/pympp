@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from mpp import Challenge, Credential, Receipt
-from mpp._parsing import ParseError, _parse_timestamp
+from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._units import parse_units, transform_units
 from mpp.errors import (
     InvalidChallengeError,
@@ -139,14 +139,7 @@ class Mpp:
         request: dict[str, Any] | None,
     ) -> tuple[Credential, Intent | VerifiableIntent, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
-        if isinstance(value, Credential):
-            credential = value
-        else:
-            authorization = value if value.lower().startswith("payment ") else f"Payment {value}"
-            try:
-                credential = Credential.from_authorization(authorization)
-            except ParseError as error:
-                raise MalformedCredentialError(str(error)) from error
+        credential = self._parse_credential(value)
 
         echo = credential.challenge
         echoed_request, echoed_opaque = _authenticate_echo(
@@ -184,6 +177,16 @@ class Mpp:
             raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
         challenge = _challenge_from_echo(echo, echoed_request, echoed_opaque)
         return credential, intent_obj, echoed_request, challenge
+
+    @staticmethod
+    def _parse_credential(value: Credential | str) -> Credential:
+        if isinstance(value, Credential):
+            return value
+        authorization = value if value.lower().startswith("payment ") else f"Payment {value}"
+        try:
+            return Credential.from_authorization(authorization)
+        except ParseError as error:
+            raise MalformedCredentialError(str(error)) from error
 
     async def validate_credential(
         self,
@@ -265,11 +268,32 @@ class Mpp:
             :meth:`validate_credential`, or the intent's verification error
             if validation or settlement fails.
         """
-        prepared, intent_obj, echoed_request, challenge = self._prepare_credential(
-            credential,
-            intent=intent,
-            request=request,
-        )
+        parsed = self._parse_credential(credential)
+        try:
+            prepared, intent_obj, echoed_request, challenge = self._prepare_credential(
+                parsed,
+                intent=intent,
+                request=request,
+            )
+        except Exception as error:
+            echo = parsed.challenge
+            try:
+                decoded_request = _b64_decode(echo.request) if echo.request else {}
+            except ParseError:
+                decoded_request = {}
+            failed_request = decoded_request if isinstance(decoded_request, dict) else {}
+            await self._events.emit(
+                PAYMENT_FAILED,
+                {
+                    "challenge": _challenge_from_echo(echo, failed_request, None),
+                    "credential": parsed,
+                    "error": error,
+                    "intent": intent or echo.intent,
+                    "method": self.method.name,
+                    "request": failed_request,
+                },
+            )
+            raise
         context = {
             "challenge": challenge,
             "credential": prepared,
