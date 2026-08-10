@@ -71,6 +71,22 @@ def test_matching_skips_unsupported_intent_before_supported_challenge() -> None:
     assert runtime.match_challenge(offered) == (offered[1], method)
 
 
+def test_matching_preserves_legacy_methods_without_intent_metadata() -> None:
+    class LegacyMethod:
+        name = "tempo"
+
+        async def create_credential(self, challenge: Challenge) -> Credential:
+            raise NotImplementedError
+
+    method = LegacyMethod()
+    offered = [
+        challenge("unsupported", intent="session"),
+        challenge("supported", intent="charge"),
+    ]
+
+    assert PaymentRuntime([method]).match_challenge(offered) == (offered[1], method)
+
+
 def test_preserves_falsey_event_dispatcher() -> None:
     class FalseyEvents(EventDispatcher):
         def __bool__(self) -> bool:

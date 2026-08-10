@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -16,11 +16,6 @@ class Method(Protocol):
     """Client-side payment method."""
 
     name: str
-
-    @property
-    def intents(self) -> Mapping[str, Any]:
-        """Payment intents supported by this method."""
-        ...
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential for a challenge."""
@@ -37,11 +32,11 @@ class PaymentRuntime:
         events: EventDispatcher | None = None,
     ) -> None:
         self.methods = tuple(methods)
-        self._methods = {
-            (method.name, intent): method
-            for method in self.methods
-            for intent in method.intents
-        }
+        self._methods: dict[tuple[str, str], Method] = {}
+        for method in self.methods:
+            intents = getattr(method, "intents", ("charge",))
+            for intent in intents:
+                self._methods[(method.name, intent)] = method
         self.events = events if events is not None else EventDispatcher()
 
     def match_challenge(
