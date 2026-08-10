@@ -31,7 +31,8 @@ def challenge(
 class MockMethod:
     name = "tempo"
 
-    def __init__(self) -> None:
+    def __init__(self, *intents: str) -> None:
+        self.intents = dict.fromkeys(intents or ("charge",), True)
         self.loops: list[asyncio.AbstractEventLoop] = []
 
     async def create_credential(self, challenge: Challenge) -> Credential:
@@ -45,7 +46,7 @@ def test_matching_preserves_transport_selection() -> None:
 
     first_tempo = MockMethod()
     last_tempo = MockMethod()
-    stripe = StripeMethod()
+    stripe = StripeMethod("subscription")
     runtime = PaymentRuntime([first_tempo, stripe, last_tempo])
     offered = [
         challenge("stripe", method="stripe", intent="subscription"),
@@ -53,9 +54,21 @@ def test_matching_preserves_transport_selection() -> None:
     ]
 
     assert runtime.match_challenge(offered) == (offered[0], stripe)
-    assert runtime.match_challenge([offered[1]]) == (offered[1], last_tempo)
+    with pytest.raises(ValueError, match="No compatible payment method"):
+        runtime.match_challenge([offered[1]])
     with pytest.raises(ValueError, match="No compatible payment method"):
         runtime.match_challenge([challenge(method="other")])
+
+
+def test_matching_skips_unsupported_intent_before_supported_challenge() -> None:
+    method = MockMethod("charge")
+    runtime = PaymentRuntime([method])
+    offered = [
+        challenge("unsupported", intent="session"),
+        challenge("supported", intent="charge"),
+    ]
+
+    assert runtime.match_challenge(offered) == (offered[1], method)
 
 
 def test_preserves_falsey_event_dispatcher() -> None:
