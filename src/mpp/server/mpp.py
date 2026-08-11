@@ -34,7 +34,12 @@ from mpp.server.intent import Validation
 from mpp.server.intent import broadcast_credential as broadcast_intent_credential
 from mpp.server.intent import validate_credential as validate_intent_credential
 from mpp.server.method import transform_request
-from mpp.server.verify import _authenticate_echo, _challenge_from_echo, verify_or_challenge
+from mpp.server.verify import (
+    _authenticate_echo,
+    _body_digest_error,
+    _challenge_from_echo,
+    verify_or_challenge,
+)
 from mpp.store import Store
 
 if TYPE_CHECKING:
@@ -44,6 +49,14 @@ if TYPE_CHECKING:
 R = TypeVar("R")
 
 DEFAULT_DECIMALS = 6
+
+
+class _ContextUnset:
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_CONTEXT_UNSET: Any = _ContextUnset()
 
 
 class Mpp:
@@ -137,6 +150,8 @@ class Mpp:
         *,
         intent: str | None,
         request: dict[str, Any] | None,
+        meta: dict[str, str] | None = _CONTEXT_UNSET,
+        body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
     ) -> tuple[Credential, Intent | VerifiableIntent, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         credential = self._parse_credential(value)
@@ -172,6 +187,14 @@ class Mpp:
             if expected_request != echoed_request:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
 
+        if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
+            expected_meta = None if meta is _CONTEXT_UNSET else meta
+            expected_body = None if body is _CONTEXT_UNSET else body
+            if echoed_opaque != expected_meta:
+                raise InvalidChallengeError(echo.id, "credential opaque does not match")
+            if digest_error := _body_digest_error(echo.digest, expected_body):
+                raise InvalidChallengeError(echo.id, digest_error)
+
         intent_obj = self.method.intents.get(echo.intent)
         if intent_obj is None:
             raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
@@ -194,6 +217,8 @@ class Mpp:
         *,
         intent: str | None = None,
         request: dict[str, Any] | None = None,
+        meta: dict[str, str] | None = _CONTEXT_UNSET,
+        body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
     ) -> Validation:
         """Validate a bound credential without consuming payment state.
 
@@ -212,6 +237,10 @@ class Mpp:
                 this intent name.
             request: If provided, also require the credential's echoed
                 request to match these request parameters.
+            meta: Expected opaque challenge metadata. Supplying any request,
+                meta, or body context checks all three bindings; omitted
+                bindings are treated as absent.
+            body: Expected request body for the challenge's digest binding.
 
         Returns:
             The intent's validation record for the accepted credential.
@@ -230,6 +259,8 @@ class Mpp:
             credential,
             intent=intent,
             request=request,
+            meta=meta,
+            body=body,
         )
         return await validate_intent_credential(
             intent=intent_obj,
@@ -243,6 +274,8 @@ class Mpp:
         *,
         intent: str | None = None,
         request: dict[str, Any] | None = None,
+        meta: dict[str, str] | None = _CONTEXT_UNSET,
+        body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
     ) -> Receipt:
         """Revalidate and perform a bound credential's terminal operation.
 
@@ -259,6 +292,10 @@ class Mpp:
                 this intent name.
             request: If provided, also require the credential's echoed
                 request to match these request parameters.
+            meta: Expected opaque challenge metadata. Supplying any request,
+                meta, or body context checks all three bindings; omitted
+                bindings are treated as absent.
+            body: Expected request body for the challenge's digest binding.
 
         Returns:
             The settlement receipt from the intent's terminal operation.
@@ -274,6 +311,8 @@ class Mpp:
                 parsed,
                 intent=intent,
                 request=request,
+                meta=meta,
+                body=body,
             )
         except Exception as error:
             echo = parsed.challenge

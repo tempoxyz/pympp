@@ -56,6 +56,7 @@ def make_bound_credential(
     source: str | None = None,
     expires: str | None = None,
     digest: str | None = None,
+    meta: dict[str, str] | None = None,
 ) -> Credential:
     """Create a Credential with an HMAC-bound challenge ID for testing.
 
@@ -74,6 +75,7 @@ def make_bound_credential(
         request=request,
         expires=expires,
         digest=digest,
+        meta=meta,
     )
     echo = challenge.to_echo()
     return Credential(challenge=echo, payload=payload, source=source)

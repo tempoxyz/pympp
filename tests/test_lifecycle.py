@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, Receipt, _body_digest
 from mpp.errors import (
     InvalidChallengeError,
     MalformedCredentialError,
@@ -291,6 +291,87 @@ async def test_mpp_rejects_request_mismatch() -> None:
 
     with pytest.raises(InvalidChallengeError, match="request does not match"):
         await _server().validate_credential(credential, request={"amount": "2000"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate_credential", "broadcast_credential"])
+async def test_mpp_contextless_lifecycle_uses_authenticated_echo(operation: str) -> None:
+    body = {"resource": "bound"}
+    credential = _bound(
+        request={"amount": "1000"},
+        digest=_body_digest.compute(body),
+        meta={"route": "bound"},
+    )
+
+    result = await getattr(_server(), operation)(credential)
+
+    if operation == "validate_credential":
+        assert result.request == {"amount": "1000"}
+    else:
+        assert result.reference == "verifiable-reference"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate_credential", "broadcast_credential"])
+async def test_mpp_accepts_matching_context_bindings(operation: str) -> None:
+    request = {"amount": "1000"}
+    meta = {"route": "bound"}
+    body = {"resource": "bound"}
+    credential = _bound(request, digest=_body_digest.compute(body), meta=meta)
+
+    await getattr(_server(), operation)(credential, request=request, meta=meta, body=body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate_credential", "broadcast_credential"])
+@pytest.mark.parametrize(
+    ("meta", "body", "reason"),
+    [
+        ({"route": "other"}, {"resource": "bound"}, "opaque"),
+        ({"route": "bound"}, {"resource": "other"}, "body digest mismatch"),
+    ],
+)
+async def test_mpp_rejects_context_binding_mismatch(
+    operation: str,
+    meta: dict[str, str],
+    body: dict[str, Any],
+    reason: str,
+) -> None:
+    request = {"amount": "1000"}
+    expected_meta = {"route": "bound"}
+    expected_body = {"resource": "bound"}
+    credential = _bound(
+        request,
+        digest=_body_digest.compute(expected_body),
+        meta=expected_meta,
+    )
+    intent = VerifiableCharge()
+
+    with pytest.raises(InvalidChallengeError, match=reason):
+        await getattr(_server(intent), operation)(
+            credential,
+            request=request,
+            meta=meta,
+            body=body,
+        )
+    assert intent.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate_credential", "broadcast_credential"])
+async def test_mpp_rejects_missing_context_bindings(operation: str) -> None:
+    request = {"amount": "1000"}
+    body = {"resource": "bound"}
+    credential = _bound(
+        request,
+        digest=_body_digest.compute(body),
+        meta={"route": "bound"},
+    )
+    intent = VerifiableCharge()
+
+    with pytest.raises(InvalidChallengeError, match="opaque"):
+        await getattr(_server(intent), operation)(credential, request=request)
+    assert intent.calls == []
 
 
 @pytest.mark.asyncio
