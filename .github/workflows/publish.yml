@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: true
 
-      - uses: tempoxyz/changelogs@ec992966ce14836e96ef5bd6258683963130cd2e # OIDC trusted publishing
+      - uses: tempoxyz/changelogs@a19f62e3fdbd6d07b8900eb0568ed09b868bf84d # OIDC trusted publishing
         with:
           ecosystem: python
           python-version: '3.12'
