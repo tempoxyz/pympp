@@ -223,7 +223,7 @@ class ChargeIntent:
                 "payment_method_types": list(request.methodDetails.paymentMethodTypes),
                 "shared_payment_granted_token": spt,
             }
-            options = {"idempotency_key": f"mppx_{challenge_id}_{spt}"}
+            options = {"idempotency_key": f"mpp_{challenge_id}_{spt}"}
 
             create_async = getattr(payment_intents, "create_async", None)
             if callable(create_async):
@@ -265,7 +265,7 @@ class ChargeIntent:
             headers={
                 "Authorization": f"Basic {auth_value}",
                 "Content-Type": "application/x-www-form-urlencoded",
-                "Idempotency-Key": f"mppx_{challenge_id}_{spt}",
+                "Idempotency-Key": f"mpp_{challenge_id}_{spt}",
             },
             data=body,
         )

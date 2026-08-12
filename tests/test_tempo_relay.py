@@ -86,7 +86,7 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
         "/mpp/v1/mpp/broadcast",
     ]
     assert calls[0].headers["tempo-api-key"] == "tempo:sk:test"
-    expected_key = "pympp_0x" + keccak(bytes.fromhex("1234")).hex()
+    expected_key = "mpp_0x" + keccak(bytes.fromhex("1234")).hex()
     assert calls[1].headers["idempotency-key"] == expected_key
     body = json.loads(calls[0].content)
     assert body["challenge"]["request"] == {"amount": "1000"}
@@ -124,7 +124,7 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
         "/v1/mpp/validate",
         "/v1/mpp/broadcast",
     ]
-    assert calls[1].headers["idempotency-key"].startswith("pympp_0x")
+    assert calls[1].headers["idempotency-key"].startswith("mpp_0x")
 
 
 @pytest.mark.asyncio

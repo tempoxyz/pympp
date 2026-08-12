@@ -249,12 +249,12 @@ def _idempotency_key(body: dict[str, Any]) -> str:
             from mpp.methods.tempo.intents import _raw_transaction_hash
 
             try:
-                return f"pympp_{_raw_transaction_hash(signature)}"
+                return f"mpp_{_raw_transaction_hash(signature)}"
             except VerificationError:
                 pass
 
     canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return f"pympp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return f"mpp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _receipt(value: Any) -> Receipt:
