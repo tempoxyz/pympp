@@ -140,7 +140,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             await request.aread()
 
         response = await self._inner.handle_async_request(request)
-        attempted_challenges: set[str] = set()
 
         for _ in range(_MAX_PAYMENT_RETRIES):
             if response.status_code != 402:
@@ -201,10 +200,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         ),
                     )
                 return response
-
-            if challenge.id in attempted_challenges:
-                return response
-            attempted_challenges.add(challenge.id)
 
             if not replayable:
                 await response.aclose()

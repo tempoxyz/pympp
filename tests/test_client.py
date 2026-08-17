@@ -856,7 +856,7 @@ class TestPaymentTransport:
         assert not task.cancelled()
 
     @pytest.mark.asyncio
-    async def test_does_not_pay_again_after_repeated_402(self) -> None:
+    async def test_retries_repeated_actionable_challenge(self) -> None:
         challenge = Challenge(
             id="test-id",
             method="tempo",
@@ -867,15 +867,22 @@ class TestPaymentTransport:
             402,
             headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
         )
-        inner = MockTransport([required, required])
+        inner = MockTransport(
+            [
+                required,
+                required,
+                required,
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
         method = MockMethod()
         transport = PaymentTransport(methods=[method], inner=inner)
 
         response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
-        assert response.status_code == 402
-        assert len(inner.requests) == 2
-        method.create_credential.assert_awaited_once()
+        assert response.status_code == 200
+        assert len(inner.requests) == 4
+        assert method.create_credential.await_count == 3
 
     @pytest.mark.asyncio
     async def test_retries_payment_for_fresh_402_challenge(self) -> None:
