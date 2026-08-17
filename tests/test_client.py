@@ -74,6 +74,32 @@ class TestPaymentTransport:
 
         assert response.status_code == 200
         assert len(inner.requests) == 1
+        assert "Accept-Payment" not in inner.requests[0].headers
+
+    @pytest.mark.asyncio
+    async def test_advertises_supported_payment_capabilities(self) -> None:
+        method = MockMethod()
+        method.intents = {"charge": True, "session": True}
+        inner = MockTransport([httpx.Response(200)])
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert inner.requests[0].headers["Accept-Payment"] == "tempo/charge, tempo/session"
+
+    @pytest.mark.asyncio
+    async def test_preserves_explicit_accept_payment_header(self) -> None:
+        inner = MockTransport([httpx.Response(200)])
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+        request = httpx.Request(
+            "GET",
+            "https://example.com",
+            headers={"Accept-Payment": "custom/charge;q=0.5"},
+        )
+
+        await transport.handle_async_request(request)
+
+        assert inner.requests[0].headers["Accept-Payment"] == "custom/charge;q=0.5"
 
     @pytest.mark.asyncio
     async def test_handles_402_with_matching_method(self) -> None:
