@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-_MAX_PAYMENT_RETRIES = 3
+_DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
 
 
@@ -94,6 +94,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         events: EventDispatcher | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
     ) -> None:
         if (methods is None) == (runtime is None):
             raise TypeError("Provide exactly one of methods or runtime")
@@ -104,6 +105,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         )
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
+        self._max_payment_retries = max_payment_retries
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -142,7 +144,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         response = await self._inner.handle_async_request(request)
         attempted_challenges: set[str] = set()
 
-        for _ in range(_MAX_PAYMENT_RETRIES):
+        for _ in range(self._max_payment_retries):
             if response.status_code != 402:
                 return response
 
@@ -308,8 +310,13 @@ class Client:
         methods: Sequence[Method] | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
     ) -> None:
-        self._transport = PaymentTransport(methods, runtime=runtime)
+        self._transport = PaymentTransport(
+            methods,
+            runtime=runtime,
+            max_payment_retries=max_payment_retries,
+        )
         self._client = httpx.AsyncClient(transport=self._transport)
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
