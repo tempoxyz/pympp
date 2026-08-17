@@ -4,13 +4,14 @@ on:
   pull_request:
     types: [labeled]
 
-permissions:
-  contents: read
+permissions: {}
 
 jobs:
-  publish:
+  authorize:
+    if: github.event.label.name == 'cyclops'
     runs-on: ubuntu-latest
-    if: github.event.action == 'labeled' && github.event.label.name == 'cyclops'
+    permissions:
+      contents: read
     steps:
       - name: Check admin permission
         env:
@@ -24,30 +25,14 @@ jobs:
             exit 1
           fi
 
-      - name: Publish event
-        env:
-          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
-          REPOSITORY: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-
-          echo "$EVENTS_KEY" > "$RUNNER_TEMP/key"
-          echo "$EVENTS_CERT" > "$RUNNER_TEMP/cert"
-
-          read -r -a events_args <<< "${EVENTS_ARGS:-}"
-          curl -sf -o /dev/null -X POST "${events_args[@]}" \
-            -H "Content-Type: application/json" \
-            --key "$RUNNER_TEMP/key" \
-            --cert "$RUNNER_TEMP/cert" \
-            -d "{
-              \"repository\": \"${REPOSITORY}\",
-              \"event\": \"pr_audit\",
-              \"data\": {
-                \"pr_number\": ${PR_NUMBER},
-                \"sha\": \"${PR_SHA}\"
-              }
-            }"
+  pr-audit:
+    needs: authorize
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@183a02178c660ce295e9a262edc5857cb7135f06
+    secrets:
+      EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+      EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+      EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
