@@ -113,3 +113,59 @@ class TestParseUnitsEdgeCases:
 
     def test_whitespace_stripped(self) -> None:
         assert parse_units(" 1.5 ", 6) == 1_500_000
+
+    def test_amount_longer_than_decimal_context_precision_is_exact(self) -> None:
+        """Amounts past 28 significant digits must not be rounded.
+
+        Scaling through the active decimal context would round these to a
+        different, still-integral value and return a silently wrong amount.
+        """
+        assert parse_units("999999999999999999999999999999", 0) == 999999999999999999999999999999
+        assert (
+            parse_units("12345678901234567890.123456789012345678", 18)
+            == 12345678901234567890123456789012345678
+        )
+
+    def test_fractional_base_units_still_rejected_for_long_amounts(self) -> None:
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("0.1234567890123456789012345678901", 6)
+
+    def test_extreme_negative_exponent_is_rejected_without_building_a_divisor(
+        self,
+    ) -> None:
+        """A tiny exponent must be rejected from the exponent alone.
+
+        The scaled divisor for these values has millions of digits. Deciding
+        divisibility by comparing the exponent to the digit count avoids
+        materializing it, so this stays immediate instead of spending seconds
+        and megabytes on a value that is rejected either way.
+        """
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("1e-10000000", 6)
+
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("1e-1000000000", 6)
+
+    def test_zero_is_zero_at_any_scale(self) -> None:
+        assert parse_units("0.000", 6) == 0
+        assert parse_units("0e-10000000", 6) == 0
+
+    @pytest.mark.parametrize(("value", "decimals"), [("100", -2), ("1000", -3), ("7", -1)])
+    def test_negative_decimals_rejected(self, value: str, decimals: int) -> None:
+        """A negative scale divides the amount rather than scaling it.
+
+        It also failed inconsistently: "100" with -2 decimals returned 1
+        while "7" with -1 raised, so an under-charge only surfaced when the
+        division left a remainder. mpp-go rejects negative decimals outright.
+        """
+        with pytest.raises(ValueError, match="decimals must be non-negative"):
+            parse_units(value, decimals)
+
+    def test_transform_units_rejects_negative_decimals(self) -> None:
+        with pytest.raises(ValueError, match="decimals must be non-negative"):
+            transform_units({"amount": "100", "decimals": -2})
+
+    def test_transform_units_rejects_bool_decimals(self) -> None:
+        """``bool`` is an ``int`` subclass, so ``true`` would scale by 1."""
+        with pytest.raises(ValueError, match="decimals must be an integer"):
+            transform_units({"amount": "1.5", "decimals": True})

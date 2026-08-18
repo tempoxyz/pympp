@@ -44,14 +44,39 @@ def parse_units(value: str, decimals: int) -> int:
     if d < 0:
         raise ValueError("amount must be non-negative")
 
-    result = d * (10**decimals)
+    # A negative scale divides the amount instead of scaling it, and only
+    # reports the loss when the division leaves a remainder: "100" with -2
+    # decimals returns 1 while "7" with -1 raises. Reject it outright, as
+    # mpp-go does.
+    if decimals < 0:
+        raise ValueError(f"decimals must be non-negative, got {decimals}")
 
-    if result != int(result):
+    # Scale with integer arithmetic. ``d * (10**decimals)`` is evaluated in the
+    # active decimal context, whose default precision is 28 significant digits,
+    # so amounts longer than that would be rounded into a different — and still
+    # integral — value and returned as a silently wrong base-unit amount.
+    _sign, digits, exponent = d.as_tuple()
+    unscaled = int("".join(str(digit) for digit in digits))
+    scale = int(exponent) + decimals
+
+    if unscaled == 0:
+        return 0
+
+    if scale >= 0:
+        return unscaled * 10**scale
+
+    # ``unscaled`` has exactly ``len(digits)`` digits, so a divisor carrying at
+    # least that many zeros cannot divide it. Testing the exponent before
+    # building the divisor short-circuits values such as ``"1e-10000000"``,
+    # which would otherwise materialize a ten-million-digit integer only to be
+    # rejected.
+    divisor_zeros = -scale
+    if divisor_zeros >= len(digits) or unscaled % 10**divisor_zeros:
         raise ValueError(
             f"Amount {value!r} with {decimals} decimals produces fractional base units"
         )
 
-    return int(result)
+    return unscaled // 10**divisor_zeros
 
 
 def transform_units(request: dict[str, Any]) -> dict[str, Any]:
@@ -75,7 +100,9 @@ def transform_units(request: dict[str, Any]) -> dict[str, Any]:
     result = {**request}
     decimals = result.pop("decimals")
 
-    if not isinstance(decimals, int):
+    # ``bool`` is a subclass of ``int``, so an unintended ``"decimals": true``
+    # would otherwise be accepted as 1 and quietly rescale the amount.
+    if isinstance(decimals, bool) or not isinstance(decimals, int):
         raise ValueError(f"decimals must be an integer, got {type(decimals).__name__}")
 
     if "amount" in result:
