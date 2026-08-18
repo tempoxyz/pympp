@@ -1,0 +1,16 @@
+version: 3
+
+rules:
+  # Tempo's shared workflows are SHA-pinned but do not publish releases that
+  # pinact can use for version-comment or minimum-age verification.
+  - ignore: true
+    conditions:
+      - expr: |
+          ActionRepoFullName in ["tempoxyz/gh-actions", "tempoxyz/mpp-tools"]
+      - expr: ActionVersion matches "^[0-9a-f]{40}$"
+  # The changelog action may be pinned to an unreleased commit trusted by
+  # PyPI's OIDC publishing policy rather than to a release tag.
+  - ignore: true
+    conditions:
+      - expr: ActionName == "wevm/changelogs"
+      - expr: ActionVersion matches "^[0-9a-f]{40}$"
