@@ -633,6 +633,42 @@ class TestChallengeExpiryEnforcement:
 
         assert isinstance(result, Challenge)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "expires",
+        ["2099-01-01T00:00:00", "2000-01-01T00:00:00"],
+        ids=["future", "past"],
+    )
+    async def test_rejects_timezone_naive_expires(self, expires: str) -> None:
+        """Should reject an expires without an offset instead of raising.
+
+        A naive timestamp parses, so it reached the comparison against an
+        aware ``now`` and raised TypeError — turning an expired credential
+        into a server error rather than a fail-closed rejection.
+        """
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires=expires,
+        )
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
 
 class TestCrossEndpointReplay:
     @pytest.mark.asyncio
