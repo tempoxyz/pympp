@@ -504,3 +504,61 @@ class TestOpaque:
             meta={},
         )
         assert challenge.opaque == {}
+
+
+class TestWireFormCanonicalization:
+    """The emitted `request` parameter must be the exact bytes the HMAC binds.
+
+    Section 5.1.1 of draft-httpauth-payment-00 binds the challenge id to the
+    base64url-encoded request "as it appears on the wire". If the wire form and
+    the HMAC input disagree, the id is unreproducible by any conformant peer
+    even though this SDK still verifies its own challenges (verify decodes and
+    re-canonicalizes, hiding the mismatch).
+    """
+
+    NON_ASCII_REQUEST = {
+        "amount": "1000000",
+        "currency": "usd",
+        "description": "Payment for café ☕",
+    }
+
+    def test_emitted_request_reproduces_the_challenge_id(self) -> None:
+        import base64
+        import hashlib
+        import hmac
+
+        from mpp._parsing import format_www_authenticate
+
+        secret, realm = "server-secret", "api.example.com"
+        challenge = Challenge.create(
+            secret_key=secret,
+            realm=realm,
+            method="tempo",
+            intent="charge",
+            request=self.NON_ASCII_REQUEST,
+        )
+        header = format_www_authenticate(challenge, realm)
+        wire_request = header.split('request="', 1)[1].split('"', 1)[0]
+
+        # Recompute the id the way a peer does: HMAC over the wire string.
+        payload = "|".join([realm, "tempo", "charge", wire_request, "", "", ""])
+        expected = (
+            base64.urlsafe_b64encode(
+                hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()
+            )
+            .decode()
+            .rstrip("=")
+        )
+        assert challenge.id == expected
+
+    def test_emitted_request_is_raw_utf8(self) -> None:
+        from mpp._parsing import _b64_decode, _b64_encode
+
+        encoded = _b64_encode(self.NON_ASCII_REQUEST)
+        import base64
+
+        decoded = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        assert "café ☕" in decoded
+        assert "\\u00e9" not in decoded
+        assert "\\u2615" not in decoded
+        assert _b64_decode(encoded) == self.NON_ASCII_REQUEST

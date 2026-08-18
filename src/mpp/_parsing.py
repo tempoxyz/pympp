@@ -38,9 +38,20 @@ class ParseError(Exception):
     """
 
 
+def canonical_json(data: Any) -> str:
+    """Serialize a value as canonical compact JSON.
+
+    Sorted keys, no whitespace, and raw UTF-8 (never \\uXXXX escapes). The
+    challenge id HMAC binds the base64url encoding of this exact form, so every
+    site that produces or re-derives a wire value must go through here or the
+    id will not reproduce (draft-httpauth-payment-00 section 5.1.1).
+    """
+    return json.dumps(data, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+
+
 def _b64_encode(data: dict[str, Any]) -> str:
     """Encode dict as URL-safe base64 JSON (compact, no padding)."""
-    compact_json = json.dumps(data, separators=(",", ":"), sort_keys=True)
+    compact_json = canonical_json(data)
     encoded = base64.urlsafe_b64encode(compact_json.encode()).decode()
     return encoded.rstrip("=")
 

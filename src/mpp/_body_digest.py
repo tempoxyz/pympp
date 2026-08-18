@@ -7,8 +7,9 @@ specific HTTP request content.
 import base64
 import hashlib
 import hmac
-import json
 from typing import Any
+
+from mpp._parsing import canonical_json
 
 
 def compute(body: str | bytes | dict[str, Any]) -> str:
@@ -21,7 +22,7 @@ def compute(body: str | bytes | dict[str, Any]) -> str:
         Digest in the format ``sha-256=<base64>``.
     """
     if isinstance(body, dict):
-        body = json.dumps(body, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        body = canonical_json(body)
     if isinstance(body, str):
         body = body.encode("utf-8")
     digest = hashlib.sha256(body).digest()
