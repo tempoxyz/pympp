@@ -297,8 +297,7 @@ class TestChargeIntegration:
         )
         expires = _future_expires()
         request_dict = {
-            # The dev faucet funds exactly 1_000_000_000 units, and gas is paid
-            # in the same token. Leave headroom so the payment can settle.
+            # Gas is paid in the same token, so leave headroom for settlement.
             "amount": premium_amount,
             "currency": currency,
             "recipient": funded_recipient.address,
