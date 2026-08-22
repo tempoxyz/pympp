@@ -47,6 +47,15 @@ def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     return (url.scheme, url.host, url.port)
 
 
+def _accept_payment(methods: Sequence[Method]) -> str:
+    capabilities = (
+        f"{method.name}/{intent}"
+        for method in methods
+        for intent in getattr(method, "intents", ("charge",))
+    )
+    return ", ".join(dict.fromkeys(capabilities))
+
+
 def _client_payment_failed_payload(
     *,
     challenge: Challenge | None,
@@ -127,6 +136,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        accept_payment = _accept_payment(self._runtime.methods)
+        if accept_payment and "accept-payment" not in request.headers:
+            request.headers["Accept-Payment"] = accept_payment
+
         current_origin = _origin(request.url)
         original_origin = request.extensions.setdefault(
             _ORIGINAL_ORIGIN_EXTENSION,
