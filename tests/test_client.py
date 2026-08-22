@@ -527,7 +527,9 @@ class TestPaymentTransport:
         transport.on_challenge_received(first)
         transport.on_challenge_received(second)
 
-        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+        response = await transport.handle_async_request(
+            httpx.Request("GET", "https://example.com")
+        )
 
         assert response.status_code == 200
         assert events == ["first"]
@@ -932,8 +934,46 @@ class TestPaymentTransport:
             "second-id",
         ]
 
+    @pytest.mark.asyncio
+    async def test_respects_configured_payment_retry_limit(self) -> None:
+        challenges = [
+            Challenge(
+                id=challenge_id,
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000"},
+            )
+            for challenge_id in ("first-id", "second-id")
+        ]
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                )
+                for challenge in challenges
+            ]
+        )
+        method = MockMethod()
+        transport = PaymentTransport(
+            methods=[method],
+            inner=inner,
+            max_payment_retries=1,
+        )
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 402
+        assert len(inner.requests) == 2
+        method.create_credential.assert_awaited_once()
+
 
 class TestClient:
+    def test_passes_payment_retry_limit_to_transport(self) -> None:
+        client = Client(methods=[], max_payment_retries=1)
+
+        assert client._transport._max_payment_retries == 1
+
     @pytest.mark.asyncio
     async def test_uses_shared_runtime(self, httpx_mock: HTTPXMock) -> None:
         challenge = Challenge(
