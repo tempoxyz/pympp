@@ -2,52 +2,32 @@ name: Changelog
 
 on:
   pull_request:
-    types: [opened]
-
-permissions: {}
+    types: [opened, synchronize]
+    paths-ignore:
+      - ".github/**"
 
 jobs:
   changelog:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
-          ref: ${{ github.head_ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
-      - name: Install changelogs
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/wevm/changelogs-rs/releases/download/changelogs%400.6.3/changelogs-linux-amd64" \
-            -o "$HOME/.local/bin/changelogs"
-          echo "d4168ee68b612224a26a39e86bfd2c923ac3dd2de12ee43d2bb65a5ea19df6b6  $HOME/.local/bin/changelogs" | sha256sum -c
-          chmod +x "$HOME/.local/bin/changelogs"
-      - name: Generate changelog
+      - name: Remove repo-local Claude settings
+        run: rm -rf .claude/
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Check changelog
+        uses: tempoxyz/changelogs/check@bd50cca508d81505924dfa3997b1696ac2b7b1aa # v0.9.0
+        with:
+          ai: "npx -y @anthropic-ai/claude-code@2.1.220 --bare -p"
+          ecosystem: python
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BASE_REF: ${{ github.base_ref }}
-          CLAUDE: npx -y @anthropic-ai/claude-code@2.1.97 --bare -p
-        run: |
-          rm -rf .claude/
-          CHANGED=$(git diff --name-only "origin/${BASE_REF}...HEAD")
-          CODE_CHANGES=$(echo "$CHANGED" | grep -vE '^(\.changelog/|\.github/|\.gitignore|README\.md|AGENTS\.md)' || true)
-          if [ -z "$CODE_CHANGES" ]; then
-            echo "No code changes requiring changelog, skipping"
-            exit 0
-          fi
-          ~/.local/bin/changelogs add --ecosystem python --ai "$CLAUDE" --ref "origin/${BASE_REF}"
-      - name: Commit changelog
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          if [ -n "$(git status --porcelain .changelog/)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}"
-            git add .changelog/
-            git commit -m "chore: add changelog"
-            git push
-          fi
