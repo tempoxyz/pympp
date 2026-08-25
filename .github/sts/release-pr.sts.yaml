@@ -1,0 +1,14 @@
+# Allow the release workflow (push to main) to mint a short-lived token that
+# opens and updates the changelog-release version PR through the
+# tempoxyz/changelogs action, and pushes its branch, tags, and GitHub
+# releases. Replaces the built-in GITHUB_TOKEN so the org can turn off
+# "Allow GitHub Actions to create and approve pull requests".
+# The release job runs inside the release GitHub Environment, so
+# that is what its OIDC subject carries; the job_workflow_ref claim check
+# pins minting to this workflow as it exists on main.
+subject: repo:tempoxyz@211589300/pympp@1141403862:environment:release
+claim_pattern:
+  job_workflow_ref: tempoxyz/pympp/\.github/workflows/publish\.yml@refs/heads/main
+permissions:
+  contents: write
+  pull_requests: write

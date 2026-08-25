@@ -13,13 +13,23 @@ jobs:
     name: Version
     runs-on: ubuntu-latest
     environment: release
+    # The changelog-release version PR, branch, tags, and GitHub releases are
+    # created with a short-lived GitHub App token minted via the github-sts
+    # action (authorized by .github/sts/release-pr.sts.yaml); the built-in
+    # GITHUB_TOKEN is not allowed to create pull requests.
     permissions:
-      contents: write
-      pull-requests: write
-      id-token: write   # required for PyPI Trusted Publishing (OIDC)
+      contents: read
+      id-token: write # PyPI Trusted Publishing (OIDC) and the STS exchange
     steps:
+      - name: Fetch GitHub token via STS
+        id: app-token
+        uses: tempoxyz/gh-actions/actions/github-sts@183a02178c660ce295e9a262edc5857cb7135f06 # main
+        with:
+          policy: release-pr
+
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
           persist-credentials: true
 
@@ -28,5 +38,4 @@ jobs:
           ecosystem: python
           python-version: '3.12'
           conventional-commit: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ steps.app-token.outputs.token }}
