@@ -128,10 +128,11 @@ def _make_challenge(
     method: str = "tempo",
     intent: str = "charge",
     currency: str = "0x20c0",
+    identifier: str = "ch_test123",
 ) -> MCPChallenge:
-    return MCPChallenge.from_dict(
-        _make_challenge_dict(method=method, intent=intent, currency=currency)
-    )
+    value = _make_challenge_dict(method=method, intent=intent, currency=currency)
+    value["id"] = identifier
+    return MCPChallenge.from_dict(value)
 
 
 # ---------------------------------------------------------------------------
@@ -552,15 +553,15 @@ class TestMcpClientPaidTool:
 class TestMcpClientMethodMatching:
     """Tests for challenge-to-method matching logic."""
 
-    def test_match_by_method_and_intent(self) -> None:
+    async def test_match_by_method_and_intent(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
         client = McpClient(AsyncMock(), methods=[method])
 
-        challenge, matched = client._match_challenge([_make_challenge()])
+        challenge, matched = await client._match_challenge([_make_challenge()])
         assert isinstance(challenge, MCPChallenge)
         assert matched is method
 
-    def test_match_prefers_client_order(self) -> None:
+    async def test_match_prefers_client_order(self) -> None:
         """Methods are matched in client-preference order."""
         stripe_method = FakeMethod(name="stripe", _intents={"charge": True})
         tempo_method = FakeMethod(name="tempo", _intents={"charge": True})
@@ -571,10 +572,10 @@ class TestMcpClientMethodMatching:
             _make_challenge(method="tempo"),
             _make_challenge(method="stripe"),
         ]
-        _, matched = client._match_challenge(challenges)
+        _, matched = await client._match_challenge(challenges)
         assert matched is stripe_method
 
-    def test_match_skips_currency_rejected_by_configured_method(self) -> None:
+    async def test_match_skips_currency_rejected_by_configured_method(self) -> None:
         method = FakeMethod(currency="0xUsdc")
         client = McpClient(AsyncMock(), methods=[method])
         challenges = [
@@ -582,24 +583,42 @@ class TestMcpClientMethodMatching:
             _make_challenge(currency="0xUSDC"),
         ]
 
-        challenge, matched = client._match_challenge(challenges)
+        challenge, matched = await client._match_challenge(challenges)
 
         assert challenge.request["currency"] == "0xUSDC"
         assert matched is method
 
-    def test_no_match_raises(self) -> None:
+    async def test_match_uses_method_owned_challenge_priority(self) -> None:
+        method = FakeMethod()
+
+        async def get_challenge_priority(challenge: Challenge) -> int:
+            return 1 if challenge.id == "funded" else -1
+
+        method.get_challenge_priority = get_challenge_priority  # type: ignore[attr-defined]
+        client = McpClient(AsyncMock(), methods=[method])
+        challenges = [
+            _make_challenge(identifier="unfunded"),
+            _make_challenge(identifier="funded"),
+        ]
+
+        challenge, matched = await client._match_challenge(challenges)
+
+        assert challenge.id == "funded"
+        assert matched is method
+
+    async def test_no_match_raises(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="stripe")])
+            await client._match_challenge([_make_challenge(method="stripe")])
 
-    def test_intent_mismatch(self) -> None:
+    async def test_intent_mismatch(self) -> None:
         method = FakeMethod(name="tempo", _intents={"session": True})
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
-            client._match_challenge([_make_challenge(method="tempo", intent="charge")])
+            await client._match_challenge([_make_challenge(method="tempo", intent="charge")])
 
     def test_extract_challenges_skips_malformed_entries(self) -> None:
         err = FakeMcpError(

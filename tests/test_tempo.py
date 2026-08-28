@@ -5,7 +5,7 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 import pytest
@@ -16,15 +16,19 @@ from mpp import Challenge
 from mpp.methods.tempo import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
+    MACH,
+    PATH_USD,
     TESTNET_CHAIN_ID,
+    USDC,
     TempoAccount,
     escrow_contract_for_chain,
+    fee_tokens_for_chain,
     tempo,
 )
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo._rpc import _tip20_balance
-from mpp.methods.tempo.client import TempoMethod
+from mpp.methods.tempo.client import TempoMethod, TransactionError
 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 from mpp.methods.tempo.fee_payer_policy import get_policy
 from mpp.methods.tempo.intents import (
@@ -131,6 +135,11 @@ class TestTempoAccount:
 
 
 class TestTempoMethod:
+    def test_mach_metadata_and_fee_tokens_are_public(self) -> None:
+        assert MACH == "0x20c000000000000000000000f37de3740ADec032"
+        assert fee_tokens_for_chain(CHAIN_ID) == (PATH_USD, USDC)
+        assert fee_tokens_for_chain(TESTNET_CHAIN_ID) == (PATH_USD,)
+
     def test_tempo_factory(self) -> None:
         """tempo() should create a TempoMethod."""
         method = tempo(intents={"charge": ChargeIntent()})
@@ -158,6 +167,300 @@ class TestTempoMethod:
         )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
+
+    @pytest.mark.asyncio
+    async def test_mach_challenge_priority_uses_payment_balance(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-priority",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000", "currency": MACH},
+        )
+
+        async def funded_balance(_rpc_url: str, token: str, _address: str) -> int:
+            return 1000 if token.lower() in {MACH.lower(), PATH_USD.lower()} else 0
+
+        balance = AsyncMock(side_effect=funded_balance)
+        with patch(
+            "mpp.methods.tempo.client._tip20_balance",
+            new=balance,
+        ):
+            assert await method.get_challenge_priority(challenge) == 1
+        assert balance.await_args_list == [
+            call("https://rpc.test", MACH, account.address),
+            call("https://rpc.test", PATH_USD, account.address),
+        ]
+
+        with patch(
+            "mpp.methods.tempo.client._tip20_balance",
+            new=AsyncMock(return_value=999),
+        ):
+            assert await method.get_challenge_priority(challenge) == -1
+
+    @pytest.mark.asyncio
+    async def test_mach_challenge_priority_uses_root_account_balance(self) -> None:
+        access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        root = "0x975937feafc6869a260c176854dda8764a78e122"
+        method = tempo(
+            account=access_key,
+            root_account=root,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-access-key-priority",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000", "currency": MACH},
+        )
+
+        async def funded_balance(_rpc_url: str, token: str, _address: str) -> int:
+            return 1000 if token.lower() in {MACH.lower(), PATH_USD.lower()} else 0
+
+        balance = AsyncMock(side_effect=funded_balance)
+
+        with patch("mpp.methods.tempo.client._tip20_balance", new=balance):
+            assert await method.get_challenge_priority(challenge) == 1
+
+        assert balance.await_args_list == [
+            call("https://rpc.test", MACH, root),
+            call("https://rpc.test", PATH_USD, root),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mach_challenge_priority_requires_fee_token_unless_sponsored(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+
+        async def payment_only(_rpc_url: str, token: str, _address: str) -> int:
+            return 1000 if token.lower() == MACH.lower() else 0
+
+        direct = Challenge(
+            id="mach-without-gas",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000", "currency": MACH},
+        )
+        sponsored = Challenge(
+            id="sponsored-mach-without-gas",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "methodDetails": {"feePayer": True, "chainId": CHAIN_ID},
+            },
+        )
+
+        with patch(
+            "mpp.methods.tempo.client._tip20_balance",
+            new=AsyncMock(side_effect=payment_only),
+        ):
+            assert await method.get_challenge_priority(direct) == -1
+            assert await method.get_challenge_priority(sponsored) == 1
+
+    @pytest.mark.asyncio
+    async def test_mach_charge_uses_funded_stablecoin_fee_token(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-fee-token",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {
+                "eth_chainId": hex(CHAIN_ID),
+                "eth_getTransactionCount": "0x1",
+                "eth_gasPrice": "0x1",
+            }[method_name]
+
+        async def fake_balance(_rpc_url: str, token: str, _address: str) -> int:
+            return 1 if token.lower() == PATH_USD.lower() else 0
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", side_effect=fake_balance),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
+        assert decoded[10] == bytes.fromhex(PATH_USD[2:])
+
+    @pytest.mark.asyncio
+    async def test_mach_charge_falls_back_to_funded_usdc_fee_token(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-usdc-fee-token",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {
+                "eth_chainId": hex(CHAIN_ID),
+                "eth_getTransactionCount": "0x1",
+                "eth_gasPrice": "0x1",
+            }[method_name]
+
+        async def fake_balance(_rpc_url: str, token: str, _address: str) -> int:
+            return 1 if token.lower() == USDC.lower() else 0
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", side_effect=fake_balance),
+            patch(
+                "mpp.methods.tempo.client.estimate_gas",
+                new=AsyncMock(return_value=100_000),
+            ),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
+        assert decoded[10] == bytes.fromhex(USDC[2:])
+
+    @pytest.mark.asyncio
+    async def test_sponsored_mach_charge_defers_fee_token_to_fee_payer(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-sponsored",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": True, "chainId": CHAIN_ID},
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {
+                "eth_chainId": hex(CHAIN_ID),
+                "eth_getTransactionCount": "0x1",
+                "eth_gasPrice": "0x1",
+            }[method_name]
+
+        balance = AsyncMock(return_value=0)
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", new=balance),
+            patch(
+                "mpp.methods.tempo.client.estimate_gas",
+                new=AsyncMock(return_value=100_000),
+            ),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded, _, _, _ = decode_fee_payer_envelope(
+            bytes.fromhex(credential.payload["signature"][2:])
+        )
+        assert decoded[10] == b""
+        balance.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_mach_charge_requires_a_funded_stablecoin_fee_token(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-no-fee-token",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {
+                "eth_chainId": hex(CHAIN_ID),
+                "eth_getTransactionCount": "0x1",
+                "eth_gasPrice": "0x1",
+            }[method_name]
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", new=AsyncMock(return_value=0)),
+        ):
+            with pytest.raises(TransactionError, match="funded supported stablecoin"):
+                await method.create_credential(challenge)
 
     def test_tempo_propagates_rpc_url_to_intents(self) -> None:
         """tempo() should propagate rpc_url to intents that don't set one."""

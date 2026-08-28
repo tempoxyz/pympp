@@ -31,11 +31,13 @@ from mpp._lazy_exports import load_lazy_attr
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
+    MACH,
     PATH_USD,
     TESTNET_CHAIN_ID,
     USDC,
     default_currency_for_chain,
     escrow_contract_for_chain,
+    fee_tokens_for_chain,
 )
 
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'

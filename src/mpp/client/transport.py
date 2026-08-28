@@ -213,7 +213,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     challenges.append(parsed)
 
             try:
-                challenge, matched_method = self._runtime.match_challenge(challenges)
+                challenge, matched_method = await self._runtime.select_challenge(challenges)
             except ValueError as match_error:
                 if parse_error is not None or challenges:
                     # Surface parse/method-selection failures to observers while

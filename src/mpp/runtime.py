@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
@@ -59,14 +62,82 @@ class PaymentRuntime:
         challenges: Sequence[Challenge],
     ) -> tuple[Challenge, Method]:
         """Return the first challenge with a configured method and intent."""
+        candidates = self._compatible_candidates(challenges)
+        if candidates:
+            return candidates[0]
+
+        offered = [challenge.method for challenge in challenges]
+        raise ValueError(f"No compatible payment method for challenges: {offered}")
+
+    async def select_challenge(
+        self,
+        challenges: Sequence[Challenge],
+    ) -> tuple[Challenge, Method]:
+        """Return the preferred compatible challenge, including async method priorities."""
+        candidates = self._compatible_candidates(challenges)
+        if not candidates:
+            offered = [challenge.method for challenge in challenges]
+            raise ValueError(f"No compatible payment method for challenges: {offered}")
+
+        return (await self._prioritize_candidates(candidates))[0]
+
+    async def _prioritize_candidates(
+        self,
+        candidates: Sequence[tuple[Challenge, Method]],
+    ) -> list[tuple[Challenge, Method]]:
+        """Apply async method priorities without changing cross-method order."""
+
+        ordered = list(candidates)
+        positions_by_method: dict[int, list[int]] = {}
+        for index, (_challenge, method) in enumerate(candidates):
+            if not callable(getattr(method, "get_challenge_priority", None)):
+                continue
+            positions_by_method.setdefault(id(method), []).append(index)
+
+        for positions in positions_by_method.values():
+            if len(positions) < 2:
+                continue
+            method = candidates[positions[0]][1]
+            priority_fn = getattr(method, "get_challenge_priority")  # noqa: B009
+
+            async def rank_candidate(
+                original_index: int,
+                position: int,
+                priority_fn: Any,
+            ) -> tuple[float, int, tuple[Challenge, Method]]:
+                candidate = candidates[position]
+                priority = priority_fn(candidate[0])
+                if inspect.isawaitable(priority):
+                    priority = await priority
+                if not isinstance(priority, int | float) or not math.isfinite(priority):
+                    raise ValueError("Challenge priority must be finite")
+                return float(priority), original_index, candidate
+
+            ranked = await asyncio.gather(
+                *(
+                    rank_candidate(index, position, priority_fn)
+                    for index, position in enumerate(positions)
+                )
+            )
+            ranked.sort(key=lambda item: (-item[0], item[1]))
+            for ranked_index, position in enumerate(positions):
+                ordered[position] = ranked[ranked_index][2]
+
+        return ordered
+
+    def _compatible_candidates(
+        self,
+        challenges: Sequence[Challenge],
+    ) -> list[tuple[Challenge, Method]]:
+        """Return compatible candidates in normal negotiation order."""
+        candidates: list[tuple[Challenge, Method]] = []
         for challenge in challenges:
             methods = self._methods.get((challenge.method, challenge.intent), ())
             for method in methods:
                 if _method_accepts_currency(method, challenge):
-                    return challenge, method
-
-        offered = [challenge.method for challenge in challenges]
-        raise ValueError(f"No compatible payment method for challenges: {offered}")
+                    candidates.append((challenge, method))
+                    break
+        return candidates
 
     async def create_credential(
         self,

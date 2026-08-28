@@ -15,11 +15,13 @@ from mpp.methods import CanOfferFn, PaymentSuccessHandler
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
+    MACH,
     RPC_URL,
     default_currency_for_chain,
+    fee_tokens_for_chain,
     rpc_url_for_chain,
 )
-from mpp.methods.tempo._rpc import _rpc_call, estimate_gas
+from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
 from mpp.methods.tempo.fee_payer_policy import get_policy
 
 if TYPE_CHECKING:
@@ -126,6 +128,80 @@ class TempoMethod:
             return await self._get_chain_id(self.rpc_url)
         return None
 
+    async def get_challenge_priority(self, challenge: Challenge) -> int:
+        """Prefer charge challenges the configured payer can fund directly."""
+        if self.account is None or challenge.intent != "charge":
+            return 0
+        amount = challenge.request.get("amount")
+        currency = challenge.request.get("currency")
+        if not isinstance(amount, str) or not isinstance(currency, str):
+            return 0
+        try:
+            amount_raw = int(amount)
+        except ValueError:
+            return 0
+        if amount_raw == 0:
+            return 1
+
+        method_details = challenge.request.get("methodDetails")
+        challenge_chain_id = (
+            method_details.get("chainId") if isinstance(method_details, dict) else None
+        )
+        expected_chain_id = await self._resolve_expected_chain_id()
+        parsed_chain_id: int | None = None
+        if challenge_chain_id is not None:
+            try:
+                parsed_chain_id = int(challenge_chain_id)
+            except (TypeError, ValueError):
+                return 0
+            if expected_chain_id is not None and parsed_chain_id != expected_chain_id:
+                return -1
+
+        payer = self.root_account or self.account.address
+        try:
+            balance = await _tip20_balance(self.rpc_url, currency, payer)
+        except Exception:
+            return 0
+        if balance < amount_raw:
+            return -1
+
+        use_fee_payer = (
+            method_details.get("feePayer", False) if isinstance(method_details, dict) else False
+        )
+        if currency.lower() != MACH.lower() or use_fee_payer:
+            return 1
+
+        try:
+            chain_id = parsed_chain_id if parsed_chain_id is not None else expected_chain_id
+            if chain_id is None:
+                chain_id = await self._get_chain_id(self.rpc_url)
+            await self._resolve_mach_fee_token(
+                account=payer,
+                chain_id=chain_id,
+                rpc_url=self.rpc_url,
+            )
+        except Exception:
+            return -1
+        return 1
+
+    async def _resolve_mach_fee_token(
+        self,
+        *,
+        account: str,
+        chain_id: int,
+        rpc_url: str,
+    ) -> str:
+        """Return a funded stablecoin for MACH transaction fees."""
+        for token in fee_tokens_for_chain(chain_id):
+            try:
+                if await _tip20_balance(rpc_url, token, account) > 0:
+                    return token
+            except Exception:
+                continue
+        raise TransactionError(
+            "MACH charges require a funded supported stablecoin for transaction fees"
+        )
+
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
 
@@ -229,8 +305,9 @@ class TempoMethod:
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
-        Creates a TempoTransaction (type 0x76) with fee token set to the
-        transfer currency, allowing gas to be paid in the same token.
+        Creates a TempoTransaction (type 0x76) with a supported fee token.
+        Ordinary charges use the transfer currency; MACH charges select a
+        funded supported stablecoin because MACH cannot pay transaction fees.
 
         When ``awaiting_fee_payer`` is True, the transaction is built with
         a fee payer placeholder so a sponsoring service can co-sign it
@@ -303,6 +380,16 @@ class TempoMethod:
                 f"expected {expected_chain_id} from client policy"
             )
 
+        fee_token: str | None = None
+        if not awaiting_fee_payer:
+            fee_token = currency
+            if currency.lower() == MACH.lower():
+                fee_token = await self._resolve_mach_fee_token(
+                    account=nonce_address,
+                    chain_id=chain_id,
+                    rpc_url=resolved_rpc,
+                )
+
         if awaiting_fee_payer:
             resolved_nonce_key = EXPIRING_NONCE_KEY
             resolved_nonce = 0
@@ -338,7 +425,7 @@ class TempoMethod:
             max_priority_fee_per_gas=max_priority_fee_per_gas,
             nonce=resolved_nonce,
             nonce_key=resolved_nonce_key,
-            fee_token=None if awaiting_fee_payer else currency,
+            fee_token=fee_token,
             awaiting_fee_payer=awaiting_fee_payer,
             valid_before=valid_before,
             calls=calls_tuple,

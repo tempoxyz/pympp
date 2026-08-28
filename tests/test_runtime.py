@@ -115,6 +115,19 @@ def test_matching_ignores_implicit_currency_default() -> None:
     assert runtime.match_challenge([offered]) == (offered, method)
 
 
+async def test_async_selection_prefers_method_ranked_challenge() -> None:
+    method = MockMethod("charge")
+
+    async def get_challenge_priority(offered: Challenge) -> int:
+        return 1 if offered.id == "funded" else -1
+
+    method.get_challenge_priority = get_challenge_priority  # type: ignore[attr-defined]
+    runtime = PaymentRuntime([method])
+    offered = [challenge("unfunded"), challenge("funded")]
+
+    assert await runtime.select_challenge(offered) == (offered[1], method)
+
+
 def test_matching_preserves_legacy_methods_without_intent_metadata() -> None:
     class LegacyMethod:
         name = "tempo"
