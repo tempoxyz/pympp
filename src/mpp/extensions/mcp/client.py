@@ -33,7 +33,7 @@ from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import Method as Method
-from mpp.runtime import PaymentRuntime, _method_accepts_currency
+from mpp.runtime import _method_accepts_currency
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,7 @@ class McpClient:
             if not challenges:
                 raise ValueError("Server returned malformed payment challenges") from e
 
-            challenge, method = await self._match_challenge(challenges)
+            challenge, method = self._match_challenge(challenges)
 
             core_credential = await method.create_credential(challenge.to_core())
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
@@ -223,9 +223,12 @@ class McpClient:
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
 
-    async def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
-        """Match in client preference order, then apply method-owned priorities."""
-        candidates: list[tuple[MCPChallenge, Method]] = []
+    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
+        """Match a challenge to an installed method.
+
+        Iterates installed methods in order (client preference) and returns
+        the first match by ``name`` and ``intent``.
+        """
         for method in self._methods:
             supported_intents = self._intent_names(method)
             for challenge in challenges:
@@ -234,23 +237,13 @@ class McpClient:
                     and challenge.intent in supported_intents
                     and _method_accepts_currency(method, challenge.to_core())
                 ):
-                    candidates.append((challenge, method))
+                    return challenge, method
 
-        if not candidates:
-            available = [challenge.method for challenge in challenges]
-            installed = [method.name for method in self._methods]
-            raise ValueError(
-                f"No compatible payment method. Server offered: {available}, "
-                f"client has: {installed}"
-            )
-
-        runtime = PaymentRuntime(self._methods)
-        core_candidates = [(challenge.to_core(), method) for challenge, method in candidates]
-        selected, method = (await runtime._prioritize_candidates(core_candidates))[0]
-        challenge = next(
-            challenge for challenge, _method in candidates if challenge.id == selected.id
+        available = [challenge.method for challenge in challenges]
+        installed = [m.name for m in self._methods]
+        raise ValueError(
+            f"No compatible payment method. Server offered: {available}, client has: {installed}"
         )
-        return challenge, method
 
     @staticmethod
     def _intent_names(method: Method) -> set[str]:

@@ -128,62 +128,6 @@ class TempoMethod:
             return await self._get_chain_id(self.rpc_url)
         return None
 
-    async def get_challenge_priority(self, challenge: Challenge) -> int:
-        """Prefer charge challenges the configured payer can fund directly."""
-        if self.account is None or challenge.intent != "charge":
-            return 0
-        amount = challenge.request.get("amount")
-        currency = challenge.request.get("currency")
-        if not isinstance(amount, str) or not isinstance(currency, str):
-            return 0
-        try:
-            amount_raw = int(amount)
-        except ValueError:
-            return 0
-        if amount_raw == 0:
-            return 1
-
-        method_details = challenge.request.get("methodDetails")
-        challenge_chain_id = (
-            method_details.get("chainId") if isinstance(method_details, dict) else None
-        )
-        expected_chain_id = await self._resolve_expected_chain_id()
-        parsed_chain_id: int | None = None
-        if challenge_chain_id is not None:
-            try:
-                parsed_chain_id = int(challenge_chain_id)
-            except (TypeError, ValueError):
-                return 0
-            if expected_chain_id is not None and parsed_chain_id != expected_chain_id:
-                return -1
-
-        payer = self.root_account or self.account.address
-        try:
-            balance = await _tip20_balance(self.rpc_url, currency, payer)
-        except Exception:
-            return 0
-        if balance < amount_raw:
-            return -1
-
-        use_fee_payer = (
-            method_details.get("feePayer", False) if isinstance(method_details, dict) else False
-        )
-        if currency.lower() != MACH.lower() or use_fee_payer:
-            return 1
-
-        try:
-            chain_id = parsed_chain_id if parsed_chain_id is not None else expected_chain_id
-            if chain_id is None:
-                chain_id = await self._get_chain_id(self.rpc_url)
-            await self._resolve_mach_fee_token(
-                account=payer,
-                chain_id=chain_id,
-                rpc_url=self.rpc_url,
-            )
-        except Exception:
-            return -1
-        return 1
-
     async def _resolve_mach_fee_token(
         self,
         *,

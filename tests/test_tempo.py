@@ -5,7 +5,7 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from unittest.mock import AsyncMock, call, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -169,114 +169,12 @@ class TestTempoMethod:
         assert method.rpc_url == "https://custom.rpc"
 
     @pytest.mark.asyncio
-    async def test_mach_challenge_priority_uses_payment_balance(self) -> None:
-        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
-            account=account,
-            chain_id=CHAIN_ID,
-            rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
-        )
-        challenge = Challenge(
-            id="mach-priority",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000", "currency": MACH},
-        )
-
-        async def funded_balance(_rpc_url: str, token: str, _address: str) -> int:
-            return 1000 if token.lower() in {MACH.lower(), PATH_USD.lower()} else 0
-
-        balance = AsyncMock(side_effect=funded_balance)
-        with patch(
-            "mpp.methods.tempo.client._tip20_balance",
-            new=balance,
-        ):
-            assert await method.get_challenge_priority(challenge) == 1
-        assert balance.await_args_list == [
-            call("https://rpc.test", MACH, account.address),
-            call("https://rpc.test", PATH_USD, account.address),
-        ]
-
-        with patch(
-            "mpp.methods.tempo.client._tip20_balance",
-            new=AsyncMock(return_value=999),
-        ):
-            assert await method.get_challenge_priority(challenge) == -1
-
-    @pytest.mark.asyncio
-    async def test_mach_challenge_priority_uses_root_account_balance(self) -> None:
+    async def test_mach_access_key_uses_root_balance_for_fee_token(self) -> None:
         access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
         root = "0x975937feafc6869a260c176854dda8764a78e122"
         method = tempo(
             account=access_key,
             root_account=root,
-            chain_id=CHAIN_ID,
-            rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
-        )
-        challenge = Challenge(
-            id="mach-access-key-priority",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000", "currency": MACH},
-        )
-
-        async def funded_balance(_rpc_url: str, token: str, _address: str) -> int:
-            return 1000 if token.lower() in {MACH.lower(), PATH_USD.lower()} else 0
-
-        balance = AsyncMock(side_effect=funded_balance)
-
-        with patch("mpp.methods.tempo.client._tip20_balance", new=balance):
-            assert await method.get_challenge_priority(challenge) == 1
-
-        assert balance.await_args_list == [
-            call("https://rpc.test", MACH, root),
-            call("https://rpc.test", PATH_USD, root),
-        ]
-
-    @pytest.mark.asyncio
-    async def test_mach_challenge_priority_requires_fee_token_unless_sponsored(self) -> None:
-        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
-            account=account,
-            chain_id=CHAIN_ID,
-            rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
-        )
-
-        async def payment_only(_rpc_url: str, token: str, _address: str) -> int:
-            return 1000 if token.lower() == MACH.lower() else 0
-
-        direct = Challenge(
-            id="mach-without-gas",
-            method="tempo",
-            intent="charge",
-            request={"amount": "1000", "currency": MACH},
-        )
-        sponsored = Challenge(
-            id="sponsored-mach-without-gas",
-            method="tempo",
-            intent="charge",
-            request={
-                "amount": "1000",
-                "currency": MACH,
-                "methodDetails": {"feePayer": True, "chainId": CHAIN_ID},
-            },
-        )
-
-        with patch(
-            "mpp.methods.tempo.client._tip20_balance",
-            new=AsyncMock(side_effect=payment_only),
-        ):
-            assert await method.get_challenge_priority(direct) == -1
-            assert await method.get_challenge_priority(sponsored) == 1
-
-    @pytest.mark.asyncio
-    async def test_mach_charge_uses_funded_stablecoin_fee_token(self) -> None:
-        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
-            account=account,
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
             intents={"charge": ChargeIntent()},
@@ -306,7 +204,8 @@ class TestTempoMethod:
                 "eth_gasPrice": "0x1",
             }[method_name]
 
-        async def fake_balance(_rpc_url: str, token: str, _address: str) -> int:
+        async def fake_balance(_rpc_url: str, token: str, address: str) -> int:
+            assert address == root
             return 1 if token.lower() == PATH_USD.lower() else 0
 
         with (
@@ -318,6 +217,8 @@ class TestTempoMethod:
 
         decoded = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
         assert decoded[10] == bytes.fromhex(PATH_USD[2:])
+        assert credential.source is not None
+        assert credential.source.endswith(f":{root}")
 
     @pytest.mark.asyncio
     async def test_mach_charge_falls_back_to_funded_usdc_fee_token(self) -> None:
