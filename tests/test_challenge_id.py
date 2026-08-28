@@ -4,9 +4,15 @@ These tests use the cross-SDK conformance test vectors to ensure
 Python SDK produces identical challenge IDs to TypeScript and Rust SDKs.
 """
 
+import base64
+import hashlib
+import hmac
+
 import pytest
+import rfc8785
 
 from mpp import Challenge, generate_challenge_id
+from mpp._canonical import canonical_b64url
 
 
 class TestGenerateChallengeId:
@@ -573,3 +579,92 @@ class TestCredentialHeader:
                 request={"amount": "1000000"},
                 header="Payment Authorization",
             )
+
+
+class TestJcsChallengeEncoding:
+    """RFC 8785 vectors exercised through every HMAC-bound representation."""
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            (
+                {"description": "Payment for café ☕", "amount": "1000000"},
+                "eyJhbW91bnQiOiIxMDAwMDAwIiwiZGVzY3JpcHRpb24iOiJQYXltZW50IGZvciBjYWbDqSDimJUifQ",
+            ),
+            (
+                {"\U00010000": "supplementary", "\ue000": "private"},
+                "eyLwkICAIjoic3VwcGxlbWVudGFyeSIsIu6AgCI6InByaXZhdGUifQ",
+            ),
+            (
+                {
+                    "integer": 333333333.33333329,
+                    "large": 1e21,
+                    "negativeZero": -0.0,
+                    "scientific": 1e-7,
+                    "small": 1e-6,
+                },
+                "eyJpbnRlZ2VyIjozMzMzMzMzMzMuMzMzMzMzMywibGFyZ2UiOjFlKzIxLCJuZWdhdGl2ZVplcm8iOjAsInNjaWVudGlmaWMiOjFlLTcsInNtYWxsIjowLjAwMDAwMX0",
+            ),
+        ],
+    )
+    def test_matches_rfc8785_vectors(self, data: dict[str, object], expected: str) -> None:
+        assert canonical_b64url(data) == expected
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            {"value": float("nan")},
+            {"value": float("inf")},
+            {"value": 2**100},
+            {1: "not-a-string-key"},
+        ],
+    )
+    def test_rejects_values_outside_jcs(self, data: dict[object, object]) -> None:
+        with pytest.raises(rfc8785.CanonicalizationError):
+            canonical_b64url(data)
+
+    def test_http_wire_form_echo_and_hmac_use_identical_jcs_bytes(self) -> None:
+        request = {"description": "Payment for café ☕", "amount": "1000000"}
+        opaque = {"\U00010000": "supplementary", "\ue000": "private"}
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request=request,
+            meta=opaque,
+            header="Payment-Authorization",
+        )
+
+        header = challenge.to_www_authenticate(challenge.realm)
+        request_b64 = header.split('request="', 1)[1].split('"', 1)[0]
+        opaque_b64 = header.split('opaque="', 1)[1].split('"', 1)[0]
+        hmac_input = "|".join(
+            [
+                challenge.realm,
+                challenge.method,
+                challenge.intent,
+                request_b64,
+                "",
+                "",
+                "Payment-Authorization",
+                opaque_b64,
+            ]
+        )
+        expected_id = (
+            base64.urlsafe_b64encode(
+                hmac.new(b"test-secret", hmac_input.encode(), hashlib.sha256).digest()
+            )
+            .decode()
+            .rstrip("=")
+        )
+
+        assert request_b64 == canonical_b64url(request)
+        assert opaque_b64 == canonical_b64url(opaque)
+        assert challenge.id == expected_id
+        assert challenge.to_echo().request == request_b64
+        assert challenge.to_echo().opaque == opaque_b64
+
+        parsed = Challenge.from_www_authenticate(header)
+        assert parsed.verify("test-secret", "api.example.com")
+        assert parsed.to_www_authenticate(parsed.realm) == header

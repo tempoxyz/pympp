@@ -8,12 +8,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from mpp._canonical import canonical_b64url
 from mpp._parsing import (
     ParseError,
     format_authorization,
@@ -135,13 +135,11 @@ def generate_challenge_id(
             request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
         )
     """
-    request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    request_b64 = _b64url_encode(request_json)
+    request_b64 = canonical_b64url(request)
 
     opaque_b64 = ""
     if opaque is not None:
-        opaque_json = json.dumps(opaque, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-        opaque_b64 = _b64url_encode(opaque_json)
+        opaque_b64 = canonical_b64url(opaque)
 
     hmac_parts = [
         realm,
@@ -265,13 +263,7 @@ class Challenge:
             opaque=meta,
             header=header,
         )
-        request_json = json.dumps(
-            request,
-            separators=(",", ":"),
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        request_b64 = _b64url_encode(request_json)
+        request_b64 = canonical_b64url(request)
         return cls(
             id=challenge_id,
             method=method,
@@ -331,13 +323,7 @@ class Challenge:
         """
         opaque_b64 = None
         if self.opaque is not None:
-            opaque_json = json.dumps(
-                self.opaque,
-                separators=(",", ":"),
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-            opaque_b64 = _b64url_encode(opaque_json)
+            opaque_b64 = canonical_b64url(self.opaque)
         return ChallengeEcho(
             id=self.id,
             realm=self.realm,

@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import rfc8785
+
 from mpp import (
     Challenge,
     Credential,
@@ -278,17 +280,20 @@ def _authenticate_echo(
     except ParseError as error:
         raise MalformedCredentialError(str(error)) from error
 
-    expected_id = generate_challenge_id(
-        secret_key=secret_key,
-        realm=echo.realm,
-        method=echo.method,
-        intent=echo.intent,
-        request=echo_request,
-        expires=echo.expires,
-        digest=echo.digest,
-        opaque=echo_opaque,
-        header=echo.header,
-    )
+    try:
+        expected_id = generate_challenge_id(
+            secret_key=secret_key,
+            realm=echo.realm,
+            method=echo.method,
+            intent=echo.intent,
+            request=echo_request,
+            expires=echo.expires,
+            digest=echo.digest,
+            opaque=echo_opaque,
+            header=echo.header,
+        )
+    except rfc8785.CanonicalizationError as error:
+        raise MalformedCredentialError("Challenge contains non-canonical JSON") from error
     if not _constant_time_equal(echo.id, expected_id):
         raise InvalidChallengeError(echo.id, "challenge was not issued by this server")
     return echo_request, echo_opaque

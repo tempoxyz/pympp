@@ -1,8 +1,18 @@
 """Tests for server-side verification."""
 
+import json
+
 import pytest
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, BodyDigest, Challenge, Credential, Receipt
+from mpp import (
+    PAYMENT_AUTHORIZATION_HEADER,
+    BodyDigest,
+    Challenge,
+    ChallengeEcho,
+    Credential,
+    Receipt,
+    _b64url_encode,
+)
 from mpp.errors import VerificationFailedError
 from mpp.events import EventDispatcher
 from mpp.server import Mpp, intent, pay, verify_or_challenge
@@ -323,6 +333,35 @@ class TestVerificationError:
 
         result = await verify_or_challenge(
             authorization="Payment not-valid-base64!!",
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["request", "opaque"])
+    async def test_returns_challenge_on_non_jcs_echo(self, field: str) -> None:
+        """Reject echoed JSON that cannot be canonically encoded for HMAC verification."""
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        echo = ChallengeEcho(
+            id="forged-id",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request=_b64url_encode(json.dumps({"amount": 2**100} if field == "request" else {})),
+            opaque=(_b64url_encode(json.dumps({"value": 2**100})) if field == "opaque" else None),
+        )
+        credential = Credential(challenge=echo, payload={})
+
+        result = await verify_or_challenge(
+            authorization=credential.to_authorization(),
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",

@@ -38,6 +38,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import rfc8785
+
 from mpp import _constant_time_equal, generate_challenge_id
 from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
@@ -144,16 +146,19 @@ async def verify_or_challenge(
     # Stateless challenge verification: recompute expected challenge ID from
     # echoed parameters and compare to the credential's challenge ID.
     echoed = mcp_credential.challenge
-    expected_id = generate_challenge_id(
-        secret_key=secret_key,
-        realm=echoed.realm,
-        method=echoed.method,
-        intent=echoed.intent,
-        request=echoed.request,
-        expires=echoed.expires,
-        digest=echoed.digest,
-        opaque=echoed.opaque,
-    )
+    try:
+        expected_id = generate_challenge_id(
+            secret_key=secret_key,
+            realm=echoed.realm,
+            method=echoed.method,
+            intent=echoed.intent,
+            request=echoed.request,
+            expires=echoed.expires,
+            digest=echoed.digest,
+            opaque=echoed.opaque,
+        )
+    except rfc8785.CanonicalizationError:
+        return new_challenge()
     if not _constant_time_equal(echoed.id, expected_id):
         return new_challenge()
 

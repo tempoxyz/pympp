@@ -18,6 +18,8 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from mpp._canonical import canonical_b64url
+
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
 
@@ -172,7 +174,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
     # Encode request as base64url JSON
-    request_b64 = _b64_encode(challenge.request)
+    request_b64 = canonical_b64url(challenge.request)
 
     # Build auth-params
     parts = [
@@ -193,7 +195,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     if challenge.header:
         parts.append(f'header="{_escape_quoted(challenge.header)}"')
     if challenge.opaque is not None:
-        opaque_b64 = _b64_encode(challenge.opaque)
+        opaque_b64 = canonical_b64url(challenge.opaque)
         parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
