@@ -271,6 +271,57 @@ class TestTempoMethod:
         assert decoded[10] == bytes.fromhex(USDC[2:])
 
     @pytest.mark.asyncio
+    async def test_mach_charge_skips_fee_token_that_cannot_cover_max_fee(self) -> None:
+        account = TempoAccount.from_key(TEST_PRIVATE_KEY)
+        method = tempo(
+            account=account,
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = Challenge(
+            id="mach-fee-token-balance",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": MACH,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {
+                "eth_chainId": hex(CHAIN_ID),
+                "eth_getTransactionCount": "0x1",
+                # 1,000,000 gas at this price costs 1,000 microdollars.
+                "eth_gasPrice": hex(1_000_000_000),
+            }[method_name]
+
+        async def fake_balance(_rpc_url: str, token: str, _address: str) -> int:
+            return 1 if token.lower() == PATH_USD.lower() else 1_000
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", side_effect=fake_balance),
+            patch(
+                "mpp.methods.tempo.client.estimate_gas",
+                new=AsyncMock(return_value=100_000),
+            ),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
+        assert decoded[10] == bytes.fromhex(USDC[2:])
+
+    @pytest.mark.asyncio
     async def test_sponsored_mach_charge_defers_fee_token_to_fee_payer(self) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(

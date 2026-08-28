@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 FEE_PAYER_VALID_BEFORE_SECS = 25
+# Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
+# microdollars (10^-6 USD).
+ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 
 
@@ -134,11 +137,12 @@ class TempoMethod:
         account: str,
         chain_id: int,
         rpc_url: str,
+        required_balance: int,
     ) -> str:
-        """Return a funded stablecoin for MACH transaction fees."""
+        """Return a stablecoin that can cover the MACH transaction fee."""
         for token in fee_tokens_for_chain(chain_id):
             try:
-                if await _tip20_balance(rpc_url, token, account) > 0:
+                if await _tip20_balance(rpc_url, token, account) >= required_balance:
                     return token
             except Exception:
                 continue
@@ -324,16 +328,6 @@ class TempoMethod:
                 f"expected {expected_chain_id} from client policy"
             )
 
-        fee_token: str | None = None
-        if not awaiting_fee_payer:
-            fee_token = currency
-            if currency.lower() == MACH.lower():
-                fee_token = await self._resolve_mach_fee_token(
-                    account=nonce_address,
-                    chain_id=chain_id,
-                    rpc_url=resolved_rpc,
-                )
-
         if awaiting_fee_payer:
             resolved_nonce_key = EXPIRING_NONCE_KEY
             resolved_nonce = 0
@@ -361,6 +355,26 @@ class TempoMethod:
                 gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
             pass
+
+        fee_token: str | None = None
+        if not awaiting_fee_payer:
+            fee_token = currency
+            if currency.lower() == MACH.lower():
+                required_balance = max(
+                    1,
+                    (
+                        gas_limit * gas_price
+                        + ATTODOLLARS_PER_MICRODOLLAR
+                        - 1
+                    )
+                    // ATTODOLLARS_PER_MICRODOLLAR,
+                )
+                fee_token = await self._resolve_mach_fee_token(
+                    account=nonce_address,
+                    chain_id=chain_id,
+                    rpc_url=resolved_rpc,
+                    required_balance=required_balance,
+                )
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
