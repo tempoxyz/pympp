@@ -22,6 +22,19 @@ class Method(Protocol):
         ...
 
 
+def _method_accepts_currency(method: Method, challenge: Challenge) -> bool:
+    """Return whether a Challenge matches a method's optional currency constraint."""
+    configured_currency = getattr(method, "currency", None)
+    if configured_currency is None:
+        return True
+    offered_currency = challenge.request.get("currency")
+    return (
+        isinstance(configured_currency, str)
+        and isinstance(offered_currency, str)
+        and offered_currency.lower() == configured_currency.lower()
+    )
+
+
 class PaymentRuntime:
     """Match challenges and create credentials on the caller's event loop."""
 
@@ -46,7 +59,7 @@ class PaymentRuntime:
         """Return the first challenge with a configured method and intent."""
         for challenge in challenges:
             method = self._methods.get((challenge.method, challenge.intent))
-            if method is not None:
+            if method is not None and _method_accepts_currency(method, challenge):
                 return challenge, method
 
         offered = [challenge.method for challenge in challenges]
@@ -64,6 +77,13 @@ class PaymentRuntime:
             raise ValueError("Method is not installed in this PaymentRuntime")
         if challenge.method != method.name:
             raise ValueError(f"Method {method.name!r} does not support {challenge.method!r}")
+        if not _method_accepts_currency(method, challenge):
+            configured_currency = getattr(method, "currency", None)
+            offered_currency = challenge.request.get("currency")
+            raise ValueError(
+                f"Method {method.name!r} currency {configured_currency!r} "
+                f"does not support {offered_currency!r}"
+            )
         if challenge.expires is not None:
             try:
                 expires = datetime.fromisoformat(challenge.expires)
