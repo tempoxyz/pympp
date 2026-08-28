@@ -527,9 +527,7 @@ class TestPaymentTransport:
         transport.on_challenge_received(first)
         transport.on_challenge_received(second)
 
-        response = await transport.handle_async_request(
-            httpx.Request("GET", "https://example.com")
-        )
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
         assert response.status_code == 200
         assert events == ["first"]

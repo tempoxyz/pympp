@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   conformance-policy:
-    uses: tempoxyz/mpp-tools/.github/workflows/sdk-conformance-policy.yml@29fee62deba0aa3982d3860b40c5e72c8aa27957
+    uses: tempoxyz/mpp-tools/.github/workflows/sdk-conformance-policy.yml@c5dde8faa684b79e2df665143cf7cd731608c079
     with:
       protocol-paths: |
         src/**
@@ -31,7 +31,7 @@ jobs:
 
   conformance:
     needs: conformance-policy
-    uses: tempoxyz/mpp-tools/.github/workflows/sdk-conformance.yml@29fee62deba0aa3982d3860b40c5e72c8aa27957
+    uses: tempoxyz/mpp-tools/.github/workflows/sdk-conformance.yml@c5dde8faa684b79e2df665143cf7cd731608c079
     with:
       adapter: python
       conformance-ref: ${{ needs.conformance-policy.outputs.conformance_ref }}
