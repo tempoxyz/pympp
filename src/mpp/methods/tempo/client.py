@@ -80,6 +80,7 @@ class TempoMethod:
     _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
+    _currency_explicit: bool = field(default=True, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
 
@@ -452,6 +453,7 @@ def tempo(
             raise ValueError("chain_id or rpc_url is required")
         rpc_url = rpc_url_for_chain(resolved_chain_id)
 
+    currency_explicit = currency is not None
     if currency is None:
         currency = default_currency_for_chain(resolved_chain_id)
 
@@ -467,6 +469,7 @@ def tempo(
         client_id=client_id,
     )
     method._chain_id_explicit = chain_id_explicit
+    method._currency_explicit = currency_explicit
     method._rpc_url_explicit = rpc_url_explicit
     for intent in intents.values():
         if hasattr(intent, "rpc_url") and intent.rpc_url is None:  # type: ignore[union-attr]

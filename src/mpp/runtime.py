@@ -24,6 +24,8 @@ class Method(Protocol):
 
 def _method_accepts_currency(method: Method, challenge: Challenge) -> bool:
     """Return whether a Challenge matches a method's optional currency constraint."""
+    if getattr(method, "_currency_explicit", True) is False:
+        return True
     configured_currency = getattr(method, "currency", None)
     if configured_currency is None:
         return True
@@ -45,11 +47,11 @@ class PaymentRuntime:
         events: EventDispatcher | None = None,
     ) -> None:
         self.methods = tuple(methods)
-        self._methods: dict[tuple[str, str], Method] = {}
+        self._methods: dict[tuple[str, str], list[Method]] = {}
         for method in self.methods:
             intents = getattr(method, "intents", ("charge",))
             for intent in intents:
-                self._methods[(method.name, intent)] = method
+                self._methods.setdefault((method.name, intent), []).append(method)
         self.events = events if events is not None else EventDispatcher()
 
     def match_challenge(
@@ -58,9 +60,10 @@ class PaymentRuntime:
     ) -> tuple[Challenge, Method]:
         """Return the first challenge with a configured method and intent."""
         for challenge in challenges:
-            method = self._methods.get((challenge.method, challenge.intent))
-            if method is not None and _method_accepts_currency(method, challenge):
-                return challenge, method
+            methods = self._methods.get((challenge.method, challenge.intent), ())
+            for method in methods:
+                if _method_accepts_currency(method, challenge):
+                    return challenge, method
 
         offered = [challenge.method for challenge in challenges]
         raise ValueError(f"No compatible payment method for challenges: {offered}")

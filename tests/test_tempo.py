@@ -137,6 +137,16 @@ class TestTempoMethod:
         assert isinstance(method, TempoMethod)
         assert method.name == "tempo"
 
+    def test_tempo_default_currency_is_not_a_client_constraint(self) -> None:
+        method = tempo(intents={"charge": ChargeIntent()})
+
+        assert method._currency_explicit is False
+
+    def test_tempo_provided_currency_is_a_client_constraint(self) -> None:
+        method = tempo(currency="0xUsdc", intents={"charge": ChargeIntent()})
+
+        assert method._currency_explicit is True
+
     def test_tempo_with_account(self) -> None:
         """tempo() should accept account and rpc_url."""
         key = "0x" + "d" * 64
