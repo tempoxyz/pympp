@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.0 (2026-08-28)
+
+### Minor Changes
+
+- Added a `VerifiableIntent` protocol with separate `validate` and `broadcast` hooks plus bound `Mpp.validate_credential()` and `Mpp.broadcast_credential()` APIs, introduced a `Relay` adapter that delegates Tempo charge validation and finalization to the Tempo API relay (surfacing only safe machine-readable error codes and retryable 402 challenges on decline), and added a runnable `charge-relay` FastAPI example with a payer client. Relay idempotency keys use the `pympp_` namespace, existing Stripe idempotency behavior remains unchanged, and Python validation details use snake_case. (by @ParvAhuja, [#204](https://github.com/tempoxyz/pympp/pull/204))
+- Added configurable `max_payment_retries` parameter to `PaymentTransport` and `Client`, allowing callers to override the default retry limit of 3 instead of relying on a hardcoded constant. (by @mpp-agricola[bot], [#223](https://github.com/tempoxyz/pympp/pull/223))
+
+### Patch Changes
+
+- Fixed currency validation during challenge matching by introducing a `_method_accepts_currency` helper that enforces case-insensitive currency comparison when a method has a configured currency constraint. Applied the check in both `PaymentRuntime` and `McpClient` challenge matching and credential creation paths. (by @DerekCofausper, [#232](https://github.com/tempoxyz/pympp/pull/232))
+- Added MACH as a supported Tempo charge currency and selected a supported stablecoin with enough balance to cover unsponsored MACH transaction fees. (by @ParvAhuja, [#237](https://github.com/tempoxyz/pympp/pull/237))
+- Fixed payment challenge request and opaque serialization to use RFC 8785 JSON Canonicalization Scheme (JCS) via the `rfc8785` library, replacing ad-hoc `json.dumps` calls across HTTP and MCP transports. This ensures challenge IDs are reproducible from the exact bytes emitted on the wire, including non-ASCII characters and JCS number formatting. (by @BrendanRyan, [#235](https://github.com/tempoxyz/pympp/pull/235))
+- Fixed initial requests to advertise supported payment methods via the `Accept-Payment` header, derived from the configured payment methods and their intents. Existing `Accept-Payment` headers are preserved when explicitly set by the caller. (by @mpp-agricola[bot], [#225](https://github.com/tempoxyz/pympp/pull/225))
+- Fixed `verify_or_challenge` raising `TypeError` when a challenge carried a timezone-naive `expires` value. A naive timestamp parsed successfully but could not be compared to an aware `now`, surfacing as a server error instead of a fail-closed rejection; it is now rejected like any other invalid `expires`. (by @BrendanRyan, [#234](https://github.com/tempoxyz/pympp/pull/234))
+- Reverted early termination on repeated actionable challenges, allowing the payment transport to retry payment even when the same challenge ID is received multiple times. (by @mpp-agricola[bot], [#224](https://github.com/tempoxyz/pympp/pull/224))
+- Changed Stripe PaymentIntent and Tempo relay idempotency keys to use the SDK-independent `mpp_` prefix while preserving their existing suffix construction. (by @ParvAhuja, [#220](https://github.com/tempoxyz/pympp/pull/220))
+- Added a `requires_auth` server option that uses `Payment-Authorization` for Payment credentials so `Authorization` remains available for application authentication. (by @RyanAubrey, [#230](https://github.com/tempoxyz/pympp/pull/230))
+- Used the bootstrapped Tempo localnet image for reproducible integration tests, replacing the dynamic `latest` tag pull-and-cache approach with a pinned `tempo-localnet` image digest. Removed the dev-key-based account funding fallback in favour of exclusively using the localnet faucet via `tempo_fundAddress`. (by @BrendanRyan, [#226](https://github.com/tempoxyz/pympp/pull/226))
+- Fixed challenge selection to match on both method name and intent, preventing methods from being incorrectly matched to challenges with unsupported intents. Added `intents` property to the `Method` protocol to declare which payment intents each method supports. (by @mpp-agricola[bot], [#216](https://github.com/tempoxyz/pympp/pull/216))
+
 ## 0.10.1 (2026-08-09)
 
 ### Patch Changes
