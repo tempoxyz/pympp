@@ -168,6 +168,46 @@ class TestPaymentTransport:
         method.create_credential.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_skips_unsupported_intent_for_same_method(self) -> None:
+        """Should pay a later challenge whose method and intent are supported."""
+        session = Challenge(
+            id="session-id",
+            method="tempo",
+            intent="session",
+            request={"amount": "1000"},
+        )
+        charge = Challenge(
+            id="charge-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers=[
+                        ("www-authenticate", session.to_www_authenticate("example.com")),
+                        ("www-authenticate", charge.to_www_authenticate("example.com")),
+                    ],
+                ),
+                httpx.Response(200, content=b'{"data": "ok"}'),
+            ]
+        )
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        method.create_credential.assert_awaited_once()
+        await_args = method.create_credential.await_args
+        assert await_args is not None
+        selected = await_args.args[0]
+        assert selected.id == "charge-id"
+        assert selected.intent == "charge"
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "target_url",
         [
