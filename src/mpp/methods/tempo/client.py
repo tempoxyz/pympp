@@ -362,11 +362,7 @@ class TempoMethod:
             if currency.lower() == MACH.lower():
                 required_balance = max(
                     1,
-                    (
-                        gas_limit * gas_price
-                        + ATTODOLLARS_PER_MICRODOLLAR
-                        - 1
-                    )
+                    (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
                     // ATTODOLLARS_PER_MICRODOLLAR,
                 )
                 fee_token = await self._resolve_mach_fee_token(
