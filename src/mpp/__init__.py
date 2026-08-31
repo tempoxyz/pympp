@@ -425,6 +425,7 @@ class Receipt:
     external_id: str | None = None
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
+    extensions: dict[str, Any] | None = None
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:
