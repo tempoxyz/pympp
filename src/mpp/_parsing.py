@@ -308,6 +308,17 @@ def _parse_timestamp(value: str) -> datetime:
         raise ParseError("Invalid timestamp format") from None
 
 
+_RECEIPT_BASE_FIELDS = {
+    "status",
+    "timestamp",
+    "reference",
+    "method",
+    "externalId",
+    "subscriptionId",
+    "extra",
+}
+
+
 def parse_payment_receipt(header: str) -> Receipt:
     """Parse a Payment-Receipt header into a Receipt.
 
@@ -338,7 +349,6 @@ def parse_payment_receipt(header: str) -> Receipt:
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
-
     return Receipt(
         status=status,
         timestamp=timestamp,
@@ -347,6 +357,8 @@ def parse_payment_receipt(header: str) -> Receipt:
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
         extra=extra if isinstance(extra, dict) else None,
+        extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
+        or None,
     )
 
 
@@ -370,4 +382,8 @@ def format_payment_receipt(receipt: Receipt) -> str:
         payload["subscriptionId"] = receipt.subscription_id
     if receipt.extra:
         payload["extra"] = receipt.extra
+    if receipt.extensions:
+        for key, value in receipt.extensions.items():
+            if key not in _RECEIPT_BASE_FIELDS:
+                payload[key] = value
     return _b64_encode(payload)

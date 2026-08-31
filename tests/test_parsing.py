@@ -423,6 +423,35 @@ class TestReceipt:
         roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
         assert roundtripped.subscription_id == "sub_123"
 
+    def test_roundtrip_preserves_method_specific_fields(self) -> None:
+        payload = {
+            "status": "success",
+            "method": "tempo",
+            "timestamp": "2024-01-20T12:00:00Z",
+            "reference": "0xabc123def456",
+            "challengeId": "challenge-123",
+            "originTxHash": "0xdeadbeef",
+            "destinationNetwork": "eip155:1",
+        }
+        header = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+
+        parsed = Receipt.from_payment_receipt(header)
+
+        assert parsed.extensions == {
+            "challengeId": "challenge-123",
+            "originTxHash": "0xdeadbeef",
+            "destinationNetwork": "eip155:1",
+        }
+        roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
+        assert roundtripped.extensions == parsed.extensions
+
+        encoded_payload = json.loads(
+            base64.urlsafe_b64decode(parsed.to_payment_receipt() + "==").decode()
+        )
+        assert encoded_payload["challengeId"] == "challenge-123"
+        assert encoded_payload["originTxHash"] == "0xdeadbeef"
+        assert encoded_payload["destinationNetwork"] == "eip155:1"
+
     def test_parse_invalid_timestamp(self) -> None:
         payload = {
             "status": "success",
