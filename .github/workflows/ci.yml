@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -66,7 +66,7 @@ jobs:
 
       - name: Type check
         if: matrix.python-version == '3.12'
-        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           version: PATH
 
@@ -99,7 +99,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -131,7 +131,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -168,7 +168,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@6f436eb3a168279692739e8c0c9fdb52b94bfae7
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
