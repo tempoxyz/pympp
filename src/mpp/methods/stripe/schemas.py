@@ -16,7 +16,7 @@ class StripeMethodDetails(BaseModel):
 class ChargeRequest(BaseModel):
     """Request schema for the Stripe charge intent.
 
-    After the transform in ``stripe()``, ``amount`` is in the smallest
+    After the transform in ``spt()``, ``amount`` is in the smallest
     currency unit (e.g. cents for USD) and ``decimals`` is removed.
     """
 

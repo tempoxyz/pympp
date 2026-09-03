@@ -39,6 +39,13 @@ tempo = [
 ]
 stripe = [
     "pydantic>=2.0",
+    "pytempo>=0.2.1",
+    "eth-account>=0.11",
+    "eth-abi>=5.0,<6",
+    "eth-hash[pycryptodome]>=0.7",
+    "attrs>=23.0",
+    "rlp>=4.0",
+    "stripe>=8.0.0",
 ]
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]

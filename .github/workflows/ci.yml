@@ -160,7 +160,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, tempo, mcp]
+        profile: [base, tempo, stripe, mcp]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -197,6 +197,9 @@ jobs:
             tempo)
               INSTALL_TARGET="${WHEEL}[tempo]"
               ;;
+            stripe)
+              INSTALL_TARGET="${WHEEL}[stripe]"
+              ;;
             mcp)
               INSTALL_TARGET="${WHEEL}[mcp]"
               ;;
@@ -228,16 +231,19 @@ jobs:
           print("base install smoke test passed")
           PY
 
-      - name: Smoke test built wheel (tempo)
-        if: matrix.profile == 'tempo'
+      - name: Smoke test built wheel (Tempo dependencies)
+        if: matrix.profile == 'tempo' || matrix.profile == 'stripe'
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
           .smoke-venv/bin/python - <<'PY'
+          import os
           from mpp.methods.tempo import ChargeIntent, TempoAccount
-
-          assert ChargeIntent.__name__ == "ChargeIntent"
-          assert TempoAccount.__name__ == "TempoAccount"
-
-          print("tempo install smoke test passed")
+          if os.environ["PROFILE"] == "stripe":
+              from stripe import StripeClient
+              from mpp.methods.stripe import create
+              payments = create(network_id="bn_test", livemode=False, client=StripeClient("sk_test"), deposit_addresses={"tempo": "0x" + "1" * 40})
+              assert [method.name for method in payments.default_methods()] == ["tempo", "stripe"]
           PY
 
       - name: Smoke test built wheel (mcp)

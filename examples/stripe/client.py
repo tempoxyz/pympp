@@ -15,7 +15,7 @@ import sys
 import httpx
 
 from mpp.client import Client
-from mpp.methods.stripe import stripe
+from mpp.methods.stripe import spt
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +55,7 @@ async def run(args: argparse.Namespace) -> int:
             response.raise_for_status()
             return response.json()["spt"]
 
-    method = stripe(
+    method = spt(
         create_token=create_token,
         payment_method="pm_card_visa",
         intents={},

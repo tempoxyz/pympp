@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from mpp import Challenge
-from mpp.methods.stripe import ChargeIntent, stripe
+from mpp.methods.stripe import ChargeIntent, spt
 from mpp.server import Mpp
 
 app = FastAPI(title="Stripe Fortune Server")
@@ -23,7 +23,7 @@ app = FastAPI(title="Stripe Fortune Server")
 SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]
 
 server = Mpp.create(
-    method=stripe(
+    method=spt(
         network_id=os.environ.get("STRIPE_NETWORK_ID", "internal"),
         payment_method_types=["card"],
         currency="usd",

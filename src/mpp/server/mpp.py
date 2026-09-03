@@ -24,7 +24,13 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.compose import ComposedHandler, ComposedResult, ComposeEntry, ComposeOptions
+from mpp.server.compose import (
+    ComposedChallenges,
+    ComposedHandler,
+    ComposedResult,
+    ComposeEntry,
+    ComposeOptions,
+)
 from mpp.server.decorator import (
     BodyParamsType,
     bind_framework_scope,
@@ -123,6 +129,7 @@ class Mpp:
         self.defaults = defaults or {}
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
+        self._compose_implicit_methods = False
         self._events = EventDispatcher()
         self._register_method_payment_success_handler(method)
 
@@ -453,8 +460,10 @@ class Mpp:
             store=store,
             requires_auth=requires_auth,
         )
-        if len(configured) > 1:
+        server._compose_implicit_methods = methods is not None
+        if methods is not None:
             server.methods = configured
+        if len(configured) > 1:
             if store is not None:
                 server._wire_store(store)
             for configured_method in configured[1:]:
@@ -541,11 +550,14 @@ class Mpp:
             "chain_id": chain_id,
             "extra": extra,
         }
-        if len(methods) > 1:
-            return await self.compose(
+        if self._compose_implicit_methods:
+            result = await self.compose(
                 *((method, options) for method in methods),
                 body=body,
             ).verify(self.payment_credential_value(authorization, payment_authorization))
+            if len(methods) == 1 and isinstance(result, ComposedChallenges):
+                return result.challenges[0]
+            return result
 
         intent, request, challenge_expires = self._build_offer_request(
             methods[0], "charge", options, None, api_name="charge"
@@ -626,7 +638,7 @@ class Mpp:
             "chain_id": chain_id,
             "extra": extra,
         }
-        if len(methods) > 1:
+        if self._compose_implicit_methods:
             return self.compose(
                 *((f"{method.name}/{intent}", options) for method in methods),
                 body=body,

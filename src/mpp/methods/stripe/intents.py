@@ -10,6 +10,7 @@ import base64
 from datetime import UTC, datetime
 from typing import Any, cast
 
+import mpp.methods.stripe._defaults as stripe_defaults
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import (
@@ -17,7 +18,6 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationFailedError,
 )
-from mpp.methods.stripe._defaults import STRIPE_API_BASE
 from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload
 
 
@@ -27,9 +27,7 @@ def _build_analytics(credential: Credential) -> dict[str, str]:
     analytics: dict[str, str] = {
         "mpp_challenge_id": challenge.id,
         "mpp_intent": challenge.intent,
-        "mpp_is_mpp": "true",
         "mpp_server_id": challenge.realm,
-        "mpp_version": "1",
     }
     if credential.source:
         analytics["mpp_client_id"] = credential.source
@@ -51,6 +49,14 @@ def _resolve_payment_intents(client: Any) -> Any:
     if pi is not None:
         return pi
     raise TypeError("Unsupported Stripe client: expected .v1.payment_intents or .payment_intents")
+
+
+async def _create_payment_intent(client: Any, body: dict[str, Any], options: dict[str, Any]) -> Any:
+    """Create through either an asynchronous or synchronous Stripe client."""
+    payment_intents = _resolve_payment_intents(client)
+    if callable(create_async := getattr(payment_intents, "create_async", None)):
+        return await cast(Any, create_async)(body, options=options)
+    return await asyncio.to_thread(payment_intents.create, body, options=options)
 
 
 class ChargeIntent:
@@ -86,8 +92,7 @@ class ChargeIntent:
 
         Args:
             client: Pre-configured Stripe SDK instance (duck-typed).
-                Supports both ``StripeClient`` (v8+, ``client.v1.payment_intents``)
-                and legacy clients (``client.payment_intents``).
+                Supports ``client.payment_intents`` and ``client.v1.payment_intents``.
             secret_key: Stripe secret API key for raw HTTP verification.
                 Used only when ``client`` is not provided.
             http_client: Optional httpx client for raw HTTP calls.
@@ -218,7 +223,6 @@ class ChargeIntent:
     ) -> dict[str, str]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
-            payment_intents = _resolve_payment_intents(client)
             body = {
                 "amount": int(request.amount),
                 "confirm": True,
@@ -227,13 +231,13 @@ class ChargeIntent:
                 "payment_method_types": list(request.methodDetails.paymentMethodTypes),
                 "shared_payment_granted_token": spt,
             }
-            options = {"idempotency_key": f"mpp_{challenge_id}_{spt}"}
+            options = {
+                "headers": {"X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE},
+                "idempotency_key": f"mpp_{challenge_id}_{spt}",
+                "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
+            }
 
-            create_async = getattr(payment_intents, "create_async", None)
-            if callable(create_async):
-                result = await cast(Any, create_async)(body, options=options)
-            else:
-                result = await asyncio.to_thread(payment_intents.create, body, options=options)
+            result = await _create_payment_intent(client, body, options)
             return {"id": result.id, "status": result.status}
         except (VerificationFailedError, TypeError):
             raise
@@ -265,11 +269,13 @@ class ChargeIntent:
             body[f"metadata[{key}]"] = value
 
         response = await http_client.post(
-            f"{STRIPE_API_BASE}/payment_intents",
+            f"{stripe_defaults.STRIPE_API_BASE}/payment_intents",
             headers={
                 "Authorization": f"Basic {auth_value}",
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Idempotency-Key": f"mpp_{challenge_id}_{spt}",
+                "Stripe-Version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
+                "X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE,
             },
             data=body,
         )
