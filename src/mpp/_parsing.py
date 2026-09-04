@@ -18,6 +18,8 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from mpp._canonical import canonical_b64url
+
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
 
@@ -102,9 +104,9 @@ def parse_www_authenticate(header: str) -> Challenge:
     Expected format (per IETF draft-ietf-httpauth-payment):
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
 
-    Optional parameters: digest, expires, description
+    Optional parameters: digest, expires, description, header, opaque
     """
-    from mpp import Challenge
+    from mpp import Challenge, advertised_credential_header
 
     header = header.strip()
 
@@ -145,6 +147,11 @@ def parse_www_authenticate(header: str) -> Challenge:
     if opaque_b64:
         opaque = _b64_decode(opaque_b64)
 
+    try:
+        credential_header = advertised_credential_header(params.get("header"))
+    except ValueError as error:
+        raise ParseError(str(error)) from error
+
     return Challenge(
         id=id_,
         method=method,
@@ -156,6 +163,7 @@ def parse_www_authenticate(header: str) -> Challenge:
         expires=params.get("expires"),
         description=params.get("description"),
         opaque=opaque,
+        header=credential_header,
     )
 
 
@@ -166,7 +174,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
     # Encode request as base64url JSON
-    request_b64 = _b64_encode(challenge.request)
+    request_b64 = canonical_b64url(challenge.request)
 
     # Build auth-params
     parts = [
@@ -184,8 +192,10 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
     if challenge.description:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
+    if challenge.header:
+        parts.append(f'header="{_escape_quoted(challenge.header)}"')
     if challenge.opaque is not None:
-        opaque_b64 = _b64_encode(challenge.opaque)
+        opaque_b64 = canonical_b64url(challenge.opaque)
         parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
@@ -202,7 +212,7 @@ def parse_authorization(header: str) -> Credential:
         - payload: Method-specific credential data
         - source: Optional payer DID
     """
-    from mpp import ChallengeEcho, Credential
+    from mpp import ChallengeEcho, Credential, advertised_credential_header
 
     header = header.strip()
 
@@ -226,6 +236,13 @@ def parse_authorization(header: str) -> Credential:
     method = str(challenge_data.get("method", ""))
     _validate_payment_method_id(method)
 
+    try:
+        credential_header = advertised_credential_header(
+            str(challenge_data["header"]) if challenge_data.get("header") else None
+        )
+    except ValueError as error:
+        raise ParseError(str(error)) from error
+
     echo = ChallengeEcho(
         id=str(challenge_data["id"]),
         realm=str(challenge_data.get("realm", "")),
@@ -235,6 +252,7 @@ def parse_authorization(header: str) -> Credential:
         expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
         digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
         opaque=str(challenge_data["opaque"]) if challenge_data.get("opaque") else None,
+        header=credential_header,
     )
 
     return Credential(
@@ -266,6 +284,8 @@ def format_authorization(credential: Credential) -> str:
         challenge_dict["expires"] = credential.challenge.expires
     if credential.challenge.digest:
         challenge_dict["digest"] = credential.challenge.digest
+    if credential.challenge.header:
+        challenge_dict["header"] = credential.challenge.header
     if credential.challenge.opaque is not None:
         challenge_dict["opaque"] = credential.challenge.opaque
 
@@ -286,6 +306,17 @@ def _parse_timestamp(value: str) -> datetime:
         return datetime.fromisoformat(ts_str)
     except (ValueError, TypeError):
         raise ParseError("Invalid timestamp format") from None
+
+
+_RECEIPT_BASE_FIELDS = {
+    "status",
+    "timestamp",
+    "reference",
+    "method",
+    "externalId",
+    "subscriptionId",
+    "extra",
+}
 
 
 def parse_payment_receipt(header: str) -> Receipt:
@@ -318,7 +349,6 @@ def parse_payment_receipt(header: str) -> Receipt:
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
-
     return Receipt(
         status=status,
         timestamp=timestamp,
@@ -327,6 +357,8 @@ def parse_payment_receipt(header: str) -> Receipt:
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
         extra=extra if isinstance(extra, dict) else None,
+        extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
+        or None,
     )
 
 
@@ -350,4 +382,8 @@ def format_payment_receipt(receipt: Receipt) -> str:
         payload["subscriptionId"] = receipt.subscription_id
     if receipt.extra:
         payload["extra"] = receipt.extra
+    if receipt.extensions:
+        for key, value in receipt.extensions.items():
+            if key not in _RECEIPT_BASE_FIELDS:
+                payload[key] = value
     return _b64_encode(payload)

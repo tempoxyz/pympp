@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from mpp.methods import CanOfferFn, PaymentSuccessHandler
+
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mpp import Challenge, Credential
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 
 @runtime_checkable
@@ -23,7 +27,7 @@ class Method(Protocol):
             name = "stripe"
 
             @property
-            def intents(self) -> dict[str, Intent]:
+            def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
                 return {"charge": StripeChargeIntent(self.api_key)}
 
             async def create_credential(self, challenge: Challenge) -> Credential:
@@ -34,7 +38,7 @@ class Method(Protocol):
     name: str
 
     @property
-    def intents(self) -> dict[str, Intent]:
+    def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
         """Available intents for this method."""
         ...
 
@@ -50,6 +54,20 @@ class Method(Protocol):
             A credential that satisfies the challenge.
         """
         ...
+
+
+@runtime_checkable
+class _SupportsCanOffer(Protocol):
+    """A method that can decide whether to advertise a prepared offer."""
+
+    can_offer: CanOfferFn | None
+
+
+@runtime_checkable
+class _SupportsPaymentSuccess(Protocol):
+    """A method that handles its own successfully verified payments."""
+
+    on_payment_success: PaymentSuccessHandler | None
 
 
 def transform_request(

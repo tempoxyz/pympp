@@ -27,39 +27,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
+from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-
-if TYPE_CHECKING:
-    from mpp import Challenge, Credential
+from mpp.runtime import Method as Method
+from mpp.runtime import _method_accepts_currency
 
 logger = logging.getLogger(__name__)
-
-
-class PaymentOutcomeUnknownError(RuntimeError):
-    """Raised when a paid retry fails after a credential was attached."""
-
-    def __init__(self, challenge: MCPChallenge, cause: Exception) -> None:
-        self.challenge = challenge
-        self.cause = cause
-        super().__init__(
-            "Tool call failed after sending a payment credential; "
-            f"payment outcome is unknown for challenge {challenge.id}. "
-            "Do not blindly retry."
-        )
-
-
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface for MCP client credential creation."""
-
-    name: str
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge."""
-        ...
 
 
 def _error_code(error: Exception) -> int | None:
@@ -256,7 +232,11 @@ class McpClient:
         for method in self._methods:
             supported_intents = self._intent_names(method)
             for challenge in challenges:
-                if challenge.method == method.name and challenge.intent in supported_intents:
+                if (
+                    challenge.method == method.name
+                    and challenge.intent in supported_intents
+                    and _method_accepts_currency(method, challenge.to_core())
+                ):
                     return challenge, method
 
         available = [challenge.method for challenge in challenges]

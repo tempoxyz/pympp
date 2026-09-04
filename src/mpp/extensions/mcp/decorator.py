@@ -41,7 +41,7 @@ from mpp.extensions.mcp.verify import (
 from mpp.server._defaults import detect_realm, detect_secret_key
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -51,7 +51,7 @@ RequestParamsType = dict[str, Any] | Callable[..., dict[str, Any]]
 
 def pay(
     *,
-    intent: Intent,
+    intent: Intent | VerifiableIntent,
     request: RequestParamsType,
     realm: str | None = None,
     secret_key: str | None = None,

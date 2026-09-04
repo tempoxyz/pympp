@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import inspect
 import json as _json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from mpp import Challenge, Credential, Receipt
-from mpp.errors import PaymentRequiredError
+from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
+from mpp.errors import PaymentError, PaymentRequiredError
 from mpp.events import EventDispatcher
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.compose import ComposedResult
+    from mpp.server.intent import Intent, VerifiableIntent
 
 R = TypeVar("R")
 
@@ -30,10 +31,29 @@ def get_authorization(request: Any) -> str | None:
     Supports Starlette/FastAPI (request.headers), Django (request.META),
     and any object with a ``headers`` dict-like attribute.
     """
+    return get_header(request, "authorization")
+
+
+def get_payment_authorization(request: Any) -> str | None:
+    """Extract Payment-Authorization header from various request types."""
+    return get_header(request, "payment-authorization")
+
+
+def get_header(request: Any, name: str) -> str | None:
+    """Extract an HTTP header from various request types.
+
+    Supports Starlette/FastAPI (request.headers), Django (request.META),
+    and any object with a ``headers`` dict-like attribute.
+    """
+    canonical = "-".join(part.capitalize() for part in name.split("-"))
     if hasattr(request, "headers"):
-        return request.headers.get("authorization") or request.headers.get("Authorization")
+        return (
+            request.headers.get(name)
+            or request.headers.get(name.lower())
+            or request.headers.get(canonical)
+        )
     if hasattr(request, "META"):
-        return request.META.get("HTTP_AUTHORIZATION")
+        return request.META.get("HTTP_" + name.upper().replace("-", "_"))
     return None
 
 
@@ -119,29 +139,38 @@ def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> di
     return {**request_params, "_mppx_scope": scope}
 
 
-def make_challenge_response(challenge: Challenge, realm: str) -> Any:
+def make_challenge_response(
+    challenge: Challenge | Sequence[Challenge],
+    realm: str,
+    error: PaymentError | None = None,
+) -> Any:
     """Build a 402 response for a payment challenge with RFC 9457 problem details body.
 
     Returns a Starlette ``Response`` when starlette is installed,
     otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
     """
-    error = PaymentRequiredError(realm=realm, description=challenge.description)
-    body = _json.dumps(error.to_problem_details(challenge.id))
-    headers = {
-        "WWW-Authenticate": challenge.to_www_authenticate(realm),
+    challenges = (challenge,) if isinstance(challenge, Challenge) else tuple(challenge)
+    error = error or PaymentRequiredError(realm=realm, description=challenges[0].description)
+    body = _json.dumps(error.to_problem_details(challenges[0].id))
+    values = [item.to_www_authenticate(item.realm or realm) for item in challenges]
+    headers: dict[str, Any] = {
         "Cache-Control": "no-store",
         "Content-Type": "application/problem+json",
     }
     try:
         from starlette.responses import Response
 
-        return Response(
+        response = Response(
             content=body,
             status_code=402,
             headers=headers,
             media_type="application/problem+json",
         )
+        for value in values:
+            response.headers.append("WWW-Authenticate", value)
+        return response
     except ImportError:
+        headers["WWW-Authenticate"] = values[0] if len(values) == 1 else values
         return {
             "_mpp_challenge": True,
             "status": 402,
@@ -164,8 +193,10 @@ async def resolve_body_param(body: BodyParamsType, request_obj: Any) -> BodyType
 
 def wrap_payment_handler(
     handler: Callable[..., Awaitable[R]],
-    verify_fn: Callable[[str | None, Any], Awaitable[Challenge | tuple[Credential, Receipt]]],
+    verify_fn: Callable[[str | None, Any], Awaitable[Challenge | ComposedResult]],
     realm_fn: Callable[[], str],
+    *,
+    requires_auth: bool = False,
 ) -> Callable[..., Awaitable[R | Any]]:
     """Wrap a handler with the payment challenge/verify flow.
 
@@ -179,8 +210,10 @@ def wrap_payment_handler(
     Args:
         handler: The async endpoint handler to wrap.
         verify_fn: Called with ``(authorization, request_obj)``; must return
-            a ``Challenge`` or ``(Credential, Receipt)`` tuple.
+            a ``Challenge``, composed challenges, or ``(Credential, Receipt)`` tuple.
         realm_fn: Returns the realm string for challenge responses.
+        requires_auth: When True, read the Payment credential from
+            ``Payment-Authorization`` instead of ``Authorization``.
     """
     sig = inspect.signature(handler)
     params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
@@ -201,12 +234,26 @@ def wrap_payment_handler(
                 "The decorated handler must receive a request object as its first argument."
             )
 
-        authorization = get_authorization(request_obj)
+        authorization = (
+            get_payment_authorization(request_obj)
+            if requires_auth
+            else get_authorization(request_obj)
+        )
 
-        result = await verify_fn(authorization, request_obj)
+        try:
+            result = await verify_fn(authorization, request_obj)
+        except PaymentError as error:
+            if not isinstance(error.retry_challenge, Challenge):
+                raise
+            return make_challenge_response(error.retry_challenge, realm_fn(), error)
 
         if isinstance(result, Challenge):
             return make_challenge_response(result, realm_fn())
+
+        from mpp.server.compose import ComposedChallenges
+
+        if isinstance(result, ComposedChallenges):
+            return make_challenge_response(result.challenges, result.challenges[0].realm)
 
         credential, receipt = result
         return await handler(request_obj, credential, receipt)
@@ -218,7 +265,7 @@ def wrap_payment_handler(
 
 def pay(
     *,
-    intent: Intent,
+    intent: Intent | VerifiableIntent,
     request: RequestParamsType,
     realm: str | None = None,
     secret_key: str | None = None,
@@ -226,6 +273,7 @@ def pay(
     description: str | None = None,
     body: BodyParamsType = None,
     events: EventDispatcher | None = None,
+    requires_auth: bool = False,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
     Callable[[Any], Awaitable[R | Any]],
@@ -254,6 +302,9 @@ def pay(
         body: Optional static body bytes/string/dict or callback receiving the
             request object. The resolved value is bound into issued challenges
             via digest and used to verify paid retries.
+        requires_auth: When True, challenges advertise
+            ``header="Payment-Authorization"`` and credentials are read from
+            that header so ``Authorization`` can carry application auth.
 
     Example:
         @app.get("/resource")
@@ -290,8 +341,11 @@ def pay(
                 description=description,
                 body=await resolve_body_param(body, request_obj),
                 events=events,
+                header=PAYMENT_AUTHORIZATION_HEADER if requires_auth else None,
             )
 
-        return wrap_payment_handler(handler, _verify, lambda: resolved_realm)
+        return wrap_payment_handler(
+            handler, _verify, lambda: resolved_realm, requires_auth=requires_auth
+        )
 
     return decorator

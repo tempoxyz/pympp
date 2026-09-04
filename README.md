@@ -31,10 +31,23 @@ server = Mpp.create(
     ),
 )
 
+
 @app.get("/paid")
 @server.pay(amount="0.50")
 async def handler(request, credential: Credential, receipt: Receipt):
     return {"data": "...", "payer": credential.source}
+```
+
+If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
+
+```python
+server = Mpp.create(method=tempo(...), requires_auth=True)
+
+result = await server.charge(
+    authorization=request.headers.get("Authorization"),
+    amount="0.50",
+    payment_authorization=request.headers.get("Payment-Authorization"),
+)
 ```
 
 ### Client
@@ -47,6 +60,20 @@ account = TempoAccount.from_key("0x...")
 
 async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
     response = await client.get("https://mpp.dev/api/ping/paid")
+```
+
+Custom transports can reuse method matching and credential creation without
+depending on HTTPX:
+
+```python
+from mpp.client import PaymentTransport
+from mpp.runtime import PaymentRuntime
+
+payments = PaymentRuntime([method])
+challenge, method = payments.match_challenge(challenges)
+credential = await payments.create_credential(challenge, method)
+
+transport = PaymentTransport(runtime=payments)
 ```
 
 ## Examples

@@ -56,6 +56,8 @@ def make_bound_credential(
     source: str | None = None,
     expires: str | None = None,
     digest: str | None = None,
+    meta: dict[str, str] | None = None,
+    header: str | None = None,
 ) -> Credential:
     """Create a Credential with an HMAC-bound challenge ID for testing.
 
@@ -74,6 +76,40 @@ def make_bound_credential(
         request=request,
         expires=expires,
         digest=digest,
+        meta=meta,
+        header=header,
     )
     echo = challenge.to_echo()
     return Credential(challenge=echo, payload=payload, source=source)
+
+
+class MockRequest:
+    """Mock request object for testing."""
+
+    def __init__(
+        self,
+        authorization: str | None = None,
+        body: bytes | None = None,
+        path: str | None = None,
+        route: str | None = None,
+        query_string: str | None = None,
+        payment_authorization: str | None = None,
+    ) -> None:
+        self.headers: dict[str, str] = {}
+        if authorization:
+            self.headers["authorization"] = authorization
+        if payment_authorization:
+            self.headers["payment-authorization"] = payment_authorization
+        self.body = body
+        if path is not None:
+            self.path = path
+        if route is not None:
+            self.route = route
+        if query_string is not None:
+            self.query_string = query_string
+
+
+def challenge_from_402(result: Any) -> Challenge:
+    """Extract the challenge from a 402 response (Starlette or plain-dict form)."""
+    headers = result.headers if hasattr(result, "headers") else result["headers"]
+    return Challenge.from_www_authenticate(headers["WWW-Authenticate"])

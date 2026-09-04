@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mpp import Challenge, Credential
+from mpp import PaymentOutcomeUnknownError as CoreOutcomeUnknownError
 from mpp.extensions.mcp import (
     META_CREDENTIAL,
     META_RECEIPT,
@@ -18,6 +19,11 @@ from mpp.extensions.mcp import (
 )
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+
+
+def test_outcome_unknown_error_is_shared() -> None:
+    assert PaymentOutcomeUnknownError is CoreOutcomeUnknownError
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,6 +70,7 @@ class FakeMethod:
     """Fake payment method for testing."""
 
     name: str = "tempo"
+    currency: str | None = None
     _intents: dict[str, Any] | None = None
     _credential_to_return: Credential | None = None
 
@@ -93,13 +100,14 @@ class FakeMethod:
 def _make_challenge_dict(
     method: str = "tempo",
     intent: str = "charge",
+    currency: str = "0x20c0",
 ) -> dict[str, Any]:
     return {
         "id": "ch_test123",
         "realm": "api.example.com",
         "method": method,
         "intent": intent,
-        "request": {"amount": "1000", "currency": "0x20c0", "recipient": "0xdead"},
+        "request": {"amount": "1000", "currency": currency, "recipient": "0xdead"},
         "expires": "2099-01-01T00:00:00Z",
     }
 
@@ -119,8 +127,11 @@ def _make_receipt_meta() -> dict[str, Any]:
 def _make_challenge(
     method: str = "tempo",
     intent: str = "charge",
+    currency: str = "0x20c0",
 ) -> MCPChallenge:
-    return MCPChallenge.from_dict(_make_challenge_dict(method=method, intent=intent))
+    return MCPChallenge.from_dict(
+        _make_challenge_dict(method=method, intent=intent, currency=currency)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +573,19 @@ class TestMcpClientMethodMatching:
         ]
         _, matched = client._match_challenge(challenges)
         assert matched is stripe_method
+
+    def test_match_skips_currency_rejected_by_configured_method(self) -> None:
+        method = FakeMethod(currency="0xUsdc")
+        client = McpClient(AsyncMock(), methods=[method])
+        challenges = [
+            _make_challenge(currency="0xMachineUsd"),
+            _make_challenge(currency="0xUSDC"),
+        ]
+
+        challenge, matched = client._match_challenge(challenges)
+
+        assert challenge.request["currency"] == "0xUSDC"
+        assert matched is method
 
     def test_no_match_raises(self) -> None:
         method = FakeMethod(name="tempo", _intents={"charge": True})

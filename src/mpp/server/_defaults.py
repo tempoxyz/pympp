@@ -30,8 +30,8 @@ def detect_realm() -> str:
 def detect_secret_key() -> str:
     """Get server secret key from environment.
 
-    Mirrors mppx behavior: the secret key is required and must be provided
-    via `MPP_SECRET_KEY` or passed explicitly to server APIs.
+    The secret key is required and must be provided via ``MPP_SECRET_KEY`` or
+    passed explicitly to server APIs.
     """
     value = os.environ.get(_SECRET_KEY_NAME)
     if value and value.strip():

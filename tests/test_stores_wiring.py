@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
-from mpp import Challenge
+from mpp import Challenge, Credential
 from mpp.methods.tempo import tempo
 from mpp.methods.tempo.intents import ChargeIntent
 from mpp.server import Mpp
@@ -24,6 +26,27 @@ class TestMppStoreWiring:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
                 intents={"charge": intent},
             ),
+            realm="test.com",
+            secret_key="test-secret",
+            store=store,
+        )
+
+        assert intent._store is store
+
+    def test_store_wired_into_read_only_intent_mapping(self) -> None:
+        """Mpp should wire stores into any mapping accepted by Method."""
+        store = MemoryStore()
+        intent = ChargeIntent()
+
+        class ReadOnlyMethod:
+            name = "tempo"
+            intents = MappingProxyType({"charge": intent})
+
+            async def create_credential(self, challenge: Challenge) -> Credential:
+                raise NotImplementedError
+
+        Mpp.create(
+            method=ReadOnlyMethod(),
             realm="test.com",
             secret_key="test-secret",
             store=store,

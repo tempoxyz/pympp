@@ -186,7 +186,7 @@ class TestStripeMethod:
 
     @pytest.mark.asyncio
     async def test_create_credential_missing_network_id_raises(self):
-        """networkId is required in challenge.methodDetails (mppx parity)."""
+        """networkId is required in challenge.methodDetails."""
 
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
@@ -235,7 +235,7 @@ class TestStripeMethod:
 
     @pytest.mark.asyncio
     async def test_create_credential_rejects_metadata_external_id(self):
-        """metadata.externalId is reserved (mppx parity)."""
+        """metadata.externalId is reserved."""
 
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
@@ -650,10 +650,11 @@ class TestChargeIntent:
         assert metadata["mpp_challenge_id"] == "test-challenge-id"
         assert metadata["mpp_server_id"] == "api.example.com"
         assert metadata["mpp_client_id"] == "stripe:test"
+        assert metadata["machine_payment"] == "true"
 
     @pytest.mark.asyncio
     async def test_idempotency_key(self):
-        """Verify idempotency key format matches mppx."""
+        """Verify idempotency keys use the MPP namespace."""
         captured: list[tuple[tuple, dict]] = []
 
         class CapturingIntents:
@@ -669,7 +670,7 @@ class TestChargeIntent:
         await intent.verify(credential, SAMPLE_REQUEST)
 
         options = captured[0][1]["options"]
-        assert options["idempotency_key"] == "mppx_test-challenge-id_spt_test_xyz"
+        assert options["idempotency_key"] == "mpp_test-challenge-id_spt_test_xyz"
 
     @pytest.mark.asyncio
     async def test_client_request_body_is_first_positional_arg(self):
@@ -716,12 +717,16 @@ class TestChargeIntent:
             **SAMPLE_REQUEST,
             "methodDetails": {
                 **SAMPLE_REQUEST["methodDetails"],
-                "metadata": {"mpp_version": "custom", "user_key": "user_val"},
+                "metadata": {
+                    "mpp_version": "custom",
+                    "user_key": "user_val",
+                },
             },
         }
         await intent.verify(credential, request_with_metadata)
 
         metadata = captured[0][0][0]["metadata"]
+        assert metadata["machine_payment"] == "true"
         assert metadata["mpp_version"] == "custom"
         assert metadata["user_key"] == "user_val"
 
@@ -757,7 +762,7 @@ class TestChargeIntentRawHttp:
         headers = call_kwargs.kwargs["headers"]
         expected_auth = base64.b64encode(b"sk_test_raw:").decode()
         assert headers["Authorization"] == f"Basic {expected_auth}"
-        assert headers["Idempotency-Key"] == "mppx_test-challenge-id_spt_test_abc"
+        assert headers["Idempotency-Key"] == "mpp_test-challenge-id_spt_test_abc"
 
         data = call_kwargs.kwargs["data"]
         assert data["amount"] == "150"
@@ -835,6 +840,7 @@ class TestChargeIntentRawHttp:
         await intent.verify(credential, SAMPLE_REQUEST)
 
         data = mock_client.post.call_args.kwargs["data"]
+        assert data["metadata[machine_payment]"] == "true"
         assert data["metadata[mpp_is_mpp]"] == "true"
         assert data["metadata[mpp_version]"] == "1"
 

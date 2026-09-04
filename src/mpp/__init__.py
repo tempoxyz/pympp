@@ -8,11 +8,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from mpp._canonical import canonical_b64url
 from mpp._parsing import (
     ParseError,
     format_authorization,
@@ -32,6 +33,7 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
+    PaymentOutcomeUnknownError,
     PaymentRequiredError,
     VerificationFailedError,
 )
@@ -47,6 +49,29 @@ from mpp.events import (
     PaymentEvent,
     PaymentEventName,
 )
+
+AUTHORIZATION_HEADER = "Authorization"
+PAYMENT_AUTHORIZATION_HEADER = "Payment-Authorization"
+_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+
+def is_default_credential_header(header: str | None) -> bool:
+    """True when the credential header is omitted or is the implicit Authorization default."""
+    return header is None or header == "" or header.lower() == AUTHORIZATION_HEADER.lower()
+
+
+def advertised_credential_header(header: str | None) -> str | None:
+    """Return an advertised credential header, or None for the Authorization default.
+
+    ``Authorization`` is the implicit protocol default and is intentionally not
+    advertised on the wire. This preserves the legacy challenge binding.
+    """
+    if is_default_credential_header(header):
+        return None
+    name = str(header)
+    if not _HTTP_HEADER_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid HTTP header name")
+    return name
 
 
 def _b64url_encode(data: str) -> str:
@@ -71,6 +96,7 @@ def generate_challenge_id(
     expires: str | None = None,
     digest: str | None = None,
     opaque: dict[str, str] | None = None,
+    header: str | None = None,
 ) -> str:
     """Generate HMAC-SHA256 challenge ID per spec.
 
@@ -79,8 +105,10 @@ def generate_challenge_id(
     verification - the server can verify a challenge was issued by it without
     storing state.
 
-    HMAC input format: realm|method|intent|request_b64|expires|digest|opaque (pipe-delimited).
-    All fields are always included; absent optional fields use empty string.
+    HMAC input format: realm|method|intent|request_b64|expires|digest|opaque
+    (pipe-delimited). Challenges that advertise a credential header insert it
+    immediately before the final opaque slot. Authorization is the implicit
+    default and is never included, preserving the legacy binding.
     Output: base64url(HMAC-SHA256(secret_key, input))
 
     Args:
@@ -92,6 +120,8 @@ def generate_challenge_id(
         expires: Optional expiration timestamp (ISO 8601).
         digest: Optional digest of request body.
         opaque: Optional server-defined correlation data.
+        header: Optional HTTP field for the Payment credential. Authorization
+            is omitted; any other value is bound into the ID.
 
     Returns:
         Base64url-encoded HMAC-SHA256 of the challenge parameters.
@@ -105,25 +135,25 @@ def generate_challenge_id(
             request={"amount": "1000000", "currency": "0x...", "recipient": "0x..."},
         )
     """
-    request_json = json.dumps(request, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    request_b64 = _b64url_encode(request_json)
+    request_b64 = canonical_b64url(request)
 
     opaque_b64 = ""
     if opaque is not None:
-        opaque_json = json.dumps(opaque, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-        opaque_b64 = _b64url_encode(opaque_json)
+        opaque_b64 = canonical_b64url(opaque)
 
-    hmac_input = "|".join(
-        [
-            realm,
-            method,
-            intent,
-            request_b64,
-            expires or "",
-            digest or "",
-            opaque_b64,
-        ]
-    )
+    hmac_parts = [
+        realm,
+        method,
+        intent,
+        request_b64,
+        expires or "",
+        digest or "",
+    ]
+    advertised = advertised_credential_header(header)
+    if advertised:
+        hmac_parts.append(advertised)
+    hmac_parts.append(opaque_b64)
+    hmac_input = "|".join(hmac_parts)
 
     mac = hmac.new(
         secret_key.encode("utf-8"),
@@ -171,6 +201,17 @@ class Challenge:
     expires: str | None = None
     description: str | None = None
     opaque: dict[str, str] | None = None
+    header: str | None = None
+
+    def __post_init__(self) -> None:
+        advertised = advertised_credential_header(self.header)
+        if advertised != self.header:
+            object.__setattr__(self, "header", advertised)
+
+    @property
+    def credential_header(self) -> str:
+        """HTTP field a client must use for the payment credential."""
+        return self.header or AUTHORIZATION_HEADER
 
     @classmethod
     def create(
@@ -185,6 +226,7 @@ class Challenge:
         digest: str | None = None,
         description: str | None = None,
         meta: dict[str, str] | None = None,
+        header: str | None = None,
     ) -> Challenge:
         """Create a Challenge with an HMAC-bound ID.
 
@@ -203,10 +245,13 @@ class Challenge:
             digest: Optional digest of request body.
             description: Optional human-readable description.
             meta: Optional server-defined correlation data (stored as opaque).
+            header: Optional HTTP field for the Payment credential. Authorization
+                is the implicit default and is not advertised.
 
         Returns:
             A Challenge with an HMAC-bound ID.
         """
+        header = advertised_credential_header(header)
         challenge_id = generate_challenge_id(
             secret_key=secret_key,
             realm=realm,
@@ -216,14 +261,9 @@ class Challenge:
             expires=expires,
             digest=digest,
             opaque=meta,
+            header=header,
         )
-        request_json = json.dumps(
-            request,
-            separators=(",", ":"),
-            sort_keys=True,
-            ensure_ascii=False,
-        )
-        request_b64 = _b64url_encode(request_json)
+        request_b64 = canonical_b64url(request)
         return cls(
             id=challenge_id,
             method=method,
@@ -235,6 +275,7 @@ class Challenge:
             expires=expires,
             description=description,
             opaque=meta,
+            header=header,
         )
 
     @classmethod
@@ -270,6 +311,7 @@ class Challenge:
             expires=self.expires,
             digest=self.digest,
             opaque=self.opaque,
+            header=self.header,
         )
         return _constant_time_equal(self.id, expected_id)
 
@@ -281,13 +323,7 @@ class Challenge:
         """
         opaque_b64 = None
         if self.opaque is not None:
-            opaque_json = json.dumps(
-                self.opaque,
-                separators=(",", ":"),
-                sort_keys=True,
-                ensure_ascii=False,
-            )
-            opaque_b64 = _b64url_encode(opaque_json)
+            opaque_b64 = canonical_b64url(self.opaque)
         return ChallengeEcho(
             id=self.id,
             realm=self.realm,
@@ -297,6 +333,7 @@ class Challenge:
             expires=self.expires,
             digest=self.digest,
             opaque=opaque_b64,
+            header=self.header,
         )
 
 
@@ -325,6 +362,12 @@ class ChallengeEcho:
     expires: str | None = None
     digest: str | None = None
     opaque: str | None = None
+    header: str | None = None
+
+    def __post_init__(self) -> None:
+        advertised = advertised_credential_header(self.header)
+        if advertised != self.header:
+            object.__setattr__(self, "header", advertised)
 
 
 @dataclass(frozen=True, slots=True)
@@ -382,6 +425,7 @@ class Receipt:
     external_id: str | None = None
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
+    extensions: dict[str, Any] | None = None
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:

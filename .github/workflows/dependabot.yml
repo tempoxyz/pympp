@@ -1,0 +1,23 @@
+name: Dependabot
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  merge:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    # The called workflow approves and merges with a short-lived GitHub App
+    # token minted via the github-sts action against this repo's
+    # .github/sts/dependabot.sts.yaml policy; the built-in GITHUB_TOKEN is
+    # not allowed to approve pull requests and only needs read scopes.
+    # id-token lets the called job request the OIDC token the STS exchange
+    # verifies.
+    permissions:
+      checks: read
+      contents: read
+      pull-requests: read
+      id-token: write
+    uses: tempoxyz/mpp-tools/.github/workflows/dependabot.yml@77de41d7ae6e215290f31ac1f0782f545ee07e5d

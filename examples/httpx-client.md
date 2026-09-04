@@ -89,6 +89,6 @@ async with httpx.AsyncClient() as client:
     # Retry with credential
     res2 = await client.get(
         "https://api.example.com/resource",
-        headers={"Authorization": credential.to_authorization()},
+        headers={challenge.credential_header: credential.to_authorization()},
     )
 ```

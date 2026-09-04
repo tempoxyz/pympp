@@ -40,8 +40,24 @@ from mpp.events import (
     PaymentEvent,
     PaymentEventName,
 )
+from mpp.server.compose import (
+    ComposedChallenges,
+    ComposedHandler,
+    ComposedResult,
+    ComposeEntry,
+    ComposeOptions,
+    compose,
+)
 from mpp.server.decorator import pay
-from mpp.server.intent import Intent, VerificationError, intent
+from mpp.server.intent import (
+    Intent,
+    Validation,
+    VerifiableIntent,
+    VerificationError,
+    broadcast_credential,
+    intent,
+    validate_credential,
+)
 from mpp.server.method import Method, transform_request
 from mpp.server.mpp import Mpp
 from mpp.server.verify import verify_or_challenge

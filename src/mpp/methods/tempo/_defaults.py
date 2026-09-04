@@ -7,6 +7,7 @@ CHAIN_ID = 4217
 RPC_URL = "https://rpc.tempo.xyz"
 PATH_USD = "0x20c0000000000000000000000000000000000000"
 USDC = "0x20C000000000000000000000b9537d11c60E8b50"
+MACH = "0x20c000000000000000000000f37de3740ADec032"
 PATH_USD_DECIMALS = 6
 
 # Testnet (Moderato)
@@ -19,6 +20,14 @@ DEFAULT_CURRENCIES: MappingProxyType[int, str] = MappingProxyType(
     {
         CHAIN_ID: USDC,
         TESTNET_CHAIN_ID: PATH_USD,
+    }
+)
+
+# MACH is closed-loop payment credit, not a supported Tempo gas token.
+FEE_TOKENS: MappingProxyType[int, tuple[str, ...]] = MappingProxyType(
+    {
+        CHAIN_ID: (PATH_USD, USDC),
+        TESTNET_CHAIN_ID: (PATH_USD,),
     }
 )
 
@@ -64,6 +73,11 @@ def default_currency_for_chain(chain_id: int | None) -> str:
     if chain_id is None:
         return PATH_USD
     return DEFAULT_CURRENCIES.get(chain_id, PATH_USD)
+
+
+def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]:
+    """Return supported Tempo fee tokens in preference order."""
+    return FEE_TOKENS.get(chain_id, (PATH_USD,))
 
 
 def escrow_contract_for_chain(chain_id: int) -> str:

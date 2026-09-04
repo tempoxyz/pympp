@@ -38,7 +38,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import rfc8785
+
 from mpp import _constant_time_equal, generate_challenge_id
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
@@ -47,7 +50,7 @@ from mpp.extensions.mcp.errors import (
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent
+    from mpp.server.intent import Intent, VerifiableIntent
 
 DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 
@@ -55,7 +58,7 @@ DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
 async def verify_or_challenge(
     *,
     meta: dict[str, Any] | None,
-    intent: Intent,
+    intent: Intent | VerifiableIntent,
     request: dict[str, Any],
     realm: str,
     secret_key: str,
@@ -143,16 +146,19 @@ async def verify_or_challenge(
     # Stateless challenge verification: recompute expected challenge ID from
     # echoed parameters and compare to the credential's challenge ID.
     echoed = mcp_credential.challenge
-    expected_id = generate_challenge_id(
-        secret_key=secret_key,
-        realm=echoed.realm,
-        method=echoed.method,
-        intent=echoed.intent,
-        request=echoed.request,
-        expires=echoed.expires,
-        digest=echoed.digest,
-        opaque=echoed.opaque,
-    )
+    try:
+        expected_id = generate_challenge_id(
+            secret_key=secret_key,
+            realm=echoed.realm,
+            method=echoed.method,
+            intent=echoed.intent,
+            request=echoed.request,
+            expires=echoed.expires,
+            digest=echoed.digest,
+            opaque=echoed.opaque,
+        )
+    except rfc8785.CanonicalizationError:
+        return new_challenge()
     if not _constant_time_equal(echoed.id, expected_id):
         return new_challenge()
 
@@ -194,17 +200,24 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return new_challenge()
 
-    from mpp.server.intent import VerificationError
+    from mpp.server.intent import VerificationError, broadcast_credential
 
     core_credential = mcp_credential.to_core()
 
     try:
-        core_receipt = await intent.verify(core_credential, request)
-    except VerificationError as e:
+        core_receipt = await broadcast_credential(
+            intent=intent,
+            credential=core_credential,
+            request=request,
+        )
+    except PaymentOutcomeUnknownError:
+        raise
+    except (PaymentError, VerificationError) as e:
         raise PaymentVerificationError(
             challenges=[new_challenge()],
             reason="verification-failed",
             detail=str(e),
+            details=getattr(e, "details", None),
         ) from e
 
     mcp_receipt = MCPReceipt.from_core(

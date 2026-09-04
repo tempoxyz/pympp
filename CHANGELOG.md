@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.11.0 (2026-08-28)
+
+### Minor Changes
+
+- Added a `VerifiableIntent` protocol with separate `validate` and `broadcast` hooks plus bound `Mpp.validate_credential()` and `Mpp.broadcast_credential()` APIs, introduced a `Relay` adapter that delegates Tempo charge validation and finalization to the Tempo API relay (surfacing only safe machine-readable error codes and retryable 402 challenges on decline), and added a runnable `charge-relay` FastAPI example with a payer client. Relay idempotency keys use the `pympp_` namespace, existing Stripe idempotency behavior remains unchanged, and Python validation details use snake_case. (by @ParvAhuja, [#204](https://github.com/tempoxyz/pympp/pull/204))
+- Added configurable `max_payment_retries` parameter to `PaymentTransport` and `Client`, allowing callers to override the default retry limit of 3 instead of relying on a hardcoded constant. (by @mpp-agricola[bot], [#223](https://github.com/tempoxyz/pympp/pull/223))
+
+### Patch Changes
+
+- Fixed currency validation during challenge matching by introducing a `_method_accepts_currency` helper that enforces case-insensitive currency comparison when a method has a configured currency constraint. Applied the check in both `PaymentRuntime` and `McpClient` challenge matching and credential creation paths. (by @DerekCofausper, [#232](https://github.com/tempoxyz/pympp/pull/232))
+- Added MACH as a supported Tempo charge currency and selected a supported stablecoin with enough balance to cover unsponsored MACH transaction fees. (by @ParvAhuja, [#237](https://github.com/tempoxyz/pympp/pull/237))
+- Fixed payment challenge request and opaque serialization to use RFC 8785 JSON Canonicalization Scheme (JCS) via the `rfc8785` library, replacing ad-hoc `json.dumps` calls across HTTP and MCP transports. This ensures challenge IDs are reproducible from the exact bytes emitted on the wire, including non-ASCII characters and JCS number formatting. (by @BrendanRyan, [#235](https://github.com/tempoxyz/pympp/pull/235))
+- Fixed initial requests to advertise supported payment methods via the `Accept-Payment` header, derived from the configured payment methods and their intents. Existing `Accept-Payment` headers are preserved when explicitly set by the caller. (by @mpp-agricola[bot], [#225](https://github.com/tempoxyz/pympp/pull/225))
+- Fixed `verify_or_challenge` raising `TypeError` when a challenge carried a timezone-naive `expires` value. A naive timestamp parsed successfully but could not be compared to an aware `now`, surfacing as a server error instead of a fail-closed rejection; it is now rejected like any other invalid `expires`. (by @BrendanRyan, [#234](https://github.com/tempoxyz/pympp/pull/234))
+- Reverted early termination on repeated actionable challenges, allowing the payment transport to retry payment even when the same challenge ID is received multiple times. (by @mpp-agricola[bot], [#224](https://github.com/tempoxyz/pympp/pull/224))
+- Changed Stripe PaymentIntent and Tempo relay idempotency keys to use the SDK-independent `mpp_` prefix while preserving their existing suffix construction. (by @ParvAhuja, [#220](https://github.com/tempoxyz/pympp/pull/220))
+- Added a `requires_auth` server option that uses `Payment-Authorization` for Payment credentials so `Authorization` remains available for application authentication. (by @RyanAubrey, [#230](https://github.com/tempoxyz/pympp/pull/230))
+- Used the bootstrapped Tempo localnet image for reproducible integration tests, replacing the dynamic `latest` tag pull-and-cache approach with a pinned `tempo-localnet` image digest. Removed the dev-key-based account funding fallback in favour of exclusively using the localnet faucet via `tempo_fundAddress`. (by @BrendanRyan, [#226](https://github.com/tempoxyz/pympp/pull/226))
+- Fixed challenge selection to match on both method name and intent, preventing methods from being incorrectly matched to challenges with unsupported intents. Added `intents` property to the `Method` protocol to declare which payment intents each method supports. (by @mpp-agricola[bot], [#216](https://github.com/tempoxyz/pympp/pull/216))
+
+## 0.10.1 (2026-08-09)
+
+### Patch Changes
+
+- Preserved request details across paid retries and rejected payment challenges reached through cross-origin redirects. (by @mpp-agricola[bot], [#214](https://github.com/tempoxyz/pympp/pull/214))
+- Fixed handling of fresh 402 payment challenges returned after a paid retry, enabling clients to recover from failed verification and complete multi-round payment flows. Introduced a retry loop with a maximum attempt limit to support these sequential challenge-response exchanges. (by @mpp-agricola[bot], [#214](https://github.com/tempoxyz/pympp/pull/214))
+
+## 0.10.0 (2026-08-03)
+
+### Minor Changes
+
+- Added a transport-neutral `PaymentRuntime` class that provides reusable primitives for matching payment challenges and creating credentials without depending on HTTPX. Refactored `PaymentTransport` and `Client` to accept either a `methods` list or a pre-built `runtime` instance, and consolidated the `Method` protocol into `mpp.runtime`. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Add `hint` field to `PaymentError` problem details. `PaymentRequiredError`, `MalformedCredentialError`, and `PaymentMethodUnsupportedError` now include a default hint pointing users to wallet documentation. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Improved HTTP challenge parsing to correctly split merged `WWW-Authenticate` headers with quoted commas, added pass-through support for streaming request bodies on ordinary and unrelated 402 responses, and introduced `PaymentOutcomeUnknownError` (consolidated from the MCP client into core) to surface explicit errors when a paid retry outcome is uncertain due to network failures or task cancellation. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+
+### Patch Changes
+
+- Added Python 3.14 to the list of declared supported versions in package classifiers and added Python 3.11 to the CI test matrix. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Preserved MCP challenge metadata when converting MCP challenges to core payment challenges. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Prevent the optional MCP SDK from resolving to incompatible 2.x releases. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Handle multipart (`files=`) and streaming bodies on paid 402 retry. Multipart bodies are buffered and replayed identically; async generator bodies raise `PaymentError` before any I/O. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Preserve `subscriptionId` when parsing and formatting payment receipts. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+- Fixed MCP payment error detection to support the current MCP SDK's `McpError` shape, where error code and data are nested under an `error` attribute rather than directly on the exception. Added helper functions `_error_code` and `_error_data` to extract these fields from both error shapes. (by @ParvAhuja, [#202](https://github.com/tempoxyz/pympp/pull/202))
+
 ## 0.9.1 (2026-07-01)
 
 ### Patch Changes
@@ -216,4 +260,3 @@
 
 **Breaking:** `tempo()` now requires an explicit `intents` parameter. The implicit `ChargeIntent` default has been removed. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
 - Initial release of pympp - HTTP 402 Payment Authentication for Python. (by @BrendanRyan, [#26](https://github.com/tempoxyz/pympp/pull/26))
-

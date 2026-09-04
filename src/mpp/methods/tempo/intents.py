@@ -18,6 +18,7 @@ from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._validation import Validation
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import PATH_USD, rpc_url_for_chain
 from mpp.methods.tempo.fee_payer_policy import get_policy
@@ -547,23 +548,12 @@ class ChargeIntent:
             self._http_client = httpx.AsyncClient(timeout=self._timeout)
         return self._http_client
 
-    async def verify(
+    def _prepare_credential(
         self,
         credential: Credential,
         request: dict[str, Any],
-    ) -> Receipt:
-        """Verify a charge credential.
-
-        Args:
-            credential: The payment credential from the client.
-            request: The original payment request parameters.
-
-        Returns:
-            A receipt indicating success or failure.
-
-        Raises:
-            VerificationError: If verification fails.
-        """
+    ) -> tuple[ChargeRequest, CredentialPayload]:
+        """Parse the charge request and credential payload."""
         req = ChargeRequest.model_validate(request)
 
         # Expiry is conveyed via the challenge-level expires auth-param,
@@ -587,21 +577,129 @@ class ChargeIntent:
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
+        return req, payload
+
+    async def validate(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Validation:
+        """Validate a charge credential without consuming or broadcasting it.
+
+        Push-mode credentials are verified against the chain without
+        consuming the transaction hash's replay key; pull-mode transactions
+        are decoded and checked against the request without being broadcast.
+
+        Args:
+            credential: The payment credential from the client.
+            request: The original payment request parameters.
+
+        Returns:
+            A validation record whose ``details`` carry the settlement
+            ``mode`` and, in pull mode, the serialized transaction.
+
+        Raises:
+            VerificationError: If the credential is invalid.
+        """
+        req, payload = self._prepare_credential(credential, request)
+
         if isinstance(payload, HashCredentialPayload):
-            return await self._verify_hash(
+            await self._ensure_hash_unused(payload.hash)
+            await self._validate_hash(
                 payload,
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
                 source=credential.source,
             )
+            details: dict[str, Any] = {"mode": "push"}
         else:
-            return await self._verify_transaction(
-                payload,
-                req,
-                challenge_id=credential.challenge.id,
-                realm=credential.challenge.realm,
-            )
+            self._validate_transaction_payload(payload.signature, req, strict=True)
+            details = {"mode": "pull", "serialized_transaction": payload.signature}
+
+        return Validation(
+            credential=credential,
+            details=details,
+            intent=self.name,
+            request=dict(request),
+        )
+
+    async def broadcast(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Receipt:
+        """Perform the terminal charge operation.
+
+        Push-mode credentials reserve the transaction hash's replay key
+        before re-verification — so concurrent duplicates fail fast — and
+        release it again if verification fails. Pull-mode transactions are
+        broadcast to the network.
+
+        Args:
+            credential: The payment credential from the client.
+            request: The original payment request parameters.
+
+        Returns:
+            A receipt for the settled payment.
+
+        Raises:
+            VerificationError: If verification fails or the transaction hash
+                was already used.
+        """
+        req, payload = self._prepare_credential(credential, request)
+
+        if isinstance(payload, HashCredentialPayload):
+            store_key = await self._reserve_hash(payload.hash)
+            try:
+                return await self._validate_hash(
+                    payload,
+                    req,
+                    challenge_id=credential.challenge.id,
+                    realm=credential.challenge.realm,
+                    source=credential.source,
+                )
+            except Exception:
+                if store_key is not None and self._store is not None:
+                    await self._store.delete(store_key)
+                raise
+        return await self._broadcast_transaction(
+            payload,
+            req,
+            challenge_id=credential.challenge.id,
+            realm=credential.challenge.realm,
+        )
+
+    async def verify(
+        self,
+        credential: Credential,
+        request: dict[str, Any],
+    ) -> Receipt:
+        """Backward-compatible terminal charge hook.
+
+        Equivalent to :meth:`broadcast`; prefer :meth:`validate` for the
+        non-mutating pre-check and :meth:`broadcast` for settlement.
+        """
+        return await self.broadcast(credential, request)
+
+    async def _reserve_hash(self, tx_hash: str) -> str | None:
+        if self._store is None:
+            return None
+        store_key = self._hash_store_key(tx_hash)
+        if not await self._store.put_if_absent(store_key, tx_hash):
+            raise VerificationError("Transaction hash already used")
+        return store_key
+
+    async def _ensure_hash_unused(self, tx_hash: str) -> None:
+        if (
+            self._store is not None
+            and await self._store.get(self._hash_store_key(tx_hash)) is not None
+        ):
+            raise VerificationError("Transaction hash already used")
+
+    @staticmethod
+    def _hash_store_key(tx_hash: str) -> str:
+        return f"mpp:charge:{tx_hash.lower()}"
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
@@ -644,7 +742,7 @@ class ChargeIntent:
             )
         )
 
-    async def _verify_hash(
+    async def _validate_hash(
         self,
         payload: HashCredentialPayload,
         request: ChargeRequest,
@@ -652,33 +750,20 @@ class ChargeIntent:
         realm: str,
         source: str | None = None,
     ) -> Receipt:
-        """Verify a credential with a transaction hash."""
-        # Validate the source before reserving the hash.
+        """Validate a transaction hash without consuming its replay key."""
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         client = await self._get_client()
-
-        store_key: str | None = None
-        if self._store is not None:
-            store_key = f"mpp:charge:{payload.hash.lower()}"
-            if not await self._store.put_if_absent(store_key, payload.hash):
-                raise VerificationError("Transaction hash already used")
-
-        try:
-            receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-            self._verify_receipt_transfers(
-                receipt_data,
-                request,
-                challenge_id=challenge_id,
-                realm=realm,
-                source=source,
-                source_address=source_address,
-                validate_sender=self._validate_sender,
-            )
-        except Exception:
-            if self._store is not None and store_key is not None:
-                await self._store.delete(store_key)
-            raise
+        receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
+        self._verify_receipt_transfers(
+            receipt_data,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+            source=source,
+            source_address=source_address,
+            validate_sender=self._validate_sender,
+        )
 
         return Receipt.success(payload.hash)
 
@@ -951,7 +1036,7 @@ class ChargeIntent:
 
         return all_matches
 
-    async def _verify_transaction(
+    async def _broadcast_transaction(
         self,
         payload: TransactionCredentialPayload,
         request: ChargeRequest,
@@ -1375,23 +1460,39 @@ class ChargeIntent:
         ]
         _validate_normalized_calls(normalized_calls, request)
 
-    def _validate_transaction_payload(self, signature: str, request: ChargeRequest) -> None:
-        """Best-effort pre-broadcast check. Silently skips if decoding fails."""
+    def _validate_transaction_payload(
+        self,
+        signature: str,
+        request: ChargeRequest,
+        *,
+        strict: bool = False,
+    ) -> None:
+        """Validate a transaction, failing closed for advisory validation."""
         try:
             import rlp
-        except ImportError:
+        except ImportError as error:
+            if strict:
+                raise VerificationError("Transaction decoding is unavailable") from error
             return
         try:
             tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
-        except ValueError:
+        except ValueError as error:
+            if strict:
+                raise VerificationError("Invalid serialized transaction") from error
             return
         if not tx_bytes or tx_bytes[0] not in (0x76, 0x78):
+            if strict:
+                raise VerificationError("Only Tempo (0x76/0x78) transactions are supported")
             return
         try:
             decoded = rlp.decode(tx_bytes[1:])
-        except Exception:
+        except Exception as error:
+            if strict:
+                raise VerificationError("Invalid serialized transaction") from error
             return
         if not isinstance(decoded, list) or len(decoded) < 5:
+            if strict:
+                raise VerificationError("Invalid serialized transaction")
             return
 
         calls_data = decoded[4] if len(decoded) > 4 else []

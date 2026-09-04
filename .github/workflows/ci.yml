@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -41,7 +41,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -66,7 +66,7 @@ jobs:
 
       - name: Type check
         if: matrix.python-version == '3.12'
-        uses: jakebailey/pyright-action@8ec14b5cfe41f26e5f41686a31eb6012758217ef # v3.0.2
+        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           version: PATH
 
@@ -93,15 +93,13 @@ jobs:
   integration:
     name: Integration Test
     runs-on: ubuntu-latest
-    env:
-      TEMPO_TAG: latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -112,30 +110,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Resolve Tempo image digest
-        id: tempo-digest
-        run: |
-          digest=$(docker buildx imagetools inspect "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" --raw | sha256sum | cut -d' ' -f1)
-          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Tempo Docker image
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: docker-cache
-        with:
-          path: /tmp/tempo-image.tar
-          key: tempo-image-${{ steps.tempo-digest.outputs.digest }}
-
-      - name: Load cached Tempo image
-        if: steps.docker-cache.outputs.cache-hit == 'true'
-        run: docker load -i /tmp/tempo-image.tar
-
-      - name: Pull and cache Tempo image
-        if: steps.docker-cache.outputs.cache-hit != 'true'
-        run: |
-          docker pull "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}"
-          docker save "ghcr.io/tempoxyz/tempo:${TEMPO_TAG}" -o /tmp/tempo-image.tar
-
-      - name: Start Tempo devnet and Redis
+      - name: Start Tempo localnet and Redis
         run: docker compose up -d --wait
 
       - name: Run integration tests
@@ -156,7 +131,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -193,7 +168,7 @@ jobs:
           persist-credentials: false
 
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
