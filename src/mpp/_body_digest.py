@@ -29,14 +29,41 @@ def compute(body: str | bytes | dict[str, Any]) -> str:
     return f"sha-256={encoded}"
 
 
+def _unwrap(digest: str) -> tuple[str, str] | None:
+    """Split a digest into its algorithm and base64 value.
+
+    Accepts both the bare ``sha-256=<base64>`` form this module emits and the
+    RFC 9530 Byte Sequence form ``sha-256=:<base64>:`` used by the MPP spec,
+    so a digest produced by a spec-conformant peer still verifies here.
+
+    Returns None if the string is not a digest at all.
+    """
+    algorithm, separator, value = digest.partition("=")
+    if not separator:
+        return None
+    if len(value) >= 2 and value.startswith(":") and value.endswith(":"):
+        value = value[1:-1]
+    return algorithm.lower(), value
+
+
 def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
     """Verify a body digest matches the expected value.
 
     Args:
-        digest: The digest string to verify (format: ``sha-256=<base64>``).
+        digest: The digest string to verify. Both ``sha-256=<base64>`` and the
+            RFC 9530 form ``sha-256=:<base64>:`` are accepted.
         body: The request body to check against.
 
     Returns:
         True if the digest matches, False otherwise.
     """
-    return hmac.compare_digest(compute(body), digest)
+    received = _unwrap(digest)
+    if received is None:
+        return False
+
+    algorithm, value = received
+    if algorithm != "sha-256":
+        return False
+
+    expected = compute(body).removeprefix("sha-256=")
+    return hmac.compare_digest(expected, value)

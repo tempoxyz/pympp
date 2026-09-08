@@ -118,6 +118,23 @@ class TestVerify:
         body = "test"
         assert verify("sha-256=AAAA", body) is False
 
+    def test_accepts_rfc9530_byte_sequence_form(self) -> None:
+        """A digest wrapped in RFC 9530 colon delimiters should verify."""
+        body = {"amount": "1000", "currency": "USD"}
+        value = compute(body).removeprefix("sha-256=")
+        assert verify(f"sha-256=:{value}:", body) is True
+
+    def test_rfc9530_form_with_wrong_body_returns_false(self) -> None:
+        """Colon delimiters must not weaken the comparison itself."""
+        value = compute("original body").removeprefix("sha-256=")
+        assert verify(f"sha-256=:{value}:", "different body") is False
+
+    def test_unbalanced_colon_is_not_stripped(self) -> None:
+        """Only a matched leading/trailing colon pair is a Byte Sequence."""
+        value = compute("test").removeprefix("sha-256=")
+        assert verify(f"sha-256=:{value}", "test") is False
+        assert verify(f"sha-256={value}:", "test") is False
+
     def test_wrong_algorithm_prefix(self) -> None:
         """Digest with wrong algorithm prefix should fail verification."""
         assert verify("sha-512=AAAA", "test") is False
