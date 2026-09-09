@@ -202,6 +202,10 @@ class ChargeIntent:
                 metadata=resolved_metadata,
             )
 
+        if pi.get("idempotent_replayed"):
+            raise VerificationFailedError(
+                f"PaymentIntent {pi['id']} was an idempotent replay, not a fresh charge"
+            )
         if pi["status"] == "requires_action":
             raise PaymentActionRequiredError("Stripe PaymentIntent requires action")
         if pi["status"] != "succeeded":
@@ -220,7 +224,7 @@ class ChargeIntent:
         request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
             body = {
@@ -238,7 +242,26 @@ class ChargeIntent:
             }
 
             result = await _create_payment_intent(client, body, options)
-            return {"id": result.id, "status": result.status}
+            # Stripe's SDK sets last_response on the returned resource after a
+            # successful API call. Idempotent-Replayed distinguishes "this call
+            # actually charged" from "this call returned a cached result from
+            # an earlier request with the same idempotency key" -- a credential
+            # reused against a different challenge would otherwise still
+            # collapse onto the first PaymentIntent and look like a fresh
+            # success (see mppx's stripe/server/Charge.ts).
+            idempotent_replayed = False
+            last_response = getattr(result, "last_response", None)
+            if last_response is not None:
+                headers = getattr(last_response, "headers", None)
+                if headers is not None:
+                    idempotent_replayed = (
+                        str(headers.get("Idempotent-Replayed", "")).lower() == "true"
+                    )
+            return {
+                "id": result.id,
+                "idempotent_replayed": idempotent_replayed,
+                "status": result.status,
+            }
         except (VerificationFailedError, TypeError):
             raise
         except Exception as err:
@@ -251,7 +274,7 @@ class ChargeIntent:
         request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a PaymentIntent using raw HTTP with a secret key."""
         http_client = await self._get_http_client()
 
@@ -292,4 +315,10 @@ class ChargeIntent:
             )
 
         result = response.json()
-        return {"id": result["id"], "status": result["status"]}
+        # See _create_with_client for why this header matters.
+        idempotent_replayed = response.headers.get("Idempotent-Replayed", "").lower() == "true"
+        return {
+            "id": result["id"],
+            "idempotent_replayed": idempotent_replayed,
+            "status": result["status"],
+        }

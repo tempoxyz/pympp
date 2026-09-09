@@ -626,19 +626,6 @@ class TestChargeIntent:
             ChargeIntent()
 
     @pytest.mark.asyncio
-    async def test_accepts_replayed_credential_client(self):
-        """Stripe idempotent retries still return the original successful receipt."""
-        replayed_pi = FakePaymentIntent(
-            last_response=FakeLastResponse(headers={"idempotent-replayed": "true"})
-        )
-        intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
-        credential = _make_credential()
-
-        receipt = await intent.verify(credential, SAMPLE_REQUEST)
-
-        assert receipt.status == "success"
-        assert receipt.reference == "pi_test_123"
-
     @pytest.mark.asyncio
     async def test_analytics_metadata(self):
         """Verify analytics metadata is passed to PaymentIntent creation."""
@@ -746,6 +733,44 @@ class TestChargeIntent:
         assert metadata["mpp_version"] == "custom"
         assert metadata["user_key"] == "user_val"
 
+    # ------------------------------------------------------------------
+    # Regression tests for AGR-2026-097: idempotent-replayed PaymentIntents
+    # used to be accepted as fresh successful charges (the Idempotent-Replayed
+    # response header was never inspected).
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_idempotent_replayed_payment_intent(self):
+        """A succeeded PaymentIntent that was an idempotent replay must not
+        be accepted as a fresh successful verification."""
+        replayed = FakePaymentIntent(
+            id="pi_replay_123",
+            status="succeeded",
+            last_response=FakeLastResponse(headers={"Idempotent-Replayed": "true"}),
+        )
+        intent = ChargeIntent(client=FakeStripeClient(replayed))
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="pi_replay_123"):
+            await intent.verify(credential, SAMPLE_REQUEST)
+
+    @pytest.mark.asyncio
+    async def test_verify_accepts_non_replayed_payment_intent(self):
+        """A succeeded PaymentIntent whose Idempotent-Replayed header is
+        explicitly false (or absent) is a normal fresh charge."""
+        fresh = FakePaymentIntent(
+            id="pi_fresh_123",
+            status="succeeded",
+            last_response=FakeLastResponse(headers={"Idempotent-Replayed": "false"}),
+        )
+        intent = ChargeIntent(client=FakeStripeClient(fresh))
+        credential = _make_credential()
+
+        receipt = await intent.verify(credential, SAMPLE_REQUEST)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_fresh_123"
+
 
 # ──────────────────────────────────────────────────────────────────
 # Raw HTTP path tests (_create_with_secret_key)
@@ -823,26 +848,6 @@ class TestChargeIntentRawHttp:
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
-    async def test_accepts_replayed_credential_raw_http(self):
-        """Stripe idempotent retries still return the original successful receipt."""
-        mock_response = httpx.Response(
-            200,
-            json={"id": "pi_replayed", "status": "succeeded"},
-            headers={"idempotent-replayed": "true"},
-            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
-        )
-        mock_client = AsyncMock(spec=httpx.AsyncClient)
-        mock_client.post.return_value = mock_response
-
-        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
-        credential = _make_credential()
-
-        receipt = await intent.verify(credential, SAMPLE_REQUEST)
-
-        assert receipt.status == "success"
-        assert receipt.reference == "pi_replayed"
-
-    @pytest.mark.asyncio
     async def test_verify_with_secret_key_metadata_in_form(self):
         """Verify metadata is encoded as form fields."""
         mock_response = httpx.Response(
@@ -860,6 +865,25 @@ class TestChargeIntentRawHttp:
         data = mock_client.post.call_args.kwargs["data"]
         assert data["metadata[machine_payment]"] == "true"
         assert data["metadata[mpp_intent]"] == "charge"
+
+    @pytest.mark.asyncio
+    async def test_verify_with_secret_key_rejects_idempotent_replayed(self):
+        """Same AGR-2026-097 regression, via the raw HTTP path: the
+        Idempotent-Replayed response header must be checked there too."""
+        mock_response = httpx.Response(
+            200,
+            json={"id": "pi_http_replay", "status": "succeeded"},
+            headers={"Idempotent-Replayed": "true"},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post.return_value = mock_response
+
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
+        credential = _make_credential()
+
+        with pytest.raises(VerificationFailedError, match="pi_http_replay"):
+            await intent.verify(credential, SAMPLE_REQUEST)
 
 
 # ──────────────────────────────────────────────────────────────────
