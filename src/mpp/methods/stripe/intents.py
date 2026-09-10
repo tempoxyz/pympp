@@ -246,6 +246,8 @@ class ChargeIntent:
             options = {
                 "headers": {"X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE},
                 "idempotency_key": f"mpp_{challenge_id}_{spt}",
+                # Keep replay responses attributable to separate verify calls.
+                "max_network_retries": 0,
                 "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
             }
 

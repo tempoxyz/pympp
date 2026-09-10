@@ -686,6 +686,7 @@ class TestChargeIntent:
 
         options = captured[0][1]["options"]
         assert options["idempotency_key"] == "mpp_test-challenge-id_spt_test_xyz"
+        assert options["max_network_retries"] == 0
         assert options["headers"] == {
             "X-Request-Source": 'service="pympp"; project="machine_payments"'
         }

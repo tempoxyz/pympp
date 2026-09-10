@@ -151,6 +151,7 @@ async def test_spt_uses_pinned_explicit_request_shape() -> None:
     assert options == {
         "headers": {"X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE},
         "idempotency_key": f"mpp_{challenge.id}_spt_test",
+        "max_network_retries": 0,
         "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
     }
 
