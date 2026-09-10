@@ -1,5 +1,6 @@
 """Tests for Tempo payment method."""
 
+import asyncio
 import json
 import os
 import re
@@ -1255,7 +1256,7 @@ class TestChargeIntent:
         to_topic = "0x" + "0" * 24 + destination[2:]
 
         receipt_with_logs = {
-            "transactionHash": "0xtxhash123",
+            "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
             "status": "0x1",
             "logs": [
                 {
@@ -1290,7 +1291,7 @@ class TestChargeIntent:
         )
 
         assert receipt.status == "success"
-        assert receipt.reference == "0xtxhash123"
+        assert receipt.reference == _raw_transaction_hash("0xabcdef1234567890")
         assert mock_client.post.await_args is not None
         assert mock_client.post.await_args.kwargs["json"]["method"] == "eth_sendRawTransactionSync"
 
@@ -1305,7 +1306,7 @@ class TestChargeIntent:
         explicit_memo = "0x" + "ab" * 32
 
         receipt_with_logs = {
-            "transactionHash": "0xtxhash123",
+            "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
             "status": "0x1",
             "logs": [
                 {
@@ -1344,7 +1345,7 @@ class TestChargeIntent:
         )
 
         assert receipt.status == "success"
-        assert receipt.reference == "0xtxhash123"
+        assert receipt.reference == _raw_transaction_hash("0xabcdef1234567890")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_plain_transfer_without_challenge_bound_memo(
@@ -1520,14 +1521,16 @@ class TestChargeIntent:
             await intent.verify(hash_credential, request)
 
     @pytest.mark.asyncio
-    async def test_verify_transaction_duplicate_fetches_receipt_without_rebroadcast(
+    @pytest.mark.parametrize("explicit_store", [False, True])
+    async def test_verify_transaction_rejects_duplicate_without_rpc(
         self,
+        explicit_store: bool,
     ) -> None:
         from mpp.store import MemoryStore
 
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         store = MemoryStore()
-        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store if explicit_store else None)
 
         asset = "0x1234567890123456789012345678901234567890"
         destination = "0x4567890123456789012345678901234567890123"
@@ -1574,13 +1577,29 @@ class TestChargeIntent:
             "recipient": destination,
         }
 
-        first_receipt = await intent.verify(credential, request)
-        second_receipt = await intent.verify(credential, request)
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def broadcast(*args, **kwargs):
+            started.set()
+            await finish.wait()
+            return mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1})
+
+        mock_client.post.side_effect = broadcast
+        first = asyncio.create_task(intent.verify(credential, request))
+        await started.wait()
+        try:
+            with pytest.raises(VerificationError, match="Transaction hash already used"):
+                await asyncio.wait_for(intent.verify(credential, request), timeout=1)
+        finally:
+            finish.set()
+        first_receipt = await first
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await asyncio.wait_for(intent.verify(credential, request), timeout=1)
 
         assert first_receipt.reference == tx_hash
-        assert second_receipt.reference == tx_hash
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"]
+        assert methods == ["eth_sendRawTransactionSync"]
 
     @pytest.mark.asyncio
     async def test_verify_transaction_pre_reserves_hash_on_failed_receipt(self) -> None:
@@ -1883,7 +1902,7 @@ class TestSponsoredTransfer:
         # External fee payer signs and returns co-signed tx
         httpx_mock.add_response(
             url="https://sponsor.test",
-            json={"jsonrpc": "2.0", "result": "0x76cosigned", "id": 1},
+            json={"jsonrpc": "2.0", "result": "0x76abcdef01", "id": 1},
         )
 
         # eth_sendRawTransactionSync to RPC
@@ -1892,7 +1911,7 @@ class TestSponsoredTransfer:
             json={
                 "jsonrpc": "2.0",
                 "result": {
-                    "transactionHash": "0xsponsored_hash",
+                    "transactionHash": _raw_transaction_hash("0x76abcdef01"),
                     "status": "0x1",
                     "logs": [
                         {
@@ -1933,7 +1952,7 @@ class TestSponsoredTransfer:
         )
 
         assert receipt.status == "success"
-        assert receipt.reference == "0xsponsored_hash"
+        assert receipt.reference == _raw_transaction_hash("0x76abcdef01")
 
         requests = httpx_mock.get_requests()
         assert len(requests) == 2
@@ -2719,7 +2738,9 @@ class TestCosignAsFeePayer:
             json={
                 "jsonrpc": "2.0",
                 "result": {
-                    "transactionHash": "0xtxhash123",
+                    "transactionHash": _raw_transaction_hash(
+                        intent._cosign_as_fee_payer(raw_tx, currency)[0]
+                    ),
                     "status": "0x1",
                     "logs": [
                         {
@@ -2744,7 +2765,9 @@ class TestCosignAsFeePayer:
         )
 
         assert receipt.status == "success"
-        assert receipt.reference == "0xtxhash123"
+        assert receipt.reference == _raw_transaction_hash(
+            intent._cosign_as_fee_payer(raw_tx, currency)[0]
+        )
 
         # Simulation was skipped; only the broadcast was attempted, and the
         # broadcast tx is the auth-bearing co-signed 0x76 (auth list preserved).
@@ -2755,79 +2778,36 @@ class TestCosignAsFeePayer:
         decoded = rlp.decode(bytes.fromhex(broadcast_raw[2:])[1:])
         assert decoded[12] == [b"\x77" * 20, b"\x88" * 32]
 
-    # An already-reserved charge fetches the existing receipt without simulating.
     @pytest.mark.asyncio
-    async def test_verify_duplicate_skips_simulation_and_fetches_receipt(self) -> None:
+    async def test_verify_duplicate_rejects_without_simulation_or_receipt_fetch(self) -> None:
         from mpp.store import MemoryStore
-
-        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        currency = "0x20c0000000000000000000000000000000000000"
-        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
-        challenge_id = "challenge-dup"
-        realm = "api.example.com"
-        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
 
         intent = self._make_intent()
         store = MemoryStore()
         intent._store = store
-
-        # Reserve the co-signed tx hash that verify() will compute.
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
         raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
         cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
         tx_hash = _raw_transaction_hash(cosigned_raw)
         await store.put_if_absent(f"mpp:charge:{tx_hash.lower()}", tx_hash)
-
-        receipt_with_logs = {
-            "transactionHash": tx_hash,
-            "status": "0x1",
-            "logs": [
-                {
-                    "address": currency,
-                    "topics": [
-                        TRANSFER_WITH_MEMO_TOPIC,
-                        "0x" + "0" * 24 + "abcd" * 10,
-                        "0x" + "0" * 24 + recipient[2:],
-                        memo,
-                    ],
-                    "data": amount_data(1000000),
-                }
-            ],
-        }
-
-        def _post(*_args: object, **kwargs: object) -> httpx.Response:
-            method = cast(dict, kwargs["json"])["method"]
-            if method == "tempo_simulateV1":
-                return mock_response(200, {"jsonrpc": "2.0", "error": {"message": "node busy"}})
-            if method == "eth_getTransactionReceipt":
-                return mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1})
-            raise AssertionError(f"unexpected RPC method: {method}")
-
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(side_effect=_post)
         intent._http_client = mock_client
-
         credential = make_credential(
             payload={"type": "transaction", "signature": raw_tx},
-            challenge_id=challenge_id,
-            expires=future,
-            realm=realm,
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         )
-
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000000",
-                "currency": currency,
-                "recipient": recipient,
-                "methodDetails": {"feePayer": True},
-            },
-        )
-
-        assert receipt.status == "success"
-        assert receipt.reference == tx_hash
-        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_getTransactionReceipt"]
-        assert "tempo_simulateV1" not in methods
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True},
+                },
+            )
+        mock_client.post.assert_not_awaited()
 
     # A simulation failure releases the reservation and does not broadcast.
     @pytest.mark.asyncio
@@ -4836,7 +4816,7 @@ class TestHashCredentialSourceValidation:
 
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         receipt = {
-            "transactionHash": "0xtxhash123",
+            "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
             "status": "0x1",
             "from": self.SOURCE_ADDR,
             "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
@@ -4852,7 +4832,7 @@ class TestHashCredentialSourceValidation:
             credential,
             {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT},
         )
-        assert result.reference == "0xtxhash123"
+        assert result.reference == _raw_transaction_hash("0xabcdef1234567890")
 
     @pytest.mark.asyncio
     async def test_hash_without_source_does_not_bind_sender(self) -> None:
