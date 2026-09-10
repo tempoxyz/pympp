@@ -1,0 +1,28 @@
+name: Workflow Validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/**"
+      - ".pinact.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/**"
+      - ".pinact.yaml"
+  workflow_dispatch:
+  schedule:
+    - cron: "19 7 * * 1"
+
+permissions: {}
+
+jobs:
+  workflow-validation:
+    name: Workflow Validation
+    uses: tempoxyz/gh-actions/.github/workflows/scan-github-actions.yml@483bda4a2a4b5e04a51edff03768c1590d271f80 # main
+    permissions:
+      actions: read
+      contents: read
+    with:
+      pinact: true
