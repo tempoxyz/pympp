@@ -498,7 +498,8 @@ class ChargeIntent:
                 If provided, the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).
             store: Key-value store for tx hash replay protection. Defaults to
-                an in-memory store on first settlement. Use a shared persistent
+                an in-memory store capped at 10,000 entries on first settlement.
+                New payments fail at capacity without evicting used hashes. Use a shared persistent
                 store across server replicas and restarts.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
@@ -649,7 +650,7 @@ class ChargeIntent:
         """
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
-            self._store = MemoryStore()
+            self._store = MemoryStore(max_entries=10_000)
 
         req, payload = self._prepare_credential(credential, request)
 
@@ -1137,7 +1138,14 @@ class ChargeIntent:
         if "error" in result:
             if _is_already_known_transaction_error(result):
                 tx_hash = reserved_tx_hash or _raw_transaction_hash(raw_tx)
-                receipt_data = await self._fetch_transaction_receipt(client, tx_hash)
+                try:
+                    receipt_data = await self._fetch_transaction_receipt(client, tx_hash)
+                except Exception:
+                    # No fulfillment was authorized. A retry must acquire the
+                    # reservation again before looking up the settled payment.
+                    if self._store is not None and store_key is not None:
+                        await self._store.delete(store_key)
+                    raise
                 self._verify_receipt_transfers(
                     receipt_data,
                     request,

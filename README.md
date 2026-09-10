@@ -50,6 +50,11 @@ result = await server.charge(
 )
 ```
 
+Tempo charge settlement uses an in-memory replay store capped at 10,000 entries by
+default. It rejects new payments at capacity rather than evicting used hashes.
+Configure a shared persistent store through `Mpp.create(store=...)` or
+`ChargeIntent(store=...)` for production and across replicas or restarts.
+
 ### Client
 
 ```python

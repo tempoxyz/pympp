@@ -1601,6 +1601,15 @@ class TestChargeIntent:
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
         assert methods == ["eth_sendRawTransactionSync"]
 
+        if not explicit_store:
+            assert intent._store is not None
+            for index in range(9_999):
+                assert await intent._store.put_if_absent(f"reserved:{index}", "hash")
+            with pytest.raises(RuntimeError, match="Replay store capacity reached"):
+                await intent._store.put_if_absent("overflow", "hash")
+            with pytest.raises(VerificationError, match="Transaction hash already used"):
+                await intent.verify(credential, request)
+
     @pytest.mark.asyncio
     async def test_verify_transaction_pre_reserves_hash_on_failed_receipt(self) -> None:
         from mpp.store import MemoryStore
@@ -1749,7 +1758,11 @@ class TestChargeIntent:
         assert methods == ["eth_sendRawTransactionSync"]
 
     @pytest.mark.asyncio
-    async def test_verify_transaction_already_known_error_fetches_receipt(self) -> None:
+    @pytest.mark.parametrize("lookup_failure", [None, "missing", "rpc", "transport"])
+    async def test_verify_transaction_already_known_error_fetches_receipt(
+        self,
+        lookup_failure: str | None,
+    ) -> None:
         from mpp.store import MemoryStore
 
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -1804,12 +1817,32 @@ class TestChargeIntent:
             "recipient": destination,
         }
 
+        if lookup_failure is not None:
+            failed_lookup = {
+                "missing": mock_response(200, {"result": None}),
+                "rpc": mock_response(200, {"error": {"message": "temporarily unavailable"}}),
+                "transport": httpx.ReadTimeout("receipt lookup timed out"),
+            }[lookup_failure]
+            mock_client.post.side_effect = [
+                mock_response(200, {"error": {"message": "already known"}}),
+                failed_lookup,
+                mock_response(200, {"error": {"message": "already known"}}),
+                mock_response(200, {"result": receipt_with_logs}),
+            ]
+            with pytest.raises((VerificationError, httpx.ReadTimeout)):
+                await intent.verify(credential, request)
+            assert await store.get(f"mpp:charge:{tx_hash}") is None
+
         receipt = await intent.verify(credential, request)
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(credential, request)
 
         assert receipt.reference == tx_hash
         assert await store.get(f"mpp:charge:{tx_hash}") is not None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"]
+        assert methods == ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"] * (
+            2 if lookup_failure else 1
+        )
 
     @pytest.mark.asyncio
     async def test_verify_transaction_missing_receipt(self) -> None:

@@ -550,10 +550,10 @@ class TestChargeIntegration:
         with pytest.raises(VerificationError, match="Transaction hash already used"):
             await intent.verify(credential, request_dict)
 
-    async def test_verify_hash_replay_allowed_without_store(
+    async def test_verify_hash_replay_rejected_with_default_store(
         self, rpc_url, funded_payer, funded_recipient, currency
     ):
-        """Same hash submitted twice without a store should succeed both times."""
+        """The default replay store rejects a second fulfillment of the same payment."""
         challenge_id = "test-hash-replay-no-store"
         memo = encode_attribution(challenge_id=challenge_id, server_id=TEST_REALM)
         tx_hash = await _send_transfer(
@@ -577,8 +577,8 @@ class TestChargeIntegration:
 
         receipt1 = await intent.verify(credential, request_dict)
         assert receipt1.status == "success"
-        receipt2 = await intent.verify(credential, request_dict)
-        assert receipt2.status == "success"
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(credential, request_dict)
 
     async def test_verify_hash_store_records_on_success(
         self, rpc_url, funded_payer, funded_recipient, currency

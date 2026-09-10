@@ -27,15 +27,32 @@ class Store(Protocol):
 
 
 class MemoryStore:
-    """In-memory store backed by a dict. For development/testing."""
+    """In-memory store for development/testing.
 
-    def __init__(self) -> None:
+    ``max_entries`` caps retained keys without evicting replay protection.
+    New writes fail at capacity; existing keys can still be read or updated.
+    Use persistent storage for long-running or multi-replica deployments.
+    """
+
+    def __init__(self, *, max_entries: int | None = None) -> None:
+        if max_entries is not None and max_entries < 1:
+            raise ValueError("max_entries must be positive")
+        self._max_entries = max_entries
         self._data: dict[str, Any] = {}
+
+    def _check_capacity(self, key: str) -> None:
+        if (
+            key not in self._data
+            and self._max_entries is not None
+            and len(self._data) >= self._max_entries
+        ):
+            raise RuntimeError("Replay store capacity reached; configure a persistent store")
 
     async def get(self, key: str) -> Any | None:
         return self._data.get(key)
 
     async def put(self, key: str, value: Any) -> None:
+        self._check_capacity(key)
         self._data[key] = value
 
     async def delete(self, key: str) -> None:
@@ -44,5 +61,6 @@ class MemoryStore:
     async def put_if_absent(self, key: str, value: Any) -> bool:
         if key in self._data:
             return False
+        self._check_capacity(key)
         self._data[key] = value
         return True
