@@ -1,0 +1,8 @@
+version: 3
+
+rules:
+  # tempoxyz/gh-actions has no release version to record in a comment.
+  - ignore: true
+    conditions:
+      - expr: |
+          ActionName matches "tempoxyz/gh-actions/.*"
