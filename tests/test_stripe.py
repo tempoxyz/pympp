@@ -626,18 +626,21 @@ class TestChargeIntent:
             ChargeIntent()
 
     @pytest.mark.asyncio
-    async def test_accepts_replayed_credential_client(self):
-        """Stripe idempotent retries still return the original successful receipt."""
-        replayed_pi = FakePaymentIntent(
-            last_response=FakeLastResponse(headers={"idempotent-replayed": "true"})
-        )
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"idempotent-replayed": "true"},
+            {"Idempotent-Replayed": "TRUE"},
+            {"IDEMPOTENT-REPLAYED": "true"},
+        ],
+    )
+    async def test_rejects_replayed_credential_client(self, headers: dict[str, str]):
+        replayed_pi = FakePaymentIntent(last_response=FakeLastResponse(headers=headers))
         intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
         credential = _make_credential()
 
-        receipt = await intent.verify(credential, SAMPLE_REQUEST)
-
-        assert receipt.status == "success"
-        assert receipt.reference == "pi_test_123"
+        with pytest.raises(VerificationFailedError, match="already been processed"):
+            await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
     async def test_analytics_metadata(self):
@@ -823,8 +826,7 @@ class TestChargeIntentRawHttp:
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
-    async def test_accepts_replayed_credential_raw_http(self):
-        """Stripe idempotent retries still return the original successful receipt."""
+    async def test_rejects_replayed_credential_raw_http(self):
         mock_response = httpx.Response(
             200,
             json={"id": "pi_replayed", "status": "succeeded"},
@@ -837,10 +839,8 @@ class TestChargeIntentRawHttp:
         intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
         credential = _make_credential()
 
-        receipt = await intent.verify(credential, SAMPLE_REQUEST)
-
-        assert receipt.status == "success"
-        assert receipt.reference == "pi_replayed"
+        with pytest.raises(VerificationFailedError, match="already been processed"):
+            await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
     async def test_verify_with_secret_key_metadata_in_form(self):

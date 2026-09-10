@@ -59,6 +59,16 @@ async def _create_payment_intent(client: Any, body: dict[str, Any], options: dic
     return await asyncio.to_thread(payment_intents.create, body, options=options)
 
 
+def _is_idempotent_replay(headers: Any) -> bool:
+    """Return whether Stripe replayed a cached idempotent response."""
+    if headers is None or not callable(items := getattr(headers, "items", None)):
+        return False
+    return any(
+        str(name).lower() == "idempotent-replayed" and str(value).lower() == "true"
+        for name, value in cast(Any, items)()
+    )
+
+
 class ChargeIntent:
     """Stripe charge intent for one-time payments via SPTs.
 
@@ -202,6 +212,8 @@ class ChargeIntent:
                 metadata=resolved_metadata,
             )
 
+        if pi["replayed"]:
+            raise VerificationFailedError("Payment has already been processed")
         if pi["status"] == "requires_action":
             raise PaymentActionRequiredError("Stripe PaymentIntent requires action")
         if pi["status"] != "succeeded":
@@ -220,7 +232,7 @@ class ChargeIntent:
         request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
             body = {
@@ -238,7 +250,9 @@ class ChargeIntent:
             }
 
             result = await _create_payment_intent(client, body, options)
-            return {"id": result.id, "status": result.status}
+            last_response = getattr(result, "last_response", None)
+            replayed = _is_idempotent_replay(getattr(last_response, "headers", None))
+            return {"id": result.id, "status": result.status, "replayed": replayed}
         except (VerificationFailedError, TypeError):
             raise
         except Exception as err:
@@ -251,7 +265,7 @@ class ChargeIntent:
         request: ChargeRequest,
         spt: str,
         metadata: dict[str, str],
-    ) -> dict[str, str]:
+    ) -> dict[str, Any]:
         """Create a PaymentIntent using raw HTTP with a secret key."""
         http_client = await self._get_http_client()
 
@@ -292,4 +306,8 @@ class ChargeIntent:
             )
 
         result = response.json()
-        return {"id": result["id"], "status": result["status"]}
+        return {
+            "id": result["id"],
+            "status": result["status"],
+            "replayed": _is_idempotent_replay(response.headers),
+        }
