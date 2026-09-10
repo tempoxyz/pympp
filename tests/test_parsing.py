@@ -204,6 +204,44 @@ class TestChallenge:
         assert "header=" not in header
         assert challenge.header is None
 
+    @pytest.mark.parametrize(
+        ("escaped", "expected"),
+        [
+            (r"em dash \u2014 and coffee \u2615", "em dash — and coffee ☕"),
+            (r"grinning \ud83d\ude00 face", "grinning 😀 face"),
+            ("caf\u00e9 na\u00efve", "café naïve"),
+            (r"a\u2014\ud83d\ude00\\ and \"quote\"", 'a—😀\\ and "quote"'),
+        ],
+        ids=["bmp", "astral", "raw-latin1", "mixed"],
+    )
+    def test_parse_unescapes_unicode_escapes(self, escaped: str, expected: str) -> None:
+        """Characters above Latin-1 arrive as ``\\uXXXX`` and must be restored."""
+        header = (
+            f'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", description="{escaped}"'
+        )
+
+        assert Challenge.from_www_authenticate(header).description == expected
+
+    @pytest.mark.parametrize(
+        ("escaped", "expected"),
+        [
+            (r"lone high \ud83d here", "lone high \ufffd here"),
+            (r"lone low \ude00 here", "lone low \ufffd here"),
+            (r"not an escape \\u2014", r"not an escape \u2014"),
+            (r"short \u12 tail", "short u12 tail"),
+        ],
+        ids=["lone-high", "lone-low", "doubled-backslash", "truncated"],
+    )
+    def test_parse_unicode_escape_edge_cases(self, escaped: str, expected: str) -> None:
+        """Unpaired surrogates degrade, and only a bare ``\\u`` starts an escape."""
+        header = (
+            f'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", description="{escaped}"'
+        )
+
+        assert Challenge.from_www_authenticate(header).description == expected
+
     def test_parse_www_authenticate_rejects_invalid_header_name(self) -> None:
         request_b64 = _b64_json({"amount": "1000000"})
         header = (
