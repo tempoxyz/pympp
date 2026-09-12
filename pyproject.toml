@@ -47,6 +47,10 @@ stripe = [
     "rlp>=4.0",
     "stripe>=8.0.0",
 ]
+evm = [
+    "eth-account>=0.11",
+    "eth-hash[pycryptodome]>=0.7",
+]
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]

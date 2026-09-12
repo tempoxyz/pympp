@@ -39,6 +39,17 @@ def test_tempo_module_import_succeeds():
     assert result.returncode == 0, f"Tempo module import failed:\n{result.stderr.strip()}"
 
 
+def test_evm_module_import_succeeds():
+    """Importing mpp.methods.evm itself should not crash (lazy loading)."""
+    script = textwrap.dedent("""\
+        import mpp.methods.evm
+        # Access a non-lazy attribute that has no external deps
+        print(mpp.methods.evm.BASE_CHAIN_ID)
+    """)
+    result = _run_python(script)
+    assert result.returncode == 0, f"EVM module import failed:\n{result.stderr.strip()}"
+
+
 def test_mcp_module_import_succeeds():
     """Importing mpp.extensions.mcp itself should not crash (lazy loading)."""
     script = textwrap.dedent("""\
@@ -88,6 +99,50 @@ def test_tempo_lazy_attr_error_message():
         except ImportError as e:
             msg = str(e)
             if 'pympp[tempo]' in msg:
+                print("ok")
+            else:
+                print(f"ERROR: missing install hint in: {msg}")
+                sys.exit(1)
+    """)
+    result = _run_python(script)
+    assert result.returncode == 0, f"Test failed:\n{result.stderr.strip()}\n{result.stdout.strip()}"
+    assert result.stdout.strip() == "ok"
+
+
+def test_evm_lazy_attr_error_message():
+    """Accessing a lazy evm attr with missing deps gives a helpful message.
+
+    Uses ChargeIntent, which imports eth-account/eth-hash/hexbytes at module
+    level, so blocking those reliably triggers the lazy-import guard.
+    """
+    script = textwrap.dedent("""\
+        import sys
+
+        blocked = [
+            "eth_account", "eth_account.signers", "eth_account.signers.local",
+            "eth_account.typed_transactions", "eth_account.typed_transactions.typed_transaction",
+            "eth_hash", "eth_hash.auto",
+            "hexbytes",
+        ]
+        for mod_name in blocked:
+            sys.modules.pop(mod_name, None)
+            sys.modules[mod_name] = None  # type: ignore
+
+        for key in list(sys.modules):
+            if key.startswith("mpp.methods.evm") and key != "mpp.methods.evm._defaults":
+                del sys.modules[key]
+        if "mpp.methods.evm" in sys.modules:
+            del sys.modules["mpp.methods.evm"]
+
+        import mpp.methods.evm
+
+        try:
+            _ = mpp.methods.evm.ChargeIntent
+            print("ERROR: should have raised ImportError")
+            sys.exit(1)
+        except ImportError as e:
+            msg = str(e)
+            if 'pympp[evm]' in msg:
                 print("ok")
             else:
                 print(f"ERROR: missing install hint in: {msg}")

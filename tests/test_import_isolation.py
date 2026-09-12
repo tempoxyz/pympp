@@ -18,6 +18,9 @@ CLIENT_MODULES = [
     "mpp.methods.tempo",
     "mpp.methods.tempo.client",
     "mpp.methods.tempo.intents",
+    "mpp.methods.evm",
+    "mpp.methods.evm.client",
+    "mpp.methods.evm.intents",
 ]
 
 # Modules that must NOT be loaded as a side-effect of the above imports.
