@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0 (2026-09-02)
+
+### Minor Changes
+
+- Added `extensions` field to `Receipt` to capture and preserve method-specific top-level fields (e.g. Tempo-specific fields like `challengeId`, `originTxHash`) during parsing and round-tripping of Payment-Receipt headers. (by @mpp-agricola[bot], [#239](https://github.com/tempoxyz/pympp/pull/239))
+
+### Patch Changes
+
+- Added a machine-payment metadata field to every Stripe PaymentIntent created by pympp. (by @bensandler-stripe, [#233](https://github.com/tempoxyz/pympp/pull/233))
+
 ## 0.11.0 (2026-08-28)
 
 ### Minor Changes
