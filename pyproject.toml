@@ -36,6 +36,7 @@ tempo = [
     "eth-hash[pycryptodome]>=0.7",
     "attrs>=23.0",
     "rlp>=4.0",
+    "pyjwt==2.13.0",
 ]
 stripe = [
     "pydantic>=2.0",
@@ -45,17 +46,19 @@ stripe = [
     "eth-hash[pycryptodome]>=0.7",
     "attrs>=23.0",
     "rlp>=4.0",
+    "pyjwt==2.13.0",
     "stripe>=8.0.0",
+    "urllib3==2.7.0",
 ]
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
-mcp = ["mcp>=1.1,<2"]
+mcp = ["mcp>=1.1,<2", "propcache==0.5.2", "uvicorn==0.52.4", "yarl==1.24.5"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "hypothesis>=6.0",
-    "ruff>=0.4",
+    "ruff==0.16.6",
     "starlette>=0.37",
 ]
 
@@ -64,13 +67,16 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "hypothesis>=6.0",
-    "ruff>=0.4",
+    "ruff==0.16.6",
     "pytest-cov>=7.0.0",
+    "coverage==7.16.0",
     "pytest-httpx>=0.36.0",
-    "pyright>=1.1",
+    "pyright==1.1.413",
+    "pyproject-hooks==1.2.0",
     "eth-abi>=5.0,<6",
-    "build>=1.0",
+    "build==1.6.0",
     "twine>=6.0",
+    "urllib3==2.7.0",
     "aiosqlite>=0.20",
     "redis>=5.0",
     "starlette>=0.37",
