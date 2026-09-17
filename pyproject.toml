@@ -37,6 +37,9 @@ tempo = [
     "attrs>=23.0",
     "rlp>=4.0",
     "pyjwt==2.13.0",
+    "propcache==0.5.2",
+    "urllib3==2.7.0",
+    "yarl==1.24.5",
 ]
 stripe = [
     "pydantic>=2.0",
@@ -47,13 +50,21 @@ stripe = [
     "attrs>=23.0",
     "rlp>=4.0",
     "pyjwt==2.13.0",
+    "propcache==0.5.2",
     "stripe>=8.0.0",
     "urllib3==2.7.0",
+    "yarl==1.24.5",
 ]
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
-mcp = ["mcp>=1.1,<2", "propcache==0.5.2", "uvicorn==0.52.4", "yarl==1.24.5"]
+mcp = [
+    "mcp>=1.1,<2",
+    "propcache==0.5.2",
+    "pyjwt==2.13.0",
+    "uvicorn==0.52.4",
+    "yarl==1.24.5",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
