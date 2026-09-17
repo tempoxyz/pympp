@@ -12,6 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.action == 'labeled' && github.event.label.name == 'cyclops'
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Check admin permission
         env:
           GH_TOKEN: ${{ github.token }}

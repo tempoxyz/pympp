@@ -21,6 +21,8 @@ jobs:
       contents: read
       id-token: write # PyPI Trusted Publishing (OIDC) and the STS exchange
     steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
       - name: Fetch GitHub token via STS
         id: app-token
         uses: tempoxyz/gh-actions/actions/github-sts@c0292122e255def866c64c55e5844d1e7d5fe7ad
