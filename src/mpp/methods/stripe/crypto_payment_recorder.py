@@ -31,7 +31,7 @@ async def record_crypto_payment(
     options = payment_intent_options or {}
     try:
         decimals = _NETWORK_DECIMALS[network]
-        cents = (int(request["amount"]) + 10 ** (decimals - 2) // 2) // 10 ** (decimals - 2)
+        cents = int(request["amount"]) // 10 ** (decimals - 2)
         if cents < 1:
             return
         analytics = build_analytics(credential) if credential else {"machine_payment": "true"}
