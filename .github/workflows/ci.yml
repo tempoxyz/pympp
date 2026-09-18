@@ -23,7 +23,7 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
+        uses: tempoxyz/gh-actions/actions/secure-runner@a9eee5154fef6d6c9b6483bdd95b38862117874d
       - env:
           ANY_FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |
@@ -44,13 +44,13 @@ jobs:
 
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
+        uses: tempoxyz/gh-actions/actions/secure-runner@a9eee5154fef6d6c9b6483bdd95b38862117874d
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@a9eee5154fef6d6c9b6483bdd95b38862117874d
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -75,7 +75,7 @@ jobs:
 
       - name: Type check
         if: matrix.python-version == '3.12'
-        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@a9eee5154fef6d6c9b6483bdd95b38862117874d
         with:
           version: PATH
 
@@ -107,13 +107,13 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
+        uses: tempoxyz/gh-actions/actions/secure-runner@a9eee5154fef6d6c9b6483bdd95b38862117874d
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@a9eee5154fef6d6c9b6483bdd95b38862117874d
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -144,13 +144,13 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
+        uses: tempoxyz/gh-actions/actions/secure-runner@a9eee5154fef6d6c9b6483bdd95b38862117874d
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@a9eee5154fef6d6c9b6483bdd95b38862117874d
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
@@ -186,13 +186,13 @@ jobs:
 
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@05c669ce878b8719779a28fe7375ba85822403f8
+        uses: tempoxyz/gh-actions/actions/secure-runner@a9eee5154fef6d6c9b6483bdd95b38862117874d
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Install uv
-        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@3626124474a987bc74b41fc7ae65b2e23f8e4e4e
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@a9eee5154fef6d6c9b6483bdd95b38862117874d
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
