@@ -509,7 +509,6 @@ class Mpp:
         recipient: str | None = None,
         expires: str | None = None,
         description: str | None = None,
-        memo: str | None = None,
         splits: list[dict[str, str]] | None = None,
         fee_payer: bool = False,
         chain_id: int | None = None,
@@ -529,7 +528,6 @@ class Mpp:
             expires: Challenge expiration as auth-param (ISO 8601).
                 Defaults to now + 5 minutes. Not included in the request body.
             description: Optional human-readable description.
-            memo: Optional 32-byte memo (hex string) for transferWithMemo.
             splits: Optional split recipients/amounts for multi-transfer charges.
             fee_payer: Whether to use a fee payer for gas sponsorship.
             chain_id: Override the default chain ID (e.g., 42431 for moderato).
@@ -553,7 +551,6 @@ class Mpp:
             "recipient": recipient,
             "expires": expires,
             "description": description,
-            "memo": memo,
             "splits": splits,
             "fee_payer": fee_payer,
             "chain_id": chain_id,
@@ -736,11 +733,8 @@ class Mpp:
         fee_payer = options.get("fee_payer", False)
         if splits and fee_payer:
             raise ValueError("splits and fee_payer cannot be used together")
-        memo = options.get("memo")
         details = {
-            key: value
-            for key, value in (("memo", memo), ("splits", splits), ("feePayer", fee_payer))
-            if value
+            key: value for key, value in (("splits", splits), ("feePayer", fee_payer)) if value
         }
         if chain_id is not None:
             details["chainId"] = chain_id
