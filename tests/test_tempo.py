@@ -636,7 +636,8 @@ class TestTempoMethod:
         assert await_args.kwargs["memo"] == "0x" + "11" * 32
 
     @pytest.mark.asyncio
-    async def test_create_credential_treats_empty_memo_as_absent(self) -> None:
+    @pytest.mark.parametrize("legacy_memo", ["", "0x" + "ab" * 32])
+    async def test_create_credential_uses_attribution_memo(self, legacy_memo: str) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
         method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
         challenge = Challenge(
@@ -648,7 +649,7 @@ class TestTempoMethod:
                 "amount": "1000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {"memo": ""},
+                "methodDetails": {"memo": legacy_memo},
             },
         )
 
@@ -1075,59 +1076,6 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
-    async def test_verify_hash_accepts_explicit_memo_without_challenge_binding(self) -> None:
-        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        explicit_memo = "0x" + "ab" * 32
-
-        mock_client = AsyncMock()
-        mock_client.post = AsyncMock(
-            return_value=mock_response(
-                200,
-                {
-                    "jsonrpc": "2.0",
-                    "result": {
-                        "status": "0x1",
-                        "logs": [
-                            {
-                                "address": "0x20c0000000000000000000000000000000000000",
-                                "topics": [
-                                    TRANSFER_WITH_MEMO_TOPIC,
-                                    "0x0000000000000000000000001234567890123456789012345678901234567890",
-                                    "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
-                                    explicit_memo,
-                                ],
-                                "data": amount_data(1000),
-                            }
-                        ],
-                    },
-                    "id": 1,
-                },
-            )
-        )
-        intent._http_client = mock_client
-
-        credential = make_credential(
-            payload={"type": "hash", "hash": "0xabc123"},
-            challenge_id="challenge-123",
-            expires=future,
-            realm="api.example.com",
-        )
-
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000",
-                "currency": "0x20c0000000000000000000000000000000000000",
-                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {"memo": explicit_memo},
-            },
-        )
-
-        assert receipt.status == "success"
-        assert receipt.reference == "0xabc123"
-
-    @pytest.mark.asyncio
     async def test_verify_hash_tx_failed(self) -> None:
         """Should raise VerificationError for failed transaction."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -1303,7 +1251,7 @@ class TestChargeIntent:
         asset = "0x1234567890123456789012345678901234567890"
         destination = "0x4567890123456789012345678901234567890123"
         amount = 1000
-        explicit_memo = "0x" + "ab" * 32
+        memo = encode_attribution(challenge_id="test", server_id="test.example.com")
 
         receipt_with_logs = {
             "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
@@ -1315,7 +1263,7 @@ class TestChargeIntent:
                         TRANSFER_WITH_MEMO_TOPIC,
                         "0x" + "0" * 24 + "abcd" * 10,
                         "0x" + "0" * 24 + destination[2:],
-                        explicit_memo,
+                        memo,
                     ],
                     "data": "0x" + hex(amount)[2:].zfill(64),
                 }
@@ -1340,7 +1288,6 @@ class TestChargeIntent:
                 "amount": str(amount),
                 "currency": asset,
                 "recipient": destination,
-                "methodDetails": {"memo": explicit_memo},
             },
         )
 
@@ -3579,19 +3526,19 @@ class TestAccessKeySigning:
 
 
 class TestMatchTransferCalldataWithMemo:
-    """Tests for _match_transfer_calldata with memo field."""
+    """Tests for transfer calldata shape and payment parameters."""
 
     CURRENCY = "0x20c0000000000000000000000000000000000000"
     RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
     AMOUNT = 1000000
     MEMO = "0x" + "ab" * 32
 
-    def _make_request(self, memo: str | None = None) -> ChargeRequest:
+    def _make_request(self) -> ChargeRequest:
         return ChargeRequest(
             amount=str(self.AMOUNT),
             currency=self.CURRENCY,
             recipient=self.RECIPIENT,
-            methodDetails=MethodDetails(memo=memo),
+            methodDetails=MethodDetails(),
         )
 
     def _build_calldata(self, selector: str, recipient: str, amount: int, memo: str = "") -> str:
@@ -3600,15 +3547,15 @@ class TestMatchTransferCalldataWithMemo:
         memo_part = memo[2:] if memo.startswith("0x") else memo
         return f"{selector}{to_padded}{amount_padded}{memo_part}"
 
-    def test_memo_requires_transfer_with_memo_selector(self) -> None:
-        """When memo is set, plain transfer selector should be rejected."""
-        request = self._make_request(memo=self.MEMO)
+    def test_plain_transfer_rejects_extra_memo_word(self) -> None:
+        """Plain transfer calldata cannot include an extra ABI word."""
+        request = self._make_request()
         calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO)
         assert _match_transfer_calldata(calldata, request) is False
 
     def test_memo_accepts_correct_selector(self) -> None:
-        """When memo is set, transferWithMemo selector should be accepted."""
-        request = self._make_request(memo=self.MEMO)
+        """Well-formed transferWithMemo calldata matches the payment parameters."""
+        request = self._make_request()
         calldata = self._build_calldata(
             TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
         )
@@ -3616,7 +3563,7 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_memo_rejects_trailing_padding(self) -> None:
         """transferWithMemo calldata must be exactly selector + 3 ABI words."""
-        request = self._make_request(memo=self.MEMO)
+        request = self._make_request()
         calldata = (
             self._build_calldata(
                 TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
@@ -3625,36 +3572,18 @@ class TestMatchTransferCalldataWithMemo:
         )
         assert _match_transfer_calldata(calldata, request) is False
 
-    def test_memo_wrong_memo_value(self) -> None:
-        """Wrong memo value should be rejected."""
-        request = self._make_request(memo=self.MEMO)
-        wrong_memo = "0x" + "cc" * 32
-        calldata = self._build_calldata(
-            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, wrong_memo
-        )
-        assert _match_transfer_calldata(calldata, request) is False
-
     def test_memo_short_calldata_rejected(self) -> None:
         """Calldata shorter than 200 hex chars should be rejected when memo expected."""
-        request = self._make_request(memo=self.MEMO)
+        request = self._make_request()
         # Only selector + to + amount = 136 chars, no memo
         to_padded = self.RECIPIENT[2:].lower().zfill(64)
         amount_padded = hex(self.AMOUNT)[2:].zfill(64)
         calldata = f"{TRANSFER_WITH_MEMO_SELECTOR}{to_padded}{amount_padded}"
         assert _match_transfer_calldata(calldata, request) is False
 
-    def test_memo_normalization_no_0x_prefix(self) -> None:
-        """Memo without 0x prefix should be normalized and matched."""
-        memo_no_prefix = "ab" * 32
-        request = self._make_request(memo=memo_no_prefix)
-        calldata = self._build_calldata(
-            TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, "0x" + memo_no_prefix
-        )
-        assert _match_transfer_calldata(calldata, request) is True
-
     def test_no_memo_accepts_plain_transfer_and_transfer_with_memo(self) -> None:
         """When no memo, plain transfer and transferWithMemo should be accepted."""
-        request = self._make_request(memo=None)
+        request = self._make_request()
         calldata_plain = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT)
         calldata_memo = self._build_calldata(
             TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
@@ -3664,13 +3593,13 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_no_memo_rejects_plain_transfer_trailing_padding(self) -> None:
         """Plain transfer calldata must be exactly selector + 2 ABI words."""
-        request = self._make_request(memo=None)
+        request = self._make_request()
         calldata = self._build_calldata(TRANSFER_SELECTOR, self.RECIPIENT, self.AMOUNT) + "01"
         assert _match_transfer_calldata(calldata, request) is False
 
     def test_no_memo_rejects_short_transfer_with_memo_calldata(self) -> None:
         """When no memo, truncated transferWithMemo calldata should still be rejected."""
-        request = self._make_request(memo=None)
+        request = self._make_request()
         calldata = self._build_calldata(TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT)
         assert _match_transfer_calldata(calldata, request) is False
 
@@ -3682,7 +3611,7 @@ class TestMatchTransferCalldataWithMemo:
 
     def test_rejects_padded_transfer_with_memo_calldata(self) -> None:
         """Trailing bytes after a valid transferWithMemo must be rejected."""
-        request = self._make_request(memo=self.MEMO)
+        request = self._make_request()
         calldata = (
             self._build_calldata(
                 TRANSFER_WITH_MEMO_SELECTOR, self.RECIPIENT, self.AMOUNT, self.MEMO
@@ -3712,7 +3641,7 @@ class TestMatchTransferCalldataWithMemo:
 
 
 class TestVerifyTransferLogsWithMemo:
-    """Tests for _verify_transfer_logs with memo field."""
+    """Tests for matching transfer logs before challenge-binding verification."""
 
     CURRENCY = "0x20c0000000000000000000000000000000000000"
     RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
@@ -3722,22 +3651,22 @@ class TestVerifyTransferLogsWithMemo:
     def _make_receipt(self, logs: list) -> dict:
         return {"status": "0x1", "logs": logs}
 
-    def _make_request(self, memo: str | None = None) -> ChargeRequest:
+    def _make_request(self) -> ChargeRequest:
         return ChargeRequest(
             amount=str(self.AMOUNT),
             currency=self.CURRENCY,
             recipient=self.RECIPIENT,
-            methodDetails=MethodDetails(memo=memo),
+            methodDetails=MethodDetails(),
         )
 
-    def test_empty_memo_normalizes_to_none(self) -> None:
-        request = self._make_request(memo="")
-        assert request.methodDetails.memo is None
+    def test_primary_memo_is_not_a_method_detail(self) -> None:
+        request = self._make_request()
+        assert "memo" not in request.methodDetails.model_dump()
 
     def test_memo_log_accepted(self) -> None:
         """TransferWithMemo log with correct memo should be accepted."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        request = self._make_request(memo=self.MEMO)
+        request = self._make_request()
         receipt = self._make_receipt(
             [
                 {
@@ -3757,30 +3686,10 @@ class TestVerifyTransferLogsWithMemo:
         assert matched_logs[0].kind == "memo"
         assert matched_logs[0].memo == self.MEMO
 
-    def test_memo_log_wrong_memo_rejected(self) -> None:
-        """TransferWithMemo log with wrong memo should be rejected."""
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        request = self._make_request(memo=self.MEMO)
-        receipt = self._make_receipt(
-            [
-                {
-                    "address": self.CURRENCY,
-                    "topics": [
-                        TRANSFER_WITH_MEMO_TOPIC,
-                        "0x" + "0" * 24 + "abcd" * 10,
-                        "0x" + "0" * 24 + self.RECIPIENT[2:].lower(),
-                        "0x" + "cc" * 32,
-                    ],
-                    "data": "0x" + hex(self.AMOUNT)[2:].zfill(64),
-                }
-            ]
-        )
-        assert intent._verify_transfer_logs(receipt, request) == []
-
     def test_memo_log_too_few_topics_rejected(self) -> None:
         """TransferWithMemo log with < 4 topics should be skipped."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        request = self._make_request(memo=self.MEMO)
+        request = self._make_request()
         receipt = self._make_receipt(
             [
                 {
@@ -3799,7 +3708,7 @@ class TestVerifyTransferLogsWithMemo:
     def test_no_memo_accepts_transfer_and_transfer_with_memo_logs(self) -> None:
         """When no memo is configured, both matching log types should be accepted."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        request = self._make_request(memo=None)
+        request = self._make_request()
 
         receipt_memo_topic = self._make_receipt(
             [
@@ -3838,7 +3747,7 @@ class TestVerifyTransferLogsWithMemo:
 
     def test_no_memo_prefers_matching_memo_logs_over_plain_transfer_logs(self) -> None:
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        request = self._make_request(memo=None)
+        request = self._make_request()
         receipt = self._make_receipt(
             [
                 {
@@ -4798,22 +4707,18 @@ class TestHashCredentialSourceValidation:
         def boom(v) -> bool:
             raise AssertionError("validate_sender must not be called")
 
-        explicit_memo = "0x" + "ab" * 32
-        other_memo = "0x" + "cd" * 32
-        # First log has a wrong sender and a non-matching memo (non-candidate);
+        # First log has a wrong sender and a non-matching amount (non-candidate);
         # second log matches fully, so the callback is never reached.
         receipt = {
             "status": "0x1",
             "from": self.SOURCE_ADDR,
             "logs": [
-                self._memo_log(self.RELAYER, other_memo),
-                self._memo_log(self.SOURCE_ADDR, explicit_memo),
+                {**self._memo_log(self.RELAYER, self._bound_memo), "data": amount_data(1)},
+                self._memo_log(self.SOURCE_ADDR, self._bound_memo),
             ],
         }
         intent = self._intent(receipt, validate_sender=boom)
-        result = await self._verify(
-            intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR), memo_value=explicit_memo
-        )
+        result = await self._verify(intent, source=self._did(self.CHAIN_ID, self.SOURCE_ADDR))
         assert result.reference == "0xabc123"
 
     @pytest.mark.asyncio
