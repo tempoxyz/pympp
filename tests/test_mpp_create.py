@@ -310,7 +310,7 @@ class TestMppCharge:
             )
 
     @pytest.mark.asyncio
-    async def test_charge_includes_extra_memo_and_fee_payer(self) -> None:
+    async def test_charge_includes_extra_and_fee_payer(self) -> None:
         srv = Mpp.create(
             method=tempo(
                 currency="0x20c0000000000000000000000000000000000000",
@@ -321,16 +321,17 @@ class TestMppCharge:
             secret_key="test-secret",
         )
 
-        memo = "0x" + "ab" * 32
         result = await srv.charge(
             authorization=None,
             amount="1.00",
-            memo=memo,
             fee_payer=True,
             extra={"plan": "pro"},
         )
 
         assert isinstance(result, Challenge)
         assert result.request["extra"] == {"plan": "pro"}
-        assert result.request["methodDetails"]["memo"] == memo
+        assert "memo" not in result.request["methodDetails"]
         assert result.request["methodDetails"]["feePayer"] is True
+
+        with pytest.raises(TypeError, match="unsupported charge option: memo"):
+            await srv.charge(None, "1.00", memo="0x" + "ab" * 32)
