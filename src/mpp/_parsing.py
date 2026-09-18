@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import string
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -74,9 +75,56 @@ def _escape_quoted(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _read_unicode_escape(s: str, i: int) -> int | None:
+    """Return the code unit of a ``uXXXX`` escape body at ``s[i:]``, else None."""
+    if not s.startswith("u", i):
+        return None
+    digits = s[i + 1 : i + 5]
+    if len(digits) != 4 or not all(c in string.hexdigits for c in digits):
+        return None
+    return int(digits, 16)
+
+
 def _unescape_quoted(s: str) -> str:
-    """Unescape a quoted-string value (remove backslash escapes)."""
-    return re.sub(r"\\(.)", r"\1", s)
+    """Unescape a quoted-string value.
+
+    Handles the RFC 9110 quoted-pair (``\\X`` -> ``X``) and the ``\\uXXXX`` form
+    challenges use for characters above Latin-1, which a header value cannot
+    carry directly. Surrogate pairs are recombined; an unpaired surrogate
+    becomes U+FFFD. A doubled backslash is consumed first, so ``\\\\u2014``
+    stays the literal text ``\\u2014``.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] != "\\":
+            out.append(s[i])
+            i += 1
+            continue
+
+        i += 1
+        if i >= len(s):
+            break
+
+        code = _read_unicode_escape(s, i)
+        if code is None:
+            out.append(s[i])
+            i += 1
+            continue
+        i += 5
+
+        if 0xD800 <= code <= 0xDBFF:
+            low = _read_unicode_escape(s, i + 1) if s.startswith("\\", i) else None
+            if low is not None and 0xDC00 <= low <= 0xDFFF:
+                out.append(chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)))
+                i += 6
+                continue
+            out.append("\ufffd")
+        elif 0xDC00 <= code <= 0xDFFF:
+            out.append("\ufffd")
+        else:
+            out.append(chr(code))
+    return "".join(out)
 
 
 def _validate_payment_method_id(method: str) -> None:
