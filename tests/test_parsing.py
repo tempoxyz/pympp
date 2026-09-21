@@ -183,6 +183,7 @@ class TestChallenge:
             (r"lone \ude00 here", "lone \ufffd here"),
             (r"not an escape \\u2014", r"not an escape \u2014"),
             (r"short \u12 tail", "short u12 tail"),
+            (r"ascii api\u0061", "ascii apia"),
         ],
     )
     def test_parse_unicode_quoted_strings(self, escaped: str, expected: str) -> None:
