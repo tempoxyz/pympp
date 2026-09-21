@@ -173,6 +173,40 @@ class TestChallenge:
         with pytest.raises(ParseError, match="invalid CRLF"):
             challenge.to_www_authenticate("api.example.com")
 
+    @pytest.mark.parametrize(
+        ("escaped", "expected"),
+        [
+            (r"em dash \u2014 and coffee \u2615", "em dash — and coffee ☕"),
+            (r"grinning \ud83d\ude00 face", "grinning 😀 face"),
+            ("café naïve", "café naïve"),
+            (r"lone \ud83d here", "lone \ufffd here"),
+            (r"lone \ude00 here", "lone \ufffd here"),
+            (r"not an escape \\u2014", r"not an escape \u2014"),
+            (r"short \u12 tail", "short u12 tail"),
+        ],
+    )
+    def test_parse_unicode_quoted_strings(self, escaped: str, expected: str) -> None:
+        header = (
+            f'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", description="{escaped}"'
+        )
+
+        assert Challenge.from_www_authenticate(header).description == expected
+
+    def test_format_unicode_quoted_strings_as_utf16_escapes(self) -> None:
+        challenge = Challenge(
+            id="test",
+            method="tempo",
+            intent="charge",
+            request={},
+            description="Payment — coffee ☕ 😀",
+        )
+
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert 'description="Payment \\u2014 coffee \\u2615 \\ud83d\\ude00"' in header
+        assert Challenge.from_www_authenticate(header).description == challenge.description
+
     def test_www_authenticate_roundtrip_preserves_credential_header(self) -> None:
         challenge = Challenge.create(
             secret_key="test-secret",

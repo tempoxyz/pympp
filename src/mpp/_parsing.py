@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import string
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -71,12 +72,67 @@ def _escape_quoted(s: str) -> str:
     """Escape a string for use in a quoted-string. Rejects CRLF."""
     if "\r" in s or "\n" in s:
         raise ParseError("Header value contains invalid CRLF characters")
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    escaped: list[str] = []
+    for character in s:
+        code = ord(character)
+        if character == "\\":
+            escaped.append("\\\\")
+        elif character == '"':
+            escaped.append('\\"')
+        elif code <= 0xFF:
+            escaped.append(character)
+        elif code <= 0xFFFF:
+            escaped.append(f"\\u{code:04x}")
+        else:
+            code -= 0x10000
+            escaped.append(f"\\u{0xD800 + (code >> 10):04x}")
+            escaped.append(f"\\u{0xDC00 + (code & 0x3FF):04x}")
+    return "".join(escaped)
+
+
+def _read_unicode_escape(s: str, index: int) -> int | None:
+    """Return the UTF-16 code unit in a ``uXXXX`` escape body, if present."""
+    if not s.startswith("u", index):
+        return None
+    digits = s[index + 1 : index + 5]
+    if len(digits) != 4 or not all(character in string.hexdigits for character in digits):
+        return None
+    return int(digits, 16)
 
 
 def _unescape_quoted(s: str) -> str:
-    """Unescape a quoted-string value (remove backslash escapes)."""
-    return re.sub(r"\\(.)", r"\1", s)
+    """Unescape quoted-pairs and the UTF-16 escapes emitted by mppx."""
+    result: list[str] = []
+    index = 0
+    while index < len(s):
+        if s[index] != "\\":
+            result.append(s[index])
+            index += 1
+            continue
+
+        index += 1
+        if index >= len(s):
+            break
+
+        code = _read_unicode_escape(s, index)
+        if code is None:
+            result.append(s[index])
+            index += 1
+            continue
+        index += 5
+
+        if 0xD800 <= code <= 0xDBFF:
+            low = _read_unicode_escape(s, index + 1) if s.startswith("\\", index) else None
+            if low is not None and 0xDC00 <= low <= 0xDFFF:
+                result.append(chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)))
+                index += 6
+                continue
+            result.append("\ufffd")
+        elif 0xDC00 <= code <= 0xDFFF:
+            result.append("\ufffd")
+        else:
+            result.append(chr(code))
+    return "".join(result)
 
 
 def _validate_payment_method_id(method: str) -> None:
