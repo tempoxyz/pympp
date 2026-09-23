@@ -22,10 +22,10 @@ jobs:
       id-token: write # PyPI Trusted Publishing (OIDC) and the STS exchange
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
+        uses: tempoxyz/gh-actions/actions/secure-runner@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
       - name: Fetch GitHub token via STS
         id: app-token
-        uses: tempoxyz/gh-actions/actions/github-sts@bce53819ffa60fcdf8f0f349686d807e5a66a71b # 2026-09-21T21-56-41Z-bce53819
+        uses: tempoxyz/gh-actions/actions/github-sts@d39baa2b43f5eba5d261c047521a4fbd56101129 # 2026-09-23T04-31-11Z-d39baa2b
         with:
           policy: release-pr
 
@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - uses: tempoxyz/changelogs@a19f62e3fdbd6d07b8900eb0568ed09b868bf84d # OIDC trusted publishing
+      - uses: tempoxyz/changelogs@a19f62e3fdbd6d07b8900eb0568ed09b868bf84d # 2026-08-11T21-37-02Z-a19f62e3 # OIDC trusted publishing
         with:
           ecosystem: python
           python-version: '3.12'
