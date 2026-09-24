@@ -17,6 +17,7 @@ from mpp.errors import VerificationError
 from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._rpc import get_tx_params
+from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
 from tests import INTEGRATION, TEST_REALM, make_credential
 from tests.conftest import _fund_account
 
@@ -390,11 +391,10 @@ class TestChargeIntegration:
         assert tx_request["to"].lower() == currency.lower()
         assert tx_request["data"].startswith("0x")
 
-    async def test_verify_with_server_memo(
+    async def test_legacy_server_memo_uses_challenge_bound_attribution(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
-        """When server specifies memo, client should use
-        transferWithMemo and server should verify."""
+        """Legacy primary memos must not override the client's challenge binding."""
         memo = "0x" + "ab" * 32
 
         method = tempo(
@@ -429,54 +429,46 @@ class TestChargeIntegration:
         assert receipt.status == "success"
         assert receipt.reference.startswith("0x")
 
-    async def test_verify_rejects_wrong_memo(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
-    ):
-        """Server should reject when tx has wrong memo."""
-        client_memo = "0x" + "ab" * 32
-        server_memo = "0x" + "cd" * 32
+        tx_receipt = await _wait_for_receipt(rpc_url, receipt.reference)
+        payment_memos = [
+            log["topics"][3]
+            for log in tx_receipt["logs"]
+            if log["address"].lower() == currency.lower()
+            and len(log.get("topics", [])) == 4
+            and log["topics"][0] == TRANSFER_WITH_MEMO_TOPIC
+        ]
+        assert payment_memos == [
+            encode_attribution(challenge_id=challenge.id, server_id=challenge.realm)
+        ]
 
-        method = tempo(
-            account=funded_payer,
-            chain_id=chain_id,
-            rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
+    @pytest.mark.parametrize("memo_kind", ["custom", "wrong_challenge", "wrong_realm"])
+    async def test_legacy_server_memo_cannot_bypass_challenge_binding(
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, memo_kind
+    ):
+        """Matching a legacy memo is insufficient without challenge and realm binding."""
+        challenge_id = "integ-unbound-legacy-memo"
+        memo = {
+            "custom": "0x" + "ab" * 32,
+            "wrong_challenge": encode_attribution("different-challenge", TEST_REALM),
+            "wrong_realm": encode_attribution(challenge_id, "different.example.com"),
+        }[memo_kind]
+        tx_hash = await _send_transfer(
+            rpc_url, funded_payer, currency, funded_recipient.address, 1000000, memo=memo
         )
         expires = _future_expires()
-
-        # Client builds tx with client_memo
-        challenge = Challenge(
-            id="integ-wrong-memo",
-            method="tempo",
-            intent="charge",
-            request={
-                "amount": "1000000",
-                "currency": currency,
-                "recipient": funded_recipient.address,
-                "expires": expires,
-                "methodDetails": {
-                    "feePayer": False,
-                    "chainId": chain_id,
-                    "memo": client_memo,
-                },
-            },
+        credential = make_credential(
+            payload={"type": "hash", "hash": tx_hash},
+            challenge_id=challenge_id,
             expires=expires,
         )
-        credential = await method.create_credential(challenge)
-
-        # Server verifies with server_memo — should reject
         server_request = {
             "amount": "1000000",
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
-            "methodDetails": {
-                "feePayer": False,
-                "chainId": chain_id,
-                "memo": server_memo,
-            },
+            "methodDetails": {"memo": memo},
         }
-        with pytest.raises(VerificationError, match="no matching payment call found"):
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             await charge_intent.verify(credential, server_request)
 
     async def test_default_memo_accepted_when_server_omits_memo(
