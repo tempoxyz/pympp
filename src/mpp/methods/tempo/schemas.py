@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class Split(BaseModel):
@@ -21,13 +21,7 @@ class MethodDetails(BaseModel):
     chainId: int = 4217
     feePayer: bool = False
     feePayerUrl: str | None = None
-    memo: str | None = None
     splits: list[Split] | None = None
-
-    @field_validator("memo", mode="before")
-    @classmethod
-    def normalize_empty_memo(cls, value: Any) -> Any:
-        return None if value == "" else value
 
 
 class ChargeRequest(BaseModel):

@@ -33,7 +33,6 @@ class ComposeOptions(TypedDict, total=False):
     description: str | None
     expires: str | None
     expires_in: timedelta | None
-    memo: str | None
     splits: list[dict[str, str]] | None
     fee_payer: bool
     chain_id: int | None

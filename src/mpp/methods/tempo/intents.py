@@ -280,17 +280,7 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
         return False
 
     selector = call_data_hex[:SELECTOR_HEX_LEN].lower()
-    expected_memo = request.methodDetails.memo
-
-    if expected_memo:
-        if selector != TRANSFER_WITH_MEMO_SELECTOR:
-            return False
-        decoded = _decode_static_call_args(
-            call_data_hex,
-            ("address", "uint256", "bytes32"),
-            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
-        )
-    elif selector == TRANSFER_WITH_MEMO_SELECTOR:
+    if selector == TRANSFER_WITH_MEMO_SELECTOR:
         decoded = _decode_static_call_args(
             call_data_hex,
             ("address", "uint256", "bytes32"),
@@ -315,14 +305,6 @@ def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool
         return False
     if decoded_amount != int(request.amount):
         return False
-
-    if expected_memo:
-        decoded_memo = "0x" + decoded[2].hex()
-        memo_clean = expected_memo.lower()
-        if not memo_clean.startswith("0x"):
-            memo_clean = "0x" + memo_clean
-        if decoded_memo.lower() != memo_clean:
-            return False
 
     return True
 
@@ -412,7 +394,7 @@ def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: Charg
     expected = get_transfers(
         int(request.amount),
         request.recipient,
-        request.methodDetails.memo,
+        None,
         request.methodDetails.splits,
     )
 
@@ -846,16 +828,11 @@ class ChargeIntent:
                 "Transaction must contain a Transfer log matching request parameters"
             )
 
-        # Only verify challenge binding when using auto-generated attribution memos.
-        # Explicit memos (set by the server) are strictly matched by _verify_transfer_logs
-        # but are NOT challenge-bound. Callers that set explicit memos are responsible
-        # for ensuring memo uniqueness per challenge to prevent cross-challenge hash reuse.
-        if request.methodDetails.memo is None:
-            self._assert_challenge_bound_memo(
-                matched_logs,
-                challenge_id=challenge_id,
-                realm=realm,
-            )
+        self._assert_challenge_bound_memo(
+            matched_logs,
+            challenge_id=challenge_id,
+            realm=realm,
+        )
 
         return matched_logs
 
@@ -939,7 +916,7 @@ class ChargeIntent:
         expected = get_transfers(
             int(request.amount),
             request.recipient,
-            request.methodDetails.memo,
+            None,
             request.methodDetails.splits,
         )
 
