@@ -11,7 +11,11 @@ from mpp import Challenge, ChallengeEcho, Credential, Receipt
 from mpp._parsing import MAX_HEADER_PAYLOAD_SIZE, ParseError
 from tests import make_credential
 
-INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo2", "tempo-pay", "tempo_pay", "tempo.pay")
+INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo.pay")
+# Regression coverage for AGR-2026-102: the canonical grammar
+# (^[a-z][a-z0-9:_-]*$) allows digits, colons, underscores, and hyphens after
+# the first character. These used to be rejected by a letters-only check.
+VALID_EXTENDED_PAYMENT_METHOD_IDS = ("tempo2", "tempo-pay", "tempo_pay", "vendor:method", "x402")
 
 
 def _b64_json(data: Mapping[str, object]) -> str:
@@ -99,6 +103,16 @@ class TestChallenge:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Challenge.from_www_authenticate(header)
 
+    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
+    def test_parse_accepts_extended_charset_method_id(self, method: str) -> None:
+        header = (
+            f'Payment id="test", realm="api.example.com", method="{method}", '
+            'intent="charge", request="e30"'
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.method == method
+
     def test_roundtrip_with_optional_fields(self) -> None:
         """Challenge with optional fields should survive roundtrip."""
         challenge = Challenge(
@@ -143,6 +157,30 @@ class TestChallenge:
         )
         with pytest.raises(ParseError, match="Duplicate parameter: intent"):
             Challenge.from_www_authenticate(header)
+
+    # Regression tests for AGR-2026-103: auth-parameter names are
+    # case-insensitive (RFC 9110 §11.2), but the duplicate check and storage
+    # key both used the original casing, so "id" and "ID" were treated as
+    # distinct parameters instead of a rejected duplicate.
+
+    def test_parse_rejects_case_variant_duplicate_param(self) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", INTENT="session", request="e30"'
+        )
+        with pytest.raises(ParseError, match="Duplicate parameter: INTENT"):
+            Challenge.from_www_authenticate(header)
+
+    def test_parse_accepts_mixed_case_param_names_without_duplicates(self) -> None:
+        # Mixed-case parameter names are fine as long as none collide once
+        # normalized -- this isn't about requiring lowercase on the wire.
+        header = (
+            'Payment ID="test", Realm="api.example.com", Method="tempo", '
+            'Intent="charge", Request="e30"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.id == "test"
+        assert challenge.method == "tempo"
 
     def test_parse_request_too_large(self) -> None:
         oversized = "a" * (MAX_HEADER_PAYLOAD_SIZE + 1)
