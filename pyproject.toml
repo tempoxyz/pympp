@@ -55,6 +55,10 @@ stripe = [
     "urllib3==2.7.0",
     "yarl==1.24.5",
 ]
+evm = [
+    "eth-account>=0.11",
+    "eth-hash[pycryptodome]>=0.7",
+]
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
