@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.12.0 (2026-09-26)
+
+### Minor Changes
+
+- Removed custom primary Tempo charge memos. The `memo` charge option and `MethodDetails.memo` field have been removed; clients now always generate attribution memos bound to the challenge and realm, and servers always verify that binding. Split-specific memos remain supported. (by @DerekCofausper, [#251](https://github.com/tempoxyz/pympp/pull/251))
+- Remove custom primary Tempo charge memos. Clients always generate attribution memos bound to the challenge and realm, and servers always verify that binding. Remove the `memo` charge option and `MethodDetails.memo`; split-specific memos remain supported. (by @DerekCofausper, [#251](https://github.com/tempoxyz/pympp/pull/251))
+- Added `extensions` field to `Receipt` to capture and preserve method-specific top-level fields (e.g. Tempo-specific fields like `challengeId`, `originTxHash`) during parsing and round-tripping of Payment-Receipt headers. (by @mpp-agricola[bot], [#239](https://github.com/tempoxyz/pympp/pull/239))
+
+### Patch Changes
+
+- Fixed Unicode handling in challenge auth-params by encoding non-Latin-1 characters as UTF-16 escapes during serialization and decoding those escapes (including surrogate pairs) during parsing. (by @BrendanRyan, [#256](https://github.com/tempoxyz/pympp/pull/256))
+- Added a machine-payment metadata field to every Stripe PaymentIntent created by pympp. (by @bensandler-stripe, [#233](https://github.com/tempoxyz/pympp/pull/233))
+- Fixed Stripe idempotent replay detection to reject replayed payments instead of accepting them. Updated both SDK client and raw HTTP paths to raise `VerificationFailedError` when a cached idempotent response is detected via the `Idempotent-Replayed` header. (by @BrendanRyan, [#246](https://github.com/tempoxyz/pympp/pull/246))
+- Floor recorded Stripe crypto PaymentIntent amounts to whole cents so fractional-cent on-chain payments are not rounded up. Continue skipping amounts below one cent. (by @DerekCofausper, [#252](https://github.com/tempoxyz/pympp/pull/252))
+- Added request-scoped Stripe PaymentIntent options for SPT and Stripe-recorded Tempo payments. (by @staubman-stripe, [#249](https://github.com/tempoxyz/pympp/pull/249))
+- Rejected reused Tempo transaction credentials and enabled in-memory replay protection by default. Configure a shared persistent store for deployments with multiple replicas or restarts.
+- Bounded the default replay store to 10,000 entries without evicting used hashes, and released reservations after inconclusive receipt lookups so payments can be retried safely. (by @BrendanRyan, [#248](https://github.com/tempoxyz/pympp/pull/248))
+- Added a small SPT/Tempo Stripe facade with minimum-aware offers and pinned, attributed Stripe requests, made `spt()` the preferred SPT factory, and deprecated the `stripe()` compatibility name. (by @bensandler-stripe, [#236](https://github.com/tempoxyz/pympp/pull/236))
+
 ## 0.11.0 (2026-08-28)
 
 ### Minor Changes
