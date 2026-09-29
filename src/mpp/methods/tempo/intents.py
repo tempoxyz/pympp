@@ -21,7 +21,8 @@ from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp._validation import Validation
 from mpp.errors import VerificationError
-from mpp.methods.tempo._defaults import PATH_USD, rpc_url_for_chain
+from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
+from mpp.methods.tempo._rpc import _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import get_policy
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
@@ -1045,8 +1046,11 @@ class ChargeIntent:
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
+                # Gas is paid in a supported fee token, not the charge currency:
+                # Tempo only accepts fee tokens with Fee AMM liquidity.
+                fee_token = await self._resolve_fee_token(client, request)
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
-                    raw_tx, request.currency, request=request
+                    raw_tx, fee_token, request=request
                 )
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
@@ -1154,6 +1158,35 @@ class ChargeIntent:
             if self._store is not None and store_key is not None:
                 await self._store.delete(store_key)
             raise
+
+    async def _resolve_fee_token(self, client: Any, request: ChargeRequest) -> str:
+        """Choose the token a local fee payer pays gas in.
+
+        Uses the configured ``fee_token``, else the first allowed fee token the
+        fee payer holds a balance of, else the first allowed fee token.
+        """
+        fee_payer = self.fee_payer
+        if fee_payer is None:
+            raise VerificationError("No fee payer account configured")
+        chain_id = request.methodDetails.chainId
+        if chain_id is None:
+            chain_id = getattr(self._method, "chain_id", None)
+        allowed = getattr(self._method, "allowed_fee_tokens", None) or (
+            fee_tokens_for_chain(chain_id) if chain_id is not None else (PATH_USD,)
+        )
+        configured = getattr(self._method, "fee_token", None)
+        if configured is not None:
+            if configured.lower() not in {token.lower() for token in allowed}:
+                raise VerificationError("fee-sponsored transaction feeToken is not allowed")
+            return configured
+        rpc_url = self._get_rpc_url()
+        for token in allowed:
+            try:
+                if await _tip20_balance(rpc_url, token, fee_payer.address, client=client) > 0:
+                    return token
+            except Exception:
+                continue
+        return allowed[0]
 
     def _cosign_as_fee_payer(
         self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None

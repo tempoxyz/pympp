@@ -77,6 +77,9 @@ def test_static_tempo_is_preferred_and_uses_network_defaults() -> None:
     assert (test_tempo.recipient, test_tempo.chain_id) == (TEMPO_ADDRESS, TESTNET_CHAIN_ID)
     assert test_tempo.currency == PATH_USD
     assert (live_tempo.chain_id, live_tempo.currency) == (CHAIN_ID, USDC)
+    # Stripe's Tempo rail stays on one currency rather than OUSD-first defaults.
+    assert test_tempo.currencies == (PATH_USD,)
+    assert live_tempo.currencies == (USDC,)
 
 
 def test_methods_filter_amounts_below_stripe_minima() -> None:

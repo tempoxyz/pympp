@@ -1997,7 +1997,13 @@ class TestCosignAsFeePayer:
     def _make_intent(self) -> ChargeIntent:
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
+        # Pin the fee token so these RPC mocks don't need fee payer balance lookups.
+        tempo(
+            fee_payer=fee_payer,
+            fee_token=PATH_USD,
+            rpc_url="https://rpc.test",
+            intents={"charge": intent},
+        )
         return intent
 
     def _encode_transfer_data(

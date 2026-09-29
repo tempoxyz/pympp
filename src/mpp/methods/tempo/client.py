@@ -6,6 +6,7 @@ Implements the charge (TempoMethod) client method.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
@@ -17,6 +18,7 @@ from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     MACH,
     RPC_URL,
+    default_currencies_for_chain,
     default_currency_for_chain,
     fee_tokens_for_chain,
     rpc_url_for_chain,
@@ -25,7 +27,7 @@ from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
 from mpp.methods.tempo.fee_payer_policy import get_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.relay import Relay
@@ -42,6 +44,7 @@ FEE_PAYER_VALID_BEFORE_SECS = 25
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
+_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 
 
 class TransactionError(Exception):
@@ -86,6 +89,13 @@ class TempoMethod:
     _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
     can_offer: CanOfferFn | None = field(default=None, kw_only=True)
     on_payment_success: PaymentSuccessHandler | None = field(default=None, kw_only=True)
+    # Accepted currencies in offer order. With more than one, servers issue one
+    # charge offer per currency unless a request overrides ``currency``.
+    currencies: tuple[str, ...] = field(default=(), kw_only=True)
+    # Server-side local fee sponsorship: the token the fee payer pays gas in,
+    # and the tokens it may select. ``None`` selects defaults at broadcast.
+    fee_token: str | None = field(default=None, kw_only=True)
+    allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -440,6 +450,9 @@ def tempo(
     relay: Relay | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
+    currencies: Sequence[str] | None = None,
+    fee_token: str | None = None,
+    allowed_fee_tokens: Sequence[str] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -457,13 +470,27 @@ def tempo(
             pins itself to whatever chain that RPC reports. Defaults to mainnet
             if neither is set.
         root_account: Root account address for access key signing.
-        currency: Default currency address for charges.
+        currency: Deprecated for servers; use ``currencies=[currency]``.
+            Restricts charges to this one currency. Mutually exclusive with
+            ``currencies``.
         recipient: Default recipient address for charges.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
         relay: Optional server-side Tempo API relay for the charge intent.
         can_offer: Optional callback that filters this method's composed offers.
         on_payment_success: Optional callback invoked after successful verification.
+        currencies: Ordered currency addresses a server accepts. Servers issue
+            one charge offer per currency, in order. Replaces the defaults:
+            OUSD then USDC.e on mainnet, OUSD then pathUSD on Moderato, and
+            the single :func:`default_currency_for_chain` currency elsewhere.
+            Duplicates are removed case-insensitively.
+        fee_token: Token a local ``fee_payer`` pays gas in. Must also be in
+            the allowed fee tokens. If omitted, the first allowed token the
+            fee payer holds a balance of is used, else the first allowed.
+            Independent of the charge currency. Requires ``fee_payer``.
+        allowed_fee_tokens: Tokens a local ``fee_payer`` may pay gas in.
+            Defaults to :func:`fee_tokens_for_chain` (pathUSD, then USDC.e
+            on mainnet). Must contain at least one token.
 
     Returns:
         A configured TempoMethod instance.
@@ -497,9 +524,32 @@ def tempo(
             raise ValueError("chain_id or rpc_url is required")
         rpc_url = rpc_url_for_chain(resolved_chain_id)
 
-    currency_explicit = currency is not None
-    if currency is None:
+    if currency is not None and currencies is not None:
+        raise ValueError("pass currency= or currencies=, not both")
+    currency_explicit = currency is not None or currencies is not None
+    if currencies is not None:
+        accepted = _resolve_currencies(currencies)
+        currency = accepted[0]
+    elif currency is not None:
+        accepted = (currency,)
+    else:
         currency = default_currency_for_chain(resolved_chain_id)
+        accepted = default_currencies_for_chain(resolved_chain_id)
+
+    if fee_token is not None and fee_payer is None:
+        raise ValueError("fee_token can only be configured for a local fee_payer")
+    if fee_token is not None and _ADDRESS_RE.fullmatch(fee_token) is None:
+        raise ValueError(f"Invalid Tempo fee token address: {fee_token!r}")
+    resolved_allowed_fee_tokens: tuple[str, ...] | None = None
+    if allowed_fee_tokens is not None:
+        if isinstance(allowed_fee_tokens, str):
+            raise ValueError("allowed_fee_tokens must be a sequence of addresses")
+        resolved_allowed_fee_tokens = tuple(allowed_fee_tokens)
+        if not resolved_allowed_fee_tokens:
+            raise ValueError("allowed_fee_tokens must contain at least one token")
+        for token in resolved_allowed_fee_tokens:
+            if not isinstance(token, str) or _ADDRESS_RE.fullmatch(token) is None:
+                raise ValueError(f"Invalid Tempo fee token address: {token!r}")
 
     method = TempoMethod(
         account=account,
@@ -511,6 +561,9 @@ def tempo(
         recipient=recipient,
         decimals=decimals,
         client_id=client_id,
+        currencies=accepted,
+        fee_token=fee_token,
+        allowed_fee_tokens=resolved_allowed_fee_tokens,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
@@ -530,3 +583,21 @@ def tempo(
         configured_intents["charge"] = relay.configure(charge)
     method._intents = configured_intents
     return method
+
+
+def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:
+    """Validate and deduplicate an ordered currency list, preserving order."""
+    if isinstance(currencies, str):
+        raise ValueError("currencies must be a sequence of addresses, not a string")
+    seen: set[str] = set()
+    resolved: list[str] = []
+    for currency in currencies:
+        if not isinstance(currency, str) or _ADDRESS_RE.fullmatch(currency) is None:
+            raise ValueError(f"Invalid Tempo currency address: {currency!r}")
+        key = currency.lower()
+        if key not in seen:
+            seen.add(key)
+            resolved.append(currency)
+    if not resolved:
+        raise ValueError("currencies must contain at least one currency")
+    return tuple(resolved)

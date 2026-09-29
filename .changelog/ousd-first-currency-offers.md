@@ -1,0 +1,5 @@
+---
+pympp: minor
+---
+
+Add ordered `currencies` configuration to the Tempo method. Servers now accept OUSD then USDC.e on Tempo mainnet and OUSD then pathUSD on Moderato by default, issuing one charge Challenge per accepted currency in order; other chains keep their single default currency. An explicit `currencies` list replaces the defaults, and the singular `currency` option, now deprecated for servers, still restricts acceptance to that one currency. Per-request `currency` overrides still issue a single Challenge. Local fee payers no longer pay gas in the charge currency: they use the new `fee_token` option, or else the first token in `allowed_fee_tokens` (default: `fee_tokens_for_chain()`, pathUSD then USDC.e on mainnet) that the fee payer holds, falling back to the first allowed token, so sponsored OUSD charges pay fees in pathUSD or USDC.e. A configured fee token outside the allowed list is rejected. Hosted fee payer URLs are unchanged. Add the `OUSD` constant and `default_currencies_for_chain()`. `default_currency_for_chain()`, fee tokens, and fee payer policies are unchanged, and Stripe's Tempo rail keeps its single USDC.e or pathUSD currency.
