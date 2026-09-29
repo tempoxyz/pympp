@@ -31,7 +31,9 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
 _AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
-_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
+# Matches canonical mppx: a lowercase letter, followed by lowercase letters, digits,
+# colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
+_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
 
 
 class ParseError(Exception):
@@ -145,9 +147,15 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
     params: dict[str, str] = {}
     for match in _AUTH_PARAM_RE.finditer(params_str):
-        key = match.group(1)
+        # Auth-parameter names are case-insensitive (RFC 9110 §11.2). Normalize
+        # to lowercase for both the duplicate check and storage, so "id" and
+        # "ID" are treated as the same parameter -- otherwise both get stored
+        # under their original casing and only the lowercase lookup downstream
+        # (params.get("id"), params.get("realm"), ...) is ever read, silently
+        # ignoring the other value instead of rejecting the ambiguous header.
+        key = match.group(1).lower()
         if key in params:
-            raise ParseError(f"Duplicate parameter: {key}")
+            raise ParseError(f"Duplicate parameter: {match.group(1)}")
         # Group 2 is quoted value, group 3 is unquoted token
         value = match.group(2) if match.group(2) is not None else match.group(3)
         params[key] = _unescape_quoted(value) if match.group(2) is not None else value
