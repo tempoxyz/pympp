@@ -17,6 +17,7 @@ from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     MACH,
+    OUSD,
     RPC_URL,
     default_currencies_for_chain,
     default_currency_for_chain,
@@ -141,7 +142,7 @@ class TempoMethod:
             return await self._get_chain_id(self.rpc_url)
         return None
 
-    async def _resolve_mach_fee_token(
+    async def _resolve_supported_fee_token(
         self,
         *,
         account: str,
@@ -149,16 +150,14 @@ class TempoMethod:
         rpc_url: str,
         required_balance: int,
     ) -> str:
-        """Return a stablecoin that can cover the MACH transaction fee."""
+        """Return a stablecoin that can cover the transaction fee."""
         for token in fee_tokens_for_chain(chain_id):
             try:
                 if await _tip20_balance(rpc_url, token, account) >= required_balance:
                     return token
             except Exception:
                 continue
-        raise TransactionError(
-            "MACH charges require a funded supported stablecoin for transaction fees"
-        )
+        raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
@@ -365,13 +364,13 @@ class TempoMethod:
         fee_token: str | None = None
         if not awaiting_fee_payer:
             fee_token = currency
-            if currency.lower() == MACH.lower():
+            if currency.lower() in (MACH.lower(), OUSD.lower()):
                 required_balance = max(
                     1,
                     (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
                     // ATTODOLLARS_PER_MICRODOLLAR,
                 )
-                fee_token = await self._resolve_mach_fee_token(
+                fee_token = await self._resolve_supported_fee_token(
                     account=nonce_address,
                     chain_id=chain_id,
                     rpc_url=resolved_rpc,

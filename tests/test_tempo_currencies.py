@@ -603,6 +603,7 @@ async def _fake_rpc_call(
 async def _sign(client_method: TempoMethod, challenge: Challenge) -> Credential:
     with (
         patch("mpp.methods.tempo.client._rpc_call", side_effect=_fake_rpc_call),
+        patch("mpp.methods.tempo.client._tip20_balance", new=AsyncMock(return_value=1)),
         patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
     ):
         return await client_method.create_credential(challenge)
@@ -773,13 +774,13 @@ def balances(funded: Mapping[str, int]) -> tuple[AsyncMock, list[str]]:
     return AsyncMock(side_effect=balance), queried
 
 
-async def _fake_client_rpc(chain_id: int) -> Any:
+async def _fake_client_rpc(chain_id: int, gas_price: int = 1) -> Any:
     async def call(rpc_url: str, method_name: str, params: list[object], *, client: Any = None):
         del rpc_url, params, client
         return {
             "eth_chainId": hex(chain_id),
             "eth_getTransactionCount": "0x0",
-            "eth_gasPrice": "0x1",
+            "eth_gasPrice": hex(gas_price),
         }[method_name]
 
     return call
@@ -821,15 +822,17 @@ def sponsor_intent(chain_id: int | None = CHAIN_ID, **kwargs: Any) -> ChargeInte
 class TestSponsoredFeeToken:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "chain_id,funded,expected_fee_token",
+        "chain_id,funded,expected_fee_token,gas_price",
         [
-            (CHAIN_ID, {USDC.lower(): 5}, USDC),
-            (CHAIN_ID, {PATH_USD.lower(): 5, USDC.lower(): 5}, PATH_USD),
-            (TESTNET_CHAIN_ID, {PATH_USD.lower(): 5}, PATH_USD),
+            (CHAIN_ID, {USDC.lower(): 5}, USDC, 1),
+            (CHAIN_ID, {PATH_USD.lower(): 5, USDC.lower(): 5}, PATH_USD, 1),
+            (TESTNET_CHAIN_ID, {PATH_USD.lower(): 5}, PATH_USD, 1),
+            (CHAIN_ID, {PATH_USD.lower(): 1, USDC.lower(): 1000}, USDC, 10**9),
+            (CHAIN_ID, {PATH_USD.lower(): 1000, USDC.lower(): 1001}, USDC, 10**9 + 1),
         ],
     )
     async def test_sponsored_ousd_charge_with_defaults_succeeds(
-        self, chain_id: int, funded: dict[str, int], expected_fee_token: str
+        self, chain_id: int, funded: dict[str, int], expected_fee_token: str, gas_price: int
     ) -> None:
         rpc = FakeRpc()
         server = sponsored_server(rpc, chain_id)
@@ -846,7 +849,7 @@ class TestSponsoredFeeToken:
         with (
             patch(
                 "mpp.methods.tempo.client._rpc_call",
-                side_effect=await _fake_client_rpc(chain_id),
+                side_effect=await _fake_client_rpc(chain_id, gas_price),
             ),
             patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
         ):

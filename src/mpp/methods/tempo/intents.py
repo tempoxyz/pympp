@@ -1048,7 +1048,15 @@ class ChargeIntent:
             if self.fee_payer is not None:
                 # Gas is paid in a supported fee token, not the charge currency:
                 # Tempo only accepts fee tokens with Fee AMM liquidity.
-                fee_token = await self._resolve_fee_token(client, request)
+                from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
+
+                fields, _, _, _ = decode_fee_payer_envelope(
+                    bytes.fromhex(raw_tx.removeprefix("0x"))
+                )
+                max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
+                # Gas prices are attodollars; TIP-20 balances are microdollars.
+                required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
+                fee_token = await self._resolve_fee_token(client, request, required_balance)
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
                     raw_tx, fee_token, request=request
                 )
@@ -1159,11 +1167,13 @@ class ChargeIntent:
                 await self._store.delete(store_key)
             raise
 
-    async def _resolve_fee_token(self, client: Any, request: ChargeRequest) -> str:
+    async def _resolve_fee_token(
+        self, client: Any, request: ChargeRequest, required_balance: int = 1
+    ) -> str:
         """Choose the token a local fee payer pays gas in.
 
         Uses the configured ``fee_token``, else the first allowed fee token the
-        fee payer holds a balance of, else the first allowed fee token.
+        fee payer holds enough of to cover the gas budget, else the first allowed fee token.
         """
         fee_payer = self.fee_payer
         if fee_payer is None:
@@ -1182,7 +1192,10 @@ class ChargeIntent:
         rpc_url = self._get_rpc_url()
         for token in allowed:
             try:
-                if await _tip20_balance(rpc_url, token, fee_payer.address, client=client) > 0:
+                if (
+                    await _tip20_balance(rpc_url, token, fee_payer.address, client=client)
+                    >= required_balance
+                ):
                     return token
             except Exception:
                 continue
