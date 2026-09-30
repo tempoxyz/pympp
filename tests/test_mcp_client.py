@@ -268,9 +268,18 @@ class TestMcpClientPaidTool:
                 },
             )
 
+            receipt_meta = _make_receipt_meta()
+            receipt_meta[META_RECEIPT].update(
+                {
+                    "externalId": "order-123",
+                    "subscriptionId": "subscription-123",
+                    "extra": {"invoice": "123"},
+                    "transactionId": "transaction-123",
+                }
+            )
             retry_result = FakeCallToolResult(
                 content=[{"type": "text", "text": "premium result"}],
-                meta=_make_receipt_meta(),
+                meta=receipt_meta,
             )
 
             session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
@@ -282,6 +291,11 @@ class TestMcpClientPaidTool:
             assert result.receipt is not None
             assert result.receipt.status == "success"
             assert result.receipt.reference == "0xtxhash"
+            assert result.receipt.external_id == "order-123"
+            assert result.receipt.subscription_id == "subscription-123"
+            assert result.receipt.extra == {"invoice": "123"}
+            assert result.receipt.extensions == {"transactionId": "transaction-123"}
+            assert result.receipt.to_meta() == receipt_meta
 
             assert session.call_tool.call_count == 2
 

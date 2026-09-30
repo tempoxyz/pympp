@@ -289,6 +289,120 @@ class TestMCPCredential:
 class TestMCPReceipt:
     """Tests for MCPReceipt type."""
 
+    def test_metadata_round_trip(self) -> None:
+        core = Receipt(
+            status="success",
+            timestamp=datetime(2025, 1, 15, 12, 0, 30, tzinfo=UTC),
+            reference="payment-123",
+            method="custom",
+            external_id="order-123",
+            subscription_id="subscription-123",
+            extra={"invoice": {"number": "123"}},
+            extensions={"transactionId": "transaction-123"},
+        )
+        receipt = MCPReceipt.from_core(core, "challenge-123", "custom", {"amount": "100"})
+        wire = receipt.to_dict()
+        assert wire == {
+            "status": "success",
+            "challengeId": "challenge-123",
+            "method": "custom",
+            "timestamp": "2025-01-15T12:00:30Z",
+            "reference": "payment-123",
+            "settlement": {"amount": "100"},
+            "externalId": "order-123",
+            "subscriptionId": "subscription-123",
+            "extra": {"invoice": {"number": "123"}},
+            "transactionId": "transaction-123",
+        }
+        parsed = MCPReceipt.from_dict(wire)
+        assert parsed.to_dict() == wire
+        assert parsed.to_core() == core
+        assert Receipt.from_payment_receipt(parsed.to_core().to_payment_receipt()) == core
+        assert wire["transactionId"] == "transaction-123"
+        assert core.extensions == {"transactionId": "transaction-123"}
+
+    def test_extensions_cannot_override_receipt_fields(self) -> None:
+        receipt = MCPReceipt(
+            status="success",
+            challenge_id="challenge-123",
+            method="custom",
+            timestamp="2025-01-15T12:00:30Z",
+            extensions={
+                "status": "failed",
+                "challengeId": "wrong",
+                "method": "wrong",
+                "timestamp": "wrong",
+                "reference": "wrong",
+                "settlement": {},
+                "externalId": "wrong",
+                "subscriptionId": "wrong",
+                "extra": {},
+                "transactionId": "transaction-123",
+            },
+        )
+        assert receipt.to_dict() == {
+            "status": "success",
+            "challengeId": "challenge-123",
+            "method": "custom",
+            "timestamp": "2025-01-15T12:00:30Z",
+            "transactionId": "transaction-123",
+        }
+
+    def test_empty_optional_metadata(self) -> None:
+        wire = {
+            "status": "success",
+            "challengeId": "challenge-123",
+            "method": "custom",
+            "timestamp": "2025-01-15T12:00:30Z",
+            "externalId": "",
+            "subscriptionId": "",
+            "extra": {},
+        }
+        receipt = MCPReceipt.from_dict(wire)
+        assert receipt.extensions is None
+        assert receipt.to_dict() == wire
+
+    async def test_verification_preserves_metadata(self) -> None:
+        class Intent:
+            name = "charge"
+
+            async def validate(self, credential: Credential, request: dict) -> Validation:
+                return Validation(
+                    credential=credential, details={}, intent=self.name, request=request
+                )
+
+            async def broadcast(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt(
+                    status="success",
+                    timestamp=datetime.now(UTC),
+                    reference="payment-123",
+                    method="custom",
+                    external_id="order-123",
+                    subscription_id="subscription-123",
+                    extra={"invoice": "123"},
+                    extensions={"transactionId": "transaction-123"},
+                )
+
+        request = {"amount": "1000", "currency": "USD"}
+        challenge = _make_bound_mcp_challenge(request=request, method="custom")
+        credential = MCPCredential(challenge=challenge, payload={"signature": "0x123"})
+        result = await verify_or_challenge(
+            meta=credential.to_meta(),
+            intent=Intent(),
+            request=request,
+            realm="api.example.com",
+            secret_key=MCP_TEST_SECRET,
+            method="custom",
+        )
+        assert isinstance(result, tuple)
+        wire = result[1].to_meta()[META_RECEIPT]
+        assert wire["challengeId"] == challenge.id
+        assert wire["method"] == "custom"
+        assert wire["externalId"] == "order-123"
+        assert wire["subscriptionId"] == "subscription-123"
+        assert wire["extra"] == {"invoice": "123"}
+        assert wire["transactionId"] == "transaction-123"
+
     def test_to_dict(self) -> None:
         receipt = MCPReceipt(
             status="success",
