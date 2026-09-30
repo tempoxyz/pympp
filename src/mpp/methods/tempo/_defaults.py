@@ -8,6 +8,8 @@ RPC_URL = "https://rpc.tempo.xyz"
 PATH_USD = "0x20c0000000000000000000000000000000000000"
 USDC = "0x20C000000000000000000000b9537d11c60E8b50"
 MACH = "0x20c000000000000000000000f37de3740ADec032"
+# OUSD uses the same TIP-20 address on mainnet and Moderato.
+OUSD = "0x20c0000000000000000000006a37DA5C996874BE"
 PATH_USD_DECIMALS = 6
 
 # Testnet (Moderato)
@@ -20,6 +22,15 @@ DEFAULT_CURRENCIES: MappingProxyType[int, str] = MappingProxyType(
     {
         CHAIN_ID: USDC,
         TESTNET_CHAIN_ID: PATH_USD,
+    }
+)
+
+# Chain ID -> currencies a server accepts by default, in offer order.
+# OUSD is offered first; it is not a fee token.
+DEFAULT_ACCEPTED_CURRENCIES: MappingProxyType[int, tuple[str, ...]] = MappingProxyType(
+    {
+        CHAIN_ID: (OUSD, USDC),
+        TESTNET_CHAIN_ID: (OUSD, PATH_USD),
     }
 )
 
@@ -73,6 +84,18 @@ def default_currency_for_chain(chain_id: int | None) -> str:
     if chain_id is None:
         return PATH_USD
     return DEFAULT_CURRENCIES.get(chain_id, PATH_USD)
+
+
+def default_currencies_for_chain(chain_id: int | None) -> tuple[str, ...]:
+    """Return the currencies a server accepts by default, in offer order.
+
+    Returns OUSD then USDC.e for mainnet (4217) and OUSD then pathUSD for
+    Moderato (42431). Unknown chains and None accept only
+    :func:`default_currency_for_chain`.
+    """
+    if chain_id is not None and chain_id in DEFAULT_ACCEPTED_CURRENCIES:
+        return DEFAULT_ACCEPTED_CURRENCIES[chain_id]
+    return (default_currency_for_chain(chain_id),)
 
 
 def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]:

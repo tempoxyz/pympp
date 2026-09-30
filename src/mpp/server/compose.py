@@ -335,5 +335,26 @@ def _configure_entries(
         if not (options.get("recipient") or getattr(method, "recipient", None)):
             raise ValueError("recipient must be set on the method or compose() offer")
         parse_units(options["amount"], getattr(method, "decimals", 6))
-        offers.append(_Offer(server, method, intent, options, body))
+        currencies = _offer_currencies(method, options)
+        if currencies is None:
+            offers.append(_Offer(server, method, intent, options, body))
+        else:
+            # One offer per accepted currency, in the method's order.
+            offers.extend(
+                _Offer(server, method, intent, {**options, "currency": currency}, body)
+                for currency in currencies
+            )
     return ComposedHandler._from_offers(offers)
+
+
+def _offer_currencies(method: Method, options: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """Return the currencies to expand into separate offers, if more than one.
+
+    A per-offer ``currency`` override always yields a single offer.
+    """
+    if options.get("currency"):
+        return None
+    currencies = getattr(method, "currencies", None)
+    if not isinstance(currencies, tuple | list) or len(currencies) < 2:
+        return None
+    return tuple(currencies)

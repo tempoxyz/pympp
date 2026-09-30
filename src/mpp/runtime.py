@@ -30,10 +30,12 @@ def _method_accepts_currency(method: Method, challenge: Challenge) -> bool:
     if configured_currency is None:
         return True
     offered_currency = challenge.request.get("currency")
-    return (
-        isinstance(configured_currency, str)
-        and isinstance(offered_currency, str)
-        and offered_currency.lower() == configured_currency.lower()
+    accepted = getattr(method, "currencies", None)
+    if not isinstance(accepted, tuple | list) or not accepted:
+        accepted = (configured_currency,)
+    return isinstance(offered_currency, str) and any(
+        isinstance(currency, str) and offered_currency.lower() == currency.lower()
+        for currency in accepted
     )
 
 

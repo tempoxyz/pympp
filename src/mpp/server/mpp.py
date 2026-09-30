@@ -30,6 +30,7 @@ from mpp.server.compose import (
     ComposedResult,
     ComposeEntry,
     ComposeOptions,
+    _offer_currencies,
 )
 from mpp.server.decorator import (
     BodyParamsType,
@@ -71,16 +72,18 @@ class Mpp:
     """Server-side payment handler.
 
     Binds a payment method with realm and secret_key for stateless
-    challenge verification. Currency and recipient are configured once
-    on the method, so charge() only needs an amount.
+    challenge verification. Currencies and recipient are configured once
+    on the method, so charge() only needs an amount. Tempo methods accept
+    OUSD then USDC.e on mainnet (OUSD then pathUSD on Moderato) by default
+    and issue one challenge per accepted currency.
 
     Example:
         from mpp.server import Mpp
-        from mpp.methods.tempo import tempo
+        from mpp.methods.tempo import ChargeIntent, tempo
 
         m = Mpp.create(
             method=tempo(
-                currency="0x20c0000000000000000000000000000000000000",
+                intents={"charge": ChargeIntent()},
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
         )
@@ -90,8 +93,14 @@ class Mpp:
             amount="0.50",
         )
 
-        if isinstance(result, Challenge):
-            headers = {"WWW-Authenticate": result.to_www_authenticate(m.realm)}
+        if isinstance(result, Challenge | ComposedChallenges):
+            challenges = (
+                result.challenges if isinstance(result, ComposedChallenges) else (result,)
+            )
+            headers = [
+                ("WWW-Authenticate", challenge.to_www_authenticate(m.realm))
+                for challenge in challenges
+            ]
             return Response(status=402, headers=headers)
 
         credential, receipt = result
@@ -438,7 +447,7 @@ class Mpp:
         """Create an Mpp instance with smart defaults.
 
         Args:
-            method: Payment method (e.g., tempo(currency=..., recipient=...)).
+            method: Payment method (e.g., tempo(intents=..., recipient=...)).
             methods: Ordered payment methods. Mutually exclusive with ``method``.
             realm: Server realm. Auto-detected from environment if omitted.
             secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
@@ -522,8 +531,10 @@ class Mpp:
         Args:
             authorization: The Authorization header value (or None).
             amount: Payment amount in human units (e.g., "0.50" for $0.50).
-                Automatically converted to base units (6 decimals for pathUSD).
-            currency: Override the method's default currency.
+                Automatically converted to base units using the method's
+                decimals (6 for Tempo stablecoins).
+            currency: Offer only this currency instead of the method's
+                accepted currencies.
             recipient: Override the method's default recipient.
             expires: Challenge expiration as auth-param (ISO 8601).
                 Defaults to now + 5 minutes. Not included in the request body.
@@ -539,8 +550,9 @@ class Mpp:
                 Used when the server was created with ``requires_auth=True``.
 
         Returns:
-            Challenge, or ComposedChallenges for multiple methods, if payment
-            is required; otherwise (Credential, Receipt).
+            Challenge, or ComposedChallenges for multiple offers (methods or
+            accepted currencies), if payment is required; otherwise
+            (Credential, Receipt).
         """
         methods = [method for method in self.methods if "charge" in method.intents]
         if not methods:
@@ -557,12 +569,16 @@ class Mpp:
             "extra": extra,
             **method_options,
         }
-        if self._compose_implicit_methods:
-            result = await self.compose(
-                *((method, cast(ComposeOptions, options)) for method in methods),
+        composed_methods = self._composed_methods(methods, options)
+        if composed_methods:
+            handler = self.compose(
+                *((method, cast(ComposeOptions, options)) for method in composed_methods),
                 body=body,
-            ).verify(self.payment_credential_value(authorization, payment_authorization))
-            if len(methods) == 1 and isinstance(result, ComposedChallenges):
+            )
+            result = await handler.verify(
+                self.payment_credential_value(authorization, payment_authorization)
+            )
+            if len(handler._offers) == 1 and isinstance(result, ComposedChallenges):
                 return result.challenges[0]
             return result
 
@@ -611,7 +627,8 @@ class Mpp:
         Args:
             amount: Payment amount in human units (e.g., "0.50").
             intent: Intent name to look up on the method (default: "charge").
-            currency: Override the method's default currency.
+            currency: Offer only this currency instead of the method's
+                accepted currencies.
             recipient: Override the method's default recipient.
             description: Optional human-readable description.
             expires_in: Challenge validity duration. Defaults to 5 minutes.
@@ -622,7 +639,7 @@ class Mpp:
                 challenges via digest and used to verify paid retries.
 
         Example:
-            server = Mpp.create(method=tempo(currency=..., recipient=...))
+            server = Mpp.create(method=tempo(intents=..., recipient=...))
 
             @app.get("/paid")
             @server.pay(amount="0.50")
@@ -647,9 +664,13 @@ class Mpp:
             "extra": extra,
             **method_options,
         }
-        if self._compose_implicit_methods:
+        composed_methods = self._composed_methods(methods, options)
+        if composed_methods:
             return self.compose(
-                *((f"{method.name}/{intent}", cast(ComposeOptions, options)) for method in methods),
+                *(
+                    (f"{method.name}/{intent}", cast(ComposeOptions, options))
+                    for method in composed_methods
+                ),
                 body=body,
             )
 
@@ -685,6 +706,22 @@ class Mpp:
             )
 
         return decorator
+
+    def _composed_methods(
+        self,
+        methods: Sequence[Method],
+        options: Mapping[str, Any],
+    ) -> Sequence[Method]:
+        """Return the methods to serve through composition, or none.
+
+        Servers created with ``methods=`` always compose. A single ``method=``
+        composes only when it offers more than one currency for this request.
+        """
+        if self._compose_implicit_methods:
+            return methods
+        if _offer_currencies(methods[0], options) is not None:
+            return methods[:1]
+        return ()
 
     def _build_offer_request(
         self,

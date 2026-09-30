@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import mpp.methods.stripe.intents as stripe_intents
 from mpp.methods import CanOfferFn
 from mpp.methods.stripe.client import StripeMethod, spt
-from mpp.methods.tempo._defaults import CHAIN_ID, TESTNET_CHAIN_ID
+from mpp.methods.tempo._defaults import CHAIN_ID, TESTNET_CHAIN_ID, default_currency_for_chain
 
 if TYPE_CHECKING:
     from stripe import StripeClient
@@ -79,9 +79,12 @@ class TempoPayments:
         from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
         from mpp.methods.tempo import tempo
 
+        chain_id = CHAIN_ID if self._livemode else TESTNET_CHAIN_ID
         method = tempo(
             intents={"charge": TempoChargeIntent()},
-            chain_id=CHAIN_ID if self._livemode else TESTNET_CHAIN_ID,
+            chain_id=chain_id,
+            # Keep Stripe's Tempo rail on one currency: USDC.e live, pathUSD test.
+            currencies=[default_currency_for_chain(chain_id)],
             recipient=self._recipient,
             can_offer=_minimum_amount(_RAW_UNITS_PER_CENT),
             on_payment_success=None,
