@@ -21,6 +21,9 @@ class Store(Protocol):
         Returns ``True`` if the key was new and the write succeeded,
         ``False`` if the key already existed (duplicate).
 
+        Replay claims must not expire according to a general key-value TTL.
+        A successful claim must remain protected until explicitly deleted.
+
         Maps to ``SETNX`` in Redis, conditional put in DynamoDB, etc.
         """
         ...
