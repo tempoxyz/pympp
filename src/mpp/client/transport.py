@@ -45,7 +45,12 @@ _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
-    """Attach a Payment credential, preserving ordinary Authorization values."""
+    """Attach a Payment credential without discarding an ordinary Authorization value.
+
+    If the request already carries a non-Payment Authorization header (e.g. Bearer token),
+    preserve it and reroute the Payment credential to Payment-Authorization.
+    """
+    target = header
     for stale in _CREDENTIAL_HEADERS:
         existing = headers.get(stale)
         if (
@@ -53,10 +58,14 @@ def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> 
             and stale.lower() == AUTHORIZATION_HEADER.lower()
             and not existing.startswith("Payment ")
         ):
+            # The caller supplied a non-Payment Authorization. Keep it and send the
+            # Payment credential in Payment-Authorization instead of overwriting it.
+            if target.lower() == AUTHORIZATION_HEADER.lower():
+                target = PAYMENT_AUTHORIZATION_HEADER
             continue
         if existing is not None:
             del headers[stale]
-    headers[header] = value
+    headers[target] = value
 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
@@ -101,15 +110,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
     2. Parses the challenge and finds a matching payment method
     3. Creates credentials and retries the request
     4. Returns the final response (success or failure)
-
-    Example:
-        transport = PaymentTransport(
-            methods=[tempo(...)],
-            inner=httpx.AsyncHTTPTransport(),
-        )
-
-        async with httpx.AsyncClient(transport=transport) as client:
-            response = await client.get("https://api.example.com/resource")
     """
 
     def __init__(
@@ -322,12 +322,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
 
 class Client:
-    """HTTP client with automatic payment handling.
-
-    Example:
-        async with Client(methods=[tempo(...)]) as client:
-            response = await client.get("https://api.example.com/resource")
-    """
+    """HTTP client with automatic payment handling."""
 
     def __init__(
         self,
@@ -403,18 +398,7 @@ async def request(
     methods: Sequence[Method],
     **kwargs: Any,
 ) -> httpx.Response:
-    """Send an HTTP request with automatic payment handling.
-
-    This is a convenience function that creates a temporary client for a single request.
-    For multiple requests, use Client for connection pooling.
-
-    Example:
-        response = await request(
-            "GET",
-            "https://api.example.com/resource",
-            methods=[tempo(...)],
-        )
-    """
+    """Send an HTTP request with automatic payment handling."""
     async with Client(methods) as client:
         return await client.request(method, url, **kwargs)
 

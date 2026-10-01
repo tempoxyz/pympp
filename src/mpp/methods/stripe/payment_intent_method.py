@@ -64,7 +64,10 @@ class WrappedIntent:
 
 class VerifiableWrappedIntent(WrappedIntent):
     async def validate(self, credential: Credential, request: dict[str, Any]):
-        assert isinstance(self._intent, VerifiableIntent)
+        # Replace bare assert with explicit TypeError so validation persists under python -O
+        if not isinstance(self._intent, VerifiableIntent):
+            msg = "VerifiableWrappedIntent requires a VerifiableIntent"
+            raise TypeError(msg)
         return await self._intent.validate(credential, request)
 
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
@@ -72,7 +75,9 @@ class VerifiableWrappedIntent(WrappedIntent):
         # the terminal operation so errors prevent settlement.
         options = await resolve_options(self._options, credential, request)
         metadata = merge_metadata(credential, self._configured_metadata, options)
-        assert isinstance(self._intent, VerifiableIntent)
+        if not isinstance(self._intent, VerifiableIntent):
+            msg = "VerifiableWrappedIntent requires a VerifiableIntent"
+            raise TypeError(msg)
         receipt = await self._intent.broadcast(credential, request)
         await self._record_payment(credential, request, receipt, options, metadata)
         return receipt
