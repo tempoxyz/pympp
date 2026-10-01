@@ -49,17 +49,32 @@ class TestBuildKeychainSignature:
         # Inner sig is the same since msg_hash and key are the same
         assert sig1[21:] == sig2[21:]
 
-    def test_invalid_root_address_too_short(self) -> None:
-        """Should raise on root address with too few hex chars."""
+    def test_invalid_msg_hash_length(self) -> None:
+        """Should raise ValueError on invalid msg_hash length."""
+        access_key = TempoAccount.from_key(TEST_KEY)
+        root_account = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        with pytest.raises(ValueError, match="msg_hash must be exactly 32 bytes"):
+            build_keychain_signature(b"\x00" * 31, access_key, root_account)
+
+    def test_invalid_root_address_not_prefixed(self) -> None:
+        """Should raise ValueError on root address missing 0x prefix."""
         access_key = TempoAccount.from_key(TEST_KEY)
         msg_hash = b"\x00" * 32
 
-        # Production code uses `assert` for length validation after building the signature
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="0x-prefixed"):
+            build_keychain_signature(msg_hash, access_key, "742d35Cc6634c0532925a3b844bC9e7595F8fE00")
+
+    def test_invalid_root_address_too_short(self) -> None:
+        """Should raise ValueError on root address with too few hex chars."""
+        access_key = TempoAccount.from_key(TEST_KEY)
+        msg_hash = b"\x00" * 32
+
+        with pytest.raises(ValueError):
             build_keychain_signature(msg_hash, access_key, "0xdead")
 
     def test_invalid_root_address_not_hex(self) -> None:
-        """Should raise on root address with invalid hex."""
+        """Should raise ValueError on root address with invalid hex."""
         access_key = TempoAccount.from_key(TEST_KEY)
         msg_hash = b"\x00" * 32
 
@@ -69,7 +84,7 @@ class TestBuildKeychainSignature:
             )
 
     def test_invalid_root_address_odd_length_hex(self) -> None:
-        """Should raise on root address with odd-length hex string."""
+        """Should raise ValueError on root address with odd-length hex string."""
         access_key = TempoAccount.from_key(TEST_KEY)
         msg_hash = b"\x00" * 32
 
