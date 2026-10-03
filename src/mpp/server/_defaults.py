@@ -8,8 +8,6 @@ _REALM_ENV_VARS = [
     "MPP_REALM",
     "FLY_APP_NAME",
     "HEROKU_APP_NAME",
-    "HOST",
-    "HOSTNAME",
     "RAILWAY_PUBLIC_DOMAIN",
     "RENDER_EXTERNAL_HOSTNAME",
     "VERCEL_URL",
@@ -18,7 +16,12 @@ _REALM_ENV_VARS = [
 
 
 def detect_realm() -> str:
-    """Detect server realm from environment."""
+    """Detect server realm from environment.
+
+    ``HOST`` and ``HOSTNAME`` are not read: container runtimes set
+    ``HOSTNAME`` per replica, and the realm is bound into the challenge ID,
+    so replicas would reject each other's credentials.
+    """
     for var in _REALM_ENV_VARS:
         value = os.environ.get(var)
         if value:
