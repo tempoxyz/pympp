@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.0 (2026-10-09)
+
+### Minor Changes
+
+- Released v0.13.0. Added ordered `currencies` configuration to the Tempo method, enabling servers to accept OUSD first by default on mainnet and Moderato, with improved local fee payer token selection logic and new `OUSD` constant and `default_currencies_for_chain()` helper. Updated the PyJWT pin to 2.15.1 to include upstream security fixes. (by @tempo-github-sts[bot], [#266](https://github.com/tempoxyz/pympp/pull/266))
+
+### Patch Changes
+
+- Upgraded `urllib3` dependency from `2.7.0` to `2.8.0` across `tempo`, `stripe`, and `dev` dependency groups. (by @DerekCofausper, [#274](https://github.com/tempoxyz/pympp/pull/274))
+
 ## 0.13.0 (2026-09-30)
 
 ### Minor Changes
