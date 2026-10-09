@@ -38,7 +38,7 @@ tempo = [
     "rlp>=4.0",
     "pyjwt==2.15.1",
     "propcache==0.5.2",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "yarl==1.24.5",
 ]
 stripe = [
@@ -52,7 +52,7 @@ stripe = [
     "pyjwt==2.15.1",
     "propcache==0.5.2",
     "stripe>=8.0.0",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "yarl==1.24.5",
 ]
 server = ["pydantic>=2.0"]
@@ -87,7 +87,7 @@ dev = [
     "eth-abi>=5.0,<6",
     "build==1.6.0",
     "twine>=6.0",
-    "urllib3==2.7.0",
+    "urllib3==2.8.0",
     "aiosqlite>=0.20",
     "redis>=5.0",
     "starlette>=0.37",
