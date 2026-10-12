@@ -1,16 +1,17 @@
 name: PR Audit
 
 on:
+  pull_request:
+    types: [labeled, opened, synchronize, reopened, ready_for_review]
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types: [opened, synchronize, reopened, ready_for_review]
   issue_comment:
     types: [created]
-  pull_request_target: # zizmor: ignore[dangerous-triggers] Publishes authorized events without checking out PR code.
-    types: [synchronize, reopened, ready_for_review]
-  pull_request:
-    types: [labeled, synchronize, reopened, ready_for_review]
 
 permissions: {}
 
 jobs:
+  # Manual `cyclops` labels stay admin-only; push audits need no label.
   authorize:
     runs-on: ubuntu-latest
     if: github.event.action == 'labeled' && github.event.label.name == 'cyclops'
@@ -19,7 +20,7 @@ jobs:
       id-token: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@55fe3b63d9612623cc51e6c62d9d62fbcb175fb0 # 2026-09-29T01-25-15Z-55fe3b63
+        uses: tempoxyz/gh-actions/actions/secure-runner@252d87d9636b94551796b4b8a5cb4e27b8916cf6 # 2026-10-12T22-06-06Z-252d87d9
       - name: Check admin permission
         env:
           GH_TOKEN: ${{ github.token }}
@@ -34,26 +35,19 @@ jobs:
 
   pr-audit:
     needs: authorize
+    if: >-
+      !cancelled() &&
+      contains(fromJSON('["pull_request","pull_request_target"]'), github.event_name) &&
+      (needs.authorize.result == 'success' || github.event.action != 'labeled') &&
+      (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       id-token: write
       contents: read
       pull-requests: read
       statuses: write
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@ff385914926ea9e9d9647597b9cc501fb7b6d69a
-    secrets:
-      EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-      EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-      EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
-
-  warden-updates:
-    if: contains(fromJSON('["pull_request","pull_request_target"]'), github.event_name) && github.event.action != 'labeled'
-    permissions:
-      contents: read
-      id-token: write
-      pull-requests: read
-      statuses: write
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@ff385914926ea9e9d9647597b9cc501fb7b6d69a
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@252d87d9636b94551796b4b8a5cb4e27b8916cf6 # 2026-10-12T22-06-06Z-252d87d9
     with:
+      audit-on-push: true
       audit-on-command: true
     secrets:
       EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
@@ -79,8 +73,9 @@ jobs:
       pull-requests: write
     steps:
       - name: Secure runner
-        uses: tempoxyz/gh-actions/actions/secure-runner@e813067e922303348ee5aad965f745803cc24f1f # 2026-10-02T09-56-31Z-e813067e
+        uses: tempoxyz/gh-actions/actions/secure-runner@252d87d9636b94551796b4b8a5cb4e27b8916cf6 # 2026-10-12T22-06-06Z-252d87d9
 
+      # Audit commands stay admin-only, matching the label path.
       - name: Check admin permission
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,10 +89,11 @@ jobs:
           fi
 
       - name: Handle audit command
-        uses: tempoxyz/gh-actions/actions/pr-audit-comment@ff385914926ea9e9d9647597b9cc501fb7b6d69a
+        uses: tempoxyz/gh-actions/actions/pr-audit-comment@252d87d9636b94551796b4b8a5cb4e27b8916cf6 # 2026-10-12T22-06-06Z-252d87d9
         with:
           command-regex: '^(?:@decofe\s+)?(?:cyclops\s+(?:private\s+)?audit|derek\s+audit)\b'
           permission-check-mode: association
+          allowed-associations: OWNER,MEMBER
           organization: tempoxyz
           events-key: ${{ secrets.EVENTS_KEY }}
           events-cert: ${{ secrets.EVENTS_CERT }}
