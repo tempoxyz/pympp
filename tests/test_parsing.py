@@ -509,3 +509,35 @@ class TestReceipt:
 
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Receipt.from_payment_receipt(b64)
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+@pytest.mark.parametrize("field", ["id", "realm", "intent", "expires", "digest", "opaque"])
+def test_rejects_surrogates_in_credential_echo(field: str, surrogate: str) -> None:
+    body = {
+        "challenge": {
+            "id": "id",
+            "realm": "test",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {},
+        },
+        "payload": {},
+    }
+    body["challenge"][field] = surrogate
+    with pytest.raises(ParseError, match="Invalid base64 or JSON encoding"):
+        Credential.from_authorization("Payment " + _b64_json(body))
+
+
+@pytest.mark.parametrize("payload", [{"key": "\ud800"}, {"\udfff": "value"}, ["\ud800"]])
+def test_rejects_nested_surrogates(payload: object) -> None:
+    from mpp._parsing import _b64_decode
+
+    with pytest.raises(ParseError):
+        _b64_decode(_b64_json({"payload": payload}))
+
+
+def test_accepts_valid_supplementary_unicode() -> None:
+    from mpp._parsing import _b64_decode
+
+    assert _b64_decode(_b64_json({"text": "\U0001f600"})) == {"text": "\U0001f600"}

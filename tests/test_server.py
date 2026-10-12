@@ -342,6 +342,35 @@ class TestVerificationError:
         assert isinstance(result, Challenge)
 
     @pytest.mark.asyncio
+    async def test_malformed_unicode_returns_challenge_without_verification(self) -> None:
+        import base64
+        import json
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            pytest.fail("malformed credentials must not reach payment verification")
+
+        data = {
+            "challenge": {
+                "id": "\ud800",
+                "realm": "test",
+                "method": "tempo",
+                "intent": "charge",
+                "request": {},
+            },
+            "payload": {},
+        }
+        header = "Payment " + base64.urlsafe_b64encode(json.dumps(data).encode()).decode()
+        result = await verify_or_challenge(
+            authorization=header,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="test",
+            secret_key="test-secret",
+        )
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("field", ["request", "opaque"])
     async def test_returns_challenge_on_non_jcs_echo(self, field: str) -> None:
         """Reject echoed JSON that cannot be canonically encoded for HMAC verification."""
