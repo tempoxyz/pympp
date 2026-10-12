@@ -63,7 +63,8 @@ jobs:
         startsWith(github.event.comment.body, 'cyclops private audit') ||
         startsWith(github.event.comment.body, '@decofe cyclops audit') ||
         startsWith(github.event.comment.body, '@decofe cyclops private audit') ||
-        startsWith(github.event.comment.body, 'derek audit')
+        startsWith(github.event.comment.body, 'derek audit') ||
+        startsWith(github.event.comment.body, '@decofe derek audit')
       )
     runs-on: ubuntu-latest
     permissions:
