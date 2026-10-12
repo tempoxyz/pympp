@@ -548,6 +548,43 @@ class TestMcpClientPaidTool:
                 else:
                     sys.modules[mod_name] = orig
 
+    @pytest.mark.parametrize("backend", ["asyncio", "trio"])
+    def test_cancelled_paid_retry_has_unknown_outcome(self, backend: str) -> None:
+        anyio = pytest.importorskip("anyio")
+        exceptions = pytest.importorskip("mcp.shared.exceptions")
+        types = pytest.importorskip("mcp.types")
+
+        async def run() -> None:
+            session = AsyncMock()
+
+            async def call_tool(*args: Any, **kwargs: Any) -> None:
+                if session.call_tool.await_count == 1:
+                    raise exceptions.McpError(
+                        types.ErrorData(
+                            code=-32042,
+                            message="Payment Required",
+                            data={"challenges": [_make_challenge_dict()]},
+                        )
+                    )
+                scope.cancel()
+                await anyio.sleep_forever()
+
+            session.call_tool = AsyncMock(side_effect=call_tool)
+            client = McpClient(session, methods=[FakeMethod()])
+            with anyio.CancelScope() as scope:
+                with pytest.raises(
+                    PaymentOutcomeUnknownError, match="Do not blindly retry"
+                ) as raised:
+                    await client.call_tool("premium_tool", {"query": "test"})
+
+            assert not scope.cancelled_caught
+            assert raised.value.challenge.id == "ch_test123"
+            assert isinstance(raised.value.__cause__, anyio.get_cancelled_exc_class())
+            assert session.call_tool.await_count == 2
+            assert META_CREDENTIAL in session.call_tool.call_args.kwargs["meta"]
+
+        anyio.run(run, backend=backend)
+
 
 class TestMcpClientMethodMatching:
     """Tests for challenge-to-method matching logic."""
