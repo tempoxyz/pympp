@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -16,7 +14,6 @@ from mpp.errors import (
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
-    VerificationError,
     VerificationFailedError,
 )
 
@@ -141,22 +138,24 @@ class Relay:
         path: str,
         body: dict[str, Any],
         *,
-        idempotency_key: str | None = None,
+        strip_idempotency_key: bool = False,
     ) -> dict[str, Any]:
         headers = {
             "Accept": "application/json",
             "content-type": "application/json",
             "tempo-api-key": self.api_key,
         }
-        if idempotency_key is not None:
-            headers["idempotency-key"] = idempotency_key
-
         logger.debug("relay request method=POST path=/%s", path)
-        response = await (await self._get_client()).post(
+        client = await self._get_client()
+        request = client.build_request(
+            "POST",
             self.api_base_url + path,
             json=body,
             headers=headers,
         )
+        if strip_idempotency_key:
+            request.headers.pop("idempotency-key", None)
+        response = await client.send(request)
         result = response.json() if response.is_success else None
         if not isinstance(result, dict) or result.get("success") is not True:
             raise _failure(result)
@@ -192,10 +191,12 @@ class _RelayIntent:
     async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
         body = _relay_input(credential, request)
         try:
+            # Cached settlement receipts must not authorize another protected operation.
+            # Without an idempotency key, the relay consumes each credential once.
             result = await self._relay._post(
                 "v1/mpp/broadcast",
                 body,
-                idempotency_key=_idempotency_key(body),
+                strip_idempotency_key=True,
             )
             return _receipt(result.get("receipt"))
         except PaymentError:
@@ -233,28 +234,6 @@ def _relay_input(credential: Credential, expected_request: dict[str, Any]) -> di
     if credential.source:
         result["source"] = credential.source
     return result
-
-
-def _idempotency_key(body: dict[str, Any]) -> str:
-    """Derive a deterministic broadcast idempotency key.
-
-    Pull-mode credentials use the signed transaction's hash so retries of the
-    same transaction collapse server-side. Other payloads fall back to a hash
-    of the canonical relay input.
-    """
-    payload = body.get("payload")
-    if isinstance(payload, dict):
-        signature = payload.get("signature")
-        if payload.get("type") == "transaction" and isinstance(signature, str):
-            from mpp.methods.tempo.intents import _raw_transaction_hash
-
-            try:
-                return f"mpp_{_raw_transaction_hash(signature)}"
-            except VerificationError:
-                pass
-
-    canonical = json.dumps(body, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return f"mpp_0x{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _receipt(value: Any) -> Receipt:
