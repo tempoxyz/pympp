@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from eth_hash.auto import keccak
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import (
@@ -51,7 +50,7 @@ async def relay_method(
 
 
 @pytest.mark.asyncio
-async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
+async def test_relay_validates_then_broadcasts_without_receipt_caching() -> None:
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -86,8 +85,7 @@ async def test_relay_validates_then_broadcasts_with_idempotency() -> None:
         "/mpp/v1/mpp/broadcast",
     ]
     assert calls[0].headers["tempo-api-key"] == "tempo:sk:test"
-    expected_key = "mpp_0x" + keccak(bytes.fromhex("1234")).hex()
-    assert calls[1].headers["idempotency-key"] == expected_key
+    assert "idempotency-key" not in calls[1].headers
     body = json.loads(calls[0].content)
     assert body["challenge"]["request"] == {"amount": "1000"}
     assert body["payload"] == {"type": "transaction", "signature": "0x1234"}
@@ -124,7 +122,7 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
         "/v1/mpp/validate",
         "/v1/mpp/broadcast",
     ]
-    assert calls[1].headers["idempotency-key"].startswith("mpp_0x")
+    assert "idempotency-key" not in calls[1].headers
 
 
 @pytest.mark.asyncio
@@ -431,3 +429,41 @@ async def test_charge_validation_rejects_undecodable_transactions(signature: str
                 "recipient": "0x4567890123456789012345678901234567890123",
             },
         )
+
+
+@pytest.mark.asyncio
+async def test_relay_does_not_authorize_cached_receipts_for_concurrent_credentials() -> None:
+    import asyncio
+
+    consumed = False
+    receipt = {
+        "success": True,
+        "receipt": {"method": "tempo", "reference": "0xabc", "timestamp": "2026-08-05T12:00:00Z"},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal consumed
+        if request.url.path.endswith("/validate"):
+            return response({"success": True})
+        # Model the relay contract: an idempotency key permits cached success.
+        if consumed and "idempotency-key" not in request.headers:
+            return response(
+                {"success": False, "error": {"code": "already_used", "message": "Used"}}
+            )
+        consumed = True
+        return response(receipt)
+
+    async with relay_method(handler) as method:
+        results = await asyncio.gather(
+            *(
+                broadcast_credential(
+                    intent=method.intents["charge"],
+                    credential=credential(),
+                    request={"amount": "1000"},
+                )
+                for _ in range(2)
+            ),
+            return_exceptions=True,
+        )
+    assert sum(isinstance(result, Receipt) for result in results) == 1
+    assert sum(isinstance(result, VerificationFailedError) for result in results) == 1
