@@ -137,6 +137,8 @@ class Relay:
         self,
         path: str,
         body: dict[str, Any],
+        *,
+        strip_idempotency_key: bool = False,
     ) -> dict[str, Any]:
         headers = {
             "Accept": "application/json",
@@ -144,11 +146,16 @@ class Relay:
             "tempo-api-key": self.api_key,
         }
         logger.debug("relay request method=POST path=/%s", path)
-        response = await (await self._get_client()).post(
+        client = await self._get_client()
+        request = client.build_request(
+            "POST",
             self.api_base_url + path,
             json=body,
             headers=headers,
         )
+        if strip_idempotency_key:
+            request.headers.pop("idempotency-key", None)
+        response = await client.send(request)
         result = response.json() if response.is_success else None
         if not isinstance(result, dict) or result.get("success") is not True:
             raise _failure(result)
@@ -189,6 +196,7 @@ class _RelayIntent:
             result = await self._relay._post(
                 "v1/mpp/broadcast",
                 body,
+                strip_idempotency_key=True,
             )
             return _receipt(result.get("receipt"))
         except PaymentError:

@@ -38,11 +38,14 @@ def response(body: dict, status: int = 200) -> httpx.Response:
 @asynccontextmanager
 async def relay_method(
     handler: Callable[[httpx.Request], httpx.Response],
+    client_headers: dict[str, str] | None = None,
     **relay_kwargs: Any,
 ) -> AsyncIterator[TempoMethod]:
     """Yield a tempo method whose charge intent is served by a mock relay."""
     relay_kwargs.setdefault("api_key", "key")
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), headers=client_headers
+    ) as client:
         yield tempo(
             intents={"charge": ChargeIntent()},
             relay=Relay(http_client=client, **relay_kwargs),
@@ -70,6 +73,7 @@ async def test_relay_validates_then_broadcasts_without_receipt_caching() -> None
 
     async with relay_method(
         handler,
+        client_headers={"Idempotency-Key": "inherited-key"},
         api_key="tempo:sk:test",
         api_base_url="https://relay.example/mpp",
     ) as method:
@@ -85,6 +89,7 @@ async def test_relay_validates_then_broadcasts_without_receipt_caching() -> None
         "/mpp/v1/mpp/broadcast",
     ]
     assert calls[0].headers["tempo-api-key"] == "tempo:sk:test"
+    assert calls[0].headers["idempotency-key"] == "inherited-key"
     assert "idempotency-key" not in calls[1].headers
     body = json.loads(calls[0].content)
     assert body["challenge"]["request"] == {"amount": "1000"}
@@ -453,7 +458,7 @@ async def test_relay_does_not_authorize_cached_receipts_for_concurrent_credentia
         consumed = True
         return response(receipt)
 
-    async with relay_method(handler) as method:
+    async with relay_method(handler, client_headers={"Idempotency-Key": "inherited-key"}) as method:
         results = await asyncio.gather(
             *(
                 broadcast_credential(
