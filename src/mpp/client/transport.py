@@ -176,13 +176,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             if response.status_code != 402:
                 return response
 
-            try:
-                await response.aread()
-            except BaseException:
-                with suppress(BaseException):
-                    await response.aclose()
-                raise
-
             if original_origin != current_origin:
                 error = PaymentError("Refusing to send payment credential across redirect")
                 await self._events.emit(
@@ -250,6 +243,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     },
                 )
                 auth_header = credential.to_authorization()
+            except asyncio.CancelledError:
+                with suppress(BaseException):
+                    await response.aclose()
+                raise
             except Exception as error:
                 await self._events.emit(
                     PAYMENT_FAILED,
@@ -265,8 +262,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 )
                 if isinstance(error, (InvalidChallengeError, PaymentExpiredError)):
                     return response
+                await response.aclose()
                 raise
 
+            await response.aclose()
             headers = httpx.Headers(request.headers)
             _set_payment_credential(headers, challenge.credential_header, auth_header)
             retry_request = httpx.Request(
