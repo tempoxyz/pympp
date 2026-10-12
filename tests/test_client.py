@@ -47,6 +47,22 @@ class MockTransport(httpx.AsyncBaseTransport):
         pass
 
 
+class TrackedStream(httpx.AsyncByteStream):
+    def __init__(self, *, close_error: bool = False) -> None:
+        self.closed = False
+        self.reads = 0
+        self.close_error = close_error
+
+    async def __aiter__(self):
+        self.reads += 1
+        yield b"unread response body"
+
+    async def aclose(self) -> None:
+        self.closed = True
+        if self.close_error:
+            raise OSError("close failed")
+
+
 class TestPaymentTransport:
     def test_runtime_configuration_is_unambiguous(self) -> None:
         class FalseyRuntime(PaymentRuntime):
@@ -553,6 +569,136 @@ class TestPaymentTransport:
                 assert await response.aread() == b"body remains available to the caller"
                 await response.aclose()
         assert stream.reads == (1 if mode in ("missing", "malformed", "unmatched") else 0)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "mode", ["cross_origin", "malformed", "unmatched", "credential_error", "success"]
+    )
+    async def test_cancelled_observer_closes_owned_response(self, mode: str) -> None:
+        challenge = Challenge(
+            id="test-id",
+            method="stripe" if mode == "unmatched" else "tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        headers = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+        if mode == "malformed":
+            headers = {"www-authenticate": 'Payment id="broken"'}
+        stream = TrackedStream()
+        response = httpx.Response(402, headers=headers, stream=stream)
+        method = MockMethod()
+        if mode == "credential_error":
+            method.create_credential.side_effect = RuntimeError("signing failed")
+        responses = [response]
+        if mode == "success":
+            stream = TrackedStream()
+            responses.append(httpx.Response(200, stream=stream))
+        transport = PaymentTransport(methods=[method], inner=MockTransport(responses))
+        entered = asyncio.Event()
+
+        async def observer(_payload):
+            entered.set()
+            await asyncio.Future()
+
+        if mode == "success":
+            transport.on_payment_response(observer)
+        else:
+            transport.on_payment_failed(observer)
+        request = httpx.Request("GET", "https://example.com")
+        if mode == "cross_origin":
+            from mpp.client.transport import _ORIGINAL_ORIGIN_EXTENSION
+
+            request.extensions[_ORIGINAL_ORIGIN_EXTENSION] = ("https", "other.example", 443)
+        task = asyncio.create_task(transport.handle_async_request(request))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stream.closed
+        assert stream.reads == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["retry", "error", "cancel", "invalid"])
+    async def test_close_failure_does_not_replace_payment_outcome(self, mode: str) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        stream = TrackedStream(close_error=True)
+        original = httpx.Response(
+            402,
+            headers={
+                "www-authenticate": challenge.to_www_authenticate("example.com"),
+                "content-length": "1000000",
+            },
+            stream=stream,
+        )
+        method = MockMethod()
+        if mode != "retry":
+            method.create_credential.side_effect = {
+                "error": RuntimeError("signing failed"),
+                "cancel": asyncio.CancelledError(),
+                "invalid": InvalidChallengeError("test-id", "invalid"),
+            }[mode]
+        transport = PaymentTransport(
+            methods=[method], inner=MockTransport([original, httpx.Response(200)])
+        )
+        request = httpx.Request("GET", "https://example.com")
+        if mode in ("error", "cancel"):
+            with pytest.raises(
+                RuntimeError if mode == "error" else asyncio.CancelledError
+            ) as raised:
+                await transport.handle_async_request(request)
+            assert raised.value is method.create_credential.side_effect
+        else:
+            response = await transport.handle_async_request(request)
+            assert response.status_code == (200 if mode == "retry" else 402)
+            assert await response.aread() == b""
+            if mode == "invalid":
+                assert response.headers["www-authenticate"] == original.headers["www-authenticate"]
+                assert "content-length" not in response.headers
+        assert stream.closed
+        assert stream.reads == 0
+
+    @pytest.mark.asyncio
+    async def test_credential_callback_can_reuse_single_connection_pool(self) -> None:
+        pool = asyncio.Semaphore(1)
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+
+        class PoolStream(TrackedStream):
+            async def aclose(self) -> None:
+                await super().aclose()
+                pool.release()
+
+        stream = PoolStream()
+
+        class SingleConnectionTransport(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request):
+                await pool.acquire()
+                if request.url.path == "/auxiliary" or "Authorization" in request.headers:
+                    pool.release()
+                    return httpx.Response(200)
+                return httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                    stream=stream,
+                )
+
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method], inner=SingleConnectionTransport())
+        async with httpx.AsyncClient(transport=transport) as client:
+
+            async def create_credential(_challenge):
+                assert (await client.get("https://example.com/auxiliary")).status_code == 200
+                return make_credential(payload={"hash": "0xabc"}, challenge_id="test-id")
+
+            method.create_credential.side_effect = create_credential
+            response = await asyncio.wait_for(client.get("https://example.com/paid"), timeout=1)
+            assert response.status_code == 200
+        assert stream.reads == 0
 
     @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
