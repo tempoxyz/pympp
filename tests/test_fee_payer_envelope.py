@@ -372,35 +372,22 @@ def _sign_tx_with_key_auth(key_auth_payload: list) -> TempoTransaction:
 class TestKeyAuthorizationRoundtrip:
     """The decoded keyAuthorization must preserve every signed field (TIP-1049 T6)."""
 
-    def test_cosign_preserves_full_t6_key_authorization(self) -> None:
-        """encode -> decode -> cosign must keep the full T6 payload byte-exact.
+    def test_cosign_rejects_unsimulatable_key_authorization(self) -> None:
+        from unittest.mock import patch
 
-        The sender signs a hash that includes ``key_authorization.as_rlp_payload()``.
-        If decoding drops any signed field (``limits``/``allowed_calls``/``witness``/
-        ``is_admin``/``account``), the recomputed sender hash changes and cosign
-        fails with "Sender address does not match recovered signer".
-        """
         from mpp.methods.tempo import TempoAccount, tempo
-        from mpp.methods.tempo.intents import ChargeIntent
+        from mpp.methods.tempo.intents import ChargeIntent, VerificationError
 
         signed = _sign_tx_with_key_auth(_T6_KEY_AUTH_PAYLOAD)
         envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
-
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
         intent = ChargeIntent(rpc_url="https://rpc.test")
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
-        # Succeeds only if the sender hash matched -> the full payload round-tripped.
-        result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
-        assert result.startswith("0x76")
-        # keyAuthorization cannot be faithfully serialized into the simulate JSON,
-        # so pre-broadcast simulation is skipped rather than run on a divergent tx.
-        assert simulate_payload is None
-
-        # keyAuthorization sits at index 13 in the 0x76 encoding (before sender sig).
-        decoded = rlp.decode(bytes.fromhex(result[2:])[1:])
-        assert len(decoded) == 15
-        assert decoded[13] == _T6_KEY_AUTH_PAYLOAD
+        with patch.object(TempoTransaction, "sign") as sign:
+            with pytest.raises(VerificationError, match="Authorization-bearing transactions"):
+                intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+            sign.assert_not_called()
 
     def test_decode_preserves_payload(self) -> None:
         """The decode wrapper re-encodes the original keyAuthorization verbatim."""
@@ -445,7 +432,7 @@ class TestKeyAuthorizationRoundtrip:
 class TestTempoAuthorizationListRoundtrip:
     """tempo_authorization_list is part of the signing hash and must survive cosign."""
 
-    def test_cosign_preserves_authorization_list(self) -> None:
+    def test_cosign_rejects_unsimulatable_authorization_list(self) -> None:
         from mpp.methods.tempo import TempoAccount, tempo
         from mpp.methods.tempo.intents import ChargeIntent
 
@@ -474,15 +461,14 @@ class TestTempoAuthorizationListRoundtrip:
         intent = ChargeIntent(rpc_url="https://rpc.test")
         tempo(fee_payer=fee_payer, rpc_url="https://rpc.test", intents={"charge": intent})
 
-        # Succeeds only if the auth list was preserved into the recovery hash.
-        result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
-        assert result.startswith("0x76")
-        # aaAuthorizationList cannot be faithfully serialized into the simulate
-        # JSON, so pre-broadcast simulation is skipped for this tx.
-        assert simulate_payload is None
+        from unittest.mock import patch
 
-        decoded = rlp.decode(bytes.fromhex(result[2:])[1:])
-        assert decoded[12] == [b"\x77" * 20, b"\x88" * 32]
+        from mpp.errors import VerificationError
+
+        with patch.object(TempoTransaction, "sign") as sign:
+            with pytest.raises(VerificationError, match="Authorization-bearing transactions"):
+                intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+            sign.assert_not_called()
 
     def test_cosign_plain_tx_still_builds_simulate_payload(self) -> None:
         """A tx without authorization fields keeps the pre-broadcast simulation."""
