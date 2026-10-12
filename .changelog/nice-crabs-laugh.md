@@ -2,4 +2,4 @@
 pympp: patch
 ---
 
-Fixed MCP client to correctly catch `asyncio.CancelledError` during paid tool retries and report them as unknown payment outcomes, preventing silent cancellation without proper error handling. Added a corresponding test to verify the behaviour.
+Fixed cancelled paid MCP retries to report unknown payment outcomes on both asyncio and Trio, preventing callers from blindly retrying a payment that may have settled.

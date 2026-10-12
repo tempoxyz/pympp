@@ -25,7 +25,6 @@ Example:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -183,6 +182,7 @@ class McpClient:
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
             ValueError: If no installed method matches the server's challenge.
         """
+        from anyio import get_cancelled_exc_class
         from mcp.shared.exceptions import McpError
 
         call_kwargs: dict[str, Any] = {}
@@ -218,7 +218,7 @@ class McpClient:
 
             try:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
-            except (Exception, asyncio.CancelledError) as exc:
+            except (Exception, get_cancelled_exc_class()) as exc:
                 raise PaymentOutcomeUnknownError(challenge, exc) from exc
 
             receipt = self._extract_receipt(retry_result)
