@@ -500,27 +500,59 @@ class TestPaymentTransport:
         assert len(inner.requests) == 1
 
     @pytest.mark.asyncio
-    async def test_closes_challenge_response_when_read_fails(self) -> None:
-        class FailingStream(httpx.AsyncByteStream):
+    @pytest.mark.parametrize(
+        "mode", ["missing", "malformed", "unmatched", "retry", "error", "cancel"]
+    )
+    async def test_402_body_is_not_buffered(self, mode: str) -> None:
+        class StreamingBody(httpx.AsyncByteStream):
             closed = False
+            reads = 0
 
             async def __aiter__(self):
-                raise RuntimeError("read failed")
-                yield b""  # pragma: no cover
+                self.reads += 1
+                yield b"body remains available to the caller"
 
             async def aclose(self) -> None:
                 self.closed = True
 
-        stream = FailingStream()
-        transport = PaymentTransport(
-            methods=[MockMethod()],
-            inner=MockTransport([httpx.Response(402, stream=stream)]),
+        stream = StreamingBody()
+        challenge = Challenge(
+            id="test-id",
+            method="stripe" if mode == "unmatched" else "tempo",
+            intent="charge",
+            request={"amount": "1000"},
         )
-
-        with pytest.raises(RuntimeError, match="read failed"):
-            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
-
-        assert stream.closed
+        headers = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+        if mode == "missing":
+            headers = {}
+        elif mode == "malformed":
+            headers = {"www-authenticate": 'Payment id="broken"'}
+        original = httpx.Response(402, headers=headers, stream=stream)
+        inner = MockTransport([original, httpx.Response(200)])
+        method = MockMethod()
+        if mode in ("error", "cancel"):
+            method.create_credential.side_effect = (
+                asyncio.CancelledError() if mode == "cancel" else RuntimeError("signing failed")
+            )
+        transport = PaymentTransport(methods=[method], inner=inner)
+        request = httpx.Request("GET", "https://example.com")
+        if mode in ("error", "cancel"):
+            with pytest.raises(asyncio.CancelledError if mode == "cancel" else RuntimeError):
+                await transport.handle_async_request(request)
+            assert stream.closed
+        else:
+            response = await transport.handle_async_request(request)
+            assert stream.reads == 0
+            if mode == "retry":
+                assert response.status_code == 200
+                assert stream.closed
+                assert len(inner.requests) == 2
+            else:
+                assert response is original
+                assert not stream.closed
+                assert await response.aread() == b"body remains available to the caller"
+                await response.aclose()
+        assert stream.reads == (1 if mode in ("missing", "malformed", "unmatched") else 0)
 
     @pytest.mark.asyncio
     async def test_emits_client_payment_events(self) -> None:
