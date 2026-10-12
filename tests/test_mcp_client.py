@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock
@@ -547,6 +548,40 @@ class TestMcpClientPaidTool:
                     sys.modules.pop(mod_name, None)
                 else:
                     sys.modules[mod_name] = orig
+
+    @pytest.mark.asyncio
+    async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:
+        exceptions = pytest.importorskip("mcp.shared.exceptions")
+        types = pytest.importorskip("mcp.types")
+        retry_started = asyncio.Event()
+        session = AsyncMock()
+
+        async def call_tool(*args: Any, **kwargs: Any) -> None:
+            if session.call_tool.await_count == 1:
+                raise exceptions.McpError(
+                    types.ErrorData(
+                        code=-32042,
+                        message="Payment Required",
+                        data={"challenges": [_make_challenge_dict()]},
+                    )
+                )
+            retry_started.set()
+            await asyncio.Event().wait()
+
+        session.call_tool = AsyncMock(side_effect=call_tool)
+        client = McpClient(session, methods=[FakeMethod()])
+        task = asyncio.create_task(client.call_tool("premium_tool", {"query": "test"}))
+        await retry_started.wait()
+        task.cancel()
+
+        with pytest.raises(PaymentOutcomeUnknownError, match="Do not blindly retry") as raised:
+            await task
+
+        assert raised.value.challenge.id == "ch_test123"
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert not task.cancelled()
+        assert session.call_tool.await_count == 2
+        assert META_CREDENTIAL in session.call_tool.call_args.kwargs["meta"]
 
 
 class TestMcpClientMethodMatching:

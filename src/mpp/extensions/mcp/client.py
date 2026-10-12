@@ -25,6 +25,7 @@ Example:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -217,7 +218,7 @@ class McpClient:
 
             try:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 raise PaymentOutcomeUnknownError(challenge, exc) from exc
 
             receipt = self._extract_receipt(retry_result)
