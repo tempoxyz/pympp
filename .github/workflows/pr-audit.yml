@@ -39,7 +39,7 @@ jobs:
       !cancelled() &&
       contains(fromJSON('["pull_request","pull_request_target"]'), github.event_name) &&
       (needs.authorize.result == 'success' || github.event.action != 'labeled') &&
-      (github.event_name != 'pull_request_target' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event.action == 'labeled' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       id-token: write
       contents: read
@@ -58,6 +58,7 @@ jobs:
     if: >-
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER","MEMBER"]'), github.event.comment.author_association) &&
       (
         startsWith(github.event.comment.body, 'cyclops audit') ||
         startsWith(github.event.comment.body, 'cyclops private audit') ||
