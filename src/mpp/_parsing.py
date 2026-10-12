@@ -63,6 +63,8 @@ def _b64_decode(encoded: str) -> dict[str, Any]:
         obj = json.loads(decoded)
         if not isinstance(obj, dict):
             raise ParseError("Expected JSON object")
+        # JSON escapes can contain lone surrogates that fail later UTF-8/HMAC encoding.
+        json.dumps(obj, ensure_ascii=False).encode("utf-8")
         return obj
     except (ValueError, json.JSONDecodeError):
         raise ParseError("Invalid base64 or JSON encoding") from None
