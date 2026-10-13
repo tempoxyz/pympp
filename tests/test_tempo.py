@@ -70,6 +70,19 @@ def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Res
     return response
 
 
+def with_chain_id(mock_client: AsyncMock) -> AsyncMock:
+    """Answer chain identity before delegating existing receipt RPC mocks."""
+    original_post = mock_client.post
+
+    async def post(url: str, *, json: dict) -> httpx.Response:
+        if json["method"] == "eth_chainId":
+            return mock_response(200, {"jsonrpc": "2.0", "result": hex(CHAIN_ID), "id": 1})
+        return await original_post(url, json=json)
+
+    mock_client.post = AsyncMock(side_effect=post)
+    return mock_client
+
+
 def amount_data(amount: int) -> str:
     return "0x" + hex(amount)[2:].zfill(64)
 
@@ -857,6 +870,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
@@ -906,6 +920,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
@@ -956,6 +971,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
@@ -1005,6 +1021,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
@@ -1068,6 +1085,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
@@ -1100,6 +1118,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(payload={"type": "hash", "hash": "0xabc"}, expires=future)
         with pytest.raises(VerificationError, match="Transaction reverted"):
@@ -1126,6 +1145,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(payload={"type": "hash", "hash": "0xabc"}, expires=future)
         with pytest.raises(VerificationError, match="Transfer log"):
@@ -1183,6 +1203,7 @@ class TestChargeIntent:
             )
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
 
         credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=future)
 
@@ -2702,7 +2723,7 @@ class TestCosignAsFeePayer:
                     "amount": "1000000",
                     "currency": currency,
                     "recipient": recipient,
-                    "methodDetails": {"feePayer": True},
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
                 },
             )
 
@@ -2746,7 +2767,7 @@ class TestCosignAsFeePayer:
                     "amount": str(amount),
                     "currency": currency,
                     "recipient": recipient,
-                    "methodDetails": {"feePayer": True},
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
                 },
             )
 
@@ -2778,7 +2799,7 @@ class TestCosignAsFeePayer:
                     "amount": "1000000",
                     "currency": currency,
                     "recipient": recipient,
-                    "methodDetails": {"feePayer": True},
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
                 },
             )
         mock_client.post.assert_not_awaited()
@@ -2820,7 +2841,7 @@ class TestCosignAsFeePayer:
                     "amount": "1000000",
                     "currency": currency,
                     "recipient": recipient,
-                    "methodDetails": {"feePayer": True},
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
                 },
             )
 
@@ -2832,6 +2853,20 @@ class TestCosignAsFeePayer:
 
 class TestValidateTransactionPayload:
     """Tests for _validate_transaction_payload with both 0x76 and 0x78."""
+
+    @pytest.mark.parametrize("envelope", ["0x76", "0x78"])
+    def test_rejects_transaction_on_other_chain(self, envelope: str) -> None:
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        request = ChargeRequest(
+            amount="1000000",
+            currency=PATH_USD,
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            methodDetails=MethodDetails(chainId=TESTNET_CHAIN_ID),
+        )
+        signature = self._build_0x76_tx() if envelope == "0x76" else self._build_0x78_envelope()
+
+        with pytest.raises(VerificationError, match="Transaction chain ID"):
+            intent._validate_transaction_payload(signature, request, strict=True)
 
     def _encode_transfer_data(
         self,
@@ -2865,7 +2900,7 @@ class TestValidateTransactionPayload:
         transfer_data = self._encode_transfer_data(recipient, amount, memo, padding)
 
         tx = TempoTransaction.create(
-            chain_id=42431,
+            chain_id=CHAIN_ID,
             gas_limit=100000,
             max_fee_per_gas=1,
             max_priority_fee_per_gas=1,
@@ -2895,7 +2930,7 @@ class TestValidateTransactionPayload:
         transfer_data = self._encode_transfer_data(recipient, amount, memo, padding)
 
         tx = TempoTransaction.create(
-            chain_id=42431,
+            chain_id=CHAIN_ID,
             gas_limit=100000,
             max_fee_per_gas=1,
             max_priority_fee_per_gas=1,
@@ -2996,7 +3031,7 @@ class TestValidateTransactionPayload:
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         )
         tx = TempoTransaction.create(
-            chain_id=42431,
+            chain_id=CHAIN_ID,
             gas_limit=100000,
             max_fee_per_gas=1,
             max_priority_fee_per_gas=1,
@@ -3785,7 +3820,8 @@ class TestValidateTransactionPayload0x76:
         request = self._make_request()
 
         # Build minimal RLP: [chain_id, mpfpg, mfpg, gas, calls=[], ...]
-        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [], b"", b"", b"\x00", b"", b"", b""]
+        chain = CHAIN_ID.to_bytes(2, "big")
+        decoded = [chain, b"\x01", b"\x01", b"\x01", [], b"", b"", b"\x00", b"", b"", b""]
         payload = b"\x76" + bytes(rlp.encode(decoded))
         sig = "0x" + payload.hex()
 
@@ -3804,7 +3840,8 @@ class TestValidateTransactionPayload0x76:
 
         currency_bytes = bytes.fromhex(self.CURRENCY[2:])
         call = [currency_bytes, b"", call_data]
-        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        chain = CHAIN_ID.to_bytes(2, "big")
+        decoded = [chain, b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
         payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
         sig = "0x" + payload.hex()
 
@@ -3823,7 +3860,8 @@ class TestValidateTransactionPayload0x76:
 
         currency_bytes = bytes.fromhex(self.CURRENCY[2:])
         call = [currency_bytes, b"", call_data]
-        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        chain = CHAIN_ID.to_bytes(2, "big")
+        decoded = [chain, b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
         payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
         sig = "0x" + payload.hex()
 
@@ -3842,7 +3880,8 @@ class TestValidateTransactionPayload0x76:
         call_data = selector + to_padded + amount_padded
 
         call = [wrong_currency, b"", call_data]
-        decoded = [b"\x01", b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
+        chain = CHAIN_ID.to_bytes(2, "big")
+        decoded = [chain, b"\x01", b"\x01", b"\x01", [call], b"", b"", b"\x00", b"", b"", b""]
         payload = b"\x76" + rlp.encode(decoded)  # type: ignore[operator]
         sig = "0x" + payload.hex()
 
@@ -4535,6 +4574,7 @@ class TestHashCredentialSourceValidation:
             return_value=mock_response(200, {"jsonrpc": "2.0", "result": receipt, "id": 1})
         )
         intent._http_client = mock_client
+        with_chain_id(mock_client)
         return intent
 
     async def _verify(self, intent: ChargeIntent, source: str | None, memo_value=None):

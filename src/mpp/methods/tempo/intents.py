@@ -22,7 +22,7 @@ from mpp._defaults import DEFAULT_TIMEOUT
 from mpp._validation import Validation
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
-from mpp.methods.tempo._rpc import _tip20_balance
+from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import get_policy
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
@@ -533,6 +533,20 @@ class ChargeIntent:
             self._http_client = httpx.AsyncClient(timeout=self._timeout)
         return self._http_client
 
+    async def _assert_rpc_chain_id(self, expected: int) -> None:
+        """Check the settlement RPC against the authenticated charge request."""
+        actual_hex = await _rpc_call(
+            self._get_rpc_url(), "eth_chainId", [], client=await self._get_client()
+        )
+        try:
+            actual = int(actual_hex, 16)
+        except (TypeError, ValueError) as error:
+            raise VerificationError("Invalid RPC chain ID") from error
+        if actual != expected:
+            raise VerificationError(
+                f"RPC chain ID {actual} does not match charge chain ID {expected}"
+            )
+
     def _prepare_credential(
         self,
         credential: Credential,
@@ -742,6 +756,7 @@ class ChargeIntent:
         """Validate a transaction hash without consuming its replay key."""
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
+        await self._assert_rpc_chain_id(request.methodDetails.chainId)
         client = await self._get_client()
         receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
         self._verify_receipt_transfers(
@@ -1506,6 +1521,11 @@ class ChargeIntent:
             if strict:
                 raise VerificationError("Invalid serialized transaction")
             return
+
+        if not isinstance(decoded[0], bytes):
+            raise VerificationError("Invalid transaction chain ID")
+        if int.from_bytes(decoded[0], "big") != request.methodDetails.chainId:
+            raise VerificationError("Transaction chain ID does not match charge chain ID")
 
         calls_data = decoded[4] if len(decoded) > 4 else []
         if not calls_data:
