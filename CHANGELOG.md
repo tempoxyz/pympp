@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.14.0 (2026-10-12)
+
+### Minor Changes
+
+- Released v0.13.0. Added ordered `currencies` configuration to the Tempo method, enabling servers to accept OUSD first by default on mainnet and Moderato, with improved local fee payer token selection logic and new `OUSD` constant and `default_currencies_for_chain()` helper. Updated the PyJWT pin to 2.15.1 to include upstream security fixes. (by @tempo-github-sts[bot], [#266](https://github.com/tempoxyz/pympp/pull/266))
+
+### Patch Changes
+
+- Stopped requesting cached relay receipts during payment authorization by removing idempotency key headers from broadcast requests. Reused credentials are rejected by relay replay protection, so uncertain outcomes now require separate recovery before executing protected operations. (by @BrendanRyan, [#280](https://github.com/tempoxyz/pympp/pull/280))
+- Upgraded `urllib3` dependency from `2.7.0` to `2.8.0` across `tempo`, `stripe`, and `dev` dependency groups. (by @DerekCofausper, [#274](https://github.com/tempoxyz/pympp/pull/274))
+- Rejected locally sponsored authorization-bearing transactions before signing when their authorization fields cannot be simulated. (by @BrendanRyan, [#275](https://github.com/tempoxyz/pympp/pull/275))
+- Fixed cancelled paid MCP retries to report unknown payment outcomes on both asyncio and Trio, preventing callers from blindly retrying a payment that may have settled. (by @ParvAhuja, [#277](https://github.com/tempoxyz/pympp/pull/277))
+- Rejected malformed Unicode in decoded payment headers before verification, returning ordinary parse failures instead of UTF-8 encoding exceptions. Added tests covering lone surrogates in credential fields, nested payloads, and valid supplementary Unicode. (by @BrendanRyan, [#279](https://github.com/tempoxyz/pympp/pull/279))
+- Preserved streaming bodies for unmatched 402 responses. Released matched response streams before credential callbacks, closed owned responses on cancellation, and preserved primary errors when cleanup failed. Matched challenges rejected during credential creation now return a readable empty 402 response after their original body has been discarded. (by @BrendanRyan, [#276](https://github.com/tempoxyz/pympp/pull/276))
+
 ## 0.13.0 (2026-09-30)
 
 ### Minor Changes
