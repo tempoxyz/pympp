@@ -1285,7 +1285,7 @@ class TestPaymentTransport:
                     402,
                     headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
                 ),
-                httpx.Response(500, stream=stream),
+                httpx.Response(500, headers={"content-length": "20"}, stream=stream),
             ]
         )
         transport = PaymentTransport(methods=[MockMethod()], inner=inner)
@@ -1298,6 +1298,40 @@ class TestPaymentTransport:
         assert isinstance(raised.value.__cause__, httpx.ReadError)
         assert failed == [raised.value]
         assert stream.closed
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "headers",
+        [{}, {"content-length": str(64 * 1024 + 1)}, {"content-length": "invalid"}],
+        ids=["unframed", "oversized", "invalid-length"],
+    )
+    async def test_paid_retry_5xx_large_body_is_left_streaming(
+        self, headers: dict[str, str]
+    ) -> None:
+        """Only small length-framed 5xx bodies are buffered before failure hooks."""
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        stream = TrackedStream()
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(500, headers=headers, stream=stream),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+        failed: list[ClientPaymentFailedPayload] = []
+        transport.on_payment_failed(failed.append)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert [payload["response"] for payload in failed] == [response]
+        assert stream.reads == 0
+        assert not stream.closed
+        assert await response.aread() == b"unread response body"
 
     @pytest.mark.asyncio
     async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:

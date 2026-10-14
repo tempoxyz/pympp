@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
 _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
+_MAX_BUFFERED_ERROR_BODY = 64 * 1024
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
@@ -70,6 +71,23 @@ def _accept_payment(methods: Sequence[Method]) -> str:
         for intent in getattr(method, "intents", ("charge",))
     )
     return ", ".join(dict.fromkeys(capabilities))
+
+
+async def _release_small_body(response: httpx.Response) -> None:
+    """Buffer a small length-framed body so its connection returns to the pool.
+
+    Unframed or larger bodies are left streaming for the caller to read or close.
+    """
+    stream = response.stream
+    try:
+        length = int(response.headers["content-length"])
+    except (KeyError, ValueError):
+        return
+    if not 0 <= length <= _MAX_BUFFERED_ERROR_BODY or not isinstance(stream, httpx.AsyncByteStream):
+        return
+    body = b"".join([chunk async for chunk in stream])
+    await stream.aclose()
+    response.stream = httpx.ByteStream(body)
 
 
 def _transaction_hash(method: Method, credential: Credential) -> str | None:
@@ -301,7 +319,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     if payment_response.is_server_error:
                         # Release the connection before failure hooks can make auxiliary
                         # requests; the buffered body stays readable for the caller.
-                        await payment_response.aread()
+                        await _release_small_body(payment_response)
                 except (Exception, asyncio.CancelledError) as cause:
                     error = PaymentOutcomeUnknownError(
                         challenge,
