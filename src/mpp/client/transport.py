@@ -74,11 +74,9 @@ def _accept_payment(methods: Sequence[Method]) -> str:
 
 def _transaction_hash(method: Method, credential: Credential) -> str | None:
     """Return the credential's on-chain hash if the method can derive it."""
-    derive = getattr(method, "transaction_hash", None)
-    if derive is None:
-        return None
     try:
-        return derive(credential)
+        derive = getattr(method, "transaction_hash", None)
+        return None if derive is None else derive(credential)
     except Exception:
         # Reconciliation metadata must never mask the payment outcome itself.
         return None

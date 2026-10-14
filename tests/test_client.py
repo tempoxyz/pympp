@@ -1,7 +1,7 @@
 """Tests for client-side transport."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -43,10 +43,16 @@ class MockMethod:
             self.transaction_hash = transaction_hash
 
 
+class HashLookupFailsMethod(MockMethod):
+    @property
+    def transaction_hash(self) -> Callable[[Credential], str | None]:
+        raise RuntimeError("lookup failed")
+
+
 class MockTransport(httpx.AsyncBaseTransport):
     """Mock transport that returns configurable responses."""
 
-    def __init__(self, responses: list[httpx.Response]) -> None:
+    def __init__(self, responses: Sequence[httpx.Response | Exception]) -> None:
         self.responses = responses
         self.requests: list[httpx.Request] = []
         self._index = 0
@@ -55,6 +61,8 @@ class MockTransport(httpx.AsyncBaseTransport):
         self.requests.append(request)
         response = self.responses[self._index]
         self._index += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
     async def aclose(self) -> None:
@@ -1165,14 +1173,26 @@ class TestPaymentTransport:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "derive",
-        [None, lambda credential: None, Mock(side_effect=ValueError)],
-        ids=["absent", "none", "raises"],
+        "paid_retry",
+        [lambda: httpx.Response(500), lambda: httpx.ConnectError("lost")],
+        ids=["5xx", "raises"],
     )
-    async def test_paid_retry_5xx_reports_without_transaction_hash(
-        self, derive: Callable[[Credential], str | None] | None
+    @pytest.mark.parametrize(
+        "make_method",
+        [
+            MockMethod,
+            lambda: MockMethod(transaction_hash=lambda credential: None),
+            lambda: MockMethod(transaction_hash=Mock(side_effect=ValueError)),
+            HashLookupFailsMethod,
+        ],
+        ids=["absent", "none", "raises", "lookup-raises"],
+    )
+    async def test_unknown_outcome_without_transaction_hash(
+        self,
+        paid_retry: Callable[[], httpx.Response | Exception],
+        make_method: Callable[[], MockMethod],
     ) -> None:
-        """A missing, empty, or failing hash derivation still reports the credential."""
+        """A missing, empty, or failing hash hook still reports the credential."""
         challenge = Challenge(
             id="test-id",
             method="tempo",
@@ -1180,20 +1200,20 @@ class TestPaymentTransport:
             request={"amount": "1000"},
         )
         www_auth = challenge.to_www_authenticate("example.com")
-        inner = MockTransport(
-            [
-                httpx.Response(402, headers={"www-authenticate": www_auth}),
-                httpx.Response(500),
-            ]
-        )
-        method = MockMethod(transaction_hash=derive)
+        retry = paid_retry()
+        inner = MockTransport([httpx.Response(402, headers={"www-authenticate": www_auth}), retry])
+        method = make_method()
         transport = PaymentTransport(methods=[method], inner=inner)
         failed: list[ClientPaymentFailedPayload] = []
         transport.on_payment_failed(failed.append)
 
-        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+        request = httpx.Request("GET", "https://example.com")
+        if isinstance(retry, Exception):
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await transport.handle_async_request(request)
+        else:
+            assert (await transport.handle_async_request(request)).status_code == 500
 
-        assert response.status_code == 500
         [payload] = failed
         error = payload["error"]
         assert isinstance(error, PaymentOutcomeUnknownError)
