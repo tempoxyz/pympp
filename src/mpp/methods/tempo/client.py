@@ -48,6 +48,10 @@ ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 _ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
+_CAPS_REQUIRE_CURRENCY_PIN = (
+    "Tempo charge max_amount and max_atomic_amount require a currency pin "
+    "(currency= or currencies=)."
+)
 
 
 class TransactionError(Exception):
@@ -124,11 +128,22 @@ class TempoMethod:
             if self.max_atomic_amount is None
             else _parse_max_atomic_amount(self.max_atomic_amount)
         )
-        if self.max_amount is None:
-            return max_atomic, None
-        if self.max_amount_decimals is None:
-            raise ValueError("Tempo charge max_amount requires max_amount_decimals.")
-        return max_atomic, _parse_max_amount(self.max_amount, self.max_amount_decimals)
+        max_token = None
+        if self.max_amount is not None:
+            if self.max_amount_decimals is None:
+                raise ValueError("Tempo charge max_amount requires max_amount_decimals.")
+            max_token = _parse_max_amount(self.max_amount, self.max_amount_decimals)
+        if (max_atomic is not None or max_token is not None) and not self._pinned_currencies():
+            raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
+        return max_atomic, max_token
+
+    def _pinned_currencies(self) -> tuple[str, ...]:
+        """Return the currencies the client explicitly pinned, or ``()``."""
+        if not self._currency_explicit:
+            return ()
+        if self.currencies:
+            return self.currencies
+        return () if self.currency is None else (self.currency,)
 
     @property
     def intents(self) -> dict[str, Intent | VerifiableIntent]:
@@ -217,10 +232,21 @@ class TempoMethod:
         self._check_amount_caps(request)
 
     def _check_amount_caps(self, request: dict) -> None:
-        """Reject a challenge ``amount`` (base units, splits included) above either cap."""
+        """Reject a challenge above either cap or outside the pinned currencies.
+
+        The caps bound ``amount`` (base units, splits included) and only apply to
+        currencies the client pinned, so their value is fixed by the client.
+        """
         max_atomic, max_token = self._amount_caps()
         if max_atomic is None and max_token is None:
             return
+        currency = request.get("currency")
+        pinned = {pinned.lower() for pinned in self._pinned_currencies()}
+        if not isinstance(currency, str) or currency.lower() not in pinned:
+            raise ValueError(
+                f"Challenge requests currency {currency!r}, "
+                "which is not a currency the client pinned for its amount caps"
+            )
         try:
             amount = int(request["amount"])
         except (KeyError, TypeError, ValueError) as error:
@@ -592,13 +618,14 @@ def tempo(
             units of the challenge currency, as an int or a string of digits
             (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
             excludes network fees. Over-cap challenges are skipped during
-            challenge selection and rejected before signing. Caps count units
-            of whichever currency the challenge names, so pin the currency
-            with ``currencies=`` for the cap to have a fixed value.
+            challenge selection and rejected before signing. Requires an
+            explicit ``currency=`` or ``currencies=`` pin; challenges in any
+            other currency are skipped and rejected, so the cap is always
+            denominated in a currency the client chose.
         max_amount: Client-side cap in token units, as a decimal string or
             ``Decimal`` (e.g. ``"1.5"``), checked like ``max_atomic_amount``.
-            Requires ``max_amount_decimals``. May be combined with
-            ``max_atomic_amount``.
+            Requires ``max_amount_decimals`` and a currency pin, like
+            ``max_atomic_amount``. May be combined with ``max_atomic_amount``.
         max_amount_decimals: Token decimals used to convert ``max_amount`` to
             base units (TIP-20 tokens use 6). Challenges do not carry
             decimals, so this is required with ``max_amount``. A
@@ -698,6 +725,8 @@ def tempo(
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
+    if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
+        raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
     method._chain_id_explicit = chain_id_explicit
     method._currency_explicit = currency_explicit
     method._rpc_url_explicit = rpc_url_explicit

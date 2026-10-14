@@ -61,6 +61,9 @@ def make_challenge(
 
 
 def make_method(**policy: Any) -> TempoMethod:
+    """Build a client method, pinned to pathUSD unless the policy pins a currency."""
+    if "currency" not in policy and "currencies" not in policy:
+        policy["currencies"] = [PATH_USD]
     return tempo(
         account=TempoAccount.from_key(TEST_PRIVATE_KEY),
         intents={"charge": ChargeIntent()},
@@ -164,6 +167,26 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             "exceeds max_amount",
             id="both-caps-token-stricter",
         ),
+        # currency pin required by the caps
+        pytest.param(
+            {"max_atomic_amount": 1000},
+            make_challenge(currency=USDC),
+            "not a currency the client pinned",
+            id="cap-other-currency",
+        ),
+        pytest.param(
+            TOKEN_CAP,
+            make_challenge(amount="1", currency=USDC),
+            "not a currency the client pinned",
+            id="token-cap-other-currency",
+        ),
+        pytest.param(
+            {"max_atomic_amount": 1000, "currency": USDC},
+            make_challenge(currency=swap_case(USDC)),
+            None,
+            id="cap-currency-pin-case-insensitive",
+        ),
+        pytest.param({}, make_challenge(currency=USDC), None, id="no-cap-any-currency"),
         # chain pin (default tempo() pins mainnet)
         pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-pinned"),
         pytest.param(
@@ -333,7 +356,13 @@ UNDER = {"amount": "1000"}
             {"max_atomic_amount": 1000, "currencies": [PATH_USD]},
             [{"amount": "10", "currency": USDC}, {"amount": "10"}],
             1,
-            id="unpinned-currency-then-pinned",
+            id="wrong-then-right-currency",
+        ),
+        pytest.param(
+            {"max_atomic_amount": 1000},
+            [{"amount": "10", "currency": USDC}],
+            None,
+            id="all-wrong-currency",
         ),
         pytest.param(
             {},
@@ -426,6 +455,58 @@ async def test_selection_uses_cached_rpc_chain_pin(
     build.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "construct",
+    [
+        pytest.param(lambda **kwargs: tempo_charge(**kwargs), id="tempo"),
+        pytest.param(TempoMethod, id="TempoMethod"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("caps", "pin", "error"),
+    [
+        pytest.param({"max_atomic_amount": 1000}, {}, "require a currency pin", id="atomic-no-pin"),
+        pytest.param(TOKEN_CAP, {}, "require a currency pin", id="token-no-pin"),
+        pytest.param({"max_atomic_amount": 1000}, {"currency": PATH_USD}, None, id="currency"),
+        pytest.param(TOKEN_CAP, {"currencies": [PATH_USD, USDC]}, None, id="currencies"),
+        pytest.param({}, {}, None, id="no-cap-no-pin"),
+    ],
+)
+def test_caps_require_currency_pin(
+    construct: Callable[..., TempoMethod],
+    caps: dict[str, Any],
+    pin: dict[str, Any],
+    error: str | None,
+) -> None:
+    if construct is TempoMethod and "currencies" in pin:
+        pin = {"currencies": tuple(pin["currencies"])}
+    if error is None:
+        construct(**caps, **pin)
+        return
+    with pytest.raises(ValueError, match=error):
+        construct(**caps, **pin)
+
+
+async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
+    method = TempoMethod(
+        account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+        currencies=(PATH_USD,),
+        max_atomic_amount=1000,
+    )
+    method._intents = {"charge": ChargeIntent()}
+    challenges = [
+        make_challenge(currency=USDC, challenge_id="offer-0"),
+        make_challenge(challenge_id="offer-1"),
+    ]
+    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
+
+    assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[1], method)
+    with patch.object(method, "_build_tempo_transfer", build):
+        with pytest.raises(ValueError, match="not a currency the client pinned"):
+            await method.create_credential(challenges[0])
+    build.assert_not_awaited()
+
+
 async def test_caps_changed_after_construction_are_enforced() -> None:
     method = make_method()
     challenge = make_challenge(amount="1001")
@@ -445,6 +526,13 @@ async def test_caps_changed_after_construction_are_enforced() -> None:
     with patch.object(method, "_build_tempo_transfer", build):
         with pytest.raises(ValueError, match="requires max_amount_decimals"):
             await method.create_credential(make_challenge(amount="1"))
+
+    unpinned = tempo(account=TempoAccount.from_key(TEST_PRIVATE_KEY), intents={})
+    unpinned.max_atomic_amount = 1000
+    assert unpinned.can_handle_challenge(make_challenge(amount="1")) is False
+    with patch.object(unpinned, "_build_tempo_transfer", build):
+        with pytest.raises(ValueError, match="require a currency pin"):
+            await unpinned.create_credential(make_challenge(amount="1"))
     build.assert_not_awaited()
 
 
@@ -474,7 +562,7 @@ async def test_caps_changed_after_construction_are_enforced() -> None:
     ],
 )
 def test_tempo_stores_charge_policy(kwargs: dict[str, Any], attribute: str, expected: Any) -> None:
-    method = tempo(intents={"charge": ChargeIntent()}, **kwargs)
+    method = make_method(**kwargs)
 
     assert getattr(method, attribute) == expected
 
