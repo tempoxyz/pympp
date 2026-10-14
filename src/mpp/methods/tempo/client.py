@@ -363,6 +363,37 @@ class TempoMethod:
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
 
+    def transaction_hash(self, credential: Credential) -> str | None:
+        """Return the on-chain hash of a credential's signed 0x76 transaction.
+
+        Returns ``None`` unless the payload decodes as a sender-signed 0x76
+        transaction. Sponsored (0x78 fee payer envelope) transactions return
+        ``None`` because their final hash depends on the fee payer's co-signature.
+        """
+        import rlp
+        from eth_hash.auto import keccak
+
+        payload = credential.payload
+        raw_tx = payload.get("signature")
+        if payload.get("type") != "transaction" or not isinstance(raw_tx, str):
+            return None
+        try:
+            tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+            fields = rlp.decode(tx_bytes[1:]) if tx_bytes[:1] == b"\x76" else None
+        except (ValueError, rlp.DecodingError):
+            return None
+        # 0x76 || rlp([13 body fields, key_authorization?, sender_signature])
+        if (
+            not isinstance(fields, list)
+            or len(fields) not in (14, 15)
+            or not isinstance(fields[4], list)
+            or not fields[4]
+            or not isinstance(fields[-1], bytes)
+            or not fields[-1]
+        ):
+            return None
+        return "0x" + keccak(tx_bytes).hex()
+
     async def _build_tempo_transfer(
         self,
         amount: str,

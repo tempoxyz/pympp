@@ -42,6 +42,9 @@ if TYPE_CHECKING:
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
 _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
+_MAX_BUFFERED_ERROR_BODY = 64 * 1024
+_ERROR_BODY_TIMEOUT = 2.0
+_BODY_TRUNCATED_EXTENSION = "mpp.body_truncated"
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
@@ -70,6 +73,50 @@ def _accept_payment(methods: Sequence[Method]) -> str:
         for intent in getattr(method, "intents", ("charge",))
     )
     return ", ".join(dict.fromkeys(capabilities))
+
+
+async def _buffer_error_body(response: httpx.Response) -> None:
+    """Buffer a paid-retry error body within a size and time bound, then release it.
+
+    The body is diagnostic only. One larger than 64 KiB, or still arriving after
+    2 seconds, is cut to what arrived (or dropped if compressed, since a partial
+    encoding cannot be decoded reliably) and flagged with
+    ``response.extensions["mpp.body_truncated"] = True``.
+    """
+    stream = response.stream
+    if not isinstance(stream, httpx.AsyncByteStream):
+        return
+    body = bytearray()
+    truncated = True
+    try:
+        async with asyncio.timeout(_ERROR_BODY_TIMEOUT):
+            async for chunk in stream:
+                body += chunk
+                if len(body) > _MAX_BUFFERED_ERROR_BODY:
+                    break
+            else:
+                truncated = False
+    except TimeoutError:
+        pass
+    finally:
+        with suppress(Exception):
+            await stream.aclose()
+    if truncated:
+        if response.headers.pop("content-encoding", "identity").lower() != "identity":
+            body.clear()
+        response.headers.pop("content-length", None)
+        response.extensions = {**response.extensions, _BODY_TRUNCATED_EXTENSION: True}
+    response.stream = httpx.ByteStream(bytes(body[:_MAX_BUFFERED_ERROR_BODY]))
+
+
+def _transaction_hash(method: Method, credential: Credential) -> str | None:
+    """Return the credential's on-chain hash if the method can derive it."""
+    try:
+        derive = getattr(method, "transaction_hash", None)
+        return None if derive is None else derive(credential)
+    except Exception:
+        # Reconciliation metadata must never mask the payment outcome itself.
+        return None
 
 
 def _client_payment_failed_payload(
@@ -287,12 +334,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
                 try:
                     payment_response = await self._inner.handle_async_request(retry_request)
+                    response = payment_response
+                    if payment_response.is_server_error:
+                        # Release the connection before failure hooks can make auxiliary
+                        # requests; the buffered body stays readable for the caller.
+                        await _buffer_error_body(payment_response)
                 except (Exception, asyncio.CancelledError) as cause:
                     error = PaymentOutcomeUnknownError(
                         challenge,
                         cause,
                         credential=credential,
                         request=request,
+                        transaction_hash=_transaction_hash(matched_method, credential),
                     )
                     await self._events.emit(
                         PAYMENT_FAILED,
@@ -308,7 +361,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     raise error from cause
 
-                response = payment_response
                 if payment_response.is_success:
                     await self._events.emit(
                         PAYMENT_RESPONSE,
@@ -320,6 +372,37 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "response": payment_response,
                         },
                     )
+                elif payment_response.is_server_error:
+                    # The server may have settled before failing. Report the
+                    # credential for reconciliation, return the response, and
+                    # never retry: a second attempt could pay twice.
+                    error = PaymentOutcomeUnknownError(
+                        challenge,
+                        httpx.HTTPStatusError(
+                            f"Paid retry returned HTTP {payment_response.status_code}",
+                            request=request,
+                            response=payment_response,
+                        ),
+                        credential=credential,
+                        request=request,
+                        transaction_hash=_transaction_hash(matched_method, credential),
+                    )
+                    try:
+                        await self._events.emit(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
+                                credential=credential,
+                                error=error,
+                                method=matched_method,
+                                request=request,
+                                response=payment_response,
+                            ),
+                        )
+                    except asyncio.CancelledError as cancelled:
+                        # Like a cancelled paid request, surface the credential.
+                        raise error from cancelled
 
             return response
         except BaseException:

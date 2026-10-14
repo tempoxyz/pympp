@@ -179,6 +179,76 @@ class TestTempoMethod:
 
         assert method._currency_explicit is True
 
+    @pytest.mark.parametrize("sponsored", [False, True])
+    def test_transaction_hash_for_signed_transaction(self, sponsored: bool) -> None:
+        """Unsponsored hashes match settlement; sponsored ones await the fee payer."""
+        from pytempo import Call, TempoTransaction
+
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        tx = TempoTransaction.create(
+            chain_id=CHAIN_ID,
+            gas_limit=100000,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=0,
+            fee_token=None if sponsored else PATH_USD,
+            awaiting_fee_payer=sponsored,
+            calls=(Call.create(to=PATH_USD, value=0, data="0x"),),
+        )
+        signed = tx.sign(TEST_PRIVATE_KEY)
+        raw_tx = "0x" + (encode_fee_payer_envelope(signed) if sponsored else signed.encode()).hex()
+        credential = make_credential(payload={"type": "transaction", "signature": raw_tx})
+
+        trailing = make_credential(payload={"type": "transaction", "signature": raw_tx + "00"})
+
+        expected = None if sponsored else _raw_transaction_hash(raw_tx)
+        assert TempoMethod().transaction_hash(credential) == expected
+        assert TempoMethod().transaction_hash(trailing) is None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"type": "hash", "hash": "0xabc"},
+            {"type": "transaction"},
+            {"type": "transaction", "signature": ""},
+            {"type": "transaction", "signature": "0xnothex"},
+            {"type": "transaction", "signature": "0x01"},
+            {"type": "transaction", "signature": "0x02" + "c0"},
+            {"type": "transaction", "signature": "0x76"},
+            {"type": "transaction", "signature": "0x76ff"},
+            {"type": "transaction", "signature": "0x76" + rlp.encode(b"\x01").hex()},
+            {"type": "transaction", "signature": "0x76" + rlp.encode([b"\x01"] * 14).hex()},
+            {
+                "type": "transaction",
+                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9).hex(),
+            },
+            {
+                "type": "transaction",
+                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9).hex(),
+            },
+        ],
+        ids=[
+            "hash-payload",
+            "missing",
+            "empty",
+            "not-hex",
+            "unknown-type",
+            "eip1559",
+            "no-body",
+            "malformed-rlp",
+            "not-a-list",
+            "calls-not-a-list",
+            "no-calls",
+            "unsigned",
+        ],
+    )
+    def test_transaction_hash_unknown_without_signed_transaction(self, payload: dict) -> None:
+        credential = make_credential(payload=payload)
+
+        assert TempoMethod().transaction_hash(credential) is None
+
     def test_tempo_with_account(self) -> None:
         """tempo() should accept account and rpc_url."""
         key = "0x" + "d" * 64

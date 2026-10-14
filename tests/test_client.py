@@ -1,7 +1,12 @@
 """Tests for client-side transport."""
 
 import asyncio
-from unittest.mock import AsyncMock
+import gzip
+import random
+from collections.abc import Callable, Sequence
+from contextlib import suppress
+from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -9,9 +14,25 @@ from pytest_httpx import HTTPXMock
 
 from mpp import Challenge, Credential, PaymentError, PaymentOutcomeUnknownError
 from mpp.client import Client, PaymentTransport, get, post, request
-from mpp.events import EventDispatcher
+from mpp.events import (
+    CHALLENGE_RECEIVED,
+    CREDENTIAL_CREATED,
+    PAYMENT_FAILED,
+    PAYMENT_RESPONSE,
+    ClientPaymentFailedPayload,
+    EventDispatcher,
+    PaymentEvent,
+    PaymentEventName,
+)
 from mpp.runtime import PaymentRuntime
 from tests import make_credential
+
+_NOISE_GZIP = gzip.compress(random.Random(0).randbytes(100_000))
+_SMALL_GZIP = gzip.compress(b"settle failed")
+
+
+def _gzip_head(body: bytes) -> bytes:
+    return f"Content-Encoding: gzip\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
 
 
 class MockMethod:
@@ -20,19 +41,27 @@ class MockMethod:
     name = "tempo"
     intents = {"charge": True}
 
-    def __init__(self) -> None:
+    def __init__(self, transaction_hash: Callable[[Credential], str | None] | None = None) -> None:
         self.create_credential = AsyncMock(
             return_value=make_credential(
                 payload={"hash": "0xabc"},
                 challenge_id="test-id",
             )
         )
+        if transaction_hash is not None:
+            self.transaction_hash = transaction_hash
+
+
+class HashLookupFailsMethod(MockMethod):
+    @property
+    def transaction_hash(self) -> Callable[[Credential], str | None]:
+        raise RuntimeError("lookup failed")
 
 
 class MockTransport(httpx.AsyncBaseTransport):
     """Mock transport that returns configurable responses."""
 
-    def __init__(self, responses: list[httpx.Response]) -> None:
+    def __init__(self, responses: Sequence[httpx.Response | Exception]) -> None:
         self.responses = responses
         self.requests: list[httpx.Request] = []
         self._index = 0
@@ -41,6 +70,8 @@ class MockTransport(httpx.AsyncBaseTransport):
         self.requests.append(request)
         response = self.responses[self._index]
         self._index += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
     async def aclose(self) -> None:
@@ -1076,7 +1107,8 @@ class TestPaymentTransport:
                     )
                 raise RuntimeError("network failed")
 
-        transport = PaymentTransport(methods=[MockMethod()], inner=FailingRetryTransport([]))
+        method = MockMethod(transaction_hash=lambda credential: "0xhash")
+        transport = PaymentTransport(methods=[method], inner=FailingRetryTransport([]))
         transport.on_payment_failed(
             lambda payload: events.append(
                 f"failed:{payload['challenge'].id}:{type(payload['error']).__name__}"
@@ -1090,7 +1122,260 @@ class TestPaymentTransport:
         assert raised.value.challenge.id == challenge.id
         assert raised.value.credential is not None
         assert raised.value.request.url == httpx.URL("https://example.com")
+        assert raised.value.transaction_hash == "0xhash"
         assert events == ["failed:test-id:PaymentOutcomeUnknownError"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "outcome_events"),
+        [
+            (200, [PAYMENT_RESPONSE]),
+            (201, [PAYMENT_RESPONSE]),
+            (400, []),
+            (404, []),
+            (500, [PAYMENT_FAILED]),
+            (502, [PAYMENT_FAILED]),
+            (503, [PAYMENT_FAILED]),
+        ],
+    )
+    async def test_paid_retry_status_outcome(
+        self, status: int, outcome_events: list[PaymentEventName]
+    ) -> None:
+        """A 5xx paid retry reports an unknown outcome and is returned without retrying."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        paid_request = httpx.Request("GET", "https://example.com")
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_auth}),
+                httpx.Response(status, request=paid_request),
+            ]
+        )
+        method = MockMethod(transaction_hash=lambda credential: "0xhash")
+        transport = PaymentTransport(methods=[method], inner=inner)
+        events: list[PaymentEvent] = []
+        transport.on("*", events.append)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == status
+        assert len(inner.requests) == 2
+        assert [event.name for event in events] == [
+            CHALLENGE_RECEIVED,
+            CREDENTIAL_CREATED,
+            *outcome_events,
+        ]
+        if outcome_events == [PAYMENT_FAILED]:
+            payload = cast(ClientPaymentFailedPayload, events[-1].payload)
+            error = payload["error"]
+            assert isinstance(error, PaymentOutcomeUnknownError)
+            assert payload["response"] is response
+            assert response.request is paid_request
+            assert error.credential is payload["credential"]
+            assert error.credential is method.create_credential.return_value
+            assert error.transaction_hash == "0xhash"
+            assert isinstance(error.cause, httpx.HTTPStatusError)
+            assert error.cause.response is response
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "paid_retry",
+        [lambda: httpx.Response(500), lambda: httpx.ConnectError("lost")],
+        ids=["5xx", "raises"],
+    )
+    @pytest.mark.parametrize(
+        "make_method",
+        [
+            MockMethod,
+            lambda: MockMethod(transaction_hash=lambda credential: None),
+            lambda: MockMethod(transaction_hash=Mock(side_effect=ValueError)),
+            HashLookupFailsMethod,
+        ],
+        ids=["absent", "none", "raises", "lookup-raises"],
+    )
+    async def test_unknown_outcome_without_transaction_hash(
+        self,
+        paid_retry: Callable[[], httpx.Response | Exception],
+        make_method: Callable[[], MockMethod],
+    ) -> None:
+        """A missing, empty, or failing hash hook still reports the credential."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        retry = paid_retry()
+        inner = MockTransport([httpx.Response(402, headers={"www-authenticate": www_auth}), retry])
+        method = make_method()
+        transport = PaymentTransport(methods=[method], inner=inner)
+        failed: list[ClientPaymentFailedPayload] = []
+        transport.on_payment_failed(failed.append)
+
+        request = httpx.Request("GET", "https://example.com")
+        if isinstance(retry, Exception):
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await transport.handle_async_request(request)
+        else:
+            assert (await transport.handle_async_request(request)).status_code == 500
+
+        [payload] = failed
+        error = payload["error"]
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert error.credential is method.create_credential.return_value
+        assert error.transaction_hash is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body_mode", "expected_body", "truncated"),
+        [
+            ("framed", b"settle failed", False),
+            ("chunked", b"settle failed", False),
+            ("large", b"x" * 64 * 1024, True),
+            ("slow", b"partial", True),
+            ("gzip", b"settle failed", False),
+            ("large-gzip", b"", True),
+        ],
+        ids=["framed", "chunked", "large", "slow", "gzip", "large-gzip"],
+    )
+    async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        body_mode: str,
+        expected_body: bytes,
+        truncated: bool,
+    ) -> None:
+        """Failure hooks can reconcile through a one-connection pool without deadlocking."""
+        monkeypatch.setattr("mpp.client.transport._ERROR_BODY_TIMEOUT", 0.2)
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        error_head = {
+            "framed": b"Content-Length: 13\r\n\r\nsettle failed",
+            "chunked": b"Transfer-Encoding: chunked\r\n\r\nd\r\nsettle failed\r\n0\r\n\r\n",
+            "large": b"Transfer-Encoding: chunked\r\n\r\n"
+            + (b"4000\r\n" + b"x" * 0x4000 + b"\r\n") * 64,
+            "slow": b"Content-Length: 100\r\n\r\npartial",
+            "gzip": _gzip_head(_SMALL_GZIP),
+            "large-gzip": _gzip_head(_NOISE_GZIP),
+        }[body_mode]
+
+        async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            with suppress(asyncio.IncompleteReadError, ConnectionError):
+                while head := (await reader.readuntil(b"\r\n\r\n")).decode().lower():
+                    if "/reconcile" in head:
+                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nreconciled")
+                    elif "authorization: payment" not in head:
+                        writer.write(
+                            f"HTTP/1.1 402 Payment Required\r\nWWW-Authenticate: {www_auth}\r\n"
+                            "Content-Length: 0\r\n\r\n".encode()
+                        )
+                    else:
+                        writer.write(b"HTTP/1.1 500 Internal Server Error\r\n" + error_head)
+                        if truncated:
+                            # Hold the unfinished body until the client drops the connection.
+                            await writer.drain()
+                            await reader.read()
+                            break
+                    await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        base_url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        transport = PaymentTransport(
+            methods=[MockMethod()],
+            inner=httpx.AsyncHTTPTransport(limits=httpx.Limits(max_connections=1)),
+        )
+        reconciled: list[str] = []
+        async with server, httpx.AsyncClient(transport=transport) as client:
+
+            async def reconcile(payload: ClientPaymentFailedPayload) -> None:
+                reconciled.append((await client.get(f"{base_url}/reconcile")).text)
+
+            transport.on_payment_failed(reconcile)
+            response = await asyncio.wait_for(client.get(f"{base_url}/paid"), timeout=5)
+
+        assert response.status_code == 500
+        assert response.content == expected_body
+        assert ("content-encoding" in response.headers) is (body_mode == "gzip")
+        assert response.extensions.get("mpp.body_truncated", False) is truncated
+        assert reconciled == ["reconciled"]
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_5xx_body_failure_has_unknown_outcome(self) -> None:
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+
+        class FailingStream(TrackedStream):
+            async def __aiter__(self):
+                raise httpx.ReadError("connection lost")
+                yield b""
+
+        stream = FailingStream()
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(500, headers={"content-length": "20"}, stream=stream),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+        failed: list[tuple[Exception, bool]] = []
+        transport.on_payment_failed(
+            lambda payload: failed.append((payload["error"], stream.closed))
+        )
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert isinstance(raised.value.__cause__, httpx.ReadError)
+        # The connection is released before failure hooks run.
+        assert failed == [(raised.value, True)]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_5xx_observer_raises_unknown_outcome(self) -> None:
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(500),
+            ]
+        )
+        method = MockMethod(transaction_hash=lambda credential: "0xhash")
+        transport = PaymentTransport(methods=[method], inner=inner)
+        entered = asyncio.Event()
+
+        async def observer(_payload: ClientPaymentFailedPayload) -> None:
+            entered.set()
+            await asyncio.Future()
+
+        transport.on_payment_failed(observer)
+        task = asyncio.create_task(
+            transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await task
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert raised.value.credential is method.create_credential.return_value
+        assert raised.value.transaction_hash == "0xhash"
 
     @pytest.mark.asyncio
     async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:
