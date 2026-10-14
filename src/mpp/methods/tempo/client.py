@@ -97,6 +97,10 @@ class TempoMethod:
     # and the tokens it may select. ``None`` selects defaults at broadcast.
     fee_token: str | None = field(default=None, kw_only=True)
     allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
+    # Client-side charge policy, enforced before signing. ``max_amount`` is in
+    # base units of the challenge currency; ``None`` disables either check.
+    max_amount: int | None = field(default=None, kw_only=True)
+    expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -159,6 +163,43 @@ class TempoMethod:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
+    def _check_charge_policy(self, request: dict) -> None:
+        """Reject a charge outside ``max_amount`` or ``expected_recipients``.
+
+        ``max_amount`` bounds the challenge ``amount`` (base units, splits
+        included, network fees excluded). ``expected_recipients`` must contain
+        the primary recipient and every split recipient, compared
+        case-insensitively.
+        """
+        if self.max_amount is not None:
+            try:
+                amount = int(request["amount"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Challenge amount must be an integer in base units") from error
+            if amount > self.max_amount:
+                raise ValueError(
+                    f"Challenge requests amount {amount}, "
+                    f"but client is restricted to at most {self.max_amount}"
+                )
+
+        if self.expected_recipients is not None:
+            allowed = {recipient.lower() for recipient in self.expected_recipients}
+            recipient = request.get("recipient")
+            if not isinstance(recipient, str) or recipient.lower() not in allowed:
+                raise ValueError(
+                    f"Challenge requests recipient {recipient!r}, "
+                    "which is not in the client's expected recipients"
+                )
+            method_details = request.get("methodDetails")
+            splits = method_details.get("splits") if isinstance(method_details, dict) else None
+            for split in splits or ():
+                split_recipient = split.get("recipient") if isinstance(split, dict) else None
+                if not isinstance(split_recipient, str) or split_recipient.lower() not in allowed:
+                    raise ValueError(
+                        f"Challenge requests split recipient {split_recipient!r}, "
+                        "which is not in the client's expected recipients"
+                    )
+
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
 
@@ -173,7 +214,9 @@ class TempoMethod:
             A credential with the signed transaction.
 
         Raises:
-            ValueError: If no account is configured or intent is unsupported.
+            ValueError: If no account is configured, the intent is unsupported,
+                or the challenge violates the client's chain, ``max_amount``
+                or ``expected_recipients`` policy.
             TransactionError: If transaction building fails.
         """
         if self.account is None:
@@ -183,6 +226,7 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
+        self._check_charge_policy(request)
         method_details = request.get("methodDetails", {})
         use_fee_payer = (
             method_details.get("feePayer", False) if isinstance(method_details, dict) else False
@@ -452,6 +496,8 @@ def tempo(
     currencies: Sequence[str] | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
+    max_amount: int | None = None,
+    expected_recipients: Sequence[str] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -472,7 +518,8 @@ def tempo(
         currency: Deprecated for servers; use ``currencies=[currency]``.
             Restricts charges to this one currency. Mutually exclusive with
             ``currencies``.
-        recipient: Default recipient address for charges.
+        recipient: Default recipient address for server-issued charges. Not
+            enforced when paying; use ``expected_recipients`` for that.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
         relay: Optional server-side Tempo API relay for the charge intent.
@@ -490,6 +537,14 @@ def tempo(
         allowed_fee_tokens: Tokens a local ``fee_payer`` may pay gas in.
             Defaults to :func:`fee_tokens_for_chain` (pathUSD, then USDC.e
             on mainnet). Must contain at least one token.
+        max_amount: Client-side cap on a charge's ``amount``, in base units of
+            the challenge currency (e.g. ``1_000_000`` is 1.00 of a 6-decimal
+            token). Includes splits, excludes network fees. Challenges above
+            the cap are rejected before signing.
+        expected_recipients: Client-side allowlist of recipient addresses. The
+            primary recipient and every split recipient must be listed
+            (case-insensitive), or the challenge is rejected before signing.
+            An empty sequence rejects every charge.
 
     Returns:
         A configured TempoMethod instance.
@@ -550,6 +605,19 @@ def tempo(
             if not isinstance(token, str) or _ADDRESS_RE.fullmatch(token) is None:
                 raise ValueError(f"Invalid Tempo fee token address: {token!r}")
 
+    if max_amount is not None and (
+        isinstance(max_amount, bool) or not isinstance(max_amount, int) or max_amount < 0
+    ):
+        raise ValueError("max_amount must be a non-negative integer in base units")
+    resolved_expected_recipients: tuple[str, ...] | None = None
+    if expected_recipients is not None:
+        if isinstance(expected_recipients, str):
+            raise ValueError("expected_recipients must be a sequence of addresses")
+        resolved_expected_recipients = tuple(expected_recipients)
+        for address in resolved_expected_recipients:
+            if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:
+                raise ValueError(f"Invalid Tempo recipient address: {address!r}")
+
     method = TempoMethod(
         account=account,
         fee_payer=fee_payer,
@@ -563,6 +631,8 @@ def tempo(
         currencies=accepted,
         fee_token=fee_token,
         allowed_fee_tokens=resolved_allowed_fee_tokens,
+        max_amount=max_amount,
+        expected_recipients=resolved_expected_recipients,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
