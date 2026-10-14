@@ -169,6 +169,18 @@ class TempoMethod:
             return await self._get_chain_id(self.rpc_url)
         return None
 
+    def _known_expected_chain_id(self) -> int | None:
+        """Return the chain ID pin when it is known without an RPC call.
+
+        Mirrors :meth:`_resolve_expected_chain_id`, reading an RPC-reported
+        chain ID only once it has been cached.
+        """
+        if self._rpc_url_explicit and not self._chain_id_explicit:
+            return self._cached_chain_ids.get(self.rpc_url)
+        if self.chain_id is not None:
+            return self.chain_id
+        return self._cached_chain_ids.get(self.rpc_url)
+
     async def _resolve_supported_fee_token(
         self,
         *,
@@ -185,6 +197,24 @@ class TempoMethod:
             except Exception:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
+
+    def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
+        """Reject a challenge whose chain, recipients or amount violate the client policy.
+
+        Runs during challenge selection and again before signing.
+        """
+        challenge_chain_id = _challenge_chain_id(request)
+        if (
+            expected_chain_id is not None
+            and challenge_chain_id is not None
+            and challenge_chain_id != expected_chain_id
+        ):
+            raise ValueError(
+                f"Challenge requests chain ID {challenge_chain_id}, "
+                f"but client is restricted to {expected_chain_id}"
+            )
+        self._check_expected_recipients(request)
+        self._check_amount_caps(request)
 
     def _check_amount_caps(self, request: dict) -> None:
         """Reject a challenge ``amount`` (base units, splits included) above either cap."""
@@ -221,15 +251,15 @@ class TempoMethod:
                     )
 
     def can_handle_challenge(self, challenge: Challenge) -> bool:
-        """Return whether a challenge is within the client's caps and expected recipients.
+        """Return whether a challenge passes the client's chain, recipient and amount policy.
 
         Used during challenge selection so an offer this client would reject is
-        skipped in favour of one it will pay. ``create_credential`` re-checks
-        before signing.
+        skipped in favour of one it will pay. A chain pinned only by a custom
+        ``rpc_url`` is checked here once its chain ID is cached;
+        ``create_credential`` always re-checks before signing.
         """
         try:
-            self._check_expected_recipients(challenge.request)
-            self._check_amount_caps(challenge.request)
+            self._check_charge_policy(challenge.request, self._known_expected_chain_id())
         except ValueError:
             return False
         return True
@@ -260,8 +290,10 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
-        self._check_expected_recipients(request)
-        self._check_amount_caps(request)
+        expected_chain_id = await self._resolve_expected_chain_id()
+        self._check_charge_policy(request, expected_chain_id)
+        if expected_chain_id is None:
+            expected_chain_id = _challenge_chain_id(request)
         method_details = request.get("methodDetails", {})
         use_fee_payer = (
             method_details.get("feePayer", False) if isinstance(method_details, dict) else False
@@ -283,24 +315,6 @@ class TempoMethod:
         splits = method_details.get("splits") if isinstance(method_details, dict) else None
 
         rpc_url = self.rpc_url
-        expected_chain_id = await self._resolve_expected_chain_id()
-        challenge_chain_id = (
-            method_details.get("chainId") if isinstance(method_details, dict) else None
-        )
-        if challenge_chain_id is not None:
-            try:
-                parsed_chain_id = int(challenge_chain_id)
-            except (TypeError, ValueError):
-                pass
-            else:
-                if expected_chain_id is not None and parsed_chain_id != expected_chain_id:
-                    raise ValueError(
-                        f"Challenge requests chain ID {parsed_chain_id}, "
-                        f"but client is restricted to {expected_chain_id}"
-                    )
-                if expected_chain_id is None:
-                    expected_chain_id = parsed_chain_id
-
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
@@ -718,6 +732,18 @@ def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:
     if not resolved:
         raise ValueError("currencies must contain at least one currency")
     return tuple(resolved)
+
+
+def _challenge_chain_id(request: dict) -> int | None:
+    """Return the challenge's numeric ``methodDetails.chainId``, ignoring other values."""
+    method_details = request.get("methodDetails")
+    chain_id = method_details.get("chainId") if isinstance(method_details, dict) else None
+    if chain_id is None:
+        return None
+    try:
+        return int(chain_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_max_atomic_amount(value: int | str) -> int:

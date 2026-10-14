@@ -12,7 +12,15 @@ import pytest
 from mpp import Challenge
 from mpp.extensions.mcp import McpClient
 from mpp.extensions.mcp.types import MCPChallenge
-from mpp.methods.tempo import CHAIN_ID, PATH_USD, USDC, ChargeIntent, TempoAccount, tempo
+from mpp.methods.tempo import (
+    CHAIN_ID,
+    PATH_USD,
+    TESTNET_CHAIN_ID,
+    USDC,
+    ChargeIntent,
+    TempoAccount,
+    tempo,
+)
 from mpp.methods.tempo.client import TempoMethod
 from mpp.runtime import PaymentRuntime
 
@@ -33,10 +41,16 @@ def make_challenge(
     splits: list[dict[str, str]] | None = None,
     challenge_id: str = "policy-challenge",
     currency: str = PATH_USD,
+    chain_id: int | str | None = None,
 ) -> Challenge:
     request: dict[str, Any] = {"amount": amount, "currency": currency, "recipient": recipient}
+    method_details: dict[str, Any] = {}
     if splits is not None:
-        request["methodDetails"] = {"splits": splits}
+        method_details["splits"] = splits
+    if chain_id is not None:
+        method_details["chainId"] = chain_id
+    if method_details:
+        request["methodDetails"] = method_details
     return Challenge(
         id=challenge_id,
         method="tempo",
@@ -150,6 +164,21 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             "exceeds max_amount",
             id="both-caps-token-stricter",
         ),
+        # chain pin (default tempo() pins mainnet)
+        pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-pinned"),
+        pytest.param(
+            {},
+            make_challenge(chain_id=TESTNET_CHAIN_ID),
+            f"client is restricted to {CHAIN_ID}",
+            id="chain-mismatch",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID},
+            make_challenge(chain_id=CHAIN_ID),
+            f"client is restricted to {TESTNET_CHAIN_ID}",
+            id="explicit-chain-mismatch",
+        ),
+        pytest.param({}, make_challenge(chain_id="abc"), None, id="chain-not-numeric"),
         # expected_recipients
         pytest.param(
             {"expected_recipients": [RECIPIENT]}, make_challenge(), None, id="recipient-allowed"
@@ -306,7 +335,25 @@ UNDER = {"amount": "1000"}
             1,
             id="unpinned-currency-then-pinned",
         ),
+        pytest.param(
+            {},
+            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": CHAIN_ID}],
+            1,
+            id="wrong-then-right-chain",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID},
+            [{"chain_id": CHAIN_ID}, {"chain_id": TESTNET_CHAIN_ID}],
+            1,
+            id="explicit-chain-wrong-then-right",
+        ),
         pytest.param({"max_atomic_amount": 1000}, [OVER, {"amount": "2000"}], None, id="all-over"),
+        pytest.param(
+            {},
+            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": 1}],
+            None,
+            id="all-wrong-chain",
+        ),
         pytest.param(
             TOKEN_CAP, [{"amount": "1000001"}, {"amount": "2000000"}], None, id="token-all-over"
         ),
@@ -350,6 +397,33 @@ def test_challenge_selection_skips_offers_outside_policy(
     mcp_challenge, mcp_method = mcp._match_challenge(mcp_challenges)
     assert mcp_challenge.id == f"offer-{expected}"
     assert mcp_method is method
+
+
+@pytest.mark.parametrize(
+    ("cached_chain_id", "expected"),
+    [
+        pytest.param(TESTNET_CHAIN_ID, 1, id="cached-rpc-chain-skips-wrong-chain"),
+        pytest.param(None, 0, id="uncached-rpc-chain-left-to-pre-sign-guard"),
+    ],
+)
+async def test_selection_uses_cached_rpc_chain_pin(
+    cached_chain_id: int | None, expected: int
+) -> None:
+    method = make_method(rpc_url="https://rpc.custom")
+    if cached_chain_id is not None:
+        method._cached_chain_ids["https://rpc.custom"] = cached_chain_id
+    challenges = [
+        make_challenge(chain_id=CHAIN_ID, challenge_id="offer-0"),
+        make_challenge(chain_id=TESTNET_CHAIN_ID, challenge_id="offer-1"),
+    ]
+
+    assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[expected], method)
+    method._cached_chain_ids["https://rpc.custom"] = TESTNET_CHAIN_ID
+    build = AsyncMock(return_value=("0xdeadbeef", TESTNET_CHAIN_ID))
+    with patch.object(method, "_build_tempo_transfer", build):
+        with pytest.raises(ValueError, match=f"client is restricted to {TESTNET_CHAIN_ID}"):
+            await method.create_credential(challenges[0])
+    build.assert_not_awaited()
 
 
 async def test_caps_changed_after_construction_are_enforced() -> None:
