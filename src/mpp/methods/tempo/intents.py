@@ -19,7 +19,7 @@ from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
-from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
 from mpp._validation import Validation
 from mpp.errors import (
@@ -88,7 +88,32 @@ STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 
 MAX_SPLITS = 10
 MAX_TRANSFERS = MAX_SPLITS + 1
-ALREADY_KNOWN_TRANSACTION_RE = re.compile(r"\b(?:already known|known transaction)\b")
+ALREADY_KNOWN_TRANSACTION_RE = re.compile(r"\b(?:already ?known|known transaction)\b", re.I)
+# EIP-7966: the transaction was pooled but not confirmed within the sync timeout.
+SYNC_CONFIRMATION_TIMEOUT_CODE = 4
+# Seconds between receipt lookups; matches mppx's default Tempo polling interval.
+RECEIPT_POLL_INTERVAL = 0.5
+# Seconds past a transaction's ``valid_before`` after which it cannot be included.
+VALID_BEFORE_GRACE = 2.0
+
+
+def _transaction_valid_before(raw_tx: str) -> int | None:
+    """Return a Tempo transaction's ``valid_before`` timestamp, if it has one."""
+    try:
+        import rlp
+
+        tx_bytes = bytes.fromhex(_strip_0x(raw_tx))
+        if tx_bytes[:1] not in (b"\x76", b"\x78"):
+            return None
+        decoded = rlp.decode(tx_bytes[1:])
+    except Exception:
+        return None
+    if not isinstance(decoded, list) or len(decoded) <= 8:
+        return None
+    valid_before = decoded[8]
+    if not isinstance(valid_before, bytes) or not valid_before:
+        return None
+    return int.from_bytes(valid_before, "big")
 
 
 def _raw_transaction_hash(raw_tx: str) -> str:
@@ -344,12 +369,47 @@ def _rpc_error_msg(result: dict) -> str:
     return str(error_obj)
 
 
-def _is_already_known_transaction_error(result: dict[str, Any]) -> bool:
-    """Return true when an RPC send error means the tx was already accepted."""
-    if "error" not in result:
-        return False
-    msg = _rpc_error_msg(result).lower()
-    return ALREADY_KNOWN_TRANSACTION_RE.search(msg) is not None
+def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
+    """Return true when a failed broadcast may have reached the mempool.
+
+    ``error`` is the exception raised by the send, matched anywhere in its
+    ``__cause__``/``__context__`` chain, or the JSON-RPC error response.
+    Ambiguous outcomes, worth polling for a receipt:
+
+    - Timeouts (including the local confirmation deadline) and lost
+      connections after the request was sent. Connect and pool failures mean
+      it was never sent.
+    - HTTP 5xx responses. Other statuses are definitive.
+    - JSON-RPC code 4, the EIP-7966 timeout for a pooled, unconfirmed transaction.
+    - Messages matching "already known" or "known transaction".
+
+    Everything else (e.g. -32601, -32602, insufficient funds) is definitive.
+    """
+    import httpx
+
+    if isinstance(error, dict):
+        rpc_error = error.get("error")
+        if isinstance(rpc_error, dict) and rpc_error.get("code") == SYNC_CONFIRMATION_TIMEOUT_CODE:
+            return True
+        return ALREADY_KNOWN_TRANSACTION_RE.search(_rpc_error_msg(error)) is not None
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return False
+        if isinstance(cause, httpx.HTTPStatusError):
+            return cause.response.status_code >= 500
+        if isinstance(
+            cause,
+            (TimeoutError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError),
+        ):
+            return True
+        if ALREADY_KNOWN_TRANSACTION_RE.search(str(cause)):
+            return True
+        cause = cause.__cause__ or cause.__context__
+    return False
 
 
 def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
@@ -548,6 +608,7 @@ class ChargeIntent:
         timeout: float = DEFAULT_TIMEOUT,
         store: Store | None = None,
         validate_sender: ValidateSender | None = None,
+        confirmation_timeout: float = DEFAULT_CONFIRMATION_TIMEOUT,
     ) -> None:
         """Initialize the charge intent.
 
@@ -567,6 +628,12 @@ class ChargeIntent:
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
                 ``True`` to accept (e.g. smart-account / relayer flows).
+            confirmation_timeout: Seconds to wait for a broadcast transaction's
+                receipt (default: 30), shared by the synchronous send (at most
+                two thirds of it) and, when its outcome is unknown (e.g. a read
+                timeout or "already known"), polling for the receipt. Polling
+                also stops once the transaction's ``valid_before`` has passed.
+                Equivalent to mppx's ``confirmationTimeoutMs``.
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -577,6 +644,7 @@ class ChargeIntent:
         self._timeout = timeout
         self._store = store
         self._validate_sender = validate_sender
+        self._confirmation_timeout = confirmation_timeout
 
     @property
     def fee_payer(self) -> TempoAccount | None:
@@ -912,6 +980,13 @@ class ChargeIntent:
             raise CredentialReplayedError("memo is not bound to this challenge")
 
     async def _fetch_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any]:
+        receipt_data = await self._get_transaction_receipt(client, tx_hash)
+        if receipt_data is None:
+            raise InternalPaymentError() from RuntimeError("Transaction not found")
+        return receipt_data
+
+    async def _get_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any] | None:
+        """Return the receipt for ``tx_hash``, or ``None`` if it is not yet available."""
         rpc_url = self._get_rpc_url()
         try:
             receipt_data = await _rpc_call(
@@ -923,11 +998,75 @@ class ChargeIntent:
         # A missing receipt may be a pending transaction, so it does not prove
         # the payment invalid.
         if not receipt_data:
-            raise InternalPaymentError() from RuntimeError("Transaction not found")
+            return None
         if not isinstance(receipt_data, dict):
             raise InternalPaymentError() from RuntimeError("Invalid transaction receipt")
 
         return receipt_data
+
+    async def _recover_broadcast_receipt(
+        self,
+        client: Any,
+        raw_tx: str,
+        tx_hash: str,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+        deadline: float,
+        error: Exception,
+    ) -> Receipt:
+        """Verify a broadcast transaction whose outcome is unknown.
+
+        Polls for the receipt of ``tx_hash`` every ``RECEIPT_POLL_INTERVAL``
+        until ``deadline`` (a ``time.monotonic()`` value), or until the
+        transaction's ``valid_before`` (plus ``VALID_BEFORE_GRACE``) passes and
+        it can no longer be included. Each lookup is bounded by the time left.
+        When the validity cap ends polling, or has already passed, one final
+        lookup still runs, since a transaction mined before expiry may have a
+        late receipt. Raises the original broadcast ``error`` if no receipt
+        arrives or a lookup fails.
+        """
+        poll_deadline = deadline
+        valid_before = _transaction_valid_before(raw_tx)
+        if valid_before is not None:
+            expiry = time.monotonic() + valid_before + VALID_BEFORE_GRACE - time.time()
+            poll_deadline = min(deadline, expiry)
+        receipt_data = None
+        lookup_failed = False
+        while (remaining := poll_deadline - time.monotonic()) > 0:
+            try:
+                receipt_data = await asyncio.wait_for(
+                    self._get_transaction_receipt(client, tx_hash), remaining
+                )
+            except Exception:
+                lookup_failed = True
+                break
+            if receipt_data is not None:
+                break
+            await asyncio.sleep(min(RECEIPT_POLL_INTERVAL, poll_deadline - time.monotonic()))
+        if receipt_data is None and not lookup_failed and poll_deadline < deadline:
+            remaining = deadline - time.monotonic()
+            try:
+                receipt_data = await asyncio.wait_for(
+                    self._get_transaction_receipt(client, tx_hash),
+                    remaining if remaining > 0 else RECEIPT_POLL_INTERVAL,
+                )
+            except Exception:
+                receipt_data = None
+        if receipt_data is None:
+            raise error
+
+        receipt_tx_hash = receipt_data.get("transactionHash")
+        if not isinstance(receipt_tx_hash, str) or receipt_tx_hash.lower() != tx_hash.lower():
+            raise VerificationError("Receipt transaction hash does not match submitted transaction")
+
+        self._verify_receipt_transfers(
+            receipt_data,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+        )
+        return Receipt.success(tx_hash)
 
     def _verify_receipt_transfers(
         self,
@@ -1258,32 +1397,64 @@ class ChargeIntent:
             if simulate_payload is not None:
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
 
+            # The send and any receipt recovery share one confirmation deadline.
+            # The send may use at most two thirds of it, leaving the rest for
+            # receipt recovery.
+            deadline = time.monotonic() + self._confirmation_timeout
+            send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
+            send_timeout = send_timeout_ms / 1000
             broadcast_attempted = True
-            response = await client.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "eth_sendRawTransactionSync",
-                    "params": [raw_tx],
-                    "id": 1,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
+            try:
+                response = await asyncio.wait_for(
+                    client.post(
+                        rpc_url,
+                        json={
+                            "jsonrpc": "2.0",
+                            "method": "eth_sendRawTransactionSync",
+                            "params": [raw_tx, send_timeout_ms],
+                            "id": 1,
+                        },
+                    ),
+                    send_timeout,
+                )
+                response.raise_for_status()
+                result = response.json()
+            except Exception as error:
+                send_error = error
+                if isinstance(error, TimeoutError):
+                    # The local deadline cut the send off before it settled.
+                    send_error = TimeoutError(
+                        f"Transaction submission timed out after {send_timeout:g}s"
+                    )
+                if not _is_ambiguous_broadcast_error(send_error):
+                    raise
+                return await self._recover_broadcast_receipt(
+                    client,
+                    raw_tx,
+                    reserved_tx_hash or _raw_transaction_hash(raw_tx),
+                    request,
+                    challenge_id=challenge_id,
+                    realm=realm,
+                    deadline=deadline,
+                    error=send_error,
+                )
 
             if "error" in result:
-                if _is_already_known_transaction_error(result):
-                    tx_hash = reserved_tx_hash or _raw_transaction_hash(raw_tx)
-                    receipt_data = await self._fetch_transaction_receipt(client, tx_hash)
-                    self._verify_receipt_transfers(
-                        receipt_data,
-                        request,
-                        challenge_id=challenge_id,
-                        realm=realm,
-                    )
-                    return Receipt.success(tx_hash)
-
-                raise VerificationError(f"Transaction submission failed: {_rpc_error_msg(result)}")
+                rpc_error = VerificationError(
+                    f"Transaction submission failed: {_rpc_error_msg(result)}"
+                )
+                if not _is_ambiguous_broadcast_error(result):
+                    raise rpc_error
+                return await self._recover_broadcast_receipt(
+                    client,
+                    raw_tx,
+                    reserved_tx_hash or _raw_transaction_hash(raw_tx),
+                    request,
+                    challenge_id=challenge_id,
+                    realm=realm,
+                    deadline=deadline,
+                    error=rpc_error,
+                )
 
             receipt_data = result.get("result")
             if not receipt_data:

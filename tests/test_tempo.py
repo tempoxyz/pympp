@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -43,11 +44,13 @@ from mpp.methods.tempo.intents import (
     TRANSFER_WITH_MEMO_SELECTOR,
     TRANSFER_WITH_MEMO_TOPIC,
     ChargeIntent,
+    _is_ambiguous_broadcast_error,
     _match_single_transfer_calldata,
     _match_transfer_calldata,
     _parse_memo_bytes,
     _raw_transaction_hash,
     _rpc_error_msg,
+    _transaction_valid_before,
     get_transfers,
 )
 from mpp.methods.tempo.schemas import (
@@ -93,6 +96,23 @@ def with_chain_id(mock_client: AsyncMock) -> AsyncMock:
 
 def amount_data(amount: int) -> str:
     return "0x" + hex(amount)[2:].zfill(64)
+
+
+def http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://rpc.test")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(f"HTTP {status_code}", request=request, response=response)
+
+
+def chained(error: Exception, cause: Exception) -> Exception:
+    error.__cause__ = cause
+    return error
+
+
+def tempo_tx(valid_before: int | None, type_id: str = "76") -> str:
+    """Serialize a minimal Tempo transaction carrying ``valid_before``."""
+    fields = [42431, 0, 0, 0, [], [], 0, 0, valid_before or b""]
+    return "0x" + type_id + bytes(rlp.encode(fields)).hex()
 
 
 @pytest.mark.asyncio
@@ -218,15 +238,16 @@ class TestTempoMethod:
             {"type": "transaction", "signature": "0x02" + "c0"},
             {"type": "transaction", "signature": "0x76"},
             {"type": "transaction", "signature": "0x76ff"},
-            {"type": "transaction", "signature": "0x76" + rlp.encode(b"\x01").hex()},
-            {"type": "transaction", "signature": "0x76" + rlp.encode([b"\x01"] * 14).hex()},
+            {"type": "transaction", "signature": "0x76" + bytes(rlp.encode(b"\x01")).hex()},
+            {"type": "transaction", "signature": "0x76" + bytes(rlp.encode([b"\x01"] * 14)).hex()},
             {
                 "type": "transaction",
-                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9).hex(),
+                "signature": "0x76" + bytes(rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9)).hex(),
             },
             {
                 "type": "transaction",
-                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9).hex(),
+                "signature": "0x76"
+                + bytes(rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9)).hex(),
             },
         ],
         ids=[
@@ -1986,7 +2007,7 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "lookup_failure",
-        [None, "missing", "rpc", "transport", "cancelled", "initial_missing", "initial_malformed"],
+        [None, "rpc", "transport", "cancelled", "initial_missing", "initial_malformed"],
     )
     async def test_verify_transaction_already_known_error_fetches_receipt(
         self,
@@ -2048,7 +2069,6 @@ class TestChargeIntent:
 
         if lookup_failure is not None:
             failed_lookup = {
-                "missing": mock_response(200, {"result": None}),
                 "rpc": mock_response(200, {"error": {"message": "temporarily unavailable"}}),
                 "transport": httpx.ReadTimeout("receipt lookup timed out"),
                 "cancelled": asyncio.CancelledError(),
@@ -2086,6 +2106,384 @@ class TestChargeIntent:
                 else expected_methods
             ) + expected_methods
         assert methods == expected_methods
+
+    @pytest.mark.parametrize(
+        ("error", "expected"),
+        [
+            pytest.param(httpx.ReadTimeout("read timed out"), True, id="read-timeout"),
+            pytest.param(httpx.WriteTimeout("write timed out"), True, id="write-timeout"),
+            pytest.param(httpx.ReadError("connection reset"), True, id="read-error"),
+            pytest.param(httpx.RemoteProtocolError("disconnected"), True, id="disconnect"),
+            pytest.param(TimeoutError("deadline"), True, id="local-deadline"),
+            pytest.param(http_status_error(502), True, id="http-502"),
+            pytest.param(
+                chained(VerificationError("send failed"), httpx.ReadTimeout("read timed out")),
+                True,
+                id="chained-timeout",
+            ),
+            pytest.param(VerificationError("AlreadyKnown"), True, id="already-known-exception"),
+            pytest.param({"error": {"code": -32000, "message": "already known"}}, True),
+            pytest.param({"error": {"code": -32010, "message": "Known transaction: 0xab"}}, True),
+            pytest.param({"error": {"code": 4, "message": "not confirmed"}}, True, id="eip-7966"),
+            pytest.param(httpx.ConnectError("connection refused"), False, id="connect-error"),
+            pytest.param(httpx.ConnectTimeout("connect timed out"), False, id="connect-timeout"),
+            pytest.param(httpx.PoolTimeout("pool exhausted"), False, id="pool-timeout"),
+            pytest.param(http_status_error(429), False, id="http-429"),
+            pytest.param(
+                chained(VerificationError("send failed"), httpx.ConnectError("refused")),
+                False,
+                id="chained-connect-error",
+            ),
+            pytest.param(VerificationError("invalid signature"), False, id="other-exception"),
+            pytest.param({"error": {"code": -32601, "message": "method not found"}}, False),
+            pytest.param({"error": {"code": -32602, "message": "invalid params"}}, False),
+            pytest.param({"error": {"code": -32000, "message": "insufficient funds"}}, False),
+            pytest.param({"error": {"code": -32000, "message": "invalid signature"}}, False),
+            pytest.param({"error": {"code": -32000, "message": "execution reverted"}}, False),
+            pytest.param({"error": {"code": -32000, "message": "unknown transaction type"}}, False),
+        ],
+    )
+    def test_is_ambiguous_broadcast_error(self, error: Exception | dict, expected: bool) -> None:
+        assert _is_ambiguous_broadcast_error(error) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("send", "lookup_plan", "expected_error", "expected_lookups"),
+        [
+            pytest.param("already_known", ["pending", "mined"], None, 2, id="already-known-mined"),
+            pytest.param("sync_timeout", ["pending", "mined"], None, 2, id="sync-timeout-mined"),
+            pytest.param("read_timeout", ["pending", "mined"], None, 2, id="read-timeout-mined"),
+            pytest.param("disconnect", ["mined"], None, 1, id="disconnect-mined"),
+            pytest.param("gateway", ["mined"], None, 1, id="http-5xx-mined"),
+            pytest.param("hang", ["mined"], None, 1, id="send-budget-exhausted-mined"),
+            pytest.param(
+                "already_known",
+                ["pending"],
+                (VerificationError, "already known"),
+                2,
+                id="already-known-never-mined",
+            ),
+            pytest.param(
+                "read_timeout",
+                ["pending"],
+                (httpx.ReadTimeout, "send timed out"),
+                2,
+                id="read-timeout-never-mined",
+            ),
+            pytest.param(
+                "hang",
+                ["pending"],
+                (TimeoutError, "timed out after 0.2s"),
+                2,
+                id="send-budget-exhausted-polls-reserved-window",
+            ),
+            pytest.param(
+                "already_known",
+                ["rpc_error"],
+                (VerificationError, "already known"),
+                1,
+                id="lookup-rpc-error-keeps-broadcast-error",
+            ),
+            pytest.param(
+                "read_timeout",
+                ["transport_error"],
+                (httpx.ReadTimeout, "send timed out"),
+                1,
+                id="lookup-transport-error-keeps-broadcast-error",
+            ),
+            pytest.param(
+                "already_known",
+                ["hang"],
+                (VerificationError, "already known"),
+                1,
+                id="lookup-bounded-by-deadline",
+            ),
+            pytest.param(
+                "already_known",
+                ["wrong_hash"],
+                (VerificationError, "does not match submitted transaction"),
+                1,
+                id="receipt-hash-mismatch",
+            ),
+        ],
+    )
+    async def test_verify_transaction_recovers_receipt_after_ambiguous_send(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        send: str,
+        lookup_plan: list[str],
+        expected_error: tuple[type[Exception], str | None] | None,
+        expected_lookups: int,
+    ) -> None:
+        from mpp.store import MemoryStore
+
+        monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store, confirmation_timeout=0.3)
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        raw_signature = "0xabcdef1234567890"
+        tx_hash = _raw_transaction_hash(raw_signature)
+        challenge_id = "challenge-123"
+        realm = "api.example.com"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+        receipt_with_logs = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + destination[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1000),
+                }
+            ],
+        }
+        send_results: dict[str, httpx.Response | Exception] = {
+            "already_known": mock_response(200, {"error": {"message": "already known"}}),
+            "sync_timeout": mock_response(
+                200, {"error": {"code": 4, "message": "wasn't confirmed within 200ms"}}
+            ),
+            "read_timeout": httpx.ReadTimeout("send timed out"),
+            "disconnect": httpx.RemoteProtocolError("server disconnected"),
+            "gateway": mock_response(502, {}),
+        }
+        lookup_results = {
+            "pending": {"result": None},
+            "mined": {"result": receipt_with_logs},
+            "wrong_hash": {"result": {**receipt_with_logs, "transactionHash": "0x" + "12" * 32}},
+            "rpc_error": {"error": {"message": "lookup unavailable"}},
+        }
+        sync_params: list[list] = []
+        lookups: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if json["method"] == "eth_sendRawTransactionSync":
+                sync_params.append(json["params"])
+                if send == "hang":
+                    await asyncio.sleep(10)
+                result = send_results[send]
+                if isinstance(result, Exception):
+                    raise result
+                return result
+            assert json["method"] == "eth_getTransactionReceipt"
+            assert json["params"] == [tx_hash]
+            outcome = lookup_plan[min(len(lookups), len(lookup_plan) - 1)]
+            lookups.append(outcome)
+            if outcome == "hang":
+                await asyncio.sleep(10)
+            if outcome == "transport_error":
+                raise httpx.ConnectError("lookup unavailable")
+            return mock_response(200, lookup_results[outcome])
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_signature},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+        request = {"amount": "1000", "currency": asset, "recipient": destination}
+
+        started = time.monotonic()
+        if expected_error is None:
+            receipt = await intent.verify(credential, request)
+            assert receipt.reference == tx_hash
+            assert len(lookups) == expected_lookups
+            assert await store.get(f"mpp:charge:{tx_hash}") is not None
+        else:
+            # After broadcast, giving up surfaces the original broadcast error as the cause.
+            error_type, error_match = expected_error
+            with pytest.raises(InternalPaymentError) as raised:
+                await intent.verify(credential, request)
+            cause = internal_cause(raised.value)
+            assert isinstance(cause, error_type)
+            assert re.search(error_match or "", str(cause))
+            assert len(lookups) >= expected_lookups
+            assert await store.get(f"mpp:charge:{tx_hash}") is None
+        assert time.monotonic() - started < 1
+        assert sync_params == [[raw_signature, 200]]
+
+    @pytest.mark.parametrize(
+        ("raw_tx", "expected"),
+        [
+            pytest.param(tempo_tx(1_700_000_000), 1_700_000_000, id="0x76"),
+            pytest.param(tempo_tx(1_700_000_000, type_id="78"), 1_700_000_000, id="0x78"),
+            pytest.param(tempo_tx(None), None, id="no-valid-before"),
+            pytest.param(tempo_tx(1, type_id="02"), None, id="not-tempo"),
+            pytest.param("0x76" + bytes(rlp.encode([1, 2])).hex(), None, id="short"),
+            pytest.param("0x76ff", None, id="malformed-rlp"),
+            pytest.param("0x76zz", None, id="malformed-hex"),
+        ],
+    )
+    def test_transaction_valid_before(self, raw_tx: str, expected: int | None) -> None:
+        assert _transaction_valid_before(raw_tx) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("validity_left", "deadline_left", "lookup", "expected_lookups", "elapsed"),
+        [
+            pytest.param(None, 0.3, "pending", None, (0.29, 0.6), id="no-valid-before"),
+            pytest.param(3600.0, 0.3, "pending", None, (0.29, 0.6), id="long-validity"),
+            pytest.param(0.1, 0.3, "pending", None, (0.09, 0.25), id="cap-ends-polling"),
+            pytest.param(0.1, 0.3, "late", None, (0.09, 0.25), id="cap-final-lookup-mined"),
+            pytest.param(3600.0, 0.3, "mined", 1, (0.0, 0.1), id="valid-mined"),
+            pytest.param(-8.0, 0.3, "mined", 1, (0.0, 0.05), id="expired-final-lookup-mined"),
+            pytest.param(-8.0, 0.3, "pending", 1, (0.0, 0.05), id="expired-final-lookup-pending"),
+            pytest.param(-8.0, 0.3, "error", 1, (0.0, 0.05), id="expired-final-lookup-error"),
+            pytest.param(-8.0, -1.0, "mined", 1, (0.0, 0.05), id="expired-no-deadline-left"),
+        ],
+    )
+    async def test_recover_receipt_stops_after_transaction_expiry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        validity_left: float | None,
+        deadline_left: float,
+        lookup: str,
+        expected_lookups: int | None,
+        elapsed: tuple[float, float],
+    ) -> None:
+        from types import SimpleNamespace
+
+        from mpp.methods.tempo.intents import VALID_BEFORE_GRACE
+
+        # Pin wall-clock time so ``valid_before + grace`` is ``validity_left`` away.
+        valid_before = 1_000_000
+        now = valid_before + VALID_BEFORE_GRACE - (validity_left or 0.0)
+        monkeypatch.setattr(
+            "mpp.methods.tempo.intents.time",
+            SimpleNamespace(time=lambda: now, monotonic=time.monotonic),
+        )
+        monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        challenge_id = "challenge-123"
+        realm = "api.example.com"
+        raw_tx = tempo_tx(None if validity_left is None else valid_before)
+        tx_hash = _raw_transaction_hash(raw_tx)
+        receipt = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + destination[2:],
+                        encode_attribution(challenge_id=challenge_id, server_id=realm),
+                    ],
+                    "data": amount_data(1000),
+                }
+            ],
+        }
+        started = time.monotonic()
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if lookup == "error":
+                raise httpx.ReadError("lookup unavailable")
+            # "late" receipts only appear once the validity cap has ended polling.
+            mined = lookup == "mined" or (
+                lookup == "late" and time.monotonic() >= started + (validity_left or 0.0)
+            )
+            return mock_response(200, {"result": receipt if mined else None})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        error = VerificationError("Transaction submission failed: already known")
+        request = ChargeRequest.model_validate(
+            {"amount": "1000", "currency": asset, "recipient": destination}
+        )
+
+        recovery = intent._recover_broadcast_receipt(
+            mock_client,
+            raw_tx,
+            tx_hash,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+            deadline=started + deadline_left,
+            error=error,
+        )
+        if lookup in ("mined", "late"):
+            assert (await recovery).reference == tx_hash
+        else:
+            with pytest.raises(VerificationError) as exc_info:
+                await recovery
+            assert exc_info.value is error
+        assert elapsed[0] <= time.monotonic() - started < elapsed[1]
+        if expected_lookups is None:
+            assert mock_client.post.await_count > 1
+        else:
+            assert mock_client.post.await_count == expected_lookups
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "send_result",
+        [
+            pytest.param(httpx.ConnectError("connection refused"), id="connect-error"),
+            pytest.param(httpx.PoolTimeout("pool exhausted"), id="pool-timeout"),
+            pytest.param({"error": {"code": -32601, "message": "method not found"}}, id="-32601"),
+            pytest.param({"error": {"code": -32602, "message": "invalid params"}}, id="-32602"),
+            pytest.param(
+                {"error": {"code": -32000, "message": "invalid signature"}}, id="invalid-signature"
+            ),
+            pytest.param(
+                {"error": {"code": -32000, "message": "execution reverted"}}, id="generic-32000"
+            ),
+            pytest.param(429, id="http-429"),
+        ],
+    )
+    async def test_verify_transaction_definitive_send_failure_skips_receipt_lookup(
+        self, send_result: Exception | dict | int
+    ) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+        raw_signature = "0xabcdef1234567890"
+        tx_hash = _raw_transaction_hash(raw_signature)
+
+        mock_client = AsyncMock()
+        if isinstance(send_result, Exception):
+            mock_client.post = AsyncMock(side_effect=send_result)
+        elif isinstance(send_result, int):
+            mock_client.post = AsyncMock(return_value=mock_response(send_result, {}))
+        else:
+            mock_client.post = AsyncMock(return_value=mock_response(200, send_result))
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_signature},
+            expires=future,
+        )
+
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        assert isinstance(internal_cause(raised.value), (VerificationError, httpx.HTTPError))
+        assert await store.get(f"mpp:charge:{tx_hash}") is None
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert methods == ["eth_sendRawTransactionSync"]
 
     @pytest.mark.asyncio
     async def test_verify_transaction_missing_receipt(self) -> None:

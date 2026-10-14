@@ -374,6 +374,45 @@ class TestPaymentTransport:
         assert retry_request.headers["content-length"] == str(len(body))
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("transport_kwargs", "client_timeout", "expected_retry_timeout"),
+        [
+            pytest.param({}, 5.0, httpx.Timeout(5.0, read=35.0), id="default-read-floor"),
+            pytest.param({}, 60.0, httpx.Timeout(60.0), id="default-keeps-longer"),
+            pytest.param({}, None, httpx.Timeout(None), id="default-keeps-no-timeout"),
+            pytest.param({"paid_retry_timeout": 5.0}, 60.0, httpx.Timeout(5.0), id="explicit-5s"),
+            pytest.param(
+                {"paid_retry_timeout": None}, 12.0, httpx.Timeout(12.0), id="none-inherits"
+            ),
+        ],
+    )
+    async def test_paid_retry_timeout(
+        self,
+        transport_kwargs: dict,
+        client_timeout: float | None,
+        expected_retry_timeout: httpx.Timeout,
+    ) -> None:
+        """Only the paid retry uses ``paid_retry_timeout``."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        inner = MockTransport(
+            [httpx.Response(402, headers={"www-authenticate": www_auth}), httpx.Response(200)]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner, **transport_kwargs)
+
+        async with httpx.AsyncClient(transport=transport, timeout=client_timeout) as client:
+            await client.get("https://example.com/paid")
+
+        first, retry = (sent.extensions["timeout"] for sent in inner.requests)
+        assert first == httpx.Timeout(client_timeout).as_dict()
+        assert retry == expected_retry_timeout.as_dict()
+
+    @pytest.mark.asyncio
     async def test_paid_retry_replays_multipart_body(self) -> None:
         """The paid retry must carry the original multipart (files=) body."""
         challenge = Challenge(
@@ -1553,6 +1592,57 @@ class TestClient:
             response = await client.get("https://example.com")
 
         assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("paid_retry_kwargs", "request_kwargs", "via_helper", "first_timeout", "retry_timeout"),
+        [
+            pytest.param({}, {}, False, 5.0, httpx.Timeout(5.0, read=35.0), id="client-default"),
+            pytest.param({}, {"timeout": 60.0}, False, 60.0, 60.0, id="client-request-60s"),
+            pytest.param({"paid_retry_timeout": 5.0}, {}, False, 5.0, 5.0, id="client-explicit"),
+            pytest.param(
+                {"paid_retry_timeout": None},
+                {"timeout": 60.0},
+                False,
+                60.0,
+                60.0,
+                id="client-none-inherits",
+            ),
+            pytest.param({}, {}, True, 5.0, httpx.Timeout(5.0, read=35.0), id="helper-default"),
+            pytest.param({"paid_retry_timeout": 5.0}, {}, True, 5.0, 5.0, id="helper-explicit"),
+        ],
+    )
+    async def test_paid_retry_timeout_passes_through_client(
+        self,
+        httpx_mock: HTTPXMock,
+        paid_retry_kwargs: dict,
+        request_kwargs: dict,
+        via_helper: bool,
+        first_timeout: float,
+        retry_timeout: float | httpx.Timeout,
+    ) -> None:
+        challenge = Challenge(
+            id="timeout",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        )
+        httpx_mock.add_response(
+            status_code=402,
+            headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+        )
+        httpx_mock.add_response(status_code=200)
+        url = "https://example.com/paid"
+
+        if via_helper:
+            await get(url, methods=[MockMethod()], **paid_retry_kwargs, **request_kwargs)
+        else:
+            async with Client(methods=[MockMethod()], **paid_retry_kwargs) as client:
+                await client.get(url, **request_kwargs)
+
+        first, retry = (sent.extensions["timeout"] for sent in httpx_mock.get_requests())
+        assert first == httpx.Timeout(first_timeout).as_dict()
+        assert retry == httpx.Timeout(retry_timeout).as_dict()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
