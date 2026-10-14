@@ -44,6 +44,7 @@ DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 EXPIRING_NONCE_VALID_BEFORE_SECS = 25
 FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated alias.
+_CREDENTIAL_CACHE_SIZE = 256
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
@@ -66,6 +67,12 @@ class TransactionError(Exception):
 # ──────────────────────────────────────────────────────────────────
 # Charge client method
 # ──────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class _CachedCredential:
+    task: asyncio.Task[Credential]
+    expires_at: float | None = None
 
 
 @dataclass
@@ -118,6 +125,9 @@ class TempoMethod:
     _currency_explicit: bool = field(default=True, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
+    _credentials: dict[tuple[str, str], _CachedCredential] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         """Validate the amount caps so an invalid cap fails at construction."""
@@ -299,6 +309,11 @@ class TempoMethod:
         using an expiring nonce. Sponsored charges carry a fee payer placeholder
         for the server or fee payer service to co-sign before broadcast.
 
+        Each challenge is signed at most once per signer: repeated and concurrent
+        calls share one credential until the challenge expires (or, without an
+        expiry, until the transaction's ``valid_before`` window closes). Failed
+        attempts are not cached.
+
         Args:
             challenge: The payment challenge from the server.
 
@@ -316,6 +331,42 @@ class TempoMethod:
 
         if challenge.intent != "charge":
             raise ValueError(f"Unsupported intent: {challenge.intent}")
+
+        now = time.time()
+        for stale in [
+            k
+            for k, e in self._credentials.items()
+            if e.expires_at is not None and e.expires_at <= now
+        ]:
+            del self._credentials[stale]
+
+        key = ((self.root_account or self.account.address).lower(), challenge.id)
+        entry = self._credentials.get(key) or self._cache_credential(key, challenge)
+        return await asyncio.shield(entry.task)
+
+    def _cache_credential(self, key: tuple[str, str], challenge: Challenge) -> _CachedCredential:
+        """Start signing ``challenge`` and cache it until the challenge expires."""
+        entry = _CachedCredential(asyncio.ensure_future(self._create_credential(challenge)))
+        self._credentials[key] = entry
+        if len(self._credentials) > _CREDENTIAL_CACHE_SIZE:
+            del self._credentials[next(iter(self._credentials))]
+
+        def settle(task: asyncio.Task[Credential]) -> None:
+            if task.cancelled() or task.exception() is not None:
+                if self._credentials.get(key) is entry:
+                    del self._credentials[key]
+                return
+            bound = _expiry_bound(challenge.expires)
+            entry.expires_at = (
+                bound if bound is not None else time.time() + EXPIRING_NONCE_VALID_BEFORE_SECS
+            )
+
+        entry.task.add_done_callback(settle)
+        return entry
+
+    async def _create_credential(self, challenge: Challenge) -> Credential:
+        if self.account is None:
+            raise ValueError("No account configured for signing")
 
         request = challenge.request
         expected_chain_id = await self._resolve_expected_chain_id()
@@ -564,21 +615,25 @@ class TempoMethod:
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
 
 
-def _expiring_valid_before(expires: str | None) -> int:
-    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry.
+def _expiry_bound(expires: str | None) -> int | None:
+    """Return the second after a (possibly fractional) challenge expiry, if any.
 
-    ``valid_before`` is an exclusive whole-second bound, so the cap is the
-    second after the (possibly fractional) expiry. The transaction then stays
-    valid for as long as the challenge does.
+    ``valid_before`` is an exclusive whole-second bound, so capping it here keeps
+    a transaction valid for as long as its challenge.
     """
-    valid_before = int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
     if not expires:
-        return valid_before
+        return None
     try:
-        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+        return int(datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()) + 1
     except ValueError:
-        return valid_before
-    return min(valid_before, int(challenge_expiry) + 1)
+        return None
+
+
+def _expiring_valid_before(expires: str | None) -> int:
+    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry."""
+    valid_before = int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
+    bound = _expiry_bound(expires)
+    return valid_before if bound is None else min(valid_before, bound)
 
 
 # ──────────────────────────────────────────────────────────────────
