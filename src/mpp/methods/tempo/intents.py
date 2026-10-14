@@ -19,6 +19,7 @@ from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._did import parse_pkh_source
 from mpp._validation import Validation
 from mpp.errors import VerificationError
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
@@ -232,28 +233,6 @@ class SenderValidation:
 # Authorizes a transfer whose sender differs from the expected sender;
 # return ``True`` to accept.
 ValidateSender = Callable[[SenderValidation], bool]
-
-
-_PKH_SOURCE_RE = re.compile(r"did:pkh:eip155:(0|[1-9][0-9]*):(.+)")
-_PKH_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-
-
-def _parse_pkh_source(source: str) -> tuple[str, int] | None:
-    """Parse a ``did:pkh:eip155:<chainId>:<address>`` DID.
-
-    Returns ``(address, chain_id)`` or ``None`` if malformed.
-    """
-    match = _PKH_SOURCE_RE.fullmatch(source)
-    if match is None:
-        return None
-    address = match.group(2)
-    if _PKH_ADDRESS_RE.fullmatch(address) is None:
-        return None
-    try:
-        chain_id = int(match.group(1))
-    except ValueError:
-        return None
-    return address, chain_id
 
 
 def _rpc_error_msg(result: dict) -> str:
@@ -714,7 +693,7 @@ class ChargeIntent:
         """
         if source is None:
             return None
-        parsed = _parse_pkh_source(source)
+        parsed = parse_pkh_source(source)
         if parsed is None or parsed[1] != expected_chain_id:
             raise VerificationError("Hash credential source is invalid.")
         return parsed[0]

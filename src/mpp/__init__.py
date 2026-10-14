@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from mpp._canonical import canonical_b64url
+from mpp._did import parse_pkh_source
 from mpp._parsing import (
     ParseError,
     format_authorization,
@@ -393,6 +394,20 @@ class Credential:
     challenge: ChallengeEcho
     payload: dict[str, Any]
     source: str | None = None
+
+    @property
+    def payer(self) -> str | None:
+        """Payer address from a ``did:pkh:eip155:<chainId>:<address>`` source.
+
+        Returns the address as written in the DID, or ``None`` if ``source``
+        is absent or not a valid ``did:pkh:eip155`` DID. The source is
+        client-declared; whether it is bound to the on-chain sender depends
+        on the payment method.
+        """
+        if self.source is None:
+            return None
+        parsed = parse_pkh_source(self.source)
+        return parsed[0] if parsed is not None else None
 
     @classmethod
     def from_authorization(cls, header: str) -> Credential:
