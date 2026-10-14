@@ -1067,9 +1067,15 @@ class TestCredentialCache:
             pytest.param(_iso(_NOW + 10.5), 11, 2, id="evicted-after-expiry"),
             pytest.param(None, EXPIRING_NONCE_VALID_BEFORE_SECS - 1, 1, id="kept-in-window"),
             pytest.param(None, EXPIRING_NONCE_VALID_BEFORE_SECS, 2, id="evicted-after-window"),
+            pytest.param(
+                _iso(_NOW + 60),
+                EXPIRING_NONCE_VALID_BEFORE_SECS,
+                2,
+                id="evicted-after-window-before-expiry",
+            ),
         ],
     )
-    async def test_entries_expire_with_the_challenge(
+    async def test_entries_expire_with_the_transaction(
         self, expires: str | None, elapsed: float, signings: int
     ) -> None:
         method, build = self._method()

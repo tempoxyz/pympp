@@ -310,8 +310,8 @@ class TempoMethod:
         for the server or fee payer service to co-sign before broadcast.
 
         Each challenge is signed at most once per signer: repeated and concurrent
-        calls share one credential until the challenge expires (or, without an
-        expiry, until the transaction's ``valid_before`` window closes). Failed
+        calls share one credential until its transaction's ``valid_before``
+        passes, after which the transaction can no longer settle. Failed
         attempts are not cached.
 
         Args:
@@ -345,7 +345,7 @@ class TempoMethod:
         return await asyncio.shield(entry.task)
 
     def _cache_credential(self, key: tuple[str, str], challenge: Challenge) -> _CachedCredential:
-        """Start signing ``challenge`` and cache it until the challenge expires."""
+        """Start signing ``challenge`` and cache it until its ``valid_before`` passes."""
         entry = _CachedCredential(asyncio.ensure_future(self._create_credential(challenge)))
         self._credentials[key] = entry
         if len(self._credentials) > _CREDENTIAL_CACHE_SIZE:
@@ -356,10 +356,8 @@ class TempoMethod:
                 if self._credentials.get(key) is entry:
                     del self._credentials[key]
                 return
-            bound = _expiry_bound(challenge.expires)
-            entry.expires_at = (
-                bound if bound is not None else time.time() + EXPIRING_NONCE_VALID_BEFORE_SECS
-            )
+            # Computed after signing, so it never precedes the transaction's own.
+            entry.expires_at = _expiring_valid_before(challenge.expires)
 
         entry.task.add_done_callback(settle)
         return entry
@@ -615,25 +613,21 @@ class TempoMethod:
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
 
 
-def _expiry_bound(expires: str | None) -> int | None:
-    """Return the second after a (possibly fractional) challenge expiry, if any.
-
-    ``valid_before`` is an exclusive whole-second bound, so capping it here keeps
-    a transaction valid for as long as its challenge.
-    """
-    if not expires:
-        return None
-    try:
-        return int(datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()) + 1
-    except ValueError:
-        return None
-
-
 def _expiring_valid_before(expires: str | None) -> int:
-    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry."""
+    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry.
+
+    ``valid_before`` is an exclusive whole-second bound, so the cap is the
+    second after the (possibly fractional) expiry. The transaction then stays
+    valid for as long as the challenge does.
+    """
     valid_before = int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
-    bound = _expiry_bound(expires)
-    return valid_before if bound is None else min(valid_before, bound)
+    if not expires:
+        return valid_before
+    try:
+        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return valid_before
+    return min(valid_before, int(challenge_expiry) + 1)
 
 
 # ──────────────────────────────────────────────────────────────────
