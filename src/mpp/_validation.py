@@ -24,12 +24,18 @@ class Validation:
             settlement ``mode`` and, in pull mode, the serialized transaction).
         intent: Name of the intent that accepted the credential.
         request: The request parameters the credential was validated against.
+        payer: Payer identity established by the method's verification, when
+            it can determine one (for Tempo charges, the lowercase address of
+            the paying account). Unlike ``source``, which the client asserts,
+            this is derived from the verified payment. Server verification
+            copies it to ``Receipt.payer``.
     """
 
     credential: Credential
     details: Any
     intent: str
     request: dict[str, Any]
+    payer: str | None = None
 
     @property
     def challenge(self) -> ChallengeEcho:

@@ -3,6 +3,7 @@
 import base64
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -402,6 +403,13 @@ class TestReceipt:
         assert parsed.status == receipt.status
         assert parsed.timestamp == receipt.timestamp
         assert parsed.reference == receipt.reference
+
+    def test_payer_is_not_serialized(self) -> None:
+        receipt = Receipt.success("0xabc123", timestamp=datetime(2024, 1, 20, tzinfo=UTC))
+        with_payer = replace(receipt, payer="0x" + "aa" * 20)
+
+        assert with_payer.to_payment_receipt() == receipt.to_payment_receipt()
+        assert Receipt.from_payment_receipt(with_payer.to_payment_receipt()).payer is None
 
     def test_success_factory(self) -> None:
         """Receipt.success() should create success receipt with timestamp."""

@@ -27,6 +27,7 @@ Example:
 
 from typing import Any
 
+from mpp._did import PkhSource, parse_pkh_source
 from mpp._lazy_exports import load_lazy_attr
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,

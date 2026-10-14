@@ -9,7 +9,7 @@ import asyncio
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -19,6 +19,7 @@ from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._did import parse_pkh_source
 from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
@@ -75,6 +76,74 @@ def _raw_transaction_hash(raw_tx: str) -> str:
         raise VerificationError("Invalid transaction signature") from err
 
     return "0x" + keccak(tx_bytes).hex()
+
+
+def _transaction_sender(raw_tx: str) -> str | None:
+    """Return the lowercase address of the account a Tempo transaction debits.
+
+    The sender is derived from the sender signature: secp256k1 signatures are
+    recovered over the sender signing hash; keychain, multisig, P256 and
+    WebAuthn signatures name the account (keychain root, multisig account, or
+    public-key address), which the chain authenticates at settlement. A 0x78
+    fee payer envelope must also declare that sender in its sender slot.
+
+    Returns ``None`` if the transaction is malformed or the sender cannot be
+    derived.
+    """
+    import rlp
+    from eth_account import Account
+    from eth_hash.auto import keccak
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        fields = rlp.decode(tx_bytes[1:])
+    except Exception:
+        return None
+    if tx_bytes[0] not in (0x76, 0x78) or not isinstance(fields, list):
+        return None
+    if len(fields) not in (14, 15):
+        return None
+    is_envelope = tx_bytes[0] == 0x78
+    sender_slot, signature = fields[11], fields[-1]
+    if not isinstance(signature, bytes) or not signature:
+        return None
+
+    sender: str | None = None
+    if len(signature) == 65:
+        has_fee_payer = is_envelope or sender_slot != b""
+        preimage = [
+            *fields[:10],
+            b"" if has_fee_payer else fields[10],
+            b"\x00" if has_fee_payer else b"",
+            *fields[12:-1],
+        ]
+        try:
+            sender = Account._recover_hash(
+                keccak(b"\x76" + rlp.encode(preimage)), signature=signature
+            )
+        except Exception:
+            return None
+    else:
+        type_id, data = signature[0], signature[1:]
+        if type_id in (0x03, 0x04) and len(data) > 20:
+            sender = "0x" + data[:20].hex()
+        elif type_id == 0x01 and len(data) == 129:
+            sender = "0x" + keccak(data[64:128])[-20:].hex()
+        elif type_id == 0x02 and len(data) >= 128:
+            sender = "0x" + keccak(data[-64:])[-20:].hex()
+        elif type_id == 0x05:
+            try:
+                account = rlp.decode(data)[0]
+            except Exception:
+                return None
+            if isinstance(account, bytes) and len(account) == 20:
+                sender = "0x" + account.hex()
+    if sender is None:
+        return None
+    sender = sender.lower()
+    if is_envelope and sender_slot != bytes.fromhex(sender[2:]):
+        return None
+    return sender
 
 
 def _parse_memo_bytes(memo: str | None) -> bytes | None:
@@ -219,6 +288,8 @@ def _match_single_transfer_calldata(
 class MatchedTransferLog:
     kind: Literal["memo", "transfer"]
     memo: str | None = None
+    sender: str | None = None
+    """Lowercase ``from`` address of the transfer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,28 +307,6 @@ class SenderValidation:
 # Authorizes a transfer whose sender differs from the expected sender;
 # return ``True`` to accept.
 ValidateSender = Callable[[SenderValidation], bool]
-
-
-_PKH_SOURCE_RE = re.compile(r"did:pkh:eip155:(0|[1-9][0-9]*):(.+)")
-_PKH_ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
-
-
-def _parse_pkh_source(source: str) -> tuple[str, int] | None:
-    """Parse a ``did:pkh:eip155:<chainId>:<address>`` DID.
-
-    Returns ``(address, chain_id)`` or ``None`` if malformed.
-    """
-    match = _PKH_SOURCE_RE.fullmatch(source)
-    if match is None:
-        return None
-    address = match.group(2)
-    if _PKH_ADDRESS_RE.fullmatch(address) is None:
-        return None
-    try:
-        chain_id = int(match.group(1))
-    except ValueError:
-        return None
-    return address, chain_id
 
 
 def _rpc_error_msg(result: dict) -> str:
@@ -599,8 +648,11 @@ class ChargeIntent:
             request: The original payment request parameters.
 
         Returns:
-            A validation record whose ``details`` carry the settlement
-            ``mode`` and, in pull mode, the serialized transaction.
+            A validation record whose ``payer`` is the lowercase address of
+            the paying account (the transaction sender in pull mode; the
+            sender of the matched transfers in push mode, or ``None`` if they
+            differ) and whose ``details`` carry the settlement ``mode`` and,
+            in pull mode, the serialized transaction.
 
         Raises:
             VerificationError: If the credential is invalid.
@@ -611,16 +663,20 @@ class ChargeIntent:
 
         if isinstance(payload, HashCredentialPayload):
             await self._ensure_hash_unused(payload.hash)
-            await self._validate_hash(
+            receipt = await self._validate_hash(
                 payload,
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
                 source=credential.source,
             )
+            payer = receipt.payer
             details: dict[str, Any] = {"mode": "push"}
         else:
             self._validate_transaction_payload(payload.signature, req, strict=True)
+            payer = self._transaction_payer(
+                payload.signature, credential.source, req.methodDetails.chainId
+            )
             details = {"mode": "pull", "serialized_transaction": payload.signature}
 
         return Validation(
@@ -628,6 +684,7 @@ class ChargeIntent:
             details=details,
             intent=self.name,
             request=dict(request),
+            payer=payer,
         )
 
     async def broadcast(
@@ -682,6 +739,7 @@ class ChargeIntent:
             req,
             challenge_id=credential.challenge.id,
             realm=credential.challenge.realm,
+            source=credential.source,
         )
 
     async def verify(
@@ -725,10 +783,29 @@ class ChargeIntent:
         """
         if source is None:
             return None
-        parsed = _parse_pkh_source(source)
-        if parsed is None or parsed[1] != expected_chain_id:
+        parsed = parse_pkh_source(source)
+        if parsed is None or parsed.chain_id != expected_chain_id:
             raise VerificationError("Hash credential source is invalid.")
-        return parsed[0]
+        return parsed.address
+
+    @staticmethod
+    def _transaction_payer(raw_tx: str, source: str | None, chain_id: int) -> str | None:
+        """Return a transaction credential's sender, binding its source if present.
+
+        With a ``source``, it must be a ``did:pkh:eip155`` DID on ``chain_id``
+        naming the account the transaction debits, else raises
+        ``VerificationError``. Returns the lowercase sender address, or
+        ``None`` if it cannot be derived and no source was given.
+        """
+        sender = _transaction_sender(raw_tx)
+        if source is None:
+            return sender
+        parsed = parse_pkh_source(source)
+        if parsed is None or parsed.chain_id != chain_id:
+            raise VerificationError("Transaction credential source is invalid.")
+        if sender is None or sender != parsed.address.lower():
+            raise VerificationError("Transaction credential source does not match the sender.")
+        return sender
 
     def _sender_authorized(
         self,
@@ -764,13 +841,17 @@ class ChargeIntent:
         realm: str,
         source: str | None = None,
     ) -> Receipt:
-        """Validate a transaction hash without consuming its replay key."""
+        """Validate a transaction hash without consuming its replay key.
+
+        The receipt's ``payer`` is the account the matched transfers debited,
+        or ``None`` if they came from different senders.
+        """
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
         client = await self._get_client()
         receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-        self._verify_receipt_transfers(
+        matched_logs = self._verify_receipt_transfers(
             receipt_data,
             request,
             challenge_id=challenge_id,
@@ -780,7 +861,9 @@ class ChargeIntent:
             validate_sender=self._validate_sender,
         )
 
-        return Receipt.success(payload.hash)
+        senders = {matched_log.sender for matched_log in matched_logs}
+        payer = senders.pop() if len(senders) == 1 else None
+        return replace(Receipt.success(payload.hash), payer=payer)
 
     def _assert_challenge_bound_memo(
         self,
@@ -907,7 +990,9 @@ class ChargeIntent:
                     from_address, expected_sender, source, validate_sender
                 ):
                     continue
-                memo_matches.append(MatchedTransferLog(kind="memo", memo=log_memo))
+                memo_matches.append(
+                    MatchedTransferLog(kind="memo", memo=log_memo, sender=from_address.lower())
+                )
             elif event_topic == TRANSFER_TOPIC:
                 if memo is not None:
                     continue
@@ -917,7 +1002,9 @@ class ChargeIntent:
                     if log_amount == amount and self._sender_authorized(
                         from_address, expected_sender, source, validate_sender
                     ):
-                        transfer_matches.append(MatchedTransferLog(kind="transfer"))
+                        transfer_matches.append(
+                            MatchedTransferLog(kind="transfer", sender=from_address.lower())
+                        )
 
         return memo_matches + transfer_matches
 
@@ -1004,7 +1091,11 @@ class ChargeIntent:
                         )
                     ):
                         used_logs.add(log_idx)
-                        all_matches.append(MatchedTransferLog(kind="memo", memo=memo_topic))
+                        all_matches.append(
+                            MatchedTransferLog(
+                                kind="memo", memo=memo_topic, sender=from_addr.lower()
+                            )
+                        )
                         found = True
                         break
                 else:
@@ -1019,7 +1110,11 @@ class ChargeIntent:
                             from_addr, expected_sender, source, validate_sender
                         ):
                             used_logs.add(log_idx)
-                            all_matches.append(MatchedTransferLog(kind="memo", memo=topics[3]))
+                            all_matches.append(
+                                MatchedTransferLog(
+                                    kind="memo", memo=topics[3], sender=from_addr.lower()
+                                )
+                            )
                             found = True
                             break
                     elif event_topic == TRANSFER_TOPIC:
@@ -1030,7 +1125,9 @@ class ChargeIntent:
                             from_addr, expected_sender, source, validate_sender
                         ):
                             used_logs.add(log_idx)
-                            all_matches.append(MatchedTransferLog(kind="transfer"))
+                            all_matches.append(
+                                MatchedTransferLog(kind="transfer", sender=from_addr.lower())
+                            )
                             found = True
                             break
 
@@ -1045,6 +1142,7 @@ class ChargeIntent:
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        source: str | None = None,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -1055,6 +1153,7 @@ class ChargeIntent:
         submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
+        sender = self._transaction_payer(payload.signature, source, request.methodDetails.chainId)
 
         client = await self._get_client()
 
@@ -1112,6 +1211,10 @@ class ChargeIntent:
                     raise InternalPaymentError() from RuntimeError(
                         "Fee payer returned no signed transaction"
                     )
+
+            # Fee payer signing must not change who the transaction debits.
+            if sender is not None and _transaction_sender(raw_tx) != sender:
+                raise VerificationError("Fee payer transaction sender does not match the sender.")
 
         rpc_url = self._get_rpc_url()
 

@@ -1,3 +1,5 @@
+from mpp._did import PkhSource as _PkhSource
+from mpp._did import parse_pkh_source as _parse_pkh_source
 from mpp.methods.tempo._defaults import CHAIN_ID as _CHAIN_ID
 from mpp.methods.tempo._defaults import ESCROW_CONTRACTS as _ESCROW_CONTRACTS
 from mpp.methods.tempo._defaults import MACH as _MACH
@@ -24,6 +26,8 @@ from mpp.methods.tempo.relay import Relay as _Relay
 from mpp.methods.tempo.relay import RelayErrorCode as _RelayErrorCode
 from mpp.methods.tempo.schemas import Split as _Split
 
+PkhSource = _PkhSource
+parse_pkh_source = _parse_pkh_source
 CHAIN_ID = _CHAIN_ID
 ESCROW_CONTRACTS = _ESCROW_CONTRACTS
 MACH = _MACH

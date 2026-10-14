@@ -428,6 +428,12 @@ class Receipt:
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
     extensions: dict[str, Any] | None = None
+    payer: str | None = None
+    """Payer identity verified by the payment method (``Validation.payer``).
+
+    Server-side only: set on receipts returned by server verification and
+    never serialized into the ``Payment-Receipt`` header.
+    """
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:

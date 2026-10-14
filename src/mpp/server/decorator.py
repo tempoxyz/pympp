@@ -342,7 +342,7 @@ def pay(
             request={"amount": "1000"},
         )
         async def get_resource(request: Request, credential: Credential, receipt: Receipt):
-            return {"data": "paid content", "payer": credential.source}
+            return {"data": "paid content", "payer": receipt.payer}
     """
 
     resolved_realm = realm if realm is not None else detect_realm()

@@ -5014,3 +5014,336 @@ class TestHashCredentialSourceValidation:
         intent = self._intent(receipt, validate_sender=boom)
         result = await self._verify(intent, source=None)
         assert result.reference == "0xabc123"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("source", "log_senders", "accept_other", "expected"),
+        [
+            (True, [SOURCE_ADDR], False, SOURCE_ADDR),
+            (False, [SOURCE_ADDR], False, SOURCE_ADDR),
+            (True, [RELAYER], True, RELAYER),
+            (False, [SOURCE_ADDR, RELAYER], False, None),
+        ],
+    )
+    async def test_validate_reports_debited_account_as_payer(
+        self, source: bool, log_senders: list[str], accept_other: bool, expected: str | None
+    ) -> None:
+        # The payer is the sender of the matched transfers, not the transaction
+        # submitter (a relayer here), and is unset when matched senders differ.
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER if not accept_other else self.SOURCE_ADDR,
+            "logs": [self._memo_log(sender, self._bound_memo) for sender in log_senders],
+        }
+        intent = self._intent(receipt, validate_sender=(lambda v: True) if accept_other else None)
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id="challenge-123",
+            realm="api.example.com",
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            source=self._did(self.CHAIN_ID, self.SOURCE_ADDR) if source else None,
+        )
+        request = {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT}
+
+        validation = await intent.validate(credential, request)
+
+        assert validation.payer == expected
+
+
+PKH_ADDRESS = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (f"did:pkh:eip155:4217:{PKH_ADDRESS}", (PKH_ADDRESS, 4217)),
+        (f"did:pkh:eip155:1:{PKH_ADDRESS.lower()}", (PKH_ADDRESS.lower(), 1)),
+        (f"did:pkh:eip155:0:0x{PKH_ADDRESS[2:].upper()}", (f"0x{PKH_ADDRESS[2:].upper()}", 0)),
+        (f"did:pkh:eip155:{2**53 - 1}:{PKH_ADDRESS}", (PKH_ADDRESS, 2**53 - 1)),
+        (f"did:pkh:eip155:{2**53}:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:{'9' * 17}:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:{'9' * 5000}:{PKH_ADDRESS}", None),
+        ("", None),
+        ("did:example:client", None),
+        (f"did:pkh:solana:4217:{PKH_ADDRESS}", None),
+        (f"DID:PKH:EIP155:4217:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:04217:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:-1:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155::{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:4\uff1217:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:4217:extra:{PKH_ADDRESS}", None),
+        (f"did:pkh:eip155:4217:{PKH_ADDRESS[2:]}", None),
+        (f"did:pkh:eip155:4217:{PKH_ADDRESS[:-1]}", None),
+        (f"did:pkh:eip155:4217:{PKH_ADDRESS}0", None),
+        (f"did:pkh:eip155:4217:0x{'g' * 40}", None),
+        (f"did:pkh:eip155:4217:{PKH_ADDRESS}\n", None),
+        (f" did:pkh:eip155:4217:{PKH_ADDRESS}", None),
+    ],
+)
+def test_parse_pkh_source(source: str, expected: tuple[str, int] | None) -> None:
+    from mpp.methods.tempo import PkhSource, parse_pkh_source
+
+    parsed = parse_pkh_source(source)
+
+    assert parsed == expected
+    assert parsed is None or isinstance(parsed, PkhSource)
+
+
+@pytest.mark.asyncio
+async def test_oversized_hash_source_chain_id_is_rejected() -> None:
+    credential = make_credential(
+        payload={"type": "hash", "hash": "0x" + "ab" * 32},
+        expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        source=f"did:pkh:eip155:{'9' * 5000}:{PKH_ADDRESS}",
+    )
+    request = {"amount": "1000", "currency": PATH_USD, "recipient": PKH_ADDRESS}
+
+    with pytest.raises(VerificationError, match="Hash credential source is invalid"):
+        await ChargeIntent(rpc_url="https://rpc.test").validate(credential, request)
+
+
+class TestTransactionCredentialPayer:
+    """Pull-mode credentials report the transaction sender as the verified payer."""
+
+    CHAIN_ID = 42431
+    CURRENCY = "0x20c0000000000000000000000000000000000000"
+    RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    CHALLENGE_ID = "challenge-123"
+    REALM = "api.example.com"
+    ACCESS_KEY = "0x" + "11" * 32
+    FEE_PAYER_KEY = "0x" + "22" * 32
+    OTHER_KEY = "0x" + "33" * 32
+    ROOT = "0x00000000000000000000000000000000000000aa"
+    OTHER = "0x00000000000000000000000000000000000000bb"
+    PUBKEY = bytes(range(64))
+    KINDS = [
+        "secp256k1",
+        "key_authorization",
+        "sponsored",
+        "envelope",
+        "keychain",
+        "keychain_envelope",
+        "p256",
+        "webauthn",
+        "multisig",
+    ]
+
+    @property
+    def _memo(self) -> str:
+        return encode_attribution(challenge_id=self.CHALLENGE_ID, server_id=self.REALM)
+
+    def _tx(self, **overrides):
+        from pytempo import Call, TempoTransaction
+
+        to = self.RECIPIENT[2:].lower().zfill(64)
+        data = f"0x{TRANSFER_WITH_MEMO_SELECTOR}{to}{1000:064x}{self._memo[2:]}"
+        fields = {
+            "chain_id": self.CHAIN_ID,
+            "gas_limit": 100_000,
+            "max_fee_per_gas": 1,
+            "max_priority_fee_per_gas": 1,
+            "calls": (Call.create(to=self.CURRENCY, value=0, data=data),),
+        }
+        return TempoTransaction.create(**{**fields, **overrides})
+
+    def _replace_field(self, raw_tx: str, index: int, value: bytes) -> str:
+        tx_bytes = bytes.fromhex(raw_tx[2:])
+        fields = rlp.decode(tx_bytes[1:])
+        fields[index] = value
+        return "0x" + tx_bytes[:1].hex() + bytes(rlp.encode(fields)).hex()
+
+    def _envelope(self, private_key: str = TEST_PRIVATE_KEY) -> str:
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        tx = self._tx(awaiting_fee_payer=True).sign(private_key)
+        return "0x" + encode_fee_payer_envelope(tx).hex()
+
+    def _signed(self, kind: str) -> tuple[str, str]:
+        """Return ``(raw_tx, expected_sender)`` for a signature kind."""
+        from eth_account import Account
+        from eth_hash.auto import keccak
+        from pytempo.keychain import KeyAuthorization
+
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        payer = Account.from_key(TEST_PRIVATE_KEY).address
+        pubkey_address = "0x" + keccak(self.PUBKEY)[-20:].hex()
+        base = "0x" + self._tx().sign(TEST_PRIVATE_KEY).encode().hex()
+        rs = b"\x01" * 64
+
+        if kind == "secp256k1":
+            return base, payer
+        if kind == "key_authorization":
+            key_id = Account.from_key(self.ACCESS_KEY).address
+            auth = KeyAuthorization(key_id=key_id, chain_id=self.CHAIN_ID).sign(TEST_PRIVATE_KEY)
+            tx = self._tx(key_authorization=auth).sign(TEST_PRIVATE_KEY)
+            return "0x" + tx.encode().hex(), payer
+        if kind == "sponsored":
+            tx = self._tx(awaiting_fee_payer=True).sign(TEST_PRIVATE_KEY)
+            return "0x" + tx.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex(), payer
+        if kind == "envelope":
+            return self._envelope(), payer
+        if kind == "keychain":
+            tx = self._tx().sign_access_key(self.ACCESS_KEY, self.ROOT)
+            return "0x" + tx.encode().hex(), self.ROOT
+        if kind == "keychain_envelope":
+            tx = self._tx(awaiting_fee_payer=True).sign_access_key(self.ACCESS_KEY, self.ROOT)
+            return "0x" + encode_fee_payer_envelope(tx).hex(), self.ROOT
+        if kind == "p256":
+            signature = b"\x01" + rs + self.PUBKEY + b"\x00"
+            return self._replace_field(base, -1, signature), pubkey_address
+        if kind == "webauthn":
+            webauthn_data = b"\x00" * 37 + b'{"type":"webauthn.get"}'
+            signature = b"\x02" + webauthn_data + rs + self.PUBKEY
+            return self._replace_field(base, -1, signature), pubkey_address
+        if kind == "multisig":
+            account = bytes.fromhex(self.ROOT[2:])
+            signature = b"\x05" + bytes(rlp.encode([account, b"\x01", [], b""]))
+            return self._replace_field(base, -1, signature), self.ROOT
+        raise AssertionError(kind)
+
+    def _credential(self, raw_tx: str, source: str | None):
+        return make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            challenge_id=self.CHALLENGE_ID,
+            realm=self.REALM,
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+            source=source,
+        )
+
+    def _did(self, address: str) -> str:
+        return f"did:pkh:eip155:{self.CHAIN_ID}:{address}"
+
+    def _request(self, **method_details) -> dict:
+        return {
+            "amount": "1000",
+            "currency": self.CURRENCY,
+            "recipient": self.RECIPIENT,
+            "methodDetails": {"chainId": self.CHAIN_ID, **method_details},
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("source", ["match", "match_lowercase", None])
+    async def test_validate_reports_sender(self, kind: str, source: str | None) -> None:
+        raw_tx, sender = self._signed(kind)
+        did = None
+        if source == "match":
+            did = self._did(sender)
+        elif source == "match_lowercase":
+            did = self._did(sender.lower())
+
+        validation = await ChargeIntent(rpc_url="https://rpc.test").validate(
+            self._credential(raw_tx, did), self._request()
+        )
+
+        assert validation.details["mode"] == "pull"
+        assert validation.payer == sender.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize(
+        ("source", "error"),
+        [
+            (f"did:pkh:eip155:{CHAIN_ID}:{OTHER}", "source does not match the sender"),
+            ("did:pkh:eip155:4217:{sender}", "source is invalid"),
+            (f"did:pkh:eip155:{'9' * 5000}:{{sender}}", "source is invalid"),
+            ("did:example:client", "source is invalid"),
+            (f"did:pkh:eip155:{CHAIN_ID}:not-an-address", "source is invalid"),
+        ],
+    )
+    async def test_validate_rejects_source(self, kind: str, source: str, error: str) -> None:
+        raw_tx, sender = self._signed(kind)
+        credential = self._credential(raw_tx, source.format(sender=sender))
+
+        with pytest.raises(VerificationError, match=f"Transaction credential {error}"):
+            await ChargeIntent(rpc_url="https://rpc.test").validate(credential, self._request())
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("claimed", ["victim", "signer"])
+    async def test_envelope_sender_slot_must_match_signer(self, claimed: str) -> None:
+        from eth_account import Account
+
+        signer = Account.from_key(self.OTHER_KEY).address
+        victim = Account.from_key(TEST_PRIVATE_KEY).address
+        forged = self._replace_field(self._envelope(self.OTHER_KEY), 11, bytes.fromhex(victim[2:]))
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+
+        source = self._did(victim if claimed == "victim" else signer)
+        with pytest.raises(VerificationError, match="source does not match the sender"):
+            await intent.validate(self._credential(forged, source), self._request())
+        validation = await intent.validate(self._credential(forged, None), self._request())
+        assert validation.payer is None
+
+    @pytest.mark.parametrize(
+        "raw_tx",
+        [
+            "0x76abcdef",
+            "0x77" + bytes(rlp.encode([b""] * 14)).hex(),
+            "0x76" + bytes(rlp.encode([b""] * 14)).hex(),
+            "0x78" + bytes(rlp.encode([b""] * 14)).hex(),
+            "0x76" + bytes(rlp.encode([b""] * 13 + [b"\x06" + b"\x00" * 20])).hex(),
+        ],
+    )
+    def test_unknown_sender(self, raw_tx: str) -> None:
+        assert ChargeIntent._transaction_payer(raw_tx, None, self.CHAIN_ID) is None
+        with pytest.raises(VerificationError, match="does not match the sender"):
+            ChargeIntent._transaction_payer(raw_tx, self._did(self.ROOT), self.CHAIN_ID)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("source", ["match", None])
+    @pytest.mark.parametrize("cosigner", ["sender", "other"])
+    async def test_external_fee_payer_cannot_change_sender(
+        self, source: str | None, cosigner: str
+    ) -> None:
+        from eth_account import Account
+
+        from mpp.server.intent import broadcast_credential
+
+        sender = Account.from_key(TEST_PRIVATE_KEY).address
+        signer_key = TEST_PRIVATE_KEY if cosigner == "sender" else self.OTHER_KEY
+        signed = self._tx(awaiting_fee_payer=True).sign(signer_key)
+        cosigned = "0x" + signed.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex()
+        log = {
+            "address": self.CURRENCY,
+            "topics": [
+                TRANSFER_WITH_MEMO_TOPIC,
+                "0x" + sender[2:].lower().zfill(64),
+                "0x" + self.RECIPIENT[2:].lower().zfill(64),
+                self._memo,
+            ],
+            "data": amount_data(1000),
+        }
+        methods: list[str] = []
+
+        def rpc(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            methods.append(body["method"])
+            if body["method"] == "eth_signRawTransaction":
+                result: object = cosigned
+            else:
+                tx_hash = _raw_transaction_hash(body["params"][0])
+                result = {"status": "0x1", "transactionHash": tx_hash, "logs": [log]}
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
+            intent = ChargeIntent(rpc_url="https://rpc.test", http_client=client)
+            credential = self._credential(
+                self._envelope(), None if source is None else self._did(sender)
+            )
+            request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
+
+            if cosigner == "other":
+                with pytest.raises(VerificationError, match="Fee payer transaction sender"):
+                    await broadcast_credential(
+                        intent=intent, credential=credential, request=request
+                    )
+                assert methods == ["eth_signRawTransaction"]
+                return
+
+            receipt = await broadcast_credential(
+                intent=intent, credential=credential, request=request
+            )
+
+        assert receipt.payer == sender.lower()
+        assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
