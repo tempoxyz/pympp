@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
+from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import ParseError
 from mpp.errors import (
     InvalidChallengeError,
@@ -45,6 +46,35 @@ _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
 _MAX_BUFFERED_ERROR_BODY = 64 * 1024
 _ERROR_BODY_TIMEOUT = 2.0
 _BODY_TRUNCATED_EXTENSION = "mpp.body_truncated"
+
+
+class _PaidRetryTimeoutUnset:
+    def __repr__(self) -> str:
+        return f"<inherited, read >= {DEFAULT_PAID_RETRY_TIMEOUT:g}s>"
+
+
+_PAID_RETRY_TIMEOUT_UNSET: Any = _PaidRetryTimeoutUnset()
+
+
+def _paid_retry_extensions(
+    extensions: dict[str, Any], paid_retry_timeout: float | None
+) -> dict[str, Any]:
+    """Return request extensions for a paid retry.
+
+    An explicit ``paid_retry_timeout`` replaces the request's timeout and
+    ``None`` keeps it. When unset, the inherited read timeout is raised to at
+    least ``DEFAULT_PAID_RETRY_TIMEOUT``, since the read is where the server's
+    confirmation wait shows up; connect, write and pool timeouts are kept.
+    """
+    timeout = extensions.get("timeout")
+    if paid_retry_timeout is _PAID_RETRY_TIMEOUT_UNSET:
+        if not isinstance(timeout, dict) or timeout.get("read") is None:
+            return extensions
+        read = max(timeout["read"], DEFAULT_PAID_RETRY_TIMEOUT)
+        return {**extensions, "timeout": {**timeout, "read": read}}
+    if paid_retry_timeout is None:
+        return extensions
+    return {**extensions, "timeout": httpx.Timeout(paid_retry_timeout).as_dict()}
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
@@ -149,6 +179,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
     3. Creates credentials and retries the request
     4. Returns the final response (success or failure)
 
+    The paid retry may legitimately wait up to the server's confirmation
+    window (30s by default in pympp and mppx) while the payment settles. By
+    default it inherits the request's timeout with the read timeout raised to
+    at least 35s; an explicit ``paid_retry_timeout`` should be at least as long
+    as the server's window. Every other request uses the client's timeout.
+
     Example:
         transport = PaymentTransport(
             methods=[tempo(...)],
@@ -167,7 +203,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         *,
         runtime: PaymentRuntime | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
+        paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
+        """Initialize the transport.
+
+        Args:
+            paid_retry_timeout: Timeout in seconds for the paid retry request,
+                used exactly when set. ``None`` inherits the request's timeout
+                unchanged. When unset, the inherited read timeout is raised to
+                at least 35s (``DEFAULT_PAID_RETRY_TIMEOUT``).
+        """
         if (methods is None) == (runtime is None):
             raise TypeError("Provide exactly one of methods or runtime")
         if runtime is not None and events is not None:
@@ -178,6 +223,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
+        self._paid_retry_timeout = paid_retry_timeout
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -329,7 +375,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     url=request.url,
                     headers=headers,
                     content=request.content,
-                    extensions=request.extensions,
+                    extensions=_paid_retry_extensions(request.extensions, self._paid_retry_timeout),
                 )
 
                 try:
@@ -419,6 +465,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 class Client:
     """HTTP client with automatic payment handling.
 
+    The paid retry may wait up to the server's confirmation window, so unless
+    ``paid_retry_timeout`` is set its read timeout is at least 35s; see
+    ``PaymentTransport``.
+
     Example:
         async with Client(methods=[tempo(...)]) as client:
             response = await client.get("https://api.example.com/resource")
@@ -430,11 +480,13 @@ class Client:
         *,
         runtime: PaymentRuntime | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
+        paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
         self._transport = PaymentTransport(
             methods,
             runtime=runtime,
             max_payment_retries=max_payment_retries,
+            paid_retry_timeout=paid_retry_timeout,
         )
         self._client = httpx.AsyncClient(transport=self._transport)
 
@@ -496,6 +548,7 @@ async def request(
     url: str,
     *,
     methods: Sequence[Method],
+    paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -510,7 +563,7 @@ async def request(
             methods=[tempo(...)],
         )
     """
-    async with Client(methods) as client:
+    async with Client(methods, paid_retry_timeout=paid_retry_timeout) as client:
         return await client.request(method, url, **kwargs)
 
 
