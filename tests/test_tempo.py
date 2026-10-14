@@ -1299,6 +1299,68 @@ class TestChargeIntent:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("store_source", "expected_warnings"),
+        [("default", 1), ("intent", 0), ("server", 0)],
+    )
+    async def test_default_memory_store_warns_once_per_process(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+        store_source: str,
+        expected_warnings: int,
+    ) -> None:
+        from mpp.server import Mpp
+        from mpp.store import MemoryStore
+
+        monkeypatch.setattr("mpp.methods.tempo.intents._warned_fallback_stores", set())
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        request = {
+            "amount": "1000",
+            "currency": "0x1234567890123456789012345678901234567890",
+            "recipient": "0x4567890123456789012345678901234567890123",
+        }
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc123"}, expires=future)
+
+        for _ in range(2):
+            store = MemoryStore()
+            intent = ChargeIntent(
+                rpc_url="https://rpc.test",
+                store=store if store_source == "intent" else None,
+            )
+            if store_source == "server":
+                Mpp.create(
+                    method=tempo(
+                        intents={"charge": intent},
+                        currency=request["currency"],
+                        recipient=request["recipient"],
+                    ),
+                    realm="test.com",
+                    secret_key="test-secret",
+                    store=store,
+                )
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                return_value=mock_response(
+                    200,
+                    {"jsonrpc": "2.0", "result": {"status": "0x0", "logs": []}, "id": 1},
+                )
+            )
+            intent._http_client = mock_client
+            with_chain_id(mock_client)
+
+            for _ in range(2):
+                with pytest.raises(VerificationError, match="Transaction reverted"):
+                    await intent.broadcast(credential, request)
+
+            assert (intent._store is store) == (store_source != "default")
+            assert isinstance(intent._store, MemoryStore)
+
+        warnings = [r for r in caplog.records if "in-memory store" in r.getMessage()]
+        assert len(warnings) == expected_warnings
+        assert all("tempo.charge has no store configured" in r.getMessage() for r in warnings)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("lookup", "cause", "cause_text"),
         [
             (httpx.ReadTimeout("timed out"), httpx.ReadTimeout, "timed out"),

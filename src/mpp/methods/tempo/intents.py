@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -42,6 +43,30 @@ if TYPE_CHECKING:
     import httpx
 
     from mpp.methods.tempo.account import TempoAccount
+
+logger = logging.getLogger(__name__)
+
+_warned_fallback_stores: set[str] = set()
+
+
+def _fallback_store(method: str) -> MemoryStore:
+    """Create the in-memory replay store used when *method* has no store configured.
+
+    Replay protection backed by this store only covers the current process, so this
+    logs a warning once per *method* per process.
+    """
+    if method not in _warned_fallback_stores:
+        _warned_fallback_stores.add(method)
+        logger.warning(
+            "%s has no store configured and is using an in-memory store. Replay "
+            "protection is scoped to this process, so a credential accepted by one "
+            "worker or replica can be accepted again by another, or after a restart. "
+            "Pass a shared store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) "
+            "or ChargeIntent(store=...) when running more than one instance.",
+            method,
+        )
+    return MemoryStore(max_entries=10_000)
+
 
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
@@ -537,7 +562,8 @@ class ChargeIntent:
             store: Key-value store for tx hash replay protection. Defaults to
                 an in-memory store capped at 10,000 entries on first settlement.
                 New payments fail at capacity without evicting used hashes. Use a shared persistent
-                store across server replicas and restarts.
+                store across server replicas and restarts. A warning is logged once per
+                process when the in-memory default is used.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
                 ``True`` to accept (e.g. smart-account / relayer flows).
@@ -716,7 +742,7 @@ class ChargeIntent:
         """
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
-            self._store = MemoryStore(max_entries=10_000)
+            self._store = _fallback_store("tempo.charge")
 
         req, payload = self._prepare_credential(credential, request)
 
