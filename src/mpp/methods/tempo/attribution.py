@@ -2,8 +2,9 @@
 
 The Tempo client writes a 32-byte, challenge-bound attribution memo on every
 primary ``transferWithMemo`` transfer. Use these helpers to recognize MPP
-transfers and reconcile them with the server and Challenge they paid.
-Requires the ``tempo`` extra.
+transfers and reconcile them with the server and Challenge they paid. The
+client uses the Challenge ``realm`` as ``server_id``. Encoding and verification
+require the ``tempo`` extra.
 
 Example:
     from mpp.methods.tempo import attribution
@@ -13,6 +14,8 @@ Example:
 """
 
 from mpp.methods.tempo._attribution import (
+    ANONYMOUS,
+    TAG,
     DecodedMemo,
     decode,
     encode,
@@ -22,6 +25,8 @@ from mpp.methods.tempo._attribution import (
 )
 
 __all__ = [
+    "ANONYMOUS",
+    "TAG",
     "DecodedMemo",
     "decode",
     "encode",

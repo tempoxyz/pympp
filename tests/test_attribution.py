@@ -1,7 +1,11 @@
 """Tests for MPP attribution memo encoding."""
 
-from mpp.methods.tempo._attribution import TAG, challenge_nonce
+from eth_hash.auto import keccak
+
+from mpp.methods.tempo import attribution
 from mpp.methods.tempo.attribution import (
+    ANONYMOUS,
+    TAG,
     DecodedMemo,
     decode,
     encode,
@@ -11,12 +15,36 @@ from mpp.methods.tempo.attribution import (
 )
 
 
-class TestTag:
-    def test_tag_value(self) -> None:
-        assert TAG == bytes.fromhex("ef1ed712")
+def _hash_prefix(value: str, size: int) -> str:
+    return "0x" + keccak(value.encode())[:size].hex()
 
-    def test_tag_length(self) -> None:
-        assert len(TAG) == 4
+
+def test_public_surface() -> None:
+    assert set(attribution.__all__) == {
+        "ANONYMOUS",
+        "TAG",
+        "DecodedMemo",
+        "decode",
+        "encode",
+        "is_mpp_memo",
+        "verify_challenge_binding",
+        "verify_server",
+    }
+    assert not hasattr(attribution, "challenge_nonce")
+
+
+class TestConstants:
+    def test_tag_is_keccak_prefix(self) -> None:
+        assert TAG == "0xef1ed712"
+        assert TAG == _hash_prefix("mpp", 4)
+
+    def test_anonymous_is_ten_zero_bytes(self) -> None:
+        assert ANONYMOUS == "0x" + "00" * 10
+
+    def test_encoded_memo_layout(self) -> None:
+        memo = encode(challenge_id="challenge-1", server_id="api.example.com")
+        assert memo.startswith(TAG + "01")
+        assert memo[32:52] == ANONYMOUS[2:]
 
 
 class TestEncode:
@@ -40,17 +68,6 @@ class TestEncode:
         memo = encode(challenge_id="challenge-1", server_id="api.example.com")
         assert memo == encode(challenge_id="challenge-1", server_id="api.example.com")
         assert memo != encode(challenge_id="challenge-2", server_id="api.example.com")
-
-
-class TestChallengeNonce:
-    def test_is_deterministic(self) -> None:
-        assert challenge_nonce("challenge-1") == challenge_nonce("challenge-1")
-
-    def test_changes_for_different_challenges(self) -> None:
-        assert challenge_nonce("challenge-1") != challenge_nonce("challenge-2")
-
-    def test_is_seven_bytes(self) -> None:
-        assert len(challenge_nonce("challenge-1")) == 7
 
 
 class TestIsMppMemo:
@@ -102,19 +119,11 @@ class TestVerifyChallengeBinding:
 class TestDecode:
     def test_round_trip(self) -> None:
         memo = encode(challenge_id="challenge-1", server_id="api.example.com", client_id="my-app")
-        decoded = decode(memo)
-        assert decoded is not None
-        assert isinstance(decoded, DecodedMemo)
-        assert decoded.version == 1
-        assert decoded.server_fingerprint.startswith("0x")
-        assert len(decoded.server_fingerprint) == 22  # 0x + 20 hex chars (10 bytes)
-        assert decoded.client_fingerprint is not None
-        assert decoded.nonce.startswith("0x")
-        assert len(decoded.nonce) == 16  # 0x + 14 hex chars (7 bytes)
-        assert decoded.nonce == "0x" + challenge_nonce("challenge-1").hex()
-        assert memo == "0x" + TAG.hex() + "01" + "".join(
-            field[2:]
-            for field in (decoded.server_fingerprint, decoded.client_fingerprint, decoded.nonce)
+        assert decode(memo) == DecodedMemo(
+            version=1,
+            server_fingerprint=_hash_prefix("api.example.com", 10),
+            client_fingerprint=_hash_prefix("my-app", 10),
+            nonce=_hash_prefix("challenge-1", 7),
         )
 
     def test_returns_none_for_non_mpp(self) -> None:
