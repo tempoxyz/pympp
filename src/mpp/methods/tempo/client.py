@@ -9,6 +9,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
 # AA-aware eth_estimateGas calls, matching the approach used by mpp-rs.
 DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
-FEE_PAYER_VALID_BEFORE_SECS = 25
+EXPIRING_NONCE_VALID_BEFORE_SECS = 25
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
@@ -294,8 +295,8 @@ class TempoMethod:
         """Create a credential to satisfy the given challenge.
 
         For the charge intent, this builds and signs a TempoTransaction (type 0x76)
-        with a fee payer placeholder. The server will forward this to a fee payer
-        service which adds its signature and broadcasts.
+        using an expiring nonce. Sponsored charges carry a fee payer placeholder
+        for the server or fee payer service to co-sign before broadcast.
 
         Args:
             challenge: The payment challenge from the server.
@@ -325,13 +326,6 @@ class TempoMethod:
             method_details.get("feePayer", False) if isinstance(method_details, dict) else False
         )
 
-        nonce_key = request.get("nonce_key", 0)
-        if isinstance(nonce_key, str):
-            if nonce_key.startswith("0x"):
-                nonce_key = int(nonce_key, 16)
-            else:
-                nonce_key = int(nonce_key)
-
         memo = encode_attribution(
             challenge_id=challenge.id,
             server_id=challenge.realm,
@@ -345,12 +339,12 @@ class TempoMethod:
             amount=request["amount"],
             currency=request["currency"],
             recipient=request["recipient"],
-            nonce_key=nonce_key,
             memo=memo,
             rpc_url=rpc_url,
             expected_chain_id=expected_chain_id,
             awaiting_fee_payer=use_fee_payer,
             splits=splits,
+            expires=challenge.expires,
         )
 
         # When signing with an access key, the credential source is the
@@ -399,12 +393,12 @@ class TempoMethod:
         amount: str,
         currency: str,
         recipient: str,
-        nonce_key: int = 0,
         memo: str | None = None,
         rpc_url: str | None = None,
         expected_chain_id: int | None = None,
         awaiting_fee_payer: bool = False,
         splits: list[dict] | None = None,
+        expires: str | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -412,20 +406,23 @@ class TempoMethod:
         Ordinary charges use the transfer currency; MACH charges select a
         funded supported stablecoin because MACH cannot pay transaction fees.
 
+        Always uses an expiring nonce (nonce_key=U256::MAX, nonce=0) with a
+        short ``valid_before`` window for replay protection, so concurrent
+        charges from one key never contend for a sequential nonce.
+
         When ``awaiting_fee_payer`` is True, the transaction is built with
         a fee payer placeholder so a sponsoring service can co-sign it
-        before broadcast. Uses expiring nonces (nonce_key=U256::MAX,
-        nonce=0) with a ``valid_before`` window for replay protection.
+        before broadcast.
 
         Args:
             amount: Transfer amount as string.
             currency: TIP-20 token contract address.
             recipient: Recipient address.
-            nonce_key: 2D nonce key for parallel transaction streams.
             memo: Optional 32-byte memo (hex string) for transferWithMemo.
             rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
             expected_chain_id: If set, verify the RPC reports this chain ID.
             awaiting_fee_payer: If True, build for fee payer sponsorship.
+            expires: Challenge expiry (ISO 8601). Caps ``valid_before``.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
@@ -464,17 +461,12 @@ class TempoMethod:
             calls_tuple = (Call.create(to=currency, value=0, data=transfer_data),)
             gas_estimate_data = transfer_data
 
-        # When using an access key, fetch nonce from the root account
-        # (smart wallet), not the access key address.
-        nonce_address = self.root_account if self.root_account else self.account.address
+        # When using an access key, the root account (smart wallet) is the
+        # sender, not the access key address.
+        sender = self.root_account if self.root_account else self.account.address
 
         chain_id = await self._get_chain_id(resolved_rpc)
-        nonce_hex, gas_price_hex = await asyncio.gather(
-            _rpc_call(resolved_rpc, "eth_getTransactionCount", [nonce_address, "pending"]),
-            _rpc_call(resolved_rpc, "eth_gasPrice", []),
-        )
-        on_chain_nonce = int(nonce_hex, 16)
-        gas_price = int(gas_price_hex, 16)
+        gas_price = int(await _rpc_call(resolved_rpc, "eth_gasPrice", []), 16)
         max_priority_fee_per_gas = gas_price
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
@@ -484,15 +476,8 @@ class TempoMethod:
             )
 
         if awaiting_fee_payer:
-            resolved_nonce_key = EXPIRING_NONCE_KEY
-            resolved_nonce = 0
-            valid_before = int(time.time()) + FEE_PAYER_VALID_BEFORE_SECS
             # Keep sponsored envelopes inside the server's default policy.
             max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
-        else:
-            resolved_nonce_key = nonce_key
-            resolved_nonce = on_chain_nonce
-            valid_before = None
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
@@ -500,13 +485,11 @@ class TempoMethod:
                 total_estimated = 0
                 for c in calls_tuple:
                     total_estimated += await estimate_gas(
-                        resolved_rpc, nonce_address, currency, c.data.hex()
+                        resolved_rpc, sender, currency, c.data.hex()
                     )
                 gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls_tuple))
             elif gas_estimate_data is not None:
-                estimated = await estimate_gas(
-                    resolved_rpc, nonce_address, currency, gas_estimate_data
-                )
+                estimated = await estimate_gas(resolved_rpc, sender, currency, gas_estimate_data)
                 gas_limit = max(gas_limit, estimated + 5_000)
         except Exception:
             pass
@@ -521,7 +504,7 @@ class TempoMethod:
                     // ATTODOLLARS_PER_MICRODOLLAR,
                 )
                 fee_token = await self._resolve_supported_fee_token(
-                    account=nonce_address,
+                    account=sender,
                     chain_id=chain_id,
                     rpc_url=resolved_rpc,
                     required_balance=required_balance,
@@ -532,11 +515,11 @@ class TempoMethod:
             gas_limit=gas_limit,
             max_fee_per_gas=gas_price,
             max_priority_fee_per_gas=max_priority_fee_per_gas,
-            nonce=resolved_nonce,
-            nonce_key=resolved_nonce_key,
+            nonce=0,
+            nonce_key=EXPIRING_NONCE_KEY,
             fee_token=fee_token,
             awaiting_fee_payer=awaiting_fee_payer,
-            valid_before=valid_before,
+            valid_before=_expiring_valid_before(expires),
             calls=calls_tuple,
         )
 
@@ -578,6 +561,18 @@ class TempoMethod:
         if len(memo_clean) != 64:
             raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _expiring_valid_before(expires: str | None) -> int:
+    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry."""
+    valid_before = int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
+    if not expires:
+        return valid_before
+    try:
+        challenge_expiry = int(datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp())
+    except ValueError:
+        return valid_before
+    return min(valid_before, challenge_expiry)
 
 
 # ──────────────────────────────────────────────────────────────────

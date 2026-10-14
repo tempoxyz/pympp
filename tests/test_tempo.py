@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock, patch
@@ -31,7 +32,13 @@ from mpp.methods.tempo import (
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo._rpc import _tip20_balance
-from mpp.methods.tempo.client import TempoMethod, TransactionError
+from mpp.methods.tempo.client import (
+    EXPIRING_NONCE_KEY,
+    EXPIRING_NONCE_VALID_BEFORE_SECS,
+    TempoMethod,
+    TransactionError,
+    _expiring_valid_before,
+)
 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 from mpp.methods.tempo.fee_payer_policy import get_policy
 from mpp.methods.tempo.intents import (
@@ -294,7 +301,6 @@ class TestTempoMethod:
             del client
             return {
                 "eth_chainId": hex(CHAIN_ID),
-                "eth_getTransactionCount": "0x1",
                 "eth_gasPrice": "0x1",
             }[method_name]
 
@@ -348,7 +354,6 @@ class TestTempoMethod:
             del client
             return {
                 "eth_chainId": hex(chain_id),
-                "eth_getTransactionCount": "0x1",
                 "eth_gasPrice": "0x1",
             }[method_name]
 
@@ -401,7 +406,6 @@ class TestTempoMethod:
             del client
             return {
                 "eth_chainId": hex(CHAIN_ID),
-                "eth_getTransactionCount": "0x1",
                 # 1,000,000 gas at this price costs 1,000 microdollars.
                 "eth_gasPrice": hex(1_000_000_000),
             }[method_name]
@@ -454,7 +458,6 @@ class TestTempoMethod:
             del client
             return {
                 "eth_chainId": hex(CHAIN_ID),
-                "eth_getTransactionCount": "0x1",
                 "eth_gasPrice": "0x1",
             }[method_name]
 
@@ -506,7 +509,6 @@ class TestTempoMethod:
             del client
             return {
                 "eth_chainId": hex(CHAIN_ID),
-                "eth_getTransactionCount": "0x1",
                 "eth_gasPrice": "0x1",
             }[method_name]
 
@@ -600,7 +602,6 @@ class TestTempoMethod:
         )
 
         rpc_methods: list[str] = []
-        nonces = iter(["0x1", "0x2"])
 
         async def fake_rpc_call(
             rpc_url: str,
@@ -614,8 +615,6 @@ class TestTempoMethod:
             rpc_methods.append(method_name)
             if method_name == "eth_chainId":
                 return "0x1079"
-            if method_name == "eth_getTransactionCount":
-                return next(nonces)
             if method_name == "eth_gasPrice":
                 return "0x1"
             raise AssertionError(f"Unexpected RPC method: {method_name}")
@@ -630,7 +629,7 @@ class TestTempoMethod:
         assert first.payload["type"] == "transaction"
         assert second.payload["type"] == "transaction"
         assert rpc_methods.count("eth_chainId") == 1
-        assert rpc_methods.count("eth_getTransactionCount") == 2
+        assert "eth_getTransactionCount" not in rpc_methods
         assert rpc_methods.count("eth_gasPrice") == 2
 
     @pytest.mark.asyncio
@@ -669,7 +668,6 @@ class TestTempoMethod:
         )
 
         rpc_calls: list[tuple[str, str]] = []
-        nonces = iter(["0x1"])
 
         async def fake_rpc_call(
             rpc_url: str,
@@ -682,8 +680,6 @@ class TestTempoMethod:
             rpc_calls.append((rpc_url, method_name))
             if method_name == "eth_chainId":
                 return "0x1079"
-            if method_name == "eth_getTransactionCount":
-                return next(nonces)
             if method_name == "eth_gasPrice":
                 return "0x1"
             raise AssertionError(f"Unexpected RPC call: {rpc_url} {method_name}")
@@ -811,8 +807,6 @@ class TestTempoMethod:
             assert rpc_url == "https://rpc.test"
             if method_name == "eth_chainId":
                 return hex(1337)
-            if method_name == "eth_getTransactionCount":
-                return "0x1"
             if method_name == "eth_gasPrice":
                 return hex(20_000_000_000)
             raise AssertionError(f"Unexpected RPC method: {method_name}")
@@ -828,6 +822,156 @@ class TestTempoMethod:
         )
         max_priority_fee_per_gas = int.from_bytes(decoded[1], "big") if decoded[1] else 0
         assert max_priority_fee_per_gas == get_policy(1337).max_priority_fee_per_gas
+
+
+def _decode_signed_charge(signature: str) -> list:
+    """Decode the RLP fields of a signed 0x76 tx or 0x78 fee payer envelope."""
+    raw = bytes.fromhex(signature.removeprefix("0x"))
+    if raw[0] == 0x78:
+        decoded, _, _, _ = decode_fee_payer_envelope(raw)
+        return decoded
+    return rlp.decode(raw[1:])
+
+
+_NOW = 1_800_000_000
+
+
+def _iso(timestamp: int) -> str:
+    return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+
+
+class TestExpiringNonce:
+    """Charges sign with expiring nonces instead of sequential account nonces."""
+
+    @staticmethod
+    def _challenge(
+        challenge_id: str,
+        *,
+        fee_payer: bool,
+        expires: str | None = None,
+        extra: dict | None = None,
+    ) -> Challenge:
+        return Challenge(
+            id=challenge_id,
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": PATH_USD,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": fee_payer, "chainId": CHAIN_ID},
+                **(extra or {}),
+            },
+            realm="api.example.com",
+            expires=expires,
+        )
+
+    @staticmethod
+    def _fake_rpc(rpc_methods: list[str]):
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            rpc_methods.append(method_name)
+            return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[method_name]
+
+        return fake_rpc_call
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fee_payer,expires_in,extra",
+        [
+            pytest.param(False, None, None, id="unsponsored"),
+            pytest.param(True, None, None, id="sponsored"),
+            pytest.param(False, 10, None, id="unsponsored-capped-by-challenge-expiry"),
+            pytest.param(True, 10, None, id="sponsored-capped-by-challenge-expiry"),
+            pytest.param(False, None, {"nonce_key": "0x5"}, id="ignores-challenge-nonce-key"),
+        ],
+    )
+    async def test_charge_signs_with_expiring_nonce(
+        self, fee_payer: bool, expires_in: int | None, extra: dict | None
+    ) -> None:
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        start = time.time()
+        expires = None
+        window = EXPIRING_NONCE_VALID_BEFORE_SECS
+        if expires_in is not None:
+            expires = datetime.fromtimestamp(start + expires_in, UTC).isoformat()
+            window = min(window, expires_in)
+        rpc_methods: list[str] = []
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc(rpc_methods)),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+        ):
+            credential = await method.create_credential(
+                self._challenge("expiring", fee_payer=fee_payer, expires=expires, extra=extra)
+            )
+
+        decoded = _decode_signed_charge(credential.payload["signature"])
+        assert int.from_bytes(decoded[6], "big") == EXPIRING_NONCE_KEY
+        assert int.from_bytes(decoded[7], "big") == 0
+        valid_before = int.from_bytes(decoded[8], "big")
+        assert int(start) + window <= valid_before <= int(time.time()) + window
+        assert "eth_getTransactionCount" not in rpc_methods
+
+    @pytest.mark.parametrize(
+        "expires,expected",
+        [
+            pytest.param(None, _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="no-expiry"),
+            pytest.param(
+                _iso(_NOW + 60), _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="expiry-after-window"
+            ),
+            pytest.param(_iso(_NOW + 10), _NOW + 10, id="expiry-inside-window"),
+            pytest.param("not-a-date", _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="unparsable"),
+        ],
+    )
+    def test_valid_before_is_capped_at_challenge_expiry(
+        self, expires: str | None, expected: int
+    ) -> None:
+        with patch("mpp.methods.tempo.client.time.time", return_value=_NOW):
+            assert _expiring_valid_before(expires) == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fee_payer", [False, True], ids=["unsponsored", "sponsored"])
+    async def test_concurrent_charges_do_not_share_a_sequential_nonce(
+        self, fee_payer: bool
+    ) -> None:
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        rpc_methods: list[str] = []
+        challenges = [self._challenge(f"concurrent-{i}", fee_payer=fee_payer) for i in range(5)]
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc(rpc_methods)),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+        ):
+            credentials = await asyncio.gather(
+                *(method.create_credential(challenge) for challenge in challenges)
+            )
+
+        signatures = [credential.payload["signature"] for credential in credentials]
+        assert len({_raw_transaction_hash(signature) for signature in signatures}) == len(
+            challenges
+        )
+        for signature in signatures:
+            decoded = _decode_signed_charge(signature)
+            assert int.from_bytes(decoded[6], "big") == EXPIRING_NONCE_KEY
+            assert int.from_bytes(decoded[7], "big") == 0
+        assert "eth_getTransactionCount" not in rpc_methods
 
 
 class TestChargeIntent:
@@ -2141,10 +2285,6 @@ class TestSponsoredTransfer:
         httpx_mock.add_response(
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.test",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
         httpx_mock.add_response(
             url="https://rpc.test",
@@ -3600,10 +3740,6 @@ class TestChainIdPropagation:
         )
         httpx_mock.add_response(
             url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
-        httpx_mock.add_response(
-            url="https://rpc.custom",
             json={"jsonrpc": "2.0", "result": "0x186a0", "id": 1},
         )
 
@@ -3645,10 +3781,6 @@ class TestChainIdPropagation:
             url="https://rpc.custom",
             json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
         )
-        httpx_mock.add_response(
-            url="https://rpc.custom",
-            json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
-        )
 
         challenge = Challenge(
             id="test-mismatch",
@@ -3683,12 +3815,12 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
         httpx_mock.add_response(
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
-        for _ in range(3):
+        for _ in range(2):
             httpx_mock.add_response(
                 url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
@@ -3727,12 +3859,12 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
         httpx_mock.add_response(
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
-        for _ in range(3):
+        for _ in range(2):
             httpx_mock.add_response(
                 url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
@@ -3769,12 +3901,12 @@ class TestAccessKeySigning:
             intents={"charge": ChargeIntent()},
         )
 
-        # Mock RPC: chain_id (4217=0x1079), nonce, gas_price, estimateGas
+        # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
         httpx_mock.add_response(
             url="https://rpc.test",
             json={"jsonrpc": "2.0", "result": "0x1079", "id": 1},
         )
-        for _ in range(3):
+        for _ in range(2):
             httpx_mock.add_response(
                 url="https://rpc.test",
                 json={"jsonrpc": "2.0", "result": "0x1", "id": 1},
