@@ -121,6 +121,7 @@ async def test_legacy_intent_falls_back_to_verify() -> None:
         request={},
     )
     assert receipt.reference == "legacy-reference"
+    assert receipt.payer is None
     assert calls == ["verify"]
 
 
@@ -182,6 +183,47 @@ async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> Non
     assert payload["method"] == "tempo"
     assert payload["receipt"] == receipt
     assert payload["request"] == request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("validated", "broadcast", "expected"),
+    [
+        ("0x" + "aa" * 20, None, "0x" + "aa" * 20),
+        (None, None, None),
+        ("0x" + "aa" * 20, "0x" + "bb" * 20, "0x" + "bb" * 20),
+    ],
+)
+async def test_verified_payer_reaches_success_path(
+    validated: str | None, broadcast: str | None, expected: str | None
+) -> None:
+    class PayerCharge(VerifiableCharge):
+        async def validate(self, credential: Credential, request: dict) -> Validation:
+            return replace(await super().validate(credential, request), payer=validated)
+
+        async def broadcast(self, credential: Credential, request: dict) -> Receipt:
+            return replace(await super().broadcast(credential, request), payer=broadcast)
+
+    intent = PayerCharge()
+    server = _server(intent)
+    successes: list[dict[str, Any]] = []
+    server.on_payment_success(successes.append)
+    request = {"amount": "1000"}
+    credential = _bound(request)
+
+    route = await verify_or_challenge(
+        authorization=credential.to_authorization(),
+        intent=intent,
+        request=request,
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+    receipt = await server.broadcast_credential(credential, request=request)
+
+    assert isinstance(route, tuple)
+    assert route[1].payer == expected
+    assert receipt.payer == expected
+    assert successes[0]["receipt"].payer == expected
 
 
 @pytest.mark.asyncio

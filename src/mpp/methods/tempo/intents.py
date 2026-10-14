@@ -9,7 +9,7 @@ import asyncio
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -75,13 +75,16 @@ def _raw_transaction_hash(raw_tx: str) -> str:
 
 
 def _transaction_sender(raw_tx: str) -> str | None:
-    """Return the account a serialized Tempo transaction debits, or ``None``.
+    """Return the lowercase address of the account a Tempo transaction debits.
 
-    Mirrors ox ``TxEnvelopeTempo.deserialize``: a 0x78 fee payer envelope
-    carries the sender address; a 0x76 sender is the keychain root account,
-    the multisig account, or the secp256k1/P256/WebAuthn signer. Only
-    secp256k1 is recovered cryptographically here; the chain rejects a
-    transaction whose signature does not authorize the returned account.
+    The sender is derived from the sender signature: secp256k1 signatures are
+    recovered over the sender signing hash; keychain, multisig, P256 and
+    WebAuthn signatures name the account (keychain root, multisig account, or
+    public-key address), which the chain authenticates at settlement. A 0x78
+    fee payer envelope must also declare that sender in its sender slot.
+
+    Returns ``None`` if the transaction is malformed or the sender cannot be
+    derived.
     """
     import rlp
     from eth_account import Account
@@ -92,19 +95,18 @@ def _transaction_sender(raw_tx: str) -> str | None:
         fields = rlp.decode(tx_bytes[1:])
     except Exception:
         return None
-    if not isinstance(fields, list) or len(fields) not in (14, 15):
+    if tx_bytes[0] not in (0x76, 0x78) or not isinstance(fields, list):
         return None
+    if len(fields) not in (14, 15):
+        return None
+    is_envelope = tx_bytes[0] == 0x78
     sender_slot, signature = fields[11], fields[-1]
-
-    if tx_bytes[0] == 0x78:
-        if isinstance(sender_slot, bytes) and len(sender_slot) == 20:
-            return "0x" + sender_slot.hex()
-        return None
-    if tx_bytes[0] != 0x76 or not isinstance(signature, bytes) or not signature:
+    if not isinstance(signature, bytes) or not signature:
         return None
 
+    sender: str | None = None
     if len(signature) == 65:
-        has_fee_payer = sender_slot != b""
+        has_fee_payer = is_envelope or sender_slot != b""
         preimage = [
             *fields[:10],
             b"" if has_fee_payer else fields[10],
@@ -112,27 +114,32 @@ def _transaction_sender(raw_tx: str) -> str | None:
             *fields[12:-1],
         ]
         try:
-            return Account._recover_hash(
+            sender = Account._recover_hash(
                 keccak(b"\x76" + rlp.encode(preimage)), signature=signature
             )
         except Exception:
             return None
-
-    type_id, data = signature[0], signature[1:]
-    if type_id in (0x03, 0x04) and len(data) > 20:
-        return "0x" + data[:20].hex()
-    if type_id == 0x01 and len(data) == 129:
-        return "0x" + keccak(data[64:128])[-20:].hex()
-    if type_id == 0x02 and len(data) >= 128:
-        return "0x" + keccak(data[-64:])[-20:].hex()
-    if type_id == 0x05:
-        try:
-            account = rlp.decode(data)[0]
-        except Exception:
-            return None
-        if isinstance(account, bytes) and len(account) == 20:
-            return "0x" + account.hex()
-    return None
+    else:
+        type_id, data = signature[0], signature[1:]
+        if type_id in (0x03, 0x04) and len(data) > 20:
+            sender = "0x" + data[:20].hex()
+        elif type_id == 0x01 and len(data) == 129:
+            sender = "0x" + keccak(data[64:128])[-20:].hex()
+        elif type_id == 0x02 and len(data) >= 128:
+            sender = "0x" + keccak(data[-64:])[-20:].hex()
+        elif type_id == 0x05:
+            try:
+                account = rlp.decode(data)[0]
+            except Exception:
+                return None
+            if isinstance(account, bytes) and len(account) == 20:
+                sender = "0x" + account.hex()
+    if sender is None:
+        return None
+    sender = sender.lower()
+    if is_envelope and sender_slot != bytes.fromhex(sender[2:]):
+        return None
+    return sender
 
 
 def _parse_memo_bytes(memo: str | None) -> bytes | None:
@@ -527,7 +534,8 @@ class ChargeIntent:
                 store across server replicas and restarts.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
-                ``True`` to accept (e.g. smart-account / relayer flows).
+                ``True`` to accept (e.g. smart-account / relayer flows). The
+                credential source remains the reported payer.
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -634,8 +642,11 @@ class ChargeIntent:
             request: The original payment request parameters.
 
         Returns:
-            A validation record whose ``details`` carry the settlement
-            ``mode`` and, in pull mode, the serialized transaction.
+            A validation record whose ``payer`` is the lowercase paying
+            address (the transaction sender in pull mode; the source address,
+            else the transaction ``from``, in push mode) and whose ``details``
+            carry the settlement ``mode`` and, in pull mode, the serialized
+            transaction.
 
         Raises:
             VerificationError: If the credential is invalid.
@@ -644,17 +655,18 @@ class ChargeIntent:
 
         if isinstance(payload, HashCredentialPayload):
             await self._ensure_hash_unused(payload.hash)
-            await self._validate_hash(
+            receipt = await self._validate_hash(
                 payload,
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
                 source=credential.source,
             )
+            payer = receipt.payer
             details: dict[str, Any] = {"mode": "push"}
         else:
             self._validate_transaction_payload(payload.signature, req, strict=True)
-            self._verify_transaction_source(
+            payer = self._transaction_payer(
                 payload.signature, credential.source, req.methodDetails.chainId
             )
             details = {"mode": "pull", "serialized_transaction": payload.signature}
@@ -664,6 +676,7 @@ class ChargeIntent:
             details=details,
             intent=self.name,
             request=dict(request),
+            payer=payer,
         )
 
     async def broadcast(
@@ -759,26 +772,28 @@ class ChargeIntent:
         if source is None:
             return None
         parsed = parse_pkh_source(source)
-        if parsed is None or parsed[1] != expected_chain_id:
+        if parsed is None or parsed.chain_id != expected_chain_id:
             raise VerificationError("Hash credential source is invalid.")
-        return parsed[0]
+        return parsed.address
 
     @staticmethod
-    def _verify_transaction_source(raw_tx: str, source: str | None, chain_id: int) -> None:
-        """Require a transaction credential's source to name the transaction sender.
+    def _transaction_payer(raw_tx: str, source: str | None, chain_id: int) -> str | None:
+        """Return a transaction credential's sender, binding its source if present.
 
-        No-op if ``source`` is absent. Otherwise the source must be a
-        ``did:pkh:eip155`` DID on ``chain_id`` whose address is the account the
-        transaction debits, else raises ``VerificationError``.
+        With a ``source``, it must be a ``did:pkh:eip155`` DID on ``chain_id``
+        naming the account the transaction debits, else raises
+        ``VerificationError``. Returns the lowercase sender address, or
+        ``None`` if it cannot be derived and no source was given.
         """
-        if source is None:
-            return
-        parsed = parse_pkh_source(source)
-        if parsed is None or parsed[1] != chain_id:
-            raise VerificationError("Transaction credential source is invalid.")
         sender = _transaction_sender(raw_tx)
-        if sender is None or sender.lower() != parsed[0].lower():
+        if source is None:
+            return sender
+        parsed = parse_pkh_source(source)
+        if parsed is None or parsed.chain_id != chain_id:
+            raise VerificationError("Transaction credential source is invalid.")
+        if sender is None or sender != parsed.address.lower():
             raise VerificationError("Transaction credential source does not match the sender.")
+        return sender
 
     def _sender_authorized(
         self,
@@ -814,7 +829,11 @@ class ChargeIntent:
         realm: str,
         source: str | None = None,
     ) -> Receipt:
-        """Validate a transaction hash without consuming its replay key."""
+        """Validate a transaction hash without consuming its replay key.
+
+        The receipt's ``payer`` is the lowercase source address when a source
+        is present, else the transaction's ``from``.
+        """
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
@@ -830,7 +849,11 @@ class ChargeIntent:
             validate_sender=self._validate_sender,
         )
 
-        return Receipt.success(payload.hash)
+        payer = source_address if source_address is not None else receipt_data.get("from")
+        return replace(
+            Receipt.success(payload.hash),
+            payer=payer.lower() if isinstance(payer, str) else None,
+        )
 
     def _assert_challenge_bound_memo(
         self,
@@ -1113,7 +1136,7 @@ class ChargeIntent:
         submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
-        self._verify_transaction_source(payload.signature, source, request.methodDetails.chainId)
+        sender = self._transaction_payer(payload.signature, source, request.methodDetails.chainId)
 
         client = await self._get_client()
 
@@ -1166,6 +1189,10 @@ class ChargeIntent:
                 raw_tx = sign_result.get("result")
                 if not raw_tx:
                     raise VerificationError("Fee payer returned no signed transaction")
+
+            # Fee payer signing must not change who the transaction debits.
+            if sender is not None and _transaction_sender(raw_tx) != sender:
+                raise VerificationError("Fee payer transaction sender does not match the sender.")
 
         rpc_url = self._get_rpc_url()
 

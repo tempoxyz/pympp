@@ -3,17 +3,16 @@
 import base64
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
-from mpp._did import parse_pkh_source
 from mpp._parsing import MAX_HEADER_PAYLOAD_SIZE, ParseError
 from tests import make_credential
 
 INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo2", "tempo-pay", "tempo_pay", "tempo.pay")
-PAYER = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 
 
 def _b64_json(data: Mapping[str, object]) -> str:
@@ -387,39 +386,6 @@ class TestCredential:
 
         assert parsed.challenge.header == "Payment-Authorization"
 
-    @pytest.mark.parametrize(
-        ("source", "expected"),
-        [
-            (f"did:pkh:eip155:4217:{PAYER}", (PAYER, 4217)),
-            (f"did:pkh:eip155:1:{PAYER.lower()}", (PAYER.lower(), 1)),
-            (f"did:pkh:eip155:0:0x{PAYER[2:].upper()}", (f"0x{PAYER[2:].upper()}", 0)),
-            (f"did:pkh:eip155:42431:{PAYER}", (PAYER, 42431)),
-            (None, None),
-            ("", None),
-            ("did:example:client", None),
-            (f"did:pkh:solana:4217:{PAYER}", None),
-            (f"DID:PKH:EIP155:4217:{PAYER}", None),
-            (f"did:pkh:eip155:04217:{PAYER}", None),
-            (f"did:pkh:eip155:-1:{PAYER}", None),
-            (f"did:pkh:eip155::{PAYER}", None),
-            (f"did:pkh:eip155:4２17:{PAYER}", None),
-            (f"did:pkh:eip155:4217:extra:{PAYER}", None),
-            (f"did:pkh:eip155:4217:{PAYER[2:]}", None),
-            (f"did:pkh:eip155:4217:{PAYER[:-1]}", None),
-            (f"did:pkh:eip155:4217:{PAYER}0", None),
-            (f"did:pkh:eip155:4217:0x{'g' * 40}", None),
-            (f"did:pkh:eip155:4217:{PAYER}\n", None),
-            (f" did:pkh:eip155:4217:{PAYER}", None),
-        ],
-    )
-    def test_payer(self, source: str | None, expected: tuple[str, int] | None) -> None:
-        credential = make_credential(payload={"hash": "0xabc"}, source=source)
-        parsed = Credential.from_authorization(credential.to_authorization())
-
-        assert parsed.payer == (expected[0] if expected else None)
-        if source is not None:
-            assert parse_pkh_source(source) == expected
-
 
 class TestReceipt:
     def test_roundtrip(self) -> None:
@@ -437,6 +403,13 @@ class TestReceipt:
         assert parsed.status == receipt.status
         assert parsed.timestamp == receipt.timestamp
         assert parsed.reference == receipt.reference
+
+    def test_payer_is_not_serialized(self) -> None:
+        receipt = Receipt.success("0xabc123", timestamp=datetime(2024, 1, 20, tzinfo=UTC))
+        with_payer = replace(receipt, payer="0x" + "aa" * 20)
+
+        assert with_payer.to_payment_receipt() == receipt.to_payment_receipt()
+        assert Receipt.from_payment_receipt(with_payer.to_payment_receipt()).payer is None
 
     def test_success_factory(self) -> None:
         """Receipt.success() should create success receipt with timestamp."""

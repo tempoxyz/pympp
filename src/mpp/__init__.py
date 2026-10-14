@@ -14,7 +14,6 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from mpp._canonical import canonical_b64url
-from mpp._did import parse_pkh_source
 from mpp._parsing import (
     ParseError,
     format_authorization,
@@ -395,27 +394,6 @@ class Credential:
     payload: dict[str, Any]
     source: str | None = None
 
-    @property
-    def payer(self) -> str | None:
-        """Payer address from a ``did:pkh:eip155:<chainId>:<address>`` source.
-
-        Returns the address as written in the DID, or ``None`` if ``source``
-        is absent or not a valid ``did:pkh:eip155`` DID.
-
-        Parsing alone does not authenticate the address. Once a Tempo charge
-        settles a credential that carries a source, the DID's chain is the
-        charge chain and its address is the account the payment debited: the
-        transaction sender in pull mode, or the sender of every matched
-        transfer in push mode unless a ``validate_sender`` hook accepted a
-        different sender. A non-settling ``validate`` checks the same binding
-        but cannot prove that a keychain, P256, or WebAuthn signer controls
-        the account. Other payment methods may not check the source.
-        """
-        if self.source is None:
-            return None
-        parsed = parse_pkh_source(self.source)
-        return parsed[0] if parsed is not None else None
-
     @classmethod
     def from_authorization(cls, header: str) -> Credential:
         """Parse a Credential from an Authorization header value."""
@@ -448,6 +426,12 @@ class Receipt:
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
     extensions: dict[str, Any] | None = None
+    payer: str | None = None
+    """Payer identity verified by the payment method (``Validation.payer``).
+
+    Server-side only: set on receipts returned by server verification and
+    never serialized into the ``Payment-Receipt`` header.
+    """
 
     @classmethod
     def from_payment_receipt(cls, header: str) -> Receipt:

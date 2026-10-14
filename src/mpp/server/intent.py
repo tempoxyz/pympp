@@ -7,6 +7,7 @@ and provides verification logic.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -129,10 +130,18 @@ async def broadcast_credential(
     back to their combined ``verify`` hook. Like :func:`validate_credential`,
     this does not authenticate challenge issuance — use
     :meth:`~mpp.server.Mpp.broadcast_credential` for untrusted input.
+
+    The validation's ``payer`` is copied to the returned receipt's ``payer``
+    unless ``broadcast`` already set one.
     """
     if isinstance(intent, VerifiableIntent):
-        await validate_credential(intent=intent, credential=credential, request=request)
-        return await intent.broadcast(credential, request)
+        validation = await validate_credential(
+            intent=intent, credential=credential, request=request
+        )
+        receipt = await intent.broadcast(credential, request)
+        if validation.payer is not None and receipt.payer is None:
+            receipt = replace(receipt, payer=validation.payer)
+        return receipt
     if isinstance(intent, Intent):
         return await intent.verify(credential, request)
     raise VerificationFailedError(

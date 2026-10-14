@@ -2,4 +2,4 @@
 pympp: minor
 ---
 
-Added `Credential.payer`, which returns the payer address parsed from a `did:pkh:eip155:<chainId>:<address>` credential source, or `None` when the source is absent or malformed. Tempo pull-mode (transaction) credentials that carry a source are now rejected unless the source is on the charge chain and names the transaction sender (the keychain root account for access-key signatures), matching the existing push-mode binding.
+Exposed the verified payer as `payer` on `Validation` and on server-side `Receipt`s returned by verification (route handlers, `verify_or_challenge`, `Mpp.broadcast_credential`, and payment success events); it is never serialized into the `Payment-Receipt` header. Tempo charges report the transaction sender for pull-mode credentials and the source address, else the transaction sender, for hash credentials. Tempo pull-mode credentials that carry a source are now rejected unless the source is on the charge chain and names the transaction sender, fee payer envelopes must be signed by their declared sender, and fee payer co-signing may not change the sender. Added public `parse_pkh_source` and `PkhSource` to `mpp.methods.tempo`.
