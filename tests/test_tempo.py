@@ -836,7 +836,7 @@ def _decode_signed_charge(signature: str) -> list:
 _NOW = 1_800_000_000
 
 
-def _iso(timestamp: int) -> str:
+def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
 
 
@@ -906,7 +906,7 @@ class TestExpiringNonce:
         window = EXPIRING_NONCE_VALID_BEFORE_SECS
         if expires_in is not None:
             expires = datetime.fromtimestamp(start + expires_in, UTC).isoformat()
-            window = min(window, expires_in)
+            window = min(window, expires_in + 1)
         rpc_methods: list[str] = []
 
         with (
@@ -925,21 +925,39 @@ class TestExpiringNonce:
         assert "eth_getTransactionCount" not in rpc_methods
 
     @pytest.mark.parametrize(
-        "expires,expected",
+        "now,expires,expected",
         [
-            pytest.param(None, _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="no-expiry"),
+            pytest.param(_NOW, None, _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="no-expiry"),
             pytest.param(
-                _iso(_NOW + 60), _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="expiry-after-window"
+                _NOW,
+                _iso(_NOW + 60),
+                _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS,
+                id="expiry-after-window",
             ),
-            pytest.param(_iso(_NOW + 10), _NOW + 10, id="expiry-inside-window"),
-            pytest.param("not-a-date", _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="unparsable"),
+            pytest.param(_NOW, _iso(_NOW + 10), _NOW + 11, id="expiry-inside-window"),
+            pytest.param(_NOW, _iso(_NOW + 10.5), _NOW + 11, id="fractional-expiry"),
+            pytest.param(_NOW + 0.2, _iso(_NOW + 0.5), _NOW + 1, id="sub-second-expiry"),
+            pytest.param(_NOW + 0.5, _iso(_NOW + 0.5), _NOW + 1, id="expiry-is-now"),
+            pytest.param(_NOW, _iso(_NOW), _NOW + 1, id="whole-second-expiry-is-now"),
+            pytest.param(
+                _NOW + 0.999,
+                "2027-01-15T08:00:00.999999Z",
+                _NOW + 1,
+                id="microsecond-expiry",
+            ),
+            pytest.param(
+                _NOW, "not-a-date", _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS, id="unparsable"
+            ),
         ],
     )
     def test_valid_before_is_capped_at_challenge_expiry(
-        self, expires: str | None, expected: int
+        self, now: float, expires: str | None, expected: int
     ) -> None:
-        with patch("mpp.methods.tempo.client.time.time", return_value=_NOW):
-            assert _expiring_valid_before(expires) == expected
+        with patch("mpp.methods.tempo.client.time.time", return_value=now):
+            valid_before = _expiring_valid_before(expires)
+        assert valid_before == expected
+        # Still valid at signing time, even when the challenge expires this second.
+        assert valid_before > now
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fee_payer", [False, True], ids=["unsponsored", "sponsored"])

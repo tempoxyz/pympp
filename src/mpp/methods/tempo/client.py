@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 EXPIRING_NONCE_VALID_BEFORE_SECS = 25
+FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated alias.
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
@@ -564,15 +565,20 @@ class TempoMethod:
 
 
 def _expiring_valid_before(expires: str | None) -> int:
-    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry."""
+    """Return an expiring-nonce ``valid_before`` capped at the challenge expiry.
+
+    ``valid_before`` is an exclusive whole-second bound, so the cap is the
+    second after the (possibly fractional) expiry. The transaction then stays
+    valid for as long as the challenge does.
+    """
     valid_before = int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
     if not expires:
         return valid_before
     try:
-        challenge_expiry = int(datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp())
+        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return valid_before
-    return min(valid_before, challenge_expiry)
+    return min(valid_before, int(challenge_expiry) + 1)
 
 
 # ──────────────────────────────────────────────────────────────────
