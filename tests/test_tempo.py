@@ -926,6 +926,9 @@ class TestExpiringNonce:
         valid_before = int.from_bytes(decoded[8], "big")
         assert int(start) + window <= valid_before <= int(time.time()) + window
         assert "eth_getTransactionCount" not in rpc_methods
+        signature = credential.payload["signature"]
+        expected_hash = None if fee_payer else _raw_transaction_hash(signature)
+        assert method.transaction_hash(credential) == expected_hash
 
     @pytest.mark.parametrize(
         "now,expires,expected",
@@ -1091,6 +1094,22 @@ class TestCredentialCache:
             await method.create_credential(challenge)
 
         assert build.await_count == signings
+
+    @pytest.mark.asyncio
+    async def test_policy_is_enforced_before_returning_a_cached_credential(self) -> None:
+        method, build = self._method()
+        method.expected_recipients = ("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",)
+        challenge = self._challenge()
+        redirected = dataclasses.replace(
+            challenge, request={**challenge.request, "recipient": "0x" + "44" * 20}
+        )
+
+        with patch.object(method, "_build_tempo_transfer", build):
+            await method.create_credential(challenge)
+            with pytest.raises(ValueError, match="expected recipients"):
+                await method.create_credential(redirected)
+
+        assert build.await_count == 1
 
     @pytest.mark.asyncio
     async def test_failed_signing_is_not_cached(self) -> None:

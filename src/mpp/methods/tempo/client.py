@@ -331,6 +331,8 @@ class TempoMethod:
 
         if challenge.intent != "charge":
             raise ValueError(f"Unsupported intent: {challenge.intent}")
+        # Enforce client policy before returning a cached credential, too.
+        self._check_charge_policy(challenge.request, await self._resolve_expected_chain_id())
 
         now = time.time()
         for stale in [
