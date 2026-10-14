@@ -2,13 +2,20 @@
 
 import base64
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
 from mpp import Challenge, Credential, Receipt, generate_challenge_id
 from mpp._canonical import canonical_b64url
-from mpp.errors import PaymentOutcomeUnknownError, VerificationFailedError
+from mpp.errors import (
+    InternalPaymentError,
+    PaymentError,
+    PaymentOutcomeUnknownError,
+    VerificationFailedError,
+)
 from mpp.extensions.mcp import (
     CODE_MALFORMED_CREDENTIAL,
     CODE_PAYMENT_REQUIRED,
@@ -818,7 +825,19 @@ class TestVerifyOrChallenge:
             "details": {"code": "insufficient_funds"},
         }
 
-    async def test_preserves_unknown_payment_outcome_without_fresh_challenge(self) -> None:
+    @pytest.mark.parametrize(
+        "make_error",
+        [
+            lambda challenge: PaymentOutcomeUnknownError(challenge, RuntimeError("lost")),
+            lambda challenge: InternalPaymentError(),
+        ],
+        ids=["outcome-unknown", "internal"],
+    )
+    async def test_propagates_unretryable_errors_without_fresh_challenge(
+        self, make_error: Callable[[Any], PaymentError]
+    ) -> None:
+        raised_errors: list[PaymentError] = []
+
         class VerifiableIntent:
             name = "charge"
 
@@ -831,7 +850,8 @@ class TestVerifyOrChallenge:
                 )
 
             async def broadcast(self, credential: Credential, request: dict) -> Receipt:
-                raise PaymentOutcomeUnknownError(credential.challenge, RuntimeError("lost"))
+                raised_errors.append(make_error(credential.challenge))
+                raise raised_errors[-1]
 
         challenge = _make_bound_mcp_challenge(request={"amount": "1000"})
         mcp_credential = MCPCredential(
@@ -839,7 +859,7 @@ class TestVerifyOrChallenge:
             payload={"type": "transaction", "signature": "0x1234"},
         )
 
-        with pytest.raises(PaymentOutcomeUnknownError):
+        with pytest.raises(PaymentError) as raised:
             await verify_or_challenge(
                 meta=mcp_credential.to_meta(),
                 intent=VerifiableIntent(),  # type: ignore[arg-type]
@@ -847,6 +867,8 @@ class TestVerifyOrChallenge:
                 realm="api.example.com",
                 secret_key=MCP_TEST_SECRET,
             )
+
+        assert raised.value is raised_errors[0]
 
     async def test_rejects_credential_with_wrong_realm(self) -> None:
         """Credential issued for realm-A should be rejected at realm-B."""

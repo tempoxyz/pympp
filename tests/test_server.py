@@ -13,7 +13,12 @@ from mpp import (
     Receipt,
     _b64url_encode,
 )
-from mpp.errors import VerificationFailedError
+from mpp.errors import (
+    CredentialReplayedError,
+    InternalPaymentError,
+    PaymentError,
+    VerificationFailedError,
+)
 from mpp.events import EventDispatcher
 from mpp.server import Mpp, intent, pay, verify_or_challenge
 from mpp.server.intent import VerificationError
@@ -461,12 +466,21 @@ class TestVerificationError:
         assert events == ["InvalidChallengeError"]
 
     @pytest.mark.asyncio
-    async def test_intent_can_raise_verification_error(self) -> None:
-        """VerificationError should propagate from intent."""
+    @pytest.mark.parametrize(
+        ("error", "retryable"),
+        [
+            (VerificationError("Payment verification failed"), True),
+            (CredentialReplayedError("Transaction hash already used"), False),
+            (InternalPaymentError(), False),
+        ],
+        ids=["verification", "replay", "internal"],
+    )
+    async def test_intent_error_retry_challenge(self, error: PaymentError, retryable: bool) -> None:
+        """Invalid credentials get a fresh challenge; internal failures do not."""
 
         @intent(name="charge")
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
-            raise VerificationError("Payment verification failed")
+            raise error
 
         credential = make_bound_credential(
             payload={},
@@ -474,16 +488,18 @@ class TestVerificationError:
             realm="api.example.com",
             secret_key="test-secret",
         )
-        auth_header = credential.to_authorization()
 
-        with pytest.raises(VerificationError, match="Payment verification failed"):
+        with pytest.raises(type(error)) as raised:
             await verify_or_challenge(
-                authorization=auth_header,
+                authorization=credential.to_authorization(),
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
                 secret_key="test-secret",
             )
+
+        assert raised.value is error
+        assert isinstance(raised.value.retry_challenge, Challenge) is retryable
 
     @pytest.mark.asyncio
     async def test_emits_payment_failed_when_intent_raises(self) -> None:
@@ -1195,6 +1211,92 @@ class TestPay:
             assert isinstance(result, dict)
             assert result["_mpp_challenge"] is True
             assert result["status"] == 402
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "status", "challenged"),
+        [
+            (VerificationError("Transaction reverted"), 402, True),
+            (CredentialReplayedError("Transaction hash already used"), 403, False),
+            (CredentialReplayedError("memo is not bound to this challenge"), 403, False),
+        ],
+        ids=["verification", "replay", "memo"],
+    )
+    async def test_payment_error_response(
+        self, error: PaymentError, status: int, challenged: bool
+    ) -> None:
+        """Verification failures get a fresh challenge; spent payments get a final 403."""
+
+        @intent(name="charge")
+        async def failing_intent(credential: Credential, request: dict) -> Receipt:
+            raise error
+
+        @pay(
+            intent=failing_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        result = await handler(MockRequest(authorization=credential.to_authorization()))
+
+        if HAS_STARLETTE:
+            assert StarletteResponse is not None
+            assert isinstance(result, StarletteResponse)
+            actual, body = result.status_code, json.loads(bytes(result.body))
+            headers = result.headers
+        else:
+            assert isinstance(result, dict)
+            actual, body = result["status"], json.loads(result["body"])
+            headers = result["headers"]
+        assert actual == status
+        assert body["status"] == status
+        assert body["type"] == "https://paymentauth.org/problems/verification-failed"
+        assert body["detail"] == str(error)
+        assert headers["Cache-Control"] == "no-store"
+        assert ("WWW-Authenticate" in headers) is challenged
+        if challenged:
+            assert challenge_from_402(result).id != credential.challenge.id
+
+    @pytest.mark.asyncio
+    async def test_internal_payment_error_is_not_answered_with_402(self) -> None:
+        """Infrastructure failures must surface as errors, not as a retryable 402."""
+        cause = ConnectionError("RPC unreachable")
+
+        @intent(name="charge")
+        async def failing_intent(credential: Credential, request: dict) -> Receipt:
+            raise InternalPaymentError() from cause
+
+        @pay(
+            intent=failing_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+            return {"data": "paid"}
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+
+        with pytest.raises(InternalPaymentError) as raised:
+            await handler(MockRequest(authorization=credential.to_authorization()))
+
+        assert raised.value.status == 500
+        assert raised.value.retry_challenge is None
+        assert raised.value.__cause__ is cause
 
     @pytest.mark.asyncio
     async def test_preserves_function_metadata(self) -> None:

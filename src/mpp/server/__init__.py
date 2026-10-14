@@ -20,6 +20,8 @@ Example:
 from mpp import _expires as Expires
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
+    InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
