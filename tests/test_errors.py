@@ -292,14 +292,14 @@ class TestServerErrorMapping:
             ),
             (
                 CredentialReplayedError(),
-                402,
+                403,
                 _VERIFICATION_FAILED,
                 "Verification Failed",
                 "Payment verification failed: Credential has already been used.",
             ),
             (
                 CredentialReplayedError("Transaction hash already used"),
-                402,
+                403,
                 _VERIFICATION_FAILED,
                 "Verification Failed",
                 "Payment verification failed: Transaction hash already used.",
@@ -324,12 +324,14 @@ class TestServerErrorMapping:
             "detail": detail,
         }
 
-    def test_credential_replayed_matches_verification_failed(self) -> None:
-        reason = "Payment has already been processed"
+    def test_credential_replayed_differs_from_verification_failed_only_in_status(self) -> None:
+        reason = "Transaction hash already used"
         details = {"code": "already_used"}
-        assert CredentialReplayedError(reason, details=details).to_problem_details(
-            "challenge-id"
-        ) == VerificationFailedError(reason, details=details).to_problem_details("challenge-id")
+        expected = VerificationFailedError(reason, details=details).to_problem_details("ch")
+        assert CredentialReplayedError(reason, details=details).to_problem_details("ch") == {
+            **expected,
+            "status": 403,
+        }
 
     def test_internal_error_keeps_cause_out_of_problem_details(self) -> None:
         cause = RuntimeError("request to https://rpc.example.com/?key=secret-key failed")

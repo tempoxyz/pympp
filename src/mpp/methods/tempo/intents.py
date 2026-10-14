@@ -651,10 +651,11 @@ class ChargeIntent:
 
         Raises:
             VerificationError: If the credential is invalid
-                (:class:`~mpp.errors.CredentialReplayedError` for a replayed
-                transaction hash).
+                (:class:`~mpp.errors.CredentialReplayedError` when the
+                transaction hash is already claimed or its transfer is bound
+                to another challenge).
             InternalPaymentError: If settlement cannot be confirmed, including
-                any failure after the transaction was broadcast.
+                any other failure after the transaction was broadcast.
         """
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
@@ -797,9 +798,9 @@ class ChargeIntent:
             for matched_log in matched_logs
         )
         if not bound:
-            raise VerificationError(
-                "Payment verification failed: memo is not bound to this challenge."
-            )
+            # The transfer already settled to the recipient, so another payment
+            # would not help this credential.
+            raise CredentialReplayedError("memo is not bound to this challenge")
 
     async def _fetch_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any]:
         rpc_url = self._get_rpc_url()
@@ -1190,7 +1191,7 @@ class ChargeIntent:
             if (
                 broadcast_attempted
                 and isinstance(err, Exception)
-                and not isinstance(err, InternalPaymentError)
+                and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
             ):
                 raise InternalPaymentError() from err
             raise

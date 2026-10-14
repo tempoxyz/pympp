@@ -179,6 +179,33 @@ def make_challenge_response(
         }
 
 
+def make_error_response(error: PaymentError) -> Any:
+    """Build a final RFC 9457 problem details response without a challenge.
+
+    Used for errors such as :class:`~mpp.errors.CredentialReplayedError`
+    (403), where a fresh challenge would invite the client to pay again.
+
+    Returns a Starlette ``Response`` when starlette is installed,
+    otherwise a plain dict with ``_mpp_error``, ``status``, ``headers``, and ``body``.
+    """
+    body = _json.dumps(error.to_problem_details())
+    headers = {
+        "Cache-Control": "no-store",
+        "Content-Type": "application/problem+json",
+    }
+    try:
+        from starlette.responses import Response
+
+        return Response(
+            content=body,
+            status_code=error.status,
+            headers=headers,
+            media_type="application/problem+json",
+        )
+    except ImportError:
+        return {"_mpp_error": True, "status": error.status, "headers": headers, "body": body}
+
+
 async def resolve_body_param(body: BodyParamsType, request_obj: Any) -> BodyType | None:
     """Resolve a static or request-derived body value for digest verification."""
     if body is None:
@@ -243,9 +270,11 @@ def wrap_payment_handler(
         try:
             result = await verify_fn(authorization, request_obj)
         except PaymentError as error:
-            if not isinstance(error.retry_challenge, Challenge):
-                raise
-            return make_challenge_response(error.retry_challenge, realm_fn(), error)
+            if isinstance(error.retry_challenge, Challenge):
+                return make_challenge_response(error.retry_challenge, realm_fn(), error)
+            if error.status == 403:
+                return make_error_response(error)
+            raise
 
         if isinstance(result, Challenge):
             return make_challenge_response(result, realm_fn())

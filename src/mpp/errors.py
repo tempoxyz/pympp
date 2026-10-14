@@ -50,7 +50,9 @@ class PaymentError(Exception):
     """Machine-readable details safe to expose in problem details output."""
     retry_challenge: Any | None = None
     """Fresh :class:`~mpp.Challenge` attached by the server verification flow
-    when payment fails, so transports can return a retryable 402 response."""
+    when payment fails, so transports can return a retryable 402 response.
+    Errors that must not invite another payment, such as 403 and 500
+    errors, carry none."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -254,12 +256,19 @@ class VerificationError(VerificationFailedError):
 
 
 class CredentialReplayedError(VerificationError):
-    """Credential was already used to settle a payment.
+    """The payment behind a credential is already used or bound elsewhere.
 
-    Shares the verification-failed status and problem type, so the response
-    is the same as for any other verification failure.
+    Raised when a payment that already settled cannot pay for this request:
+    the credential was consumed by an earlier request, is being settled by a
+    concurrent one, or its transfer is bound to a different challenge.
+
+    Servers answer with 403 and no challenge (the payment was valid, but
+    policy denies access), because a fresh 402 challenge would invite an
+    auto-paying client to pay again. The problem type stays
+    ``verification-failed``.
     """
 
+    status = 403
     type = VerificationFailedError.type
     title = VerificationFailedError.title
 

@@ -1477,7 +1477,8 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(InternalPaymentError) as raised:
+        # The transfer landed, so this is a final answer rather than an internal error.
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
             await intent.verify(
                 credential,
                 {
@@ -1486,7 +1487,6 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
-        assert_unconfirmed_after_broadcast(raised.value, "memo is not bound to this challenge")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_wrong_challenge_bound_memo(self) -> None:
@@ -1530,7 +1530,8 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(InternalPaymentError) as raised:
+        # The transfer landed, so this is a final answer rather than an internal error.
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
             await intent.verify(
                 credential,
                 {
@@ -1539,7 +1540,6 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
-        assert_unconfirmed_after_broadcast(raised.value, "memo is not bound to this challenge")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_records_hash_and_blocks_hash_reuse(self) -> None:

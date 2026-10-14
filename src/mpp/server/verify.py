@@ -235,7 +235,10 @@ async def verify_or_challenge(
         await emit_failure(error, submitted_challenge, credential)
         raise
     except PaymentError as error:
-        error.retry_challenge = await new_challenge()
+        # 403 means the payment was valid but cannot pay for this request, so a
+        # fresh challenge would only invite the client to pay again.
+        if error.status != 403:
+            error.retry_challenge = await new_challenge()
         await emit_failure(error, submitted_challenge, credential)
         raise
     except Exception as error:
