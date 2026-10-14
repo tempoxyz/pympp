@@ -4824,29 +4824,31 @@ class TestHashCredentialSourceValidation:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("source", "receipt_from", "log_from", "expected"),
+        ("source", "log_senders", "accept_other", "expected"),
         [
-            ("source", SOURCE_ADDR, SOURCE_ADDR, SOURCE_ADDR),
-            ("source", RELAYER, SOURCE_ADDR, SOURCE_ADDR),
-            (None, SOURCE_ADDR.upper().replace("0X", "0x"), SOURCE_ADDR, SOURCE_ADDR),
-            (None, RELAYER, SOURCE_ADDR, RELAYER),
-            (None, None, SOURCE_ADDR, None),
+            (True, [SOURCE_ADDR], False, SOURCE_ADDR),
+            (False, [SOURCE_ADDR], False, SOURCE_ADDR),
+            (True, [RELAYER], True, RELAYER),
+            (False, [SOURCE_ADDR, RELAYER], False, None),
         ],
     )
-    async def test_validate_reports_payer(
-        self, source: str | None, receipt_from: str | None, log_from: str, expected: str | None
+    async def test_validate_reports_debited_account_as_payer(
+        self, source: bool, log_senders: list[str], accept_other: bool, expected: str | None
     ) -> None:
-        # The payer is the source address when present, else the receipt sender.
-        receipt: dict = {"status": "0x1", "logs": [self._memo_log(log_from, self._bound_memo)]}
-        if receipt_from is not None:
-            receipt["from"] = receipt_from
-        intent = self._intent(receipt)
+        # The payer is the sender of the matched transfers, not the transaction
+        # submitter (a relayer here), and is unset when matched senders differ.
+        receipt = {
+            "status": "0x1",
+            "from": self.RELAYER if not accept_other else self.SOURCE_ADDR,
+            "logs": [self._memo_log(sender, self._bound_memo) for sender in log_senders],
+        }
+        intent = self._intent(receipt, validate_sender=(lambda v: True) if accept_other else None)
         credential = make_credential(
             payload={"type": "hash", "hash": "0xabc123"},
             challenge_id="challenge-123",
             realm="api.example.com",
             expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-            source=None if source is None else self._did(self.CHAIN_ID, self.SOURCE_ADDR),
+            source=self._did(self.CHAIN_ID, self.SOURCE_ADDR) if source else None,
         )
         request = {"amount": "1000", "currency": self.CURRENCY, "recipient": self.RECIPIENT}
 

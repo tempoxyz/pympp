@@ -284,6 +284,8 @@ def _match_single_transfer_calldata(
 class MatchedTransferLog:
     kind: Literal["memo", "transfer"]
     memo: str | None = None
+    sender: str | None = None
+    """Lowercase ``from`` address of the transfer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,8 +536,7 @@ class ChargeIntent:
                 store across server replicas and restarts.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
-                ``True`` to accept (e.g. smart-account / relayer flows). The
-                credential source remains the reported payer.
+                ``True`` to accept (e.g. smart-account / relayer flows).
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -642,11 +643,11 @@ class ChargeIntent:
             request: The original payment request parameters.
 
         Returns:
-            A validation record whose ``payer`` is the lowercase paying
-            address (the transaction sender in pull mode; the source address,
-            else the transaction ``from``, in push mode) and whose ``details``
-            carry the settlement ``mode`` and, in pull mode, the serialized
-            transaction.
+            A validation record whose ``payer`` is the lowercase address of
+            the paying account (the transaction sender in pull mode; the
+            sender of the matched transfers in push mode, or ``None`` if they
+            differ) and whose ``details`` carry the settlement ``mode`` and,
+            in pull mode, the serialized transaction.
 
         Raises:
             VerificationError: If the credential is invalid.
@@ -831,15 +832,15 @@ class ChargeIntent:
     ) -> Receipt:
         """Validate a transaction hash without consuming its replay key.
 
-        The receipt's ``payer`` is the lowercase source address when a source
-        is present, else the transaction's ``from``.
+        The receipt's ``payer`` is the account the matched transfers debited,
+        or ``None`` if they came from different senders.
         """
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
         client = await self._get_client()
         receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-        self._verify_receipt_transfers(
+        matched_logs = self._verify_receipt_transfers(
             receipt_data,
             request,
             challenge_id=challenge_id,
@@ -849,11 +850,9 @@ class ChargeIntent:
             validate_sender=self._validate_sender,
         )
 
-        payer = source_address if source_address is not None else receipt_data.get("from")
-        return replace(
-            Receipt.success(payload.hash),
-            payer=payer.lower() if isinstance(payer, str) else None,
-        )
+        senders = {matched_log.sender for matched_log in matched_logs}
+        payer = senders.pop() if len(senders) == 1 else None
+        return replace(Receipt.success(payload.hash), payer=payer)
 
     def _assert_challenge_bound_memo(
         self,
@@ -987,7 +986,9 @@ class ChargeIntent:
                     from_address, expected_sender, source, validate_sender
                 ):
                     continue
-                memo_matches.append(MatchedTransferLog(kind="memo", memo=log_memo))
+                memo_matches.append(
+                    MatchedTransferLog(kind="memo", memo=log_memo, sender=from_address.lower())
+                )
             elif event_topic == TRANSFER_TOPIC:
                 if memo is not None:
                     continue
@@ -997,7 +998,9 @@ class ChargeIntent:
                     if log_amount == amount and self._sender_authorized(
                         from_address, expected_sender, source, validate_sender
                     ):
-                        transfer_matches.append(MatchedTransferLog(kind="transfer"))
+                        transfer_matches.append(
+                            MatchedTransferLog(kind="transfer", sender=from_address.lower())
+                        )
 
         return memo_matches + transfer_matches
 
@@ -1084,7 +1087,11 @@ class ChargeIntent:
                         )
                     ):
                         used_logs.add(log_idx)
-                        all_matches.append(MatchedTransferLog(kind="memo", memo=memo_topic))
+                        all_matches.append(
+                            MatchedTransferLog(
+                                kind="memo", memo=memo_topic, sender=from_addr.lower()
+                            )
+                        )
                         found = True
                         break
                 else:
@@ -1099,7 +1106,11 @@ class ChargeIntent:
                             from_addr, expected_sender, source, validate_sender
                         ):
                             used_logs.add(log_idx)
-                            all_matches.append(MatchedTransferLog(kind="memo", memo=topics[3]))
+                            all_matches.append(
+                                MatchedTransferLog(
+                                    kind="memo", memo=topics[3], sender=from_addr.lower()
+                                )
+                            )
                             found = True
                             break
                     elif event_topic == TRANSFER_TOPIC:
@@ -1110,7 +1121,9 @@ class ChargeIntent:
                             from_addr, expected_sender, source, validate_sender
                         ):
                             used_logs.add(log_idx)
-                            all_matches.append(MatchedTransferLog(kind="transfer"))
+                            all_matches.append(
+                                MatchedTransferLog(kind="transfer", sender=from_addr.lower())
+                            )
                             found = True
                             break
 
