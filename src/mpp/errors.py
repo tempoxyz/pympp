@@ -79,7 +79,11 @@ class PaymentError(Exception):
 
 
 class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
-    """A credential was sent, but the payment result could not be confirmed."""
+    """A credential was sent, but the payment result could not be confirmed.
+
+    ``transaction_hash`` is the on-chain hash the payment will have if it
+    settles, when the method can derive it from the credential alone.
+    """
 
     def __init__(
         self,
@@ -88,11 +92,13 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         *,
         credential: Any = None,
         request: Any = None,
+        transaction_hash: str | None = None,
     ) -> None:
         self.challenge = challenge
         self.cause = cause
         self.credential = credential
         self.request = request
+        self.transaction_hash = transaction_hash
         super().__init__(
             "Payment outcome is unknown after sending a credential "
             f"for challenge {challenge.id}. Do not blindly retry."

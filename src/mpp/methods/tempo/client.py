@@ -244,6 +244,29 @@ class TempoMethod:
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
 
+    def transaction_hash(self, credential: Credential) -> str | None:
+        """Return the on-chain hash of a credential's signed transaction.
+
+        Returns ``None`` for sponsored (0x78 fee payer envelope) transactions,
+        whose final hash depends on the fee payer's co-signature, and for
+        payloads that do not carry a signed transaction.
+        """
+        from eth_hash.auto import keccak
+
+        from mpp.methods.tempo.fee_payer_envelope import FEE_PAYER_ENVELOPE_TYPE_ID
+
+        payload = credential.payload
+        raw_tx = payload.get("signature")
+        if payload.get("type") != "transaction" or not isinstance(raw_tx, str):
+            return None
+        try:
+            tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        except ValueError:
+            return None
+        if not tx_bytes or tx_bytes[0] == FEE_PAYER_ENVELOPE_TYPE_ID:
+            return None
+        return "0x" + keccak(tx_bytes).hex()
+
     async def _build_tempo_transfer(
         self,
         amount: str,

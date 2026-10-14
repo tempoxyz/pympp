@@ -72,6 +72,18 @@ def _accept_payment(methods: Sequence[Method]) -> str:
     return ", ".join(dict.fromkeys(capabilities))
 
 
+def _transaction_hash(method: Method, credential: Credential) -> str | None:
+    """Return the credential's on-chain hash if the method can derive it."""
+    derive = getattr(method, "transaction_hash", None)
+    if derive is None:
+        return None
+    try:
+        return derive(credential)
+    except Exception:
+        # Reconciliation metadata must never mask the payment outcome itself.
+        return None
+
+
 def _client_payment_failed_payload(
     *,
     challenge: Challenge | None,
@@ -293,6 +305,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         cause,
                         credential=credential,
                         request=request,
+                        transaction_hash=_transaction_hash(matched_method, credential),
                     )
                     await self._events.emit(
                         PAYMENT_FAILED,
@@ -319,6 +332,33 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "request": request,
                             "response": payment_response,
                         },
+                    )
+                elif payment_response.is_server_error:
+                    # The server may have settled before failing. Report the
+                    # credential for reconciliation, return the response, and
+                    # never retry: a second attempt could pay twice.
+                    error = PaymentOutcomeUnknownError(
+                        challenge,
+                        httpx.HTTPStatusError(
+                            f"Paid retry returned HTTP {payment_response.status_code}",
+                            request=request,
+                            response=payment_response,
+                        ),
+                        credential=credential,
+                        request=request,
+                        transaction_hash=_transaction_hash(matched_method, credential),
+                    )
+                    await self._events.emit(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=challenge,
+                            challenges=challenges,
+                            credential=credential,
+                            error=error,
+                            method=matched_method,
+                            request=request,
+                            response=payment_response,
+                        ),
                     )
 
             return response
