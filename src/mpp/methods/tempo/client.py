@@ -9,13 +9,16 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
+from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
+    CURRENCY_DECIMALS,
     MACH,
     OUSD,
     RPC_URL,
@@ -46,6 +49,7 @@ FEE_PAYER_VALID_BEFORE_SECS = 25
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+_ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
 
 
 class TransactionError(Exception):
@@ -97,13 +101,15 @@ class TempoMethod:
     # and the tokens it may select. ``None`` selects defaults at broadcast.
     fee_token: str | None = field(default=None, kw_only=True)
     allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
-    # Client-side charge policy, enforced before signing. ``max_amount`` is in
-    # base units of the challenge currency; ``None`` disables either check.
-    max_amount: int | None = field(default=None, kw_only=True)
+    # Client-side charge policy, enforced before signing. ``max_atomic_amount``
+    # is in base units, ``max_amount`` in token units; ``None`` disables a check.
+    max_atomic_amount: int | None = field(default=None, kw_only=True)
+    max_amount: Decimal | None = field(default=None, kw_only=True)
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
+    _decimals_explicit: bool = field(default=False, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
 
@@ -164,23 +170,39 @@ class TempoMethod:
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
     def _check_charge_policy(self, request: dict) -> None:
-        """Reject a charge outside ``max_amount`` or ``expected_recipients``.
+        """Reject a charge outside the client's amount caps or recipient allowlist.
 
-        ``max_amount`` bounds the challenge ``amount`` (base units, splits
-        included, network fees excluded). ``expected_recipients`` must contain
-        the primary recipient and every split recipient, compared
-        case-insensitively.
+        The caps bound the challenge ``amount`` (splits included, network fees
+        excluded). ``max_amount`` is converted to base units with the decimals
+        of a built-in currency, else the explicitly configured ``decimals``.
+        ``expected_recipients`` must contain the primary recipient and every
+        split recipient, compared case-insensitively.
         """
-        if self.max_amount is not None:
+        if self.max_atomic_amount is not None or self.max_amount is not None:
             try:
                 amount = int(request["amount"])
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError("Challenge amount must be an integer in base units") from error
-            if amount > self.max_amount:
+            if self.max_atomic_amount is not None and amount > self.max_atomic_amount:
                 raise ValueError(
                     f"Challenge requests amount {amount}, "
-                    f"but client is restricted to at most {self.max_amount}"
+                    f"but client is restricted to at most {self.max_atomic_amount} base units"
                 )
+            if self.max_amount is not None:
+                currency = request.get("currency")
+                decimals = (
+                    CURRENCY_DECIMALS.get(currency.lower()) if isinstance(currency, str) else None
+                )
+                if decimals is None and self._decimals_explicit:
+                    decimals = self.decimals
+                if decimals is None:
+                    raise ValueError(f"max_amount requires decimals for currency {currency!r}")
+                max_atomic = parse_units(str(self.max_amount), decimals)
+                if amount > max_atomic:
+                    raise ValueError(
+                        f"Challenge requests amount {amount}, but client is restricted "
+                        f"to at most {self.max_amount} ({max_atomic} base units)"
+                    )
 
         if self.expected_recipients is not None:
             allowed = {recipient.lower() for recipient in self.expected_recipients}
@@ -215,8 +237,8 @@ class TempoMethod:
 
         Raises:
             ValueError: If no account is configured, the intent is unsupported,
-                or the challenge violates the client's chain, ``max_amount``
-                or ``expected_recipients`` policy.
+                or the challenge violates the client's chain, amount cap or
+                ``expected_recipients`` policy.
             TransactionError: If transaction building fails.
         """
         if self.account is None:
@@ -488,7 +510,7 @@ def tempo(
     root_account: str | None = None,
     currency: str | None = None,
     recipient: str | None = None,
-    decimals: int = 6,
+    decimals: int | None = None,
     client_id: str | None = None,
     relay: Relay | None = None,
     can_offer: CanOfferFn | None = None,
@@ -496,7 +518,8 @@ def tempo(
     currencies: Sequence[str] | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
-    max_amount: int | None = None,
+    max_atomic_amount: int | str | None = None,
+    max_amount: str | Decimal | None = None,
     expected_recipients: Sequence[str] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
@@ -521,6 +544,8 @@ def tempo(
         recipient: Default recipient address for server-issued charges. Not
             enforced when paying; use ``expected_recipients`` for that.
         decimals: Token decimal places for amount conversion (default: 6).
+            When set explicitly, also used to convert ``max_amount`` for
+            currencies without built-in metadata.
         client_id: Optional client identity for attribution memos.
         relay: Optional server-side Tempo API relay for the charge intent.
         can_offer: Optional callback that filters this method's composed offers.
@@ -537,10 +562,17 @@ def tempo(
         allowed_fee_tokens: Tokens a local ``fee_payer`` may pay gas in.
             Defaults to :func:`fee_tokens_for_chain` (pathUSD, then USDC.e
             on mainnet). Must contain at least one token.
-        max_amount: Client-side cap on a charge's ``amount``, in base units of
-            the challenge currency (e.g. ``1_000_000`` is 1.00 of a 6-decimal
-            token). Includes splits, excludes network fees. Challenges above
-            the cap are rejected before signing.
+        max_atomic_amount: Client-side cap on a charge's ``amount``, in base
+            units of the challenge currency, as an int or a string of digits
+            (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
+            excludes network fees. Challenges above the cap are rejected
+            before signing.
+        max_amount: Client-side cap in token units, as a decimal string or
+            ``Decimal`` (e.g. ``"1.5"``). Converted to base units with the
+            decimals of a built-in currency (pathUSD, USDC.e, MACH, OUSD),
+            else the explicitly passed ``decimals``; a challenge in any other
+            currency is rejected, as is a cap finer than those decimals. May
+            be combined with ``max_atomic_amount``.
         expected_recipients: Client-side allowlist of recipient addresses. The
             primary recipient and every split recipient must be listed
             (case-insensitive), or the challenge is rejected before signing.
@@ -605,10 +637,10 @@ def tempo(
             if not isinstance(token, str) or _ADDRESS_RE.fullmatch(token) is None:
                 raise ValueError(f"Invalid Tempo fee token address: {token!r}")
 
-    if max_amount is not None and (
-        isinstance(max_amount, bool) or not isinstance(max_amount, int) or max_amount < 0
-    ):
-        raise ValueError("max_amount must be a non-negative integer in base units")
+    resolved_max_atomic_amount = (
+        None if max_atomic_amount is None else _resolve_max_atomic_amount(max_atomic_amount)
+    )
+    resolved_max_amount = None if max_amount is None else _resolve_max_amount(max_amount)
     resolved_expected_recipients: tuple[str, ...] | None = None
     if expected_recipients is not None:
         if isinstance(expected_recipients, str):
@@ -626,18 +658,20 @@ def tempo(
         root_account=root_account,
         currency=currency,
         recipient=recipient,
-        decimals=decimals,
+        decimals=6 if decimals is None else decimals,
         client_id=client_id,
         currencies=accepted,
         fee_token=fee_token,
         allowed_fee_tokens=resolved_allowed_fee_tokens,
-        max_amount=max_amount,
+        max_atomic_amount=resolved_max_atomic_amount,
+        max_amount=resolved_max_amount,
         expected_recipients=resolved_expected_recipients,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
     method._chain_id_explicit = chain_id_explicit
     method._currency_explicit = currency_explicit
+    method._decimals_explicit = decimals is not None
     method._rpc_url_explicit = rpc_url_explicit
     for intent in intents.values():
         if hasattr(intent, "rpc_url") and intent.rpc_url is None:  # type: ignore[union-attr]
@@ -670,3 +704,28 @@ def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:
     if not resolved:
         raise ValueError("currencies must contain at least one currency")
     return tuple(resolved)
+
+
+def _resolve_max_atomic_amount(value: int | str) -> int:
+    """Validate a base-unit cap given as a non-negative int or a string of digits."""
+    if isinstance(value, str) and _ATOMIC_AMOUNT_RE.fullmatch(value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise ValueError("max_atomic_amount must be a non-negative integer or digit string")
+
+
+def _resolve_max_amount(value: str | Decimal) -> Decimal:
+    """Validate a token-unit cap given as a decimal string or ``Decimal``."""
+    if not isinstance(value, str | Decimal):
+        raise ValueError(
+            "max_amount must be a decimal string or Decimal in token units; "
+            "use max_atomic_amount for base units"
+        )
+    try:
+        parsed = Decimal(value.strip() if isinstance(value, str) else value)
+    except InvalidOperation:
+        raise ValueError(f"Invalid max_amount: {value!r}") from None
+    if not parsed.is_finite() or parsed < 0:
+        raise ValueError("max_amount must be a finite, non-negative amount")
+    return parsed
