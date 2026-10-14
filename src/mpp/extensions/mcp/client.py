@@ -33,7 +33,7 @@ from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import Method as Method
-from mpp.runtime import _method_accepts_currency
+from mpp.runtime import _method_accepts_challenge
 
 logger = logging.getLogger(__name__)
 
@@ -236,7 +236,7 @@ class McpClient:
                 if (
                     challenge.method == method.name
                     and challenge.intent in supported_intents
-                    and _method_accepts_currency(method, challenge.to_core())
+                    and _method_accepts_challenge(method, challenge.to_core())
                 ):
                     return challenge, method
 

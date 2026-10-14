@@ -12,11 +12,6 @@ MACH = "0x20c000000000000000000000f37de3740ADec032"
 OUSD = "0x20c0000000000000000000006a37DA5C996874BE"
 PATH_USD_DECIMALS = 6
 
-# Decimals of the built-in currencies, used for the client ``max_amount`` cap.
-CURRENCY_DECIMALS: MappingProxyType[str, int] = MappingProxyType(
-    {currency.lower(): PATH_USD_DECIMALS for currency in (PATH_USD, USDC, MACH, OUSD)}
-)
-
 # Testnet (Moderato)
 TESTNET_CHAIN_ID = 42431
 TESTNET_RPC_URL = "https://rpc.moderato.tempo.xyz"
