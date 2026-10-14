@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -211,7 +212,8 @@ async def test_charge_policy(
     build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
     rpc = AsyncMock(side_effect=AssertionError("unexpected RPC call"))
 
-    assert method.can_handle_challenge(challenge) is (error is None)
+    # Selection only skips amount-cap violations; recipients are checked before signing.
+    assert method.can_handle_challenge(challenge) is (error is None or "recipient" in error)
     with (
         patch.object(method, "_build_tempo_transfer", build),
         patch("mpp.methods.tempo.client._rpc_call", rpc),
@@ -258,46 +260,19 @@ async def test_rejected_charge_is_never_signed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("max_amount", "challenge_amount"),
+    ("max_amount", "cap"),
     [
-        pytest.param("0.0000005", "1", id="half-base-unit"),
-        pytest.param("0.0000009999999999999999999999999", "1", id="beyond-decimal-precision"),
-        pytest.param("0.9999999999999999999999999999999", "1000000", id="just-below-one"),
-        pytest.param("1.0000000", "1000000", id="trailing-zero"),
+        pytest.param("1.0000000", 1_000_000, id="trailing-zero"),
+        pytest.param("1.500000000", 1_500_000, id="trailing-zeros"),
+        pytest.param(Decimal("1.0000000"), 1_000_000, id="decimal-trailing-zero"),
+        pytest.param("1E+2", 100_000_000, id="exponent"),
     ],
 )
-async def test_max_amount_finer_than_decimals_is_rejected(
-    max_amount: str, challenge_amount: str
-) -> None:
-    """Rounding must never raise the cap: extra fractional digits are rejected."""
-    with pytest.raises(ValueError, match="more than 6 fractional digits"):
-        make_method(max_amount=max_amount, max_amount_decimals=6)
+def test_max_amount_trailing_zeros_are_accepted(max_amount: str | Decimal, cap: int) -> None:
+    method = make_method(max_amount=max_amount, max_amount_decimals=6)
 
-    method = TempoMethod(
-        account=TempoAccount.from_key(TEST_PRIVATE_KEY),
-        max_amount=max_amount,
-        max_amount_decimals=6,
-    )
-    challenge = make_challenge(amount=challenge_amount)
-    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
-
-    assert method.can_handle_challenge(challenge) is False
-    with patch.object(method, "_build_tempo_transfer", build):
-        with pytest.raises(ValueError, match="more than 6 fractional digits"):
-            await method.create_credential(challenge)
-    build.assert_not_awaited()
-
-
-async def test_max_amount_without_decimals_is_rejected_before_signing() -> None:
-    method = TempoMethod(account=TempoAccount.from_key(TEST_PRIVATE_KEY), max_amount="1")
-    challenge = make_challenge(amount="1")
-    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
-
-    assert method.can_handle_challenge(challenge) is False
-    with patch.object(method, "_build_tempo_transfer", build):
-        with pytest.raises(ValueError, match="max_amount requires max_amount_decimals"):
-            await method.create_credential(challenge)
-    build.assert_not_awaited()
+    assert method.can_handle_challenge(make_challenge(amount=str(cap))) is True
+    assert method.can_handle_challenge(make_challenge(amount=str(cap + 1))) is False
 
 
 @pytest.mark.parametrize(
@@ -307,6 +282,7 @@ async def test_max_amount_without_decimals_is_rejected_before_signing() -> None:
         pytest.param(TOKEN_CAP, ["1000001", "999999"], 1, id="token-over-under"),
         pytest.param({"max_atomic_amount": 1000}, ["10", "1001"], 0, id="first-affordable"),
         pytest.param({}, ["1001", "1000"], 0, id="no-cap-first"),
+        pytest.param({"expected_recipients": [OTHER]}, ["10", "20"], 0, id="recipients-unused"),
         pytest.param({"max_atomic_amount": 1000}, ["1001", "2000"], None, id="all-over"),
         pytest.param(TOKEN_CAP, ["1000001", "2000000"], None, id="token-all-over"),
     ],
@@ -355,7 +331,6 @@ def test_challenge_selection_skips_over_cap_offers(
         pytest.param({}, "expected_recipients", None, id="recipients-unset"),
         pytest.param({}, "decimals", 6, id="decimals-default"),
         pytest.param({"max_atomic_amount": 1000}, "max_atomic_amount", 1000, id="atomic-int"),
-        pytest.param({"max_atomic_amount": "1000"}, "max_atomic_amount", 1000, id="atomic-str"),
         pytest.param(TOKEN_CAP, "max_amount", "1", id="token-str"),
         pytest.param(TOKEN_CAP, "max_amount_decimals", 6, id="token-decimals"),
         pytest.param(
@@ -378,6 +353,17 @@ def test_tempo_stores_charge_policy(kwargs: dict[str, Any], attribute: str, expe
     assert getattr(method, attribute) == expected
 
 
+def tempo_charge(**kwargs: Any) -> TempoMethod:
+    return tempo(intents={"charge": ChargeIntent()}, **kwargs)
+
+
+FINER_THAN_DECIMALS = "has more fractional digits than 6 decimals allow"
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [pytest.param(tempo_charge, id="tempo"), pytest.param(TempoMethod, id="TempoMethod")],
+)
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
@@ -427,11 +413,44 @@ def test_tempo_stores_charge_policy(kwargs: dict[str, Any], attribute: str, expe
             "finite",
             id="token-infinity",
         ),
+        # Rounding must never raise the cap, so extra fractional digits are rejected.
+        pytest.param(
+            {"max_amount": "1.0000005", "max_amount_decimals": 6},
+            FINER_THAN_DECIMALS,
+            id="token-finer-than-decimals",
+        ),
+        pytest.param(
+            {"max_amount": "0.0000005", "max_amount_decimals": 6},
+            FINER_THAN_DECIMALS,
+            id="token-half-base-unit",
+        ),
+        pytest.param(
+            {"max_amount": "0.0000009999999999999999999999999", "max_amount_decimals": 6},
+            FINER_THAN_DECIMALS,
+            id="token-beyond-decimal-precision",
+        ),
+        pytest.param(
+            {"max_amount": "0.9999999999999999999999999999999", "max_amount_decimals": 6},
+            FINER_THAN_DECIMALS,
+            id="token-just-below-one",
+        ),
+    ],
+)
+def test_invalid_caps_fail_at_construction(
+    construct: Callable[..., TempoMethod], kwargs: dict[str, Any], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        construct(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error"),
+    [
         pytest.param({"expected_recipients": RECIPIENT}, "sequence", id="string-recipients"),
         pytest.param({"expected_recipients": ["0x1234"]}, "recipient address", id="short-address"),
         pytest.param({"expected_recipients": [123]}, "recipient address", id="non-string-address"),
     ],
 )
-def test_tempo_rejects_invalid_charge_policy(kwargs: dict[str, Any], error: str) -> None:
+def test_tempo_rejects_invalid_expected_recipients(kwargs: dict[str, Any], error: str) -> None:
     with pytest.raises(ValueError, match=error):
-        tempo(intents={"charge": ChargeIntent()}, **kwargs)
+        tempo_charge(**kwargs)
