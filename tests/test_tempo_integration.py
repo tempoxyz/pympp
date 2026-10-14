@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from mpp import Challenge
-from mpp.errors import VerificationError
+from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._rpc import get_tx_params
@@ -617,7 +617,7 @@ class TestChargeIntegration:
     async def test_verify_hash_tx_not_found(
         self, rpc_url, funded_recipient, currency, charge_intent, chain_id
     ):
-        """A fabricated hash that doesn't exist on-chain should be rejected."""
+        """A hash with no receipt may still be pending, so it is not a 402."""
         bogus_hash = "0x" + "00" * 32
 
         expires = _future_expires()
@@ -630,7 +630,7 @@ class TestChargeIntegration:
         }
         credential = make_credential(payload={"type": "hash", "hash": bogus_hash}, expires=expires)
 
-        with pytest.raises(VerificationError, match="Transaction not found"):
+        with pytest.raises(InternalPaymentError, match="Transaction not found"):
             await charge_intent.verify(credential, request_dict)
 
     async def test_verify_external_id_propagated(

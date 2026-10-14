@@ -4,6 +4,7 @@ import pytest
 
 from mpp.errors import (
     BadRequestError,
+    InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
@@ -14,8 +15,12 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
+    TransactionHashUsedError,
+    VerificationError,
     VerificationFailedError,
 )
+
+_VERIFICATION_FAILED = "https://paymentauth.org/problems/verification-failed"
 
 
 class TestToProblemDetails:
@@ -272,3 +277,47 @@ class TestSubclassProblemDetails:
         details = err.to_problem_details()
         assert details["status"] == 400
         assert isinstance(details["status"], int)
+
+
+class TestServerErrorMapping:
+    @pytest.mark.parametrize(
+        ("error", "status", "type_uri", "title", "detail"),
+        [
+            (
+                VerificationError("Transaction reverted"),
+                402,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Transaction reverted",
+            ),
+            (
+                TransactionHashUsedError(),
+                402,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Transaction hash already used",
+            ),
+            (
+                InternalPaymentError("Transaction receipt lookup failed"),
+                500,
+                "https://paymentauth.org/problems/internal-payment-error",
+                "Internal Payment Error",
+                "Internal payment error: Transaction receipt lookup failed.",
+            ),
+        ],
+        ids=lambda value: type(value).__name__ if isinstance(value, Exception) else None,
+    )
+    def test_problem_details(
+        self, error: PaymentError, status: int, type_uri: str, title: str, detail: str
+    ) -> None:
+        assert error.to_problem_details() == {
+            "type": type_uri,
+            "title": title,
+            "status": status,
+            "detail": detail,
+        }
+
+    def test_verification_errors_are_verification_failed(self) -> None:
+        assert issubclass(VerificationError, VerificationFailedError)
+        assert issubclass(TransactionHashUsedError, VerificationError)
+        assert not issubclass(InternalPaymentError, VerificationFailedError)

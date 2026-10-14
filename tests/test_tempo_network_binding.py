@@ -8,7 +8,7 @@ from eth_account import Account
 from pytempo import Call, TempoTransaction
 
 from mpp import Challenge, Credential
-from mpp.errors import VerificationError
+from mpp.errors import InternalPaymentError, PaymentError, VerificationError
 from mpp.methods.tempo import ChargeIntent, tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID
@@ -78,6 +78,8 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
         if credential_type == "hash":
             payload = {"type": "hash", "hash": "0x" + "ab" * 32}
             reason = "RPC chain ID"
+            # A misconfigured settlement RPC is a server fault, not a bad credential.
+            error: type[PaymentError] = InternalPaymentError
         else:
             data = "0x95777d59" + RECIPIENT[2:].lower().zfill(64) + hex(1)[2:].zfill(64) + memo[2:]
             tx = TempoTransaction.create(
@@ -91,14 +93,15 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
             )
             payload = {"type": "transaction", "signature": "0x" + tx.sign(PAYER_KEY).encode().hex()}
             reason = "Transaction chain ID"
+            error = VerificationError
 
         credential = Credential(
             challenge=challenge.to_echo(),
             payload=payload,
             source=f"did:pkh:eip155:{CHAIN_ID}:{PAYER}",
         )
-        with pytest.raises(VerificationError, match=reason):
+        with pytest.raises(error, match=reason):
             await server.validate_credential(credential)
-        with pytest.raises(VerificationError, match=reason):
+        with pytest.raises(error, match=reason):
             await server.charge(credential.to_authorization(), **options)
         assert methods == (["eth_chainId", "eth_chainId"] if credential_type == "hash" else [])

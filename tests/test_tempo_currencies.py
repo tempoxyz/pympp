@@ -14,6 +14,7 @@ import rlp
 
 import mpp.methods.tempo as tempo_exports
 from mpp import Challenge, Credential, Receipt
+from mpp.errors import InternalPaymentError
 from mpp.methods.tempo import (
     CHAIN_ID,
     MACH,
@@ -958,7 +959,7 @@ class TestSponsoredFeeToken:
     )
     async def test_disallowed_fee_token_is_rejected(self, kwargs: dict[str, Any]) -> None:
         intent = sponsor_intent(**kwargs)
-        with pytest.raises(VerificationError, match="feeToken is not allowed"):
+        with pytest.raises(InternalPaymentError, match="feeToken is not allowed"):
             await intent._resolve_fee_token(None, charge_request())
 
     @pytest.mark.asyncio
@@ -968,7 +969,7 @@ class TestSponsoredFeeToken:
 
     @pytest.mark.asyncio
     async def test_resolution_requires_a_local_fee_payer(self) -> None:
-        with pytest.raises(VerificationError, match="No fee payer"):
+        with pytest.raises(InternalPaymentError, match="No fee payer"):
             await ChargeIntent()._resolve_fee_token(None, charge_request())
 
     def test_fee_token_requires_local_fee_payer(self) -> None:

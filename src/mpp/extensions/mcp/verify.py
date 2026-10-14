@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 import rfc8785
 
 from mpp import _constant_time_equal, generate_challenge_id
-from mpp.errors import PaymentError, PaymentOutcomeUnknownError
+from mpp.errors import InternalPaymentError, PaymentError, PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
@@ -200,7 +200,7 @@ async def verify_or_challenge(
     if expires_dt < datetime.now(UTC):
         return new_challenge()
 
-    from mpp.server.intent import VerificationError, broadcast_credential
+    from mpp.server.intent import broadcast_credential
 
     core_credential = mcp_credential.to_core()
 
@@ -210,9 +210,9 @@ async def verify_or_challenge(
             credential=core_credential,
             request=request,
         )
-    except PaymentOutcomeUnknownError:
+    except (InternalPaymentError, PaymentOutcomeUnknownError):
         raise
-    except (PaymentError, VerificationError) as e:
+    except PaymentError as e:
         raise PaymentVerificationError(
             challenges=[new_challenge()],
             reason="verification-failed",

@@ -14,6 +14,7 @@ import rlp
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
+from mpp.errors import InternalPaymentError, TransactionHashUsedError
 from mpp.methods.tempo import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -68,6 +69,14 @@ def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Res
     request = httpx.Request("POST", "https://rpc.test")
     response = httpx.Response(status_code, json=json, request=request)
     return response
+
+
+def assert_unconfirmed_after_broadcast(error: BaseException, cause_match: str) -> None:
+    """Post-broadcast failures are internal and chain the original verification error."""
+    assert isinstance(error, InternalPaymentError)
+    assert "after broadcast" in str(error)
+    assert isinstance(error.__cause__, VerificationError)
+    assert re.search(cause_match, str(error.__cause__))
 
 
 def with_chain_id(mock_client: AsyncMock) -> AsyncMock:
@@ -1220,6 +1229,62 @@ class TestChargeIntent:
         assert await store.get(f"mpp:charge:{tx_hash}") is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("lookup", "message", "cause", "cause_text"),
+        [
+            (httpx.ReadTimeout("timed out"), "lookup failed", httpx.ReadTimeout, "timed out"),
+            (mock_response(500), "lookup failed", httpx.HTTPStatusError, "500"),
+            (
+                mock_response(200, {"error": {"message": "header not found"}}),
+                "lookup failed",
+                RuntimeError,
+                "header not found",
+            ),
+            (mock_response(200, {"result": None}), "Transaction not found", None, None),
+            (mock_response(200, {"result": "0x1"}), "Invalid transaction receipt", None, None),
+        ],
+        ids=["transport", "http", "rpc", "missing", "malformed"],
+    )
+    async def test_verify_hash_receipt_lookup_failure_is_internal(
+        self,
+        lookup: httpx.Response | Exception,
+        message: str,
+        cause: type[Exception] | None,
+        cause_text: str | None,
+    ) -> None:
+        """A failed receipt lookup cannot prove a pushed payment invalid."""
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        tx_hash = "0xabc123"
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=[lookup])
+        intent._http_client = mock_client
+        with_chain_id(mock_client)
+
+        credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=future)
+
+        with pytest.raises(InternalPaymentError, match=message) as raised:
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        if cause is None:
+            assert raised.value.__cause__ is None
+        else:
+            assert isinstance(raised.value.__cause__, cause)
+            assert cause_text is not None and cause_text in str(raised.value.__cause__)
+        assert await store.get(f"mpp:charge:{tx_hash}") is None
+
+    @pytest.mark.asyncio
     async def test_verify_transaction_success(self) -> None:
         """Should verify transaction credential with matching transfer logs."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -1368,7 +1433,7 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1377,6 +1442,7 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "memo is not bound to this challenge")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_wrong_challenge_bound_memo(self) -> None:
@@ -1420,7 +1486,7 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1429,6 +1495,7 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "memo is not bound to this challenge")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_records_hash_and_blocks_hash_reuse(self) -> None:
@@ -1617,7 +1684,7 @@ class TestChargeIntent:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="Transaction reverted"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1626,6 +1693,7 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "Transaction reverted")
 
         assert await store.get(f"mpp:charge:{tx_hash}") is None
 
@@ -1648,7 +1716,7 @@ class TestChargeIntent:
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
             expires=future,
         )
-        with pytest.raises(VerificationError, match="Transaction submission failed"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1657,6 +1725,7 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "Transaction submission failed")
 
     @pytest.mark.asyncio
     async def test_verify_transaction_releases_reservation_on_rpc_error(self) -> None:
@@ -1682,7 +1751,7 @@ class TestChargeIntent:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="Transaction submission failed"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1691,6 +1760,7 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "Transaction submission failed")
 
         assert await store.get(f"mpp:charge:{tx_hash}") is None
 
@@ -1722,7 +1792,7 @@ class TestChargeIntent:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="Transaction submission failed"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1731,6 +1801,7 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "Transaction submission failed")
 
         assert await store.get(f"mpp:charge:{tx_hash}") is None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
@@ -1820,12 +1891,12 @@ class TestChargeIntent:
                     mock_response(200, {"error": {"message": "already known"}}),
                     mock_response(200, {"result": receipt_with_logs}),
                 ]
-            with pytest.raises((VerificationError, httpx.ReadTimeout, asyncio.CancelledError)):
+            with pytest.raises((InternalPaymentError, asyncio.CancelledError)):
                 await intent.verify(credential, request)
             assert await store.get(f"mpp:charge:{tx_hash}") is None
 
         receipt = await intent.verify(credential, request)
-        with pytest.raises(VerificationError, match="Transaction hash already used"):
+        with pytest.raises(TransactionHashUsedError):
             await intent.verify(credential, request)
 
         assert receipt.reference == tx_hash
@@ -1856,7 +1927,7 @@ class TestChargeIntent:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="No transaction receipt returned"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -1865,6 +1936,7 @@ class TestChargeIntent:
                     "recipient": "0x4567890123456789012345678901234567890123",
                 },
             )
+        assert_unconfirmed_after_broadcast(raised.value, "No transaction receipt returned")
 
 
 class TestSponsoredTransfer:
@@ -1990,7 +2062,7 @@ class TestSponsoredTransfer:
 
     @pytest.mark.asyncio
     async def test_server_fee_payer_error(self, httpx_mock: HTTPXMock) -> None:
-        """Server should raise VerificationError when external fee payer fails."""
+        """External fee payer failures are internal errors, not verification failures."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
 
         httpx_mock.add_response(
@@ -2008,7 +2080,7 @@ class TestSponsoredTransfer:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="Fee payer signing failed"):
+        with pytest.raises(InternalPaymentError, match="Fee payer signing failed"):
             await intent.verify(
                 credential,
                 {
@@ -2155,7 +2227,7 @@ class TestCosignAsFeePayer:
         """Should raise when no fee payer account is configured."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
-        with pytest.raises(VerificationError, match="No fee payer account configured"):
+        with pytest.raises(InternalPaymentError, match="No fee payer account configured"):
             intent._cosign_as_fee_payer("0x76abcdef", "0x20c0000000000000000000000000000000000000")
 
     def test_cosign_validates_call_target(self) -> None:
@@ -2680,8 +2752,9 @@ class TestCosignAsFeePayer:
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=RuntimeError("node unavailable"))
 
-        with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
+        with pytest.raises(InternalPaymentError, match="Pre-broadcast simulation failed") as raised:
             await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        assert isinstance(raised.value.__cause__, RuntimeError)
 
     # End-to-end: a reverting simulation for a locally co-signed sponsored charge
     # must abort `verify` before the tx is broadcast, so the sponsor never pays
@@ -2834,7 +2907,7 @@ class TestCosignAsFeePayer:
             expires=future,
         )
 
-        with pytest.raises(VerificationError, match="Pre-broadcast simulation failed"):
+        with pytest.raises(InternalPaymentError, match="Pre-broadcast simulation failed"):
             await intent.verify(
                 credential,
                 {

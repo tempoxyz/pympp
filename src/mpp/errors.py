@@ -148,6 +148,25 @@ class VerificationFailedError(PaymentError):
         self.details = details
 
 
+class InternalPaymentError(PaymentError):
+    """Payment processing failed for a reason the client cannot fix.
+
+    Used for infrastructure or configuration failures (for example an
+    unreachable RPC node, or any failure after a transaction was broadcast)
+    where the payment may already have landed. Servers must not answer this
+    with a retryable 402 challenge, since that would invite the client to pay
+    again. The underlying exception is chained as ``__cause__``.
+    """
+
+    status = 500
+    type = f"{_BASE_URI}/internal-payment-error"
+    title = "Internal Payment Error"
+
+    def __init__(self, reason: str | None = None) -> None:
+        msg = f"Internal payment error: {reason}." if reason else "Internal payment error."
+        super().__init__(msg)
+
+
 class PaymentExpiredError(PaymentError):
     """Payment has expired."""
 
@@ -211,5 +230,31 @@ class PaymentActionRequiredError(PaymentError):
         super().__init__(msg)
 
 
-class VerificationError(Exception):
-    """Payment verification failed."""
+class VerificationError(VerificationFailedError):
+    """Payment verification failed.
+
+    Raised by payment intents when a credential is invalid. Unlike
+    :class:`VerificationFailedError`, the message is used verbatim.
+    """
+
+    type = VerificationFailedError.type
+    title = VerificationFailedError.title
+
+    def __init__(
+        self,
+        message: str = "Payment verification failed.",
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        PaymentError.__init__(self, message)
+        self.details = details
+
+
+class TransactionHashUsedError(VerificationError):
+    """Transaction hash was already used to settle a payment (replay)."""
+
+    type = VerificationFailedError.type
+    title = VerificationFailedError.title
+
+    def __init__(self) -> None:
+        super().__init__("Transaction hash already used")

@@ -18,6 +18,7 @@ from mpp import (
 from mpp._parsing import ParseError, _b64_decode
 from mpp._units import transform_units
 from mpp.errors import (
+    InternalPaymentError,
     InvalidChallengeError,
     MalformedCredentialError,
     PaymentError,
@@ -229,7 +230,8 @@ async def verify_or_challenge(
             credential=credential,
             request=request,
         )
-    except PaymentOutcomeUnknownError as error:
+    except (InternalPaymentError, PaymentOutcomeUnknownError) as error:
+        # The payment may have landed; a retryable 402 would invite a second one.
         await emit_failure(error, submitted_challenge, credential)
         raise
     except PaymentError as error:

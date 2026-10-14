@@ -57,7 +57,7 @@ async def my_charge(credential: Credential, request: dict) -> Receipt:
 ```python
 import stripe
 from mpp import Credential, Receipt
-from mpp.server import VerificationError
+from mpp.server import InternalPaymentError, VerificationError
 
 class StripeChargeIntent:
     name = "charge"
@@ -84,7 +84,8 @@ class StripeChargeIntent:
                 reference=payment_intent.id,
             )
         except stripe.error.StripeError as e:
-            raise VerificationError(str(e))
+            # Not a bad credential: answer 5xx instead of asking the client to pay again.
+            raise InternalPaymentError("Stripe request failed") from e
 ```
 
 ## Usage with Server
