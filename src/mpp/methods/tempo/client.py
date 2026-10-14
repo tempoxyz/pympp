@@ -9,6 +9,7 @@ import asyncio
 import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
@@ -46,6 +47,11 @@ FEE_PAYER_VALID_BEFORE_SECS = 25
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+_ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
+_CAPS_REQUIRE_CURRENCY_PIN = (
+    "Tempo charge max_amount and max_atomic_amount require a currency pin "
+    "(currency= or currencies=)."
+)
 
 
 class TransactionError(Exception):
@@ -97,11 +103,47 @@ class TempoMethod:
     # and the tokens it may select. ``None`` selects defaults at broadcast.
     fee_token: str | None = field(default=None, kw_only=True)
     allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
+    # Client-side charge policy. ``max_atomic_amount`` is in base units;
+    # ``max_amount`` is in token units and requires ``max_amount_decimals``.
+    # Caps are validated at construction and read on every check. ``None``
+    # disables a check.
+    max_atomic_amount: int | str | None = field(default=None, kw_only=True)
+    max_amount: str | Decimal | None = field(default=None, kw_only=True)
+    max_amount_decimals: int | None = field(default=None, kw_only=True)
+    expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Validate the amount caps so an invalid cap fails at construction."""
+        self._amount_caps()
+
+    def _amount_caps(self) -> tuple[int | None, int | None]:
+        """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""
+        max_atomic = (
+            None
+            if self.max_atomic_amount is None
+            else _parse_max_atomic_amount(self.max_atomic_amount)
+        )
+        max_token = None
+        if self.max_amount is not None:
+            if self.max_amount_decimals is None:
+                raise ValueError("Tempo charge max_amount requires max_amount_decimals.")
+            max_token = _parse_max_amount(self.max_amount, self.max_amount_decimals)
+        if (max_atomic is not None or max_token is not None) and not self._pinned_currencies():
+            raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
+        return max_atomic, max_token
+
+    def _pinned_currencies(self) -> tuple[str, ...]:
+        """Return the currencies the client explicitly pinned, or ``()``."""
+        if not self._currency_explicit:
+            return ()
+        if self.currencies:
+            return self.currencies
+        return () if self.currency is None else (self.currency,)
 
     @property
     def intents(self) -> dict[str, Intent | VerifiableIntent]:
@@ -142,6 +184,18 @@ class TempoMethod:
             return await self._get_chain_id(self.rpc_url)
         return None
 
+    def _known_expected_chain_id(self) -> int | None:
+        """Return the chain ID pin when it is known without an RPC call.
+
+        Mirrors :meth:`_resolve_expected_chain_id`, reading an RPC-reported
+        chain ID only once it has been cached.
+        """
+        if self._rpc_url_explicit and not self._chain_id_explicit:
+            return self._cached_chain_ids.get(self.rpc_url)
+        if self.chain_id is not None:
+            return self.chain_id
+        return self._cached_chain_ids.get(self.rpc_url)
+
     async def _resolve_supported_fee_token(
         self,
         *,
@@ -159,6 +213,83 @@ class TempoMethod:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
+    def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
+        """Reject a challenge whose chain, recipients or amount violate the client policy.
+
+        Runs during challenge selection and again before signing.
+        """
+        challenge_chain_id = _challenge_chain_id(request)
+        if (
+            expected_chain_id is not None
+            and challenge_chain_id is not None
+            and challenge_chain_id != expected_chain_id
+        ):
+            raise ValueError(
+                f"Challenge requests chain ID {challenge_chain_id}, "
+                f"but client is restricted to {expected_chain_id}"
+            )
+        self._check_expected_recipients(request)
+        self._check_amount_caps(request)
+
+    def _check_amount_caps(self, request: dict) -> None:
+        """Reject a challenge above either cap or outside the pinned currencies.
+
+        The caps bound ``amount`` (base units, splits included) and only apply to
+        currencies the client pinned, so their value is fixed by the client.
+        """
+        max_atomic, max_token = self._amount_caps()
+        if max_atomic is None and max_token is None:
+            return
+        currency = request.get("currency")
+        pinned = {pinned.lower() for pinned in self._pinned_currencies()}
+        if not isinstance(currency, str) or currency.lower() not in pinned:
+            raise ValueError(
+                f"Challenge requests currency {currency!r}, "
+                "which is not a currency the client pinned for its amount caps"
+            )
+        try:
+            amount = int(request["amount"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Challenge amount must be an integer in base units") from error
+        if max_atomic is not None and amount > max_atomic:
+            raise ValueError("Tempo charge amount exceeds max_atomic_amount.")
+        if max_token is not None and amount > max_token:
+            raise ValueError("Tempo charge amount exceeds max_amount.")
+
+    def _check_expected_recipients(self, request: dict) -> None:
+        """Reject a primary or split recipient outside ``expected_recipients``."""
+        if self.expected_recipients is not None:
+            allowed = {recipient.lower() for recipient in self.expected_recipients}
+            recipient = request.get("recipient")
+            if not isinstance(recipient, str) or recipient.lower() not in allowed:
+                raise ValueError(
+                    f"Challenge requests recipient {recipient!r}, "
+                    "which is not in the client's expected recipients"
+                )
+            method_details = request.get("methodDetails")
+            splits = method_details.get("splits") if isinstance(method_details, dict) else None
+            for split in splits or ():
+                split_recipient = split.get("recipient") if isinstance(split, dict) else None
+                if not isinstance(split_recipient, str) or split_recipient.lower() not in allowed:
+                    raise ValueError(
+                        f"Challenge requests split recipient {split_recipient!r}, "
+                        "which is not in the client's expected recipients"
+                    )
+
+    def can_handle_challenge(self, challenge: Challenge) -> bool:
+        """Return whether a challenge passes the client's chain, recipient and amount policy.
+
+        Used during challenge selection so an offer this client would reject is
+        skipped in favour of one it will pay. A chain pinned only by a custom
+        ``rpc_url`` is checked here once its chain ID is cached;
+        ``create_credential`` always re-checks before signing.
+        """
+        try:
+            self._check_charge_policy(challenge.request, self._known_expected_chain_id())
+        except ValueError:
+            return False
+        return True
+
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
 
@@ -173,7 +304,9 @@ class TempoMethod:
             A credential with the signed transaction.
 
         Raises:
-            ValueError: If no account is configured or intent is unsupported.
+            ValueError: If no account is configured, the intent is unsupported,
+                or the challenge violates the client's chain, amount cap or
+                ``expected_recipients`` policy.
             TransactionError: If transaction building fails.
         """
         if self.account is None:
@@ -183,6 +316,10 @@ class TempoMethod:
             raise ValueError(f"Unsupported intent: {challenge.intent}")
 
         request = challenge.request
+        expected_chain_id = await self._resolve_expected_chain_id()
+        self._check_charge_policy(request, expected_chain_id)
+        if expected_chain_id is None:
+            expected_chain_id = _challenge_chain_id(request)
         method_details = request.get("methodDetails", {})
         use_fee_payer = (
             method_details.get("feePayer", False) if isinstance(method_details, dict) else False
@@ -204,24 +341,6 @@ class TempoMethod:
         splits = method_details.get("splits") if isinstance(method_details, dict) else None
 
         rpc_url = self.rpc_url
-        expected_chain_id = await self._resolve_expected_chain_id()
-        challenge_chain_id = (
-            method_details.get("chainId") if isinstance(method_details, dict) else None
-        )
-        if challenge_chain_id is not None:
-            try:
-                parsed_chain_id = int(challenge_chain_id)
-            except (TypeError, ValueError):
-                pass
-            else:
-                if expected_chain_id is not None and parsed_chain_id != expected_chain_id:
-                    raise ValueError(
-                        f"Challenge requests chain ID {parsed_chain_id}, "
-                        f"but client is restricted to {expected_chain_id}"
-                    )
-                if expected_chain_id is None:
-                    expected_chain_id = parsed_chain_id
-
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
@@ -452,6 +571,10 @@ def tempo(
     currencies: Sequence[str] | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
+    max_atomic_amount: int | str | None = None,
+    max_amount: str | Decimal | None = None,
+    max_amount_decimals: int | None = None,
+    expected_recipients: Sequence[str] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -472,7 +595,8 @@ def tempo(
         currency: Deprecated for servers; use ``currencies=[currency]``.
             Restricts charges to this one currency. Mutually exclusive with
             ``currencies``.
-        recipient: Default recipient address for charges.
+        recipient: Default recipient address for server-issued charges. Not
+            enforced when paying; use ``expected_recipients`` for that.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
         relay: Optional server-side Tempo API relay for the charge intent.
@@ -490,6 +614,28 @@ def tempo(
         allowed_fee_tokens: Tokens a local ``fee_payer`` may pay gas in.
             Defaults to :func:`fee_tokens_for_chain` (pathUSD, then USDC.e
             on mainnet). Must contain at least one token.
+        max_atomic_amount: Client-side cap on a charge's ``amount``, in base
+            units of the challenge currency, as an int or a string of digits
+            (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
+            excludes network fees. Over-cap challenges are skipped during
+            challenge selection and rejected before signing. Requires an
+            explicit ``currency=`` or ``currencies=`` pin; challenges in any
+            other currency are skipped and rejected, so the cap is always
+            denominated in a currency the client chose.
+        max_amount: Client-side cap in token units, as a decimal string or
+            ``Decimal`` (e.g. ``"1.5"``), checked like ``max_atomic_amount``.
+            Requires ``max_amount_decimals`` and a currency pin, like
+            ``max_atomic_amount``. May be combined with ``max_atomic_amount``.
+        max_amount_decimals: Token decimals used to convert ``max_amount`` to
+            base units (TIP-20 tokens use 6). Challenges do not carry
+            decimals, so this is required with ``max_amount``. A
+            ``max_amount`` with more significant fractional digits is
+            rejected rather than rounded; trailing zeros are accepted.
+        expected_recipients: Client-side allowlist of recipient addresses. The
+            primary recipient and every split recipient must be listed
+            (case-insensitive). Other challenges are skipped during challenge
+            selection and rejected before signing. An empty sequence rejects
+            every charge.
 
     Returns:
         A configured TempoMethod instance.
@@ -550,6 +696,15 @@ def tempo(
             if not isinstance(token, str) or _ADDRESS_RE.fullmatch(token) is None:
                 raise ValueError(f"Invalid Tempo fee token address: {token!r}")
 
+    resolved_expected_recipients: tuple[str, ...] | None = None
+    if expected_recipients is not None:
+        if isinstance(expected_recipients, str):
+            raise ValueError("expected_recipients must be a sequence of addresses")
+        resolved_expected_recipients = tuple(expected_recipients)
+        for address in resolved_expected_recipients:
+            if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:
+                raise ValueError(f"Invalid Tempo recipient address: {address!r}")
+
     method = TempoMethod(
         account=account,
         fee_payer=fee_payer,
@@ -563,9 +718,15 @@ def tempo(
         currencies=accepted,
         fee_token=fee_token,
         allowed_fee_tokens=resolved_allowed_fee_tokens,
+        max_atomic_amount=max_atomic_amount,
+        max_amount=max_amount,
+        max_amount_decimals=max_amount_decimals,
+        expected_recipients=resolved_expected_recipients,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
+    if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
+        raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
     method._chain_id_explicit = chain_id_explicit
     method._currency_explicit = currency_explicit
     method._rpc_url_explicit = rpc_url_explicit
@@ -600,3 +761,58 @@ def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:
     if not resolved:
         raise ValueError("currencies must contain at least one currency")
     return tuple(resolved)
+
+
+def _challenge_chain_id(request: dict) -> int | None:
+    """Return the challenge's numeric ``methodDetails.chainId``, ignoring other values."""
+    method_details = request.get("methodDetails")
+    chain_id = method_details.get("chainId") if isinstance(method_details, dict) else None
+    if chain_id is None:
+        return None
+    try:
+        return int(chain_id)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_max_atomic_amount(value: int | str) -> int:
+    """Validate a base-unit cap given as a non-negative int or a string of digits."""
+    if isinstance(value, str) and _ATOMIC_AMOUNT_RE.fullmatch(value):
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    raise ValueError("max_atomic_amount must be a non-negative integer or digit string")
+
+
+def _parse_max_amount(value: str | Decimal, decimals: int) -> int:
+    """Convert a token-unit cap to base units exactly.
+
+    Rejects significant fractional digits beyond ``decimals`` instead of
+    rounding, so the conversion can never raise the cap. Trailing zeros are
+    accepted.
+    """
+    if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 0:
+        raise ValueError("max_amount_decimals must be a non-negative integer")
+    if not isinstance(value, str | Decimal):
+        raise ValueError(
+            "max_amount must be a decimal string or Decimal in token units; "
+            "use max_atomic_amount for base units"
+        )
+    try:
+        parsed = Decimal(value.strip() if isinstance(value, str) else value)
+    except InvalidOperation:
+        raise ValueError(f"Invalid max_amount: {value!r}") from None
+    sign, digits, exponent = parsed.as_tuple()
+    if sign or not isinstance(exponent, int):
+        raise ValueError("max_amount must be a finite, non-negative amount")
+    coefficient = int("".join(map(str, digits)))
+    shift = exponent + decimals
+    if shift >= 0:
+        return coefficient * 10**shift
+    atomic, remainder = divmod(coefficient, 10**-shift)
+    if remainder:
+        raise ValueError(
+            f"Tempo charge max_amount {value} has more fractional digits "
+            f"than {decimals} decimals allow."
+        )
+    return atomic

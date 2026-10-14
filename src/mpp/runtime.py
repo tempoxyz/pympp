@@ -39,6 +39,18 @@ def _method_accepts_currency(method: Method, challenge: Challenge) -> bool:
     )
 
 
+def _method_accepts_challenge(method: Method, challenge: Challenge) -> bool:
+    """Return whether a method can pay a Challenge during challenge selection.
+
+    Applies the currency constraint and, when the method defines it, the
+    optional ``can_handle_challenge(challenge) -> bool`` predicate.
+    """
+    if not _method_accepts_currency(method, challenge):
+        return False
+    can_handle_challenge = getattr(method, "can_handle_challenge", None)
+    return can_handle_challenge is None or bool(can_handle_challenge(challenge))
+
+
 class PaymentRuntime:
     """Match challenges and create credentials on the caller's event loop."""
 
@@ -64,7 +76,7 @@ class PaymentRuntime:
         for challenge in challenges:
             methods = self._methods.get((challenge.method, challenge.intent), ())
             for method in methods:
-                if _method_accepts_currency(method, challenge):
+                if _method_accepts_challenge(method, challenge):
                     return challenge, method
 
         offered = [challenge.method for challenge in challenges]
