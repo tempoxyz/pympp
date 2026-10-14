@@ -41,6 +41,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_warned_fallback_stores: set[str] = set()
+
+
+def _fallback_store(method: str) -> MemoryStore:
+    """Create the in-memory replay store used when *method* has no store configured.
+
+    Replay protection backed by this store only covers the current process, so this
+    logs a warning once per *method* per process.
+    """
+    if method not in _warned_fallback_stores:
+        _warned_fallback_stores.add(method)
+        logger.warning(
+            "%s has no store configured and is using an in-memory store. Replay "
+            "protection is scoped to this process, so a credential accepted by one "
+            "worker or replica can be accepted again by another, or after a restart. "
+            "Pass a shared store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) "
+            "or ChargeIntent(store=...) when running more than one instance.",
+            method,
+        )
+    return MemoryStore(max_entries=10_000)
+
+
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 APPROVE_SELECTOR = "095ea7b3"
@@ -487,8 +509,8 @@ class ChargeIntent:
             store: Key-value store for tx hash replay protection. Defaults to
                 an in-memory store capped at 10,000 entries on first settlement.
                 New payments fail at capacity without evicting used hashes. Use a shared persistent
-                store across server replicas and restarts. A warning is logged when the
-                in-memory default is used.
+                store across server replicas and restarts. A warning is logged once per
+                process when the in-memory default is used.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
                 ``True`` to accept (e.g. smart-account / relayer flows).
@@ -652,14 +674,7 @@ class ChargeIntent:
         """
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
-            logger.warning(
-                "No replay store configured; falling back to an in-memory replay store. "
-                "Replay protection only holds within this process, so a settled credential "
-                "can be accepted again by another worker or replica, or after a restart. "
-                "Pass a shared store via Mpp.create(store=...) or ChargeIntent(store=...), "
-                "e.g. mpp.stores.RedisStore (or SQLiteStore for a single instance)."
-            )
-            self._store = MemoryStore(max_entries=10_000)
+            self._store = _fallback_store("tempo.charge")
 
         req, payload = self._prepare_credential(credential, request)
 
