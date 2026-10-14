@@ -74,6 +74,67 @@ def _raw_transaction_hash(raw_tx: str) -> str:
     return "0x" + keccak(tx_bytes).hex()
 
 
+def _transaction_sender(raw_tx: str) -> str | None:
+    """Return the account a serialized Tempo transaction debits, or ``None``.
+
+    Mirrors ox ``TxEnvelopeTempo.deserialize``: a 0x78 fee payer envelope
+    carries the sender address; a 0x76 sender is the keychain root account,
+    the multisig account, or the secp256k1/P256/WebAuthn signer. Only
+    secp256k1 is recovered cryptographically here; the chain rejects a
+    transaction whose signature does not authorize the returned account.
+    """
+    import rlp
+    from eth_account import Account
+    from eth_hash.auto import keccak
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        fields = rlp.decode(tx_bytes[1:])
+    except Exception:
+        return None
+    if not isinstance(fields, list) or len(fields) not in (14, 15):
+        return None
+    sender_slot, signature = fields[11], fields[-1]
+
+    if tx_bytes[0] == 0x78:
+        if isinstance(sender_slot, bytes) and len(sender_slot) == 20:
+            return "0x" + sender_slot.hex()
+        return None
+    if tx_bytes[0] != 0x76 or not isinstance(signature, bytes) or not signature:
+        return None
+
+    if len(signature) == 65:
+        has_fee_payer = sender_slot != b""
+        preimage = [
+            *fields[:10],
+            b"" if has_fee_payer else fields[10],
+            b"\x00" if has_fee_payer else b"",
+            *fields[12:-1],
+        ]
+        try:
+            return Account._recover_hash(
+                keccak(b"\x76" + rlp.encode(preimage)), signature=signature
+            )
+        except Exception:
+            return None
+
+    type_id, data = signature[0], signature[1:]
+    if type_id in (0x03, 0x04) and len(data) > 20:
+        return "0x" + data[:20].hex()
+    if type_id == 0x01 and len(data) == 129:
+        return "0x" + keccak(data[64:128])[-20:].hex()
+    if type_id == 0x02 and len(data) >= 128:
+        return "0x" + keccak(data[-64:])[-20:].hex()
+    if type_id == 0x05:
+        try:
+            account = rlp.decode(data)[0]
+        except Exception:
+            return None
+        if isinstance(account, bytes) and len(account) == 20:
+            return "0x" + account.hex()
+    return None
+
+
 def _parse_memo_bytes(memo: str | None) -> bytes | None:
     """Parse a hex memo string into 32 bytes.
 
@@ -593,6 +654,9 @@ class ChargeIntent:
             details: dict[str, Any] = {"mode": "push"}
         else:
             self._validate_transaction_payload(payload.signature, req, strict=True)
+            self._verify_transaction_source(
+                payload.signature, credential.source, req.methodDetails.chainId
+            )
             details = {"mode": "pull", "serialized_transaction": payload.signature}
 
         return Validation(
@@ -650,6 +714,7 @@ class ChargeIntent:
             req,
             challenge_id=credential.challenge.id,
             realm=credential.challenge.realm,
+            source=credential.source,
         )
 
     async def verify(
@@ -697,6 +762,23 @@ class ChargeIntent:
         if parsed is None or parsed[1] != expected_chain_id:
             raise VerificationError("Hash credential source is invalid.")
         return parsed[0]
+
+    @staticmethod
+    def _verify_transaction_source(raw_tx: str, source: str | None, chain_id: int) -> None:
+        """Require a transaction credential's source to name the transaction sender.
+
+        No-op if ``source`` is absent. Otherwise the source must be a
+        ``did:pkh:eip155`` DID on ``chain_id`` whose address is the account the
+        transaction debits, else raises ``VerificationError``.
+        """
+        if source is None:
+            return
+        parsed = parse_pkh_source(source)
+        if parsed is None or parsed[1] != chain_id:
+            raise VerificationError("Transaction credential source is invalid.")
+        sender = _transaction_sender(raw_tx)
+        if sender is None or sender.lower() != parsed[0].lower():
+            raise VerificationError("Transaction credential source does not match the sender.")
 
     def _sender_authorized(
         self,
@@ -1020,6 +1102,7 @@ class ChargeIntent:
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        source: str | None = None,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -1030,6 +1113,7 @@ class ChargeIntent:
         submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
+        self._verify_transaction_source(payload.signature, source, request.methodDetails.chainId)
 
         client = await self._get_client()
 

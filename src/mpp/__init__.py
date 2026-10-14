@@ -400,9 +400,16 @@ class Credential:
         """Payer address from a ``did:pkh:eip155:<chainId>:<address>`` source.
 
         Returns the address as written in the DID, or ``None`` if ``source``
-        is absent or not a valid ``did:pkh:eip155`` DID. The source is
-        client-declared; whether it is bound to the on-chain sender depends
-        on the payment method.
+        is absent or not a valid ``did:pkh:eip155`` DID.
+
+        Parsing alone does not authenticate the address. Once a Tempo charge
+        settles a credential that carries a source, the DID's chain is the
+        charge chain and its address is the account the payment debited: the
+        transaction sender in pull mode, or the sender of every matched
+        transfer in push mode unless a ``validate_sender`` hook accepted a
+        different sender. A non-settling ``validate`` checks the same binding
+        but cannot prove that a keychain, P256, or WebAuthn signer controls
+        the account. Other payment methods may not check the source.
         """
         if self.source is None:
             return None
