@@ -12,7 +12,7 @@ import pytest
 from mpp import Challenge
 from mpp.extensions.mcp import McpClient
 from mpp.extensions.mcp.types import MCPChallenge
-from mpp.methods.tempo import CHAIN_ID, PATH_USD, ChargeIntent, TempoAccount, tempo
+from mpp.methods.tempo import CHAIN_ID, PATH_USD, USDC, ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo.client import TempoMethod
 from mpp.runtime import PaymentRuntime
 
@@ -32,8 +32,9 @@ def make_challenge(
     recipient: str = RECIPIENT,
     splits: list[dict[str, str]] | None = None,
     challenge_id: str = "policy-challenge",
+    currency: str = PATH_USD,
 ) -> Challenge:
-    request: dict[str, Any] = {"amount": amount, "currency": PATH_USD, "recipient": recipient}
+    request: dict[str, Any] = {"amount": amount, "currency": currency, "recipient": recipient}
     if splits is not None:
         request["methodDetails"] = {"splits": splits}
     return Challenge(
@@ -212,8 +213,7 @@ async def test_charge_policy(
     build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
     rpc = AsyncMock(side_effect=AssertionError("unexpected RPC call"))
 
-    # Selection only skips amount-cap violations; recipients are checked before signing.
-    assert method.can_handle_challenge(challenge) is (error is None or "recipient" in error)
+    assert method.can_handle_challenge(challenge) is (error is None)
     with (
         patch.object(method, "_build_tempo_transfer", build),
         patch("mpp.methods.tempo.client._rpc_call", rpc),
@@ -275,25 +275,55 @@ def test_max_amount_trailing_zeros_are_accepted(max_amount: str | Decimal, cap: 
     assert method.can_handle_challenge(make_challenge(amount=str(cap + 1))) is False
 
 
+OVER = {"amount": "1001"}
+UNDER = {"amount": "1000"}
+
+
 @pytest.mark.parametrize(
-    ("policy", "amounts", "expected"),
+    ("policy", "offers", "expected"),
     [
-        pytest.param({"max_atomic_amount": 1000}, ["1001", "1000"], 1, id="atomic-over-under"),
-        pytest.param(TOKEN_CAP, ["1000001", "999999"], 1, id="token-over-under"),
-        pytest.param({"max_atomic_amount": 1000}, ["10", "1001"], 0, id="first-affordable"),
-        pytest.param({}, ["1001", "1000"], 0, id="no-cap-first"),
-        pytest.param({"expected_recipients": [OTHER]}, ["10", "20"], 0, id="recipients-unused"),
-        pytest.param({"max_atomic_amount": 1000}, ["1001", "2000"], None, id="all-over"),
-        pytest.param(TOKEN_CAP, ["1000001", "2000000"], None, id="token-all-over"),
+        pytest.param({"max_atomic_amount": 1000}, [OVER, UNDER], 1, id="atomic-over-under"),
+        pytest.param(
+            TOKEN_CAP, [{"amount": "1000001"}, {"amount": "999999"}], 1, id="token-over-under"
+        ),
+        pytest.param({"max_atomic_amount": 1000}, [UNDER, OVER], 0, id="first-affordable"),
+        pytest.param({}, [OVER, UNDER], 0, id="no-cap-first"),
+        pytest.param(
+            {"expected_recipients": [RECIPIENT]},
+            [{"recipient": OTHER}, {}],
+            1,
+            id="disallowed-recipient-then-allowed",
+        ),
+        pytest.param(
+            {"expected_recipients": [RECIPIENT]},
+            [{"splits": [{"amount": "1", "recipient": OTHER}]}, {}],
+            1,
+            id="disallowed-split-then-allowed",
+        ),
+        pytest.param(
+            {"max_atomic_amount": 1000, "currencies": [PATH_USD]},
+            [{"amount": "10", "currency": USDC}, {"amount": "10"}],
+            1,
+            id="unpinned-currency-then-pinned",
+        ),
+        pytest.param({"max_atomic_amount": 1000}, [OVER, {"amount": "2000"}], None, id="all-over"),
+        pytest.param(
+            TOKEN_CAP, [{"amount": "1000001"}, {"amount": "2000000"}], None, id="token-all-over"
+        ),
+        pytest.param(
+            {"expected_recipients": [RECIPIENT]},
+            [{"recipient": OTHER}],
+            None,
+            id="all-recipients-disallowed",
+        ),
     ],
 )
-def test_challenge_selection_skips_over_cap_offers(
-    policy: dict[str, Any], amounts: list[str], expected: int | None
+def test_challenge_selection_skips_offers_outside_policy(
+    policy: dict[str, Any], offers: list[dict[str, Any]], expected: int | None
 ) -> None:
     method = make_method(**policy)
     challenges = [
-        make_challenge(amount=amount, challenge_id=f"offer-{index}")
-        for index, amount in enumerate(amounts)
+        make_challenge(challenge_id=f"offer-{index}", **offer) for index, offer in enumerate(offers)
     ]
     runtime = PaymentRuntime([method])
     mcp = McpClient(AsyncMock(), methods=[method])
@@ -320,6 +350,28 @@ def test_challenge_selection_skips_over_cap_offers(
     mcp_challenge, mcp_method = mcp._match_challenge(mcp_challenges)
     assert mcp_challenge.id == f"offer-{expected}"
     assert mcp_method is method
+
+
+async def test_caps_changed_after_construction_are_enforced() -> None:
+    method = make_method()
+    challenge = make_challenge(amount="1001")
+    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
+    assert method.can_handle_challenge(challenge) is True
+
+    method.max_atomic_amount = 1000
+    assert method.can_handle_challenge(challenge) is False
+
+    method.max_atomic_amount = None
+    method.max_amount, method.max_amount_decimals = "0.001", 6
+    assert method.can_handle_challenge(challenge) is False
+    assert method.can_handle_challenge(make_challenge(amount="1000")) is True
+
+    method.max_amount_decimals = None
+    assert method.can_handle_challenge(make_challenge(amount="1")) is False
+    with patch.object(method, "_build_tempo_transfer", build):
+        with pytest.raises(ValueError, match="requires max_amount_decimals"):
+            await method.create_credential(make_challenge(amount="1"))
+    build.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

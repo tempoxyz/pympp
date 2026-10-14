@@ -101,13 +101,12 @@ class TempoMethod:
     allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
     # Client-side charge policy. ``max_atomic_amount`` is in base units;
     # ``max_amount`` is in token units and requires ``max_amount_decimals``.
-    # Both caps are parsed at construction. ``None`` disables a check.
+    # Caps are validated at construction and read on every check. ``None``
+    # disables a check.
     max_atomic_amount: int | str | None = field(default=None, kw_only=True)
     max_amount: str | Decimal | None = field(default=None, kw_only=True)
     max_amount_decimals: int | None = field(default=None, kw_only=True)
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
-    _max_atomic_amount_cap: int | None = field(default=None, init=False, repr=False)
-    _max_amount_cap: int | None = field(default=None, init=False, repr=False)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -115,13 +114,21 @@ class TempoMethod:
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Parse the amount caps to base units so invalid caps fail at construction."""
-        if self.max_atomic_amount is not None:
-            self._max_atomic_amount_cap = _parse_max_atomic_amount(self.max_atomic_amount)
-        if self.max_amount is not None:
-            if self.max_amount_decimals is None:
-                raise ValueError("Tempo charge max_amount requires max_amount_decimals.")
-            self._max_amount_cap = _parse_max_amount(self.max_amount, self.max_amount_decimals)
+        """Validate the amount caps so an invalid cap fails at construction."""
+        self._amount_caps()
+
+    def _amount_caps(self) -> tuple[int | None, int | None]:
+        """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""
+        max_atomic = (
+            None
+            if self.max_atomic_amount is None
+            else _parse_max_atomic_amount(self.max_atomic_amount)
+        )
+        if self.max_amount is None:
+            return max_atomic, None
+        if self.max_amount_decimals is None:
+            raise ValueError("Tempo charge max_amount requires max_amount_decimals.")
+        return max_atomic, _parse_max_amount(self.max_amount, self.max_amount_decimals)
 
     @property
     def intents(self) -> dict[str, Intent | VerifiableIntent]:
@@ -181,15 +188,16 @@ class TempoMethod:
 
     def _check_amount_caps(self, request: dict) -> None:
         """Reject a challenge ``amount`` (base units, splits included) above either cap."""
-        if self._max_atomic_amount_cap is None and self._max_amount_cap is None:
+        max_atomic, max_token = self._amount_caps()
+        if max_atomic is None and max_token is None:
             return
         try:
             amount = int(request["amount"])
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("Challenge amount must be an integer in base units") from error
-        if self._max_atomic_amount_cap is not None and amount > self._max_atomic_amount_cap:
+        if max_atomic is not None and amount > max_atomic:
             raise ValueError("Tempo charge amount exceeds max_atomic_amount.")
-        if self._max_amount_cap is not None and amount > self._max_amount_cap:
+        if max_token is not None and amount > max_token:
             raise ValueError("Tempo charge amount exceeds max_amount.")
 
     def _check_expected_recipients(self, request: dict) -> None:
@@ -213,13 +221,14 @@ class TempoMethod:
                     )
 
     def can_handle_challenge(self, challenge: Challenge) -> bool:
-        """Return whether a challenge is within ``max_atomic_amount`` and ``max_amount``.
+        """Return whether a challenge is within the client's caps and expected recipients.
 
-        Used during challenge selection so an over-cap offer is skipped in
-        favour of an affordable one. ``create_credential`` re-checks the caps
+        Used during challenge selection so an offer this client would reject is
+        skipped in favour of one it will pay. ``create_credential`` re-checks
         before signing.
         """
         try:
+            self._check_expected_recipients(challenge.request)
             self._check_amount_caps(challenge.request)
         except ValueError:
             return False
@@ -569,7 +578,9 @@ def tempo(
             units of the challenge currency, as an int or a string of digits
             (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
             excludes network fees. Over-cap challenges are skipped during
-            challenge selection and rejected before signing.
+            challenge selection and rejected before signing. Caps count units
+            of whichever currency the challenge names, so pin the currency
+            with ``currencies=`` for the cap to have a fixed value.
         max_amount: Client-side cap in token units, as a decimal string or
             ``Decimal`` (e.g. ``"1.5"``), checked like ``max_atomic_amount``.
             Requires ``max_amount_decimals``. May be combined with
@@ -581,8 +592,9 @@ def tempo(
             rejected rather than rounded; trailing zeros are accepted.
         expected_recipients: Client-side allowlist of recipient addresses. The
             primary recipient and every split recipient must be listed
-            (case-insensitive), or the challenge is rejected before signing.
-            An empty sequence rejects every charge.
+            (case-insensitive). Other challenges are skipped during challenge
+            selection and rejected before signing. An empty sequence rejects
+            every charge.
 
     Returns:
         A configured TempoMethod instance.
