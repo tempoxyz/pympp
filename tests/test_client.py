@@ -27,8 +27,12 @@ from mpp.events import (
 from mpp.runtime import PaymentRuntime
 from tests import make_credential
 
-_NOISE = random.Random(0).randbytes(100_000)
-_NOISE_GZIP = gzip.compress(_NOISE)
+_NOISE_GZIP = gzip.compress(random.Random(0).randbytes(100_000))
+_SMALL_GZIP = gzip.compress(b"settle failed")
+
+
+def _gzip_head(body: bytes) -> bytes:
+    return f"Content-Encoding: gzip\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
 
 
 class MockMethod:
@@ -1145,10 +1149,11 @@ class TestPaymentTransport:
             request={"amount": "1000"},
         )
         www_auth = challenge.to_www_authenticate("example.com")
+        paid_request = httpx.Request("GET", "https://example.com")
         inner = MockTransport(
             [
                 httpx.Response(402, headers={"www-authenticate": www_auth}),
-                httpx.Response(status),
+                httpx.Response(status, request=paid_request),
             ]
         )
         method = MockMethod(transaction_hash=lambda credential: "0xhash")
@@ -1170,6 +1175,7 @@ class TestPaymentTransport:
             error = payload["error"]
             assert isinstance(error, PaymentOutcomeUnknownError)
             assert payload["response"] is response
+            assert response.request is paid_request
             assert error.credential is payload["credential"]
             assert error.credential is method.create_credential.return_value
             assert error.transaction_hash == "0xhash"
@@ -1233,9 +1239,10 @@ class TestPaymentTransport:
             ("chunked", b"settle failed", False),
             ("large", b"x" * 64 * 1024, True),
             ("slow", b"partial", True),
-            ("gzip", _NOISE[: 64 * 1024], True),
+            ("gzip", b"settle failed", False),
+            ("large-gzip", b"", True),
         ],
-        ids=["framed", "chunked", "large", "slow", "gzip"],
+        ids=["framed", "chunked", "large", "slow", "gzip", "large-gzip"],
     )
     async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(
         self,
@@ -1256,8 +1263,8 @@ class TestPaymentTransport:
             "large": b"Transfer-Encoding: chunked\r\n\r\n"
             + (b"4000\r\n" + b"x" * 0x4000 + b"\r\n") * 64,
             "slow": b"Content-Length: 100\r\n\r\npartial",
-            "gzip": f"Content-Encoding: gzip\r\nContent-Length: {len(_NOISE_GZIP)}\r\n\r\n".encode()
-            + _NOISE_GZIP,
+            "gzip": _gzip_head(_SMALL_GZIP),
+            "large-gzip": _gzip_head(_NOISE_GZIP),
         }[body_mode]
 
         async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1297,7 +1304,7 @@ class TestPaymentTransport:
 
         assert response.status_code == 500
         assert response.content == expected_body
-        assert "content-encoding" not in response.headers
+        assert ("content-encoding" in response.headers) is (body_mode == "gzip")
         assert response.extensions.get("mpp.body_truncated", False) is truncated
         assert reconciled == ["reconciled"]
 
@@ -1323,15 +1330,17 @@ class TestPaymentTransport:
             ]
         )
         transport = PaymentTransport(methods=[MockMethod()], inner=inner)
-        failed: list[Exception] = []
-        transport.on_payment_failed(lambda payload: failed.append(payload["error"]))
+        failed: list[tuple[Exception, bool]] = []
+        transport.on_payment_failed(
+            lambda payload: failed.append((payload["error"], stream.closed))
+        )
 
         with pytest.raises(PaymentOutcomeUnknownError) as raised:
             await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
         assert isinstance(raised.value.__cause__, httpx.ReadError)
-        assert failed == [raised.value]
-        assert stream.closed
+        # The connection is released before failure hooks run.
+        assert failed == [(raised.value, True)]
 
     @pytest.mark.asyncio
     async def test_cancelled_5xx_observer_raises_unknown_outcome(self) -> None:
