@@ -596,9 +596,7 @@ async def _fake_rpc_call(
     client: object | None = None,
 ) -> str:
     del rpc_url, params, client
-    return {"eth_chainId": hex(CHAIN_ID), "eth_getTransactionCount": "0x0", "eth_gasPrice": "0x1"}[
-        method_name
-    ]
+    return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[method_name]
 
 
 async def _sign(client_method: TempoMethod, challenge: Challenge) -> Credential:
@@ -780,7 +778,6 @@ async def _fake_client_rpc(chain_id: int, gas_price: int = 1) -> Any:
         del rpc_url, params, client
         return {
             "eth_chainId": hex(chain_id),
-            "eth_getTransactionCount": "0x0",
             "eth_gasPrice": hex(gas_price),
         }[method_name]
 
