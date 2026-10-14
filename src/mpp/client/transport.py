@@ -299,6 +299,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
                 try:
                     payment_response = await self._inner.handle_async_request(retry_request)
+                    response = payment_response
+                    if payment_response.is_server_error:
+                        # Release the connection before failure hooks can make auxiliary
+                        # requests; the buffered body stays readable for the caller.
+                        await payment_response.aread()
                 except (Exception, asyncio.CancelledError) as cause:
                     error = PaymentOutcomeUnknownError(
                         challenge,
@@ -321,7 +326,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     raise error from cause
 
-                response = payment_response
                 if payment_response.is_success:
                     await self._events.emit(
                         PAYMENT_RESPONSE,

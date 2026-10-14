@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 from typing import cast
 from unittest.mock import AsyncMock, Mock
 
@@ -1198,6 +1199,85 @@ class TestPaymentTransport:
         assert isinstance(error, PaymentOutcomeUnknownError)
         assert error.credential is method.create_credential.return_value
         assert error.transaction_hash is None
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(self) -> None:
+        """Failure hooks can reconcile through a one-connection pool without deadlocking."""
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+
+        async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            with suppress(asyncio.IncompleteReadError, ConnectionError):
+                while head := (await reader.readuntil(b"\r\n\r\n")).decode().lower():
+                    if "/reconcile" in head:
+                        status, extra, body = "200 OK", "", b"reconciled"
+                    elif "authorization: payment" in head:
+                        status, extra, body = "500 Internal Server Error", "", b"settle failed"
+                    else:
+                        status, extra, body = (
+                            "402 Payment Required",
+                            f"WWW-Authenticate: {www_auth}\r\n",
+                            b"",
+                        )
+                    writer.write(
+                        f"HTTP/1.1 {status}\r\n{extra}Content-Length: {len(body)}\r\n\r\n".encode()
+                        + body
+                    )
+                    await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        base_url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+        transport = PaymentTransport(
+            methods=[MockMethod()],
+            inner=httpx.AsyncHTTPTransport(limits=httpx.Limits(max_connections=1)),
+        )
+        reconciled: list[str] = []
+        async with server, httpx.AsyncClient(transport=transport) as client:
+
+            async def reconcile(payload: ClientPaymentFailedPayload) -> None:
+                reconciled.append((await client.get(f"{base_url}/reconcile")).text)
+
+            transport.on_payment_failed(reconcile)
+            response = await asyncio.wait_for(client.get(f"{base_url}/paid"), timeout=2)
+
+        assert response.status_code == 500
+        assert response.text == "settle failed"
+        assert reconciled == ["reconciled"]
+
+    @pytest.mark.asyncio
+    async def test_paid_retry_5xx_body_failure_has_unknown_outcome(self) -> None:
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+
+        class FailingStream(TrackedStream):
+            async def __aiter__(self):
+                raise httpx.ReadError("connection lost")
+                yield b""
+
+        stream = FailingStream()
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(500, stream=stream),
+            ]
+        )
+        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
+        failed: list[Exception] = []
+        transport.on_payment_failed(lambda payload: failed.append(payload["error"]))
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert isinstance(raised.value.__cause__, httpx.ReadError)
+        assert failed == [raised.value]
+        assert stream.closed
 
     @pytest.mark.asyncio
     async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:
