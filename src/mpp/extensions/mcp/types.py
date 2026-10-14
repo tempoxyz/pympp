@@ -3,7 +3,7 @@
 MCP types differ from core pympp types:
 - MCPChallenge includes realm, expires, description (core Challenge lacks these)
 - MCPCredential echoes the full challenge object (core Credential only has id)
-- MCPReceipt includes challengeId, method, settlement (core Receipt lacks these)
+- MCPReceipt includes challengeId and settlement in addition to core Receipt fields
 
 The to_core()/from_core() methods are explicitly "information-reducing" when
 mapping to core types, as MCP carries additional metadata.
@@ -218,6 +218,19 @@ class MCPCredential:
         )
 
 
+_RECEIPT_FIELDS = {
+    "status",
+    "challengeId",
+    "method",
+    "timestamp",
+    "reference",
+    "settlement",
+    "externalId",
+    "subscriptionId",
+    "extra",
+}
+
+
 @dataclass(frozen=True, slots=True)
 class MCPReceipt:
     """Payment receipt for MCP transport.
@@ -242,6 +255,10 @@ class MCPReceipt:
     timestamp: str
     reference: str | None = None
     settlement: dict[str, Any] | None = None
+    external_id: str | None = None
+    subscription_id: str | None = None
+    extra: dict[str, Any] | None = None
+    extensions: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict for wire format."""
@@ -255,6 +272,16 @@ class MCPReceipt:
             result["reference"] = self.reference
         if self.settlement is not None:
             result["settlement"] = self.settlement
+        if self.external_id is not None:
+            result["externalId"] = self.external_id
+        if self.subscription_id is not None:
+            result["subscriptionId"] = self.subscription_id
+        if self.extra is not None:
+            result["extra"] = self.extra
+        if self.extensions:
+            result.update(
+                {key: value for key, value in self.extensions.items() if key not in _RECEIPT_FIELDS}
+            )
         return result
 
     def to_meta(self) -> dict[str, Any]:
@@ -273,6 +300,11 @@ class MCPReceipt:
             timestamp=data["timestamp"],
             reference=data.get("reference"),
             settlement=data.get("settlement"),
+            external_id=data.get("externalId"),
+            subscription_id=data.get("subscriptionId"),
+            extra=data.get("extra"),
+            extensions={key: value for key, value in data.items() if key not in _RECEIPT_FIELDS}
+            or None,
         )
 
     @classmethod
@@ -285,13 +317,18 @@ class MCPReceipt:
         return cls.from_dict(meta[META_RECEIPT])
 
     def to_core(self) -> Receipt:
-        """Convert to core Receipt type (loses challengeId, method, settlement)."""
+        """Convert to core Receipt type (omits challengeId and settlement)."""
         from mpp import Receipt
 
         return Receipt(
             status=self.status,
             timestamp=datetime.fromisoformat(self.timestamp.replace("Z", "+00:00")),
             reference=self.reference or "",
+            method=self.method,
+            external_id=self.external_id,
+            subscription_id=self.subscription_id,
+            extra=self.extra,
+            extensions=self.extensions,
         )
 
     @classmethod
@@ -313,4 +350,8 @@ class MCPReceipt:
             timestamp=timestamp,
             reference=receipt.reference if receipt.reference else None,
             settlement=settlement,
+            external_id=receipt.external_id,
+            subscription_id=receipt.subscription_id,
+            extra=receipt.extra,
+            extensions=receipt.extensions,
         )
