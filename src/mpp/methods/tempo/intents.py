@@ -952,6 +952,39 @@ class ChargeIntent:
         # Multi-transfer: order-insensitive matching
         sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
         indexed_logs = list(enumerate(receipt.get("logs", [])))
+        # TIP-20 emits Transfer and TransferWithMemo for one movement. Pair by
+        # token, sender, recipient and amount, retaining the memo for attribution.
+        # Count multiplicities rather than adjacency so routed payments work too.
+        companions: dict[tuple[str, ...], list[int]] = {}
+        for index, log in indexed_logs:
+            topics = log.get("topics", [])
+            if len(topics) == 3 and topics[0] == TRANSFER_TOPIC:
+                key = tuple(
+                    value.lower()
+                    for value in (
+                        log.get("address", ""),
+                        topics[1],
+                        topics[2],
+                        log.get("data", "0x"),
+                    )
+                )
+                companions.setdefault(key, []).append(index)
+        paired: set[int] = set()
+        for _, log in indexed_logs:
+            topics = log.get("topics", [])
+            if len(topics) == 4 and topics[0] == TRANSFER_WITH_MEMO_TOPIC:
+                key = tuple(
+                    value.lower()
+                    for value in (
+                        log.get("address", ""),
+                        topics[1],
+                        topics[2],
+                        log.get("data", "0x"),
+                    )
+                )
+                if candidates := companions.get(key):
+                    paired.add(candidates.pop())
+        indexed_logs = [(index, log) for index, log in indexed_logs if index not in paired]
         # Prefer memo logs so memo-less transfers still preserve attribution
         # memos for challenge binding verification when both log types exist.
         indexed_logs.sort(
