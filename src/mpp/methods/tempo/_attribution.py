@@ -53,6 +53,16 @@ def __getattr__(name: str):  # type: ignore[reportReturnType]
 
 
 def encode(challenge_id: str, server_id: str, client_id: str | None = None) -> str:
+    """Encode a challenge-bound MPP attribution memo.
+
+    Args:
+        challenge_id: ID of the Challenge being paid.
+        server_id: Server identity, typically the Challenge realm.
+        client_id: Optional client identity. Omitted clients are anonymous.
+
+    Returns:
+        The 32-byte memo as a ``0x``-prefixed hex string.
+    """
     tag = _get_tag()
     buf = bytearray(32)
     buf[0:4] = tag
@@ -65,6 +75,7 @@ def encode(challenge_id: str, server_id: str, client_id: str | None = None) -> s
 
 
 def is_mpp_memo(memo: str) -> bool:
+    """Return whether ``memo`` carries the MPP tag and a supported version."""
     if len(memo) != 66:
         return False
     try:
@@ -76,6 +87,7 @@ def is_mpp_memo(memo: str) -> bool:
 
 
 def verify_server(memo: str, server_id: str) -> bool:
+    """Return whether ``memo`` is an MPP memo issued for ``server_id``."""
     if not is_mpp_memo(memo):
         return False
     try:
@@ -86,6 +98,7 @@ def verify_server(memo: str, server_id: str) -> bool:
 
 
 def verify_challenge_binding(memo: str, challenge_id: str) -> bool:
+    """Return whether ``memo`` is an MPP memo bound to ``challenge_id``."""
     if not is_mpp_memo(memo):
         return False
     try:
@@ -97,6 +110,16 @@ def verify_challenge_binding(memo: str, challenge_id: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class DecodedMemo:
+    """Fields of a decoded MPP attribution memo.
+
+    Attributes:
+        version: Memo format version.
+        server_fingerprint: ``0x``-prefixed ``keccak256(server_id)[0..9]``.
+        client_fingerprint: ``0x``-prefixed ``keccak256(client_id)[0..9]``, or
+            ``None`` for anonymous clients.
+        nonce: ``0x``-prefixed ``keccak256(challenge_id)[0..6]``.
+    """
+
     version: int
     server_fingerprint: str
     client_fingerprint: str | None
@@ -104,6 +127,7 @@ class DecodedMemo:
 
 
 def decode(memo: str) -> DecodedMemo | None:
+    """Decode an MPP attribution memo, or return ``None`` if it is not one."""
     if not is_mpp_memo(memo):
         return None
 

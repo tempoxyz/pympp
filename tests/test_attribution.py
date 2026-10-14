@@ -1,9 +1,8 @@
 """Tests for MPP attribution memo encoding."""
 
-from mpp.methods.tempo._attribution import (
-    TAG,
+from mpp.methods.tempo._attribution import TAG, challenge_nonce
+from mpp.methods.tempo.attribution import (
     DecodedMemo,
-    challenge_nonce,
     decode,
     encode,
     is_mpp_memo,
@@ -112,6 +111,11 @@ class TestDecode:
         assert decoded.client_fingerprint is not None
         assert decoded.nonce.startswith("0x")
         assert len(decoded.nonce) == 16  # 0x + 14 hex chars (7 bytes)
+        assert decoded.nonce == "0x" + challenge_nonce("challenge-1").hex()
+        assert memo == "0x" + TAG.hex() + "01" + "".join(
+            field[2:]
+            for field in (decoded.server_fingerprint, decoded.client_fingerprint, decoded.nonce)
+        )
 
     def test_returns_none_for_non_mpp(self) -> None:
         assert decode("0x" + "00" * 32) is None
