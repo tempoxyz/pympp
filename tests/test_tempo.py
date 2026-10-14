@@ -723,7 +723,7 @@ class TestTempoMethod:
             patch.object(
                 method,
                 "_build_tempo_transfer",
-                AsyncMock(return_value=("0xdeadbeef", 4217)),
+                AsyncMock(return_value=("0xdeadbeef", 4217, 9_999_999_999)),
             ) as build_mock,
         ):
             await method.create_credential(challenge)
@@ -763,7 +763,7 @@ class TestTempoMethod:
             patch.object(
                 method,
                 "_build_tempo_transfer",
-                AsyncMock(return_value=("0xdeadbeef", 4217)),
+                AsyncMock(return_value=("0xdeadbeef", 4217, 9_999_999_999)),
             ) as build_mock,
         ):
             await method.create_credential(challenge)
@@ -931,6 +931,30 @@ class TestExpiringNonce:
         expected_hash = None if fee_payer else _raw_transaction_hash(signature)
         assert method.transaction_hash(credential) == expected_hash
 
+    @pytest.mark.asyncio
+    async def test_valid_before_is_set_after_slow_rpc_preparation(self) -> None:
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        clock = [float(_NOW)]
+
+        async def slow_rpc(_url: str, method_name: str, *_: object, **__: object) -> str:
+            clock[0] += 30
+            return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[method_name]
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=slow_rpc),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+            patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
+        ):
+            credential = await method.create_credential(self._challenge("slow", fee_payer=False))
+
+        decoded = _decode_signed_charge(credential.payload["signature"])
+        assert int.from_bytes(decoded[8], "big") == int(clock[0]) + EXPIRING_NONCE_VALID_BEFORE_SECS
+
     @pytest.mark.parametrize(
         "now,expires,expected",
         [
@@ -1010,7 +1034,13 @@ class TestCredentialCache:
             intents={"charge": ChargeIntent()},
         )
         signings = iter(range(1_000))
-        build = AsyncMock(side_effect=lambda **_: (f"0x76{next(signings):04x}", CHAIN_ID))
+        build = AsyncMock(
+            side_effect=lambda **kwargs: (
+                f"0x76{next(signings):04x}",
+                CHAIN_ID,
+                _expiring_valid_before(kwargs["expires"]),
+            )
+        )
         return method, build
 
     @staticmethod
@@ -1097,28 +1127,24 @@ class TestCredentialCache:
         assert build.await_count == signings
 
     @pytest.mark.asyncio
-    async def test_entry_expires_at_the_signed_valid_before(self) -> None:
+    @pytest.mark.parametrize("elapsed,signings", [(6.9, 1), (7, 2)])
+    async def test_entry_expires_at_the_signed_valid_before(
+        self, elapsed: float, signings: int
+    ) -> None:
         method, build = self._method()
-        clock = [_NOW + 0.8]
-        signatures = iter(["0x76aa", "0x76bb"])
+        build.side_effect = None
+        build.return_value = ("0x76aa", CHAIN_ID, _NOW + 7)
+        clock = [float(_NOW)]
 
-        async def slow_build(**_: object) -> tuple[str, int]:
-            clock[0] += 0.5  # Signing crosses a whole-second boundary.
-            return next(signatures), CHAIN_ID
-
-        build.side_effect = slow_build
         with (
             patch.object(method, "_build_tempo_transfer", build),
             patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
         ):
-            await method.create_credential(self._challenge())
-            assert build.await_args is not None
-            valid_before = build.await_args.kwargs["valid_before"]
-            clock[0] = valid_before
-            await method.create_credential(self._challenge())
+            await method.create_credential(self._challenge(expires=_iso(_NOW + 60)))
+            clock[0] += elapsed
+            await method.create_credential(self._challenge(expires=_iso(_NOW + 60)))
 
-        assert valid_before == _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS
-        assert build.await_count == 2
+        assert build.await_count == signings
 
     @pytest.mark.asyncio
     async def test_policy_is_enforced_before_returning_a_cached_credential(self) -> None:
@@ -1139,7 +1165,7 @@ class TestCredentialCache:
     @pytest.mark.asyncio
     async def test_failed_signing_is_not_cached(self) -> None:
         method, build = self._method()
-        build.side_effect = [TransactionError("rpc down"), ("0x76ok", CHAIN_ID)]
+        build.side_effect = [TransactionError("rpc down"), ("0x76ok", CHAIN_ID, 9_999_999_999)]
         challenge = self._challenge()
 
         with patch.object(method, "_build_tempo_transfer", build):

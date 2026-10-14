@@ -71,7 +71,7 @@ class TransactionError(Exception):
 
 @dataclass
 class _CachedCredential:
-    task: asyncio.Task[Credential]
+    task: asyncio.Task[tuple[Credential, int]]
     expires_at: float | None = None
 
 
@@ -344,29 +344,28 @@ class TempoMethod:
 
         key = ((self.root_account or self.account.address).lower(), challenge.id)
         entry = self._credentials.get(key) or self._cache_credential(key, challenge)
-        return await asyncio.shield(entry.task)
+        credential, _ = await asyncio.shield(entry.task)
+        return credential
 
     def _cache_credential(self, key: tuple[str, str], challenge: Challenge) -> _CachedCredential:
         """Start signing ``challenge`` and cache it until its ``valid_before`` passes."""
-        valid_before = _expiring_valid_before(challenge.expires)
-        entry = _CachedCredential(
-            asyncio.ensure_future(self._create_credential(challenge, valid_before))
-        )
+        entry = _CachedCredential(asyncio.ensure_future(self._create_credential(challenge)))
         self._credentials[key] = entry
         if len(self._credentials) > _CREDENTIAL_CACHE_SIZE:
             del self._credentials[next(iter(self._credentials))]
 
-        def settle(task: asyncio.Task[Credential]) -> None:
+        def settle(task: asyncio.Task[tuple[Credential, int]]) -> None:
             if task.cancelled() or task.exception() is not None:
                 if self._credentials.get(key) is entry:
                     del self._credentials[key]
                 return
-            entry.expires_at = valid_before
+            _, entry.expires_at = task.result()
 
         entry.task.add_done_callback(settle)
         return entry
 
-    async def _create_credential(self, challenge: Challenge, valid_before: int) -> Credential:
+    async def _create_credential(self, challenge: Challenge) -> tuple[Credential, int]:
+        """Sign ``challenge``, returning the credential and its ``valid_before``."""
         if self.account is None:
             raise ValueError("No account configured for signing")
 
@@ -389,7 +388,7 @@ class TempoMethod:
         splits = method_details.get("splits") if isinstance(method_details, dict) else None
 
         rpc_url = self.rpc_url
-        raw_tx, chain_id = await self._build_tempo_transfer(
+        raw_tx, chain_id, valid_before = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],
             recipient=request["recipient"],
@@ -398,18 +397,19 @@ class TempoMethod:
             expected_chain_id=expected_chain_id,
             awaiting_fee_payer=use_fee_payer,
             splits=splits,
-            valid_before=valid_before,
+            expires=challenge.expires,
         )
 
         # When signing with an access key, the credential source is the
         # root account (the smart wallet), not the access key.
         source_address = self.root_account if self.root_account else self.account.address
 
-        return Credential(
+        credential = Credential(
             challenge=challenge.to_echo(),
             payload={"type": "transaction", "signature": raw_tx},
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
+        return credential, valid_before
 
     def transaction_hash(self, credential: Credential) -> str | None:
         """Return the on-chain hash of a credential's signed 0x76 transaction.
@@ -452,8 +452,8 @@ class TempoMethod:
         expected_chain_id: int | None = None,
         awaiting_fee_payer: bool = False,
         splits: list[dict] | None = None,
-        valid_before: int | None = None,
-    ) -> tuple[str, int]:
+        expires: str | None = None,
+    ) -> tuple[str, int, int]:
         """Build a client-signed Tempo transaction.
 
         Creates a TempoTransaction (type 0x76) with a supported fee token.
@@ -476,10 +476,10 @@ class TempoMethod:
             rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
             expected_chain_id: If set, verify the RPC reports this chain ID.
             awaiting_fee_payer: If True, build for fee payer sponsorship.
-            valid_before: Expiring-nonce deadline. Defaults to the 25s window.
+            expires: Challenge expiry (ISO 8601). Caps ``valid_before``.
 
         Returns:
-            Tuple of (raw signed transaction hex, chain ID).
+            Tuple of (raw signed transaction hex, chain ID, ``valid_before``).
 
         Raises:
             TransactionError: If the RPC's chain ID doesn't match expected.
@@ -564,6 +564,8 @@ class TempoMethod:
                     required_balance=required_balance,
                 )
 
+        # Set the deadline after the RPC round trips above, just before signing.
+        valid_before = _expiring_valid_before(expires)
         tx = TempoTransaction.create(
             chain_id=chain_id,
             gas_limit=gas_limit,
@@ -573,7 +575,7 @@ class TempoMethod:
             nonce_key=EXPIRING_NONCE_KEY,
             fee_token=fee_token,
             awaiting_fee_payer=awaiting_fee_payer,
-            valid_before=valid_before if valid_before is not None else _expiring_valid_before(None),
+            valid_before=valid_before,
             calls=calls_tuple,
         )
 
@@ -587,9 +589,9 @@ class TempoMethod:
         if awaiting_fee_payer:
             from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
 
-            return "0x" + encode_fee_payer_envelope(signed_tx).hex(), chain_id
+            return "0x" + encode_fee_payer_envelope(signed_tx).hex(), chain_id, valid_before
 
-        return "0x" + signed_tx.encode().hex(), chain_id
+        return "0x" + signed_tx.encode().hex(), chain_id, valid_before
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call.
