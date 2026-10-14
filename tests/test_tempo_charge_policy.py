@@ -262,7 +262,7 @@ async def test_charge_policy(
     error: str | None,
 ) -> None:
     method = make_method(**policy)
-    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID, 9_999_999_999))
+    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
     rpc = AsyncMock(side_effect=AssertionError("unexpected RPC call"))
 
     assert method.can_handle_challenge(challenge) is (error is None)
@@ -448,7 +448,7 @@ async def test_selection_uses_cached_rpc_chain_pin(
 
     assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[expected], method)
     method._cached_chain_ids["https://rpc.custom"] = TESTNET_CHAIN_ID
-    build = AsyncMock(return_value=("0xdeadbeef", TESTNET_CHAIN_ID, 9_999_999_999))
+    build = AsyncMock(return_value=("0xdeadbeef", TESTNET_CHAIN_ID))
     with patch.object(method, "_build_tempo_transfer", build):
         with pytest.raises(ValueError, match=f"client is restricted to {TESTNET_CHAIN_ID}"):
             await method.create_credential(challenges[0])
@@ -498,7 +498,7 @@ async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
         make_challenge(currency=USDC, challenge_id="offer-0"),
         make_challenge(challenge_id="offer-1"),
     ]
-    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID, 9_999_999_999))
+    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
 
     assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[1], method)
     with patch.object(method, "_build_tempo_transfer", build):
@@ -510,7 +510,7 @@ async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
 async def test_caps_changed_after_construction_are_enforced() -> None:
     method = make_method()
     challenge = make_challenge(amount="1001")
-    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID, 9_999_999_999))
+    build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
     assert method.can_handle_challenge(challenge) is True
 
     method.max_atomic_amount = 1000

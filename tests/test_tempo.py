@@ -1,7 +1,6 @@
 """Tests for Tempo payment method."""
 
 import asyncio
-import dataclasses
 import json
 import os
 import re
@@ -626,9 +625,7 @@ class TestTempoMethod:
             patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=0x186A0)),
         ):
             first = await method.create_credential(challenge)
-            second = await method.create_credential(
-                dataclasses.replace(challenge, id="test-cache-chain-id-2")
-            )
+            second = await method.create_credential(challenge)
 
         assert first.payload["type"] == "transaction"
         assert second.payload["type"] == "transaction"
@@ -723,7 +720,7 @@ class TestTempoMethod:
             patch.object(
                 method,
                 "_build_tempo_transfer",
-                AsyncMock(return_value=("0xdeadbeef", 4217, 9_999_999_999)),
+                AsyncMock(return_value=("0xdeadbeef", 4217)),
             ) as build_mock,
         ):
             await method.create_credential(challenge)
@@ -763,7 +760,7 @@ class TestTempoMethod:
             patch.object(
                 method,
                 "_build_tempo_transfer",
-                AsyncMock(return_value=("0xdeadbeef", 4217, 9_999_999_999)),
+                AsyncMock(return_value=("0xdeadbeef", 4217)),
             ) as build_mock,
         ):
             await method.create_credential(challenge)
@@ -1023,8 +1020,8 @@ class TestExpiringNonce:
         assert "eth_getTransactionCount" not in rpc_methods
 
 
-class TestCredentialCache:
-    """Each challenge is signed at most once per signer."""
+class TestInFlightSigning:
+    """Concurrent calls for one challenge share an in-flight signing."""
 
     @staticmethod
     def _method() -> tuple[TempoMethod, AsyncMock]:
@@ -1034,17 +1031,15 @@ class TestCredentialCache:
             intents={"charge": ChargeIntent()},
         )
         signings = iter(range(1_000))
-        build = AsyncMock(
-            side_effect=lambda **kwargs: (
-                f"0x76{next(signings):04x}",
-                CHAIN_ID,
-                _expiring_valid_before(kwargs["expires"]),
-            )
-        )
-        return method, build
+
+        async def build(**_: object) -> tuple[str, int]:
+            await asyncio.sleep(0)
+            return f"0x76{next(signings):04x}", CHAIN_ID
+
+        return method, AsyncMock(side_effect=build)
 
     @staticmethod
-    def _challenge(challenge_id: str = "cached", expires: str | None = None) -> Challenge:
+    def _challenge(challenge_id: str = "shared", recipient: str | None = None) -> Challenge:
         return Challenge(
             id=challenge_id,
             method="tempo",
@@ -1052,143 +1047,67 @@ class TestCredentialCache:
             request={
                 "amount": "1000",
                 "currency": PATH_USD,
-                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "recipient": recipient or "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             },
             realm="api.example.com",
-            expires=expires,
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("concurrent", [False, True], ids=["sequential", "concurrent"])
-    async def test_same_challenge_is_signed_once(self, concurrent: bool) -> None:
+    @pytest.mark.parametrize(
+        "concurrent,other_id,signings",
+        [
+            pytest.param(True, "shared", 1, id="concurrent-same-challenge"),
+            pytest.param(False, "shared", 2, id="sequential-same-challenge"),
+            pytest.param(True, "other", 2, id="concurrent-different-challenge"),
+        ],
+    )
+    async def test_signings(self, concurrent: bool, other_id: str, signings: int) -> None:
         method, build = self._method()
-        challenge = self._challenge()
 
         with patch.object(method, "_build_tempo_transfer", build):
             if concurrent:
                 first, second = await asyncio.gather(
-                    method.create_credential(challenge), method.create_credential(challenge)
+                    method.create_credential(self._challenge()),
+                    method.create_credential(self._challenge(other_id)),
                 )
             else:
-                first = await method.create_credential(challenge)
-                second = await method.create_credential(challenge)
-
-        assert build.await_count == 1
-        assert first == second
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("change", ["challenge", "signer"])
-    async def test_different_challenge_or_signer_is_signed_again(self, change: str) -> None:
-        method, build = self._method()
-        challenge = self._challenge()
-
-        with patch.object(method, "_build_tempo_transfer", build):
-            first = await method.create_credential(challenge)
-            if change == "challenge":
-                challenge = dataclasses.replace(challenge, id="other")
-            else:
-                method.root_account = "0x" + "ab" * 20
-            second = await method.create_credential(challenge)
-
-        assert build.await_count == 2
-        assert first.payload["signature"] != second.payload["signature"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "expires,elapsed,signings",
-        [
-            pytest.param(_iso(_NOW + 10.5), 10.9, 1, id="kept-through-fractional-expiry"),
-            pytest.param(_iso(_NOW + 10.5), 11, 2, id="evicted-after-expiry"),
-            pytest.param(None, EXPIRING_NONCE_VALID_BEFORE_SECS - 1, 1, id="kept-in-window"),
-            pytest.param(None, EXPIRING_NONCE_VALID_BEFORE_SECS, 2, id="evicted-after-window"),
-            pytest.param(
-                _iso(_NOW + 60),
-                EXPIRING_NONCE_VALID_BEFORE_SECS,
-                2,
-                id="evicted-after-window-before-expiry",
-            ),
-        ],
-    )
-    async def test_entries_expire_with_the_transaction(
-        self, expires: str | None, elapsed: float, signings: int
-    ) -> None:
-        method, build = self._method()
-        challenge = self._challenge(expires=expires)
-        clock = [float(_NOW)]
-
-        with (
-            patch.object(method, "_build_tempo_transfer", build),
-            patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
-        ):
-            await method.create_credential(challenge)
-            clock[0] += elapsed
-            await method.create_credential(challenge)
+                first = await method.create_credential(self._challenge())
+                second = await method.create_credential(self._challenge(other_id))
 
         assert build.await_count == signings
+        assert (first == second) is (signings == 1)
+        assert method._signing == {}
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("elapsed,signings", [(6.9, 1), (7, 2)])
-    async def test_entry_expires_at_the_signed_valid_before(
-        self, elapsed: float, signings: int
-    ) -> None:
+    async def test_failed_signing_is_not_shared_with_a_later_call(self) -> None:
         method, build = self._method()
-        build.side_effect = None
-        build.return_value = ("0x76aa", CHAIN_ID, _NOW + 7)
-        clock = [float(_NOW)]
-
-        with (
-            patch.object(method, "_build_tempo_transfer", build),
-            patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
-        ):
-            await method.create_credential(self._challenge(expires=_iso(_NOW + 60)))
-            clock[0] += elapsed
-            await method.create_credential(self._challenge(expires=_iso(_NOW + 60)))
-
-        assert build.await_count == signings
-
-    @pytest.mark.asyncio
-    async def test_policy_is_enforced_before_returning_a_cached_credential(self) -> None:
-        method, build = self._method()
-        method.expected_recipients = ("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",)
-        challenge = self._challenge()
-        redirected = dataclasses.replace(
-            challenge, request={**challenge.request, "recipient": "0x" + "44" * 20}
-        )
-
-        with patch.object(method, "_build_tempo_transfer", build):
-            await method.create_credential(challenge)
-            with pytest.raises(ValueError, match="expected recipients"):
-                await method.create_credential(redirected)
-
-        assert build.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_failed_signing_is_not_cached(self) -> None:
-        method, build = self._method()
-        build.side_effect = [TransactionError("rpc down"), ("0x76ok", CHAIN_ID, 9_999_999_999)]
-        challenge = self._challenge()
+        build.side_effect = [TransactionError("rpc down"), ("0x76ok", CHAIN_ID)]
 
         with patch.object(method, "_build_tempo_transfer", build):
             with pytest.raises(TransactionError):
-                await method.create_credential(challenge)
-            credential = await method.create_credential(challenge)
+                await method.create_credential(self._challenge())
+            credential = await method.create_credential(self._challenge())
 
         assert build.await_count == 2
         assert credential.payload["signature"] == "0x76ok"
 
     @pytest.mark.asyncio
-    async def test_cache_is_bounded(self) -> None:
+    async def test_policy_is_enforced_when_joining_a_signing(self) -> None:
         method, build = self._method()
+        method.expected_recipients = ("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",)
 
-        with (
-            patch.object(method, "_build_tempo_transfer", build),
-            patch("mpp.methods.tempo.client._CREDENTIAL_CACHE_SIZE", 2),
-        ):
-            for challenge_id in ("a", "b", "c", "a"):
-                await method.create_credential(self._challenge(challenge_id))
+        with patch.object(method, "_build_tempo_transfer", build):
+            results = await asyncio.gather(
+                method.create_credential(self._challenge()),
+                method.create_credential(self._challenge(recipient="0x" + "44" * 20)),
+                return_exceptions=True,
+            )
 
-        assert build.await_count == 4
-        assert len(method._credentials) == 2
+        first, second = results
+        assert not isinstance(first, BaseException)
+        assert first.payload["type"] == "transaction"
+        assert isinstance(second, ValueError)
+        assert build.await_count == 1
 
 
 class TestChargeIntent:
