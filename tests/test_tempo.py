@@ -218,15 +218,16 @@ class TestTempoMethod:
             {"type": "transaction", "signature": "0x02" + "c0"},
             {"type": "transaction", "signature": "0x76"},
             {"type": "transaction", "signature": "0x76ff"},
-            {"type": "transaction", "signature": "0x76" + rlp.encode(b"\x01").hex()},
-            {"type": "transaction", "signature": "0x76" + rlp.encode([b"\x01"] * 14).hex()},
+            {"type": "transaction", "signature": "0x76" + bytes(rlp.encode(b"\x01")).hex()},
+            {"type": "transaction", "signature": "0x76" + bytes(rlp.encode([b"\x01"] * 14)).hex()},
             {
                 "type": "transaction",
-                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9).hex(),
+                "signature": "0x76" + bytes(rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9)).hex(),
             },
             {
                 "type": "transaction",
-                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9).hex(),
+                "signature": "0x76"
+                + bytes(rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9)).hex(),
             },
         ],
         ids=[
