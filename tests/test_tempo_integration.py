@@ -169,7 +169,7 @@ class TestChargeIntegration:
         assert len(receipt.reference) >= 66
 
     async def test_verify_hash_credential(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         challenge_id = "test-hash-cred"
         memo = encode_attribution(challenge_id=challenge_id, server_id=TEST_REALM)
@@ -183,6 +183,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -195,7 +196,7 @@ class TestChargeIntegration:
         assert receipt.reference == tx_hash
 
     async def test_verify_hash_rejects_plain_transfer_without_challenge_bound_memo(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         challenge_id = "test-hash-no-memo"
         tx_hash = await _send_transfer(
@@ -208,6 +209,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -219,7 +221,7 @@ class TestChargeIntegration:
             await charge_intent.verify(credential, request_dict)
 
     async def test_verify_hash_rejects_wrong_challenge_binding(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         challenge_id = "test-hash-wrong-binding"
         tx_hash = await _send_transfer(
@@ -237,6 +239,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -248,7 +251,7 @@ class TestChargeIntegration:
             await charge_intent.verify(credential, request_dict)
 
     async def test_verify_rejects_insufficient_transfer(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         tx_hash = await _send_transfer(
             rpc_url, funded_payer, currency, funded_recipient.address, 100
@@ -260,6 +263,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=expires)
 
@@ -267,7 +271,7 @@ class TestChargeIntegration:
             await charge_intent.verify(credential, request_dict)
 
     async def test_verify_rejects_wrong_recipient(
-        self, rpc_url, funded_payer, currency, charge_intent
+        self, rpc_url, funded_payer, currency, charge_intent, chain_id
     ):
         tx_hash = await _send_transfer(
             rpc_url, funded_payer, currency, funded_payer.address, 1000000
@@ -280,6 +284,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": wrong_recipient,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(payload={"type": "hash", "hash": tx_hash}, expires=expires)
 
@@ -443,7 +448,7 @@ class TestChargeIntegration:
 
     @pytest.mark.parametrize("memo_kind", ["custom", "wrong_challenge", "wrong_realm"])
     async def test_legacy_server_memo_cannot_bypass_challenge_binding(
-        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, memo_kind
+        self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, memo_kind, chain_id
     ):
         """Matching a legacy memo is insufficient without challenge and realm binding."""
         challenge_id = "integ-unbound-legacy-memo"
@@ -466,7 +471,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
-            "methodDetails": {"memo": memo},
+            "methodDetails": {"memo": memo, "chainId": chain_id},
         }
         with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             await charge_intent.verify(credential, server_request)
@@ -509,7 +514,7 @@ class TestChargeIntegration:
         assert receipt.reference.startswith("0x")
 
     async def test_verify_hash_replay_rejected_with_store(
-        self, rpc_url, funded_payer, funded_recipient, currency
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
         """Same hash submitted twice with a store should fail the second time."""
         from mpp.store import MemoryStore
@@ -529,6 +534,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -543,7 +549,7 @@ class TestChargeIntegration:
             await intent.verify(credential, request_dict)
 
     async def test_verify_hash_replay_rejected_with_default_store(
-        self, rpc_url, funded_payer, funded_recipient, currency
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
         """The default replay store rejects a second fulfillment of the same payment."""
         challenge_id = "test-hash-replay-no-store"
@@ -560,6 +566,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -573,7 +580,7 @@ class TestChargeIntegration:
             await intent.verify(credential, request_dict)
 
     async def test_verify_hash_store_records_on_success(
-        self, rpc_url, funded_payer, funded_recipient, currency
+        self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
         """After successful verification, the hash should be recorded in the store."""
         from mpp.store import MemoryStore
@@ -596,6 +603,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(
             payload={"type": "hash", "hash": tx_hash},
@@ -607,7 +615,7 @@ class TestChargeIntegration:
         assert await store.get(store_key) is not None
 
     async def test_verify_hash_tx_not_found(
-        self, rpc_url, funded_recipient, currency, charge_intent
+        self, rpc_url, funded_recipient, currency, charge_intent, chain_id
     ):
         """A fabricated hash that doesn't exist on-chain should be rejected."""
         bogus_hash = "0x" + "00" * 32
@@ -618,6 +626,7 @@ class TestChargeIntegration:
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": expires,
+            "methodDetails": {"chainId": chain_id},
         }
         credential = make_credential(payload={"type": "hash", "hash": bogus_hash}, expires=expires)
 
