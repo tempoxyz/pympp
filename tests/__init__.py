@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode
+from mpp.errors import InternalPaymentError
 
 # Default secret used by tests when calling verify_or_challenge
 TEST_SECRET = "test-secret"
@@ -113,3 +114,11 @@ def challenge_from_402(result: Any) -> Challenge:
     """Extract the challenge from a 402 response (Starlette or plain-dict form)."""
     headers = result.headers if hasattr(result, "headers") else result["headers"]
     return Challenge.from_www_authenticate(headers["WWW-Authenticate"])
+
+
+def internal_cause(error: BaseException) -> BaseException:
+    """Return the server-side cause of a generic ``InternalPaymentError``."""
+    assert isinstance(error, InternalPaymentError)
+    assert str(error) == "An internal payment error occurred."
+    assert error.__cause__ is not None
+    return error.__cause__

@@ -4,6 +4,8 @@ import pytest
 
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
+    InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
@@ -14,8 +16,11 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
+    VerificationError,
     VerificationFailedError,
 )
+
+_VERIFICATION_FAILED = "https://paymentauth.org/problems/verification-failed"
 
 
 class TestToProblemDetails:
@@ -272,3 +277,77 @@ class TestSubclassProblemDetails:
         details = err.to_problem_details()
         assert details["status"] == 400
         assert isinstance(details["status"], int)
+
+
+class TestServerErrorMapping:
+    @pytest.mark.parametrize(
+        ("error", "status", "type_uri", "title", "detail"),
+        [
+            (
+                VerificationError("Transaction reverted"),
+                402,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Transaction reverted",
+            ),
+            (
+                CredentialReplayedError(),
+                403,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Payment verification failed: Credential has already been used.",
+            ),
+            (
+                CredentialReplayedError("Transaction hash already used"),
+                403,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Payment verification failed: Transaction hash already used.",
+            ),
+            (
+                InternalPaymentError(),
+                500,
+                "https://paymentauth.org/problems/internal-payment-error",
+                "Internal Payment Error",
+                "An internal payment error occurred.",
+            ),
+        ],
+        ids=["verification", "replay-default", "replay-reason", "internal"],
+    )
+    def test_problem_details(
+        self, error: PaymentError, status: int, type_uri: str, title: str, detail: str
+    ) -> None:
+        assert error.to_problem_details() == {
+            "type": type_uri,
+            "title": title,
+            "status": status,
+            "detail": detail,
+        }
+
+    def test_credential_replayed_differs_from_verification_failed_only_in_status(self) -> None:
+        reason = "Transaction hash already used"
+        details = {"code": "already_used"}
+        expected = VerificationFailedError(reason, details=details).to_problem_details("ch")
+        assert CredentialReplayedError(reason, details=details).to_problem_details("ch") == {
+            **expected,
+            "status": 403,
+        }
+
+    def test_internal_error_keeps_cause_out_of_problem_details(self) -> None:
+        cause = RuntimeError("request to https://rpc.example.com/?key=secret-key failed")
+        try:
+            raise InternalPaymentError() from cause
+        except InternalPaymentError as raised:
+            error = raised
+
+        assert error.__cause__ is cause
+        assert error.to_problem_details("challenge-id") == (
+            InternalPaymentError().to_problem_details("challenge-id")
+        )
+        assert "secret-key" not in str(error)
+        assert "secret-key" not in str(error.to_problem_details())
+
+    def test_verification_errors_are_verification_failed(self) -> None:
+        assert issubclass(VerificationError, VerificationFailedError)
+        assert issubclass(CredentialReplayedError, VerificationError)
+        assert not issubclass(InternalPaymentError, VerificationFailedError)

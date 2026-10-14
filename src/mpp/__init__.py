@@ -25,6 +25,8 @@ from mpp._parsing import (
 )
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
+    InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
