@@ -1,6 +1,8 @@
 """Tests for client-side transport."""
 
 import asyncio
+import gzip
+import random
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from typing import cast
@@ -24,6 +26,9 @@ from mpp.events import (
 )
 from mpp.runtime import PaymentRuntime
 from tests import make_credential
+
+_NOISE = random.Random(0).randbytes(100_000)
+_NOISE_GZIP = gzip.compress(_NOISE)
 
 
 class MockMethod:
@@ -1228,8 +1233,9 @@ class TestPaymentTransport:
             ("chunked", b"settle failed", False),
             ("large", b"x" * 64 * 1024, True),
             ("slow", b"partial", True),
+            ("gzip", _NOISE[: 64 * 1024], True),
         ],
-        ids=["framed", "chunked", "large", "slow"],
+        ids=["framed", "chunked", "large", "slow", "gzip"],
     )
     async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(
         self,
@@ -1250,6 +1256,8 @@ class TestPaymentTransport:
             "large": b"Transfer-Encoding: chunked\r\n\r\n"
             + (b"4000\r\n" + b"x" * 0x4000 + b"\r\n") * 64,
             "slow": b"Content-Length: 100\r\n\r\npartial",
+            "gzip": f"Content-Encoding: gzip\r\nContent-Length: {len(_NOISE_GZIP)}\r\n\r\n".encode()
+            + _NOISE_GZIP,
         }[body_mode]
 
         async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1289,6 +1297,7 @@ class TestPaymentTransport:
 
         assert response.status_code == 500
         assert response.content == expected_body
+        assert "content-encoding" not in response.headers
         assert response.extensions.get("mpp.body_truncated", False) is truncated
         assert reconciled == ["reconciled"]
 
