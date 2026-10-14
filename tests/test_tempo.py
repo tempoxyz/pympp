@@ -1097,6 +1097,30 @@ class TestCredentialCache:
         assert build.await_count == signings
 
     @pytest.mark.asyncio
+    async def test_entry_expires_at_the_signed_valid_before(self) -> None:
+        method, build = self._method()
+        clock = [_NOW + 0.8]
+        signatures = iter(["0x76aa", "0x76bb"])
+
+        async def slow_build(**_: object) -> tuple[str, int]:
+            clock[0] += 0.5  # Signing crosses a whole-second boundary.
+            return next(signatures), CHAIN_ID
+
+        build.side_effect = slow_build
+        with (
+            patch.object(method, "_build_tempo_transfer", build),
+            patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
+        ):
+            await method.create_credential(self._challenge())
+            assert build.await_args is not None
+            valid_before = build.await_args.kwargs["valid_before"]
+            clock[0] = valid_before
+            await method.create_credential(self._challenge())
+
+        assert valid_before == _NOW + EXPIRING_NONCE_VALID_BEFORE_SECS
+        assert build.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_policy_is_enforced_before_returning_a_cached_credential(self) -> None:
         method, build = self._method()
         method.expected_recipients = ("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",)

@@ -348,7 +348,10 @@ class TempoMethod:
 
     def _cache_credential(self, key: tuple[str, str], challenge: Challenge) -> _CachedCredential:
         """Start signing ``challenge`` and cache it until its ``valid_before`` passes."""
-        entry = _CachedCredential(asyncio.ensure_future(self._create_credential(challenge)))
+        valid_before = _expiring_valid_before(challenge.expires)
+        entry = _CachedCredential(
+            asyncio.ensure_future(self._create_credential(challenge, valid_before))
+        )
         self._credentials[key] = entry
         if len(self._credentials) > _CREDENTIAL_CACHE_SIZE:
             del self._credentials[next(iter(self._credentials))]
@@ -358,13 +361,12 @@ class TempoMethod:
                 if self._credentials.get(key) is entry:
                     del self._credentials[key]
                 return
-            # Computed after signing, so it never precedes the transaction's own.
-            entry.expires_at = _expiring_valid_before(challenge.expires)
+            entry.expires_at = valid_before
 
         entry.task.add_done_callback(settle)
         return entry
 
-    async def _create_credential(self, challenge: Challenge) -> Credential:
+    async def _create_credential(self, challenge: Challenge, valid_before: int) -> Credential:
         if self.account is None:
             raise ValueError("No account configured for signing")
 
@@ -396,7 +398,7 @@ class TempoMethod:
             expected_chain_id=expected_chain_id,
             awaiting_fee_payer=use_fee_payer,
             splits=splits,
-            expires=challenge.expires,
+            valid_before=valid_before,
         )
 
         # When signing with an access key, the credential source is the
@@ -450,7 +452,7 @@ class TempoMethod:
         expected_chain_id: int | None = None,
         awaiting_fee_payer: bool = False,
         splits: list[dict] | None = None,
-        expires: str | None = None,
+        valid_before: int | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -474,7 +476,7 @@ class TempoMethod:
             rpc_url: RPC URL to use. Defaults to ``self.rpc_url``.
             expected_chain_id: If set, verify the RPC reports this chain ID.
             awaiting_fee_payer: If True, build for fee payer sponsorship.
-            expires: Challenge expiry (ISO 8601). Caps ``valid_before``.
+            valid_before: Expiring-nonce deadline. Defaults to the 25s window.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
@@ -571,7 +573,7 @@ class TempoMethod:
             nonce_key=EXPIRING_NONCE_KEY,
             fee_token=fee_token,
             awaiting_fee_payer=awaiting_fee_payer,
-            valid_before=_expiring_valid_before(expires),
+            valid_before=valid_before if valid_before is not None else _expiring_valid_before(None),
             calls=calls_tuple,
         )
 
