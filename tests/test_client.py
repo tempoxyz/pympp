@@ -594,7 +594,8 @@ class TestPaymentTransport:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "mode", ["cross_origin", "malformed", "unmatched", "credential_error", "success"]
+        "mode",
+        ["cross_origin", "malformed", "unmatched", "credential_error", "success", "server_error"],
     )
     async def test_cancelled_observer_closes_owned_response(self, mode: str) -> None:
         challenge = Challenge(
@@ -612,9 +613,9 @@ class TestPaymentTransport:
         if mode == "credential_error":
             method.create_credential.side_effect = RuntimeError("signing failed")
         responses = [response]
-        if mode == "success":
+        if mode in ("success", "server_error"):
             stream = TrackedStream()
-            responses.append(httpx.Response(200, stream=stream))
+            responses.append(httpx.Response(200 if mode == "success" else 500, stream=stream))
         transport = PaymentTransport(methods=[method], inner=MockTransport(responses))
         entered = asyncio.Event()
 
