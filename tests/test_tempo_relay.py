@@ -12,6 +12,7 @@ import pytest
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import (
+    CredentialReplayedError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
     VerificationError,
@@ -166,16 +167,19 @@ async def test_relay_rejects_mismatched_request(hook_name: str) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("code", "details"),
+    ("code", "details", "error_type"),
     [
-        ("already_used", {"code": "already_used"}),
+        ("already_used", {"code": "already_used"}, CredentialReplayedError),
         (
             "temporarily_unavailable",
             {"code": "temporarily_unavailable", "retry": "same_credential"},
+            VerificationFailedError,
         ),
     ],
 )
-async def test_relay_exposes_only_safe_error_details(code: str, details: dict) -> None:
+async def test_relay_exposes_only_safe_error_details(
+    code: str, details: dict, error_type: type[VerificationFailedError]
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return response({"success": False, "error": {"code": code, "message": "private"}})
 
@@ -183,6 +187,7 @@ async def test_relay_exposes_only_safe_error_details(code: str, details: dict) -
         with pytest.raises(VerificationFailedError) as raised:
             await method.intents["charge"].validate(credential(), {"amount": "1000"})  # type: ignore[attr-defined]
 
+    assert type(raised.value) is error_type
     assert raised.value.details == details
     assert raised.value.to_problem_details()["details"] == details
     assert "private" not in str(raised.value)

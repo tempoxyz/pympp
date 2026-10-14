@@ -14,6 +14,7 @@ import mpp.methods.stripe._defaults as stripe_defaults
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import (
+    CredentialReplayedError,
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
@@ -211,7 +212,7 @@ class ChargeIntent:
             )
 
         if pi["replayed"]:
-            raise VerificationFailedError("Payment has already been processed")
+            raise CredentialReplayedError("Payment has already been processed")
         if pi["status"] == "requires_action":
             raise PaymentActionRequiredError("Stripe PaymentIntent requires action")
         if pi["status"] != "succeeded":

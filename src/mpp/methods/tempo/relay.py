@@ -11,6 +11,7 @@ from mpp._defaults import DEFAULT_TIMEOUT
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._validation import Validation
 from mpp.errors import (
+    CredentialReplayedError,
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
@@ -270,6 +271,8 @@ def _failure(value: Any = None) -> VerificationFailedError | PaymentExpiredError
         return PaymentExpiredError()
     if code in _SAFE_ERROR_CODES:
         details = {"code": code}
+        if code == "already_used":
+            return CredentialReplayedError(details=details)
         if code == "temporarily_unavailable":
             details["retry"] = "same_credential"
         return VerificationFailedError(details=details)

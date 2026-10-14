@@ -4,6 +4,7 @@ import pytest
 
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
@@ -15,7 +16,6 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
-    TransactionHashUsedError,
     VerificationError,
     VerificationFailedError,
 )
@@ -291,21 +291,28 @@ class TestServerErrorMapping:
                 "Transaction reverted",
             ),
             (
-                TransactionHashUsedError(),
+                CredentialReplayedError(),
                 402,
                 _VERIFICATION_FAILED,
                 "Verification Failed",
-                "Transaction hash already used",
+                "Payment verification failed: Credential has already been used.",
             ),
             (
-                InternalPaymentError("Transaction receipt lookup failed"),
+                CredentialReplayedError("Transaction hash already used"),
+                402,
+                _VERIFICATION_FAILED,
+                "Verification Failed",
+                "Payment verification failed: Transaction hash already used.",
+            ),
+            (
+                InternalPaymentError(),
                 500,
                 "https://paymentauth.org/problems/internal-payment-error",
                 "Internal Payment Error",
-                "Internal payment error: Transaction receipt lookup failed.",
+                "An internal payment error occurred.",
             ),
         ],
-        ids=lambda value: type(value).__name__ if isinstance(value, Exception) else None,
+        ids=["verification", "replay-default", "replay-reason", "internal"],
     )
     def test_problem_details(
         self, error: PaymentError, status: int, type_uri: str, title: str, detail: str
@@ -317,7 +324,28 @@ class TestServerErrorMapping:
             "detail": detail,
         }
 
+    def test_credential_replayed_matches_verification_failed(self) -> None:
+        reason = "Payment has already been processed"
+        details = {"code": "already_used"}
+        assert CredentialReplayedError(reason, details=details).to_problem_details(
+            "challenge-id"
+        ) == VerificationFailedError(reason, details=details).to_problem_details("challenge-id")
+
+    def test_internal_error_keeps_cause_out_of_problem_details(self) -> None:
+        cause = RuntimeError("request to https://rpc.example.com/?key=secret-key failed")
+        try:
+            raise InternalPaymentError() from cause
+        except InternalPaymentError as raised:
+            error = raised
+
+        assert error.__cause__ is cause
+        assert error.to_problem_details("challenge-id") == (
+            InternalPaymentError().to_problem_details("challenge-id")
+        )
+        assert "secret-key" not in str(error)
+        assert "secret-key" not in str(error.to_problem_details())
+
     def test_verification_errors_are_verification_failed(self) -> None:
         assert issubclass(VerificationError, VerificationFailedError)
-        assert issubclass(TransactionHashUsedError, VerificationError)
+        assert issubclass(CredentialReplayedError, VerificationError)
         assert not issubclass(InternalPaymentError, VerificationFailedError)

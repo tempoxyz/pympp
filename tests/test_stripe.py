@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from mpp import Challenge, ChallengeEcho, Credential
 from mpp.errors import (
+    CredentialReplayedError,
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
@@ -640,7 +641,7 @@ class TestChargeIntent:
         intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
+        with pytest.raises(CredentialReplayedError, match="already been processed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -842,7 +843,7 @@ class TestChargeIntentRawHttp:
         intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
+        with pytest.raises(CredentialReplayedError, match="already been processed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio

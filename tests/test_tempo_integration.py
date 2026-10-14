@@ -18,7 +18,7 @@ from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._rpc import get_tx_params
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-from tests import INTEGRATION, TEST_REALM, make_credential
+from tests import INTEGRATION, TEST_REALM, internal_cause, make_credential
 from tests.conftest import _fund_account
 
 pytestmark = [pytest.mark.integration, INTEGRATION]
@@ -630,8 +630,9 @@ class TestChargeIntegration:
         }
         credential = make_credential(payload={"type": "hash", "hash": bogus_hash}, expires=expires)
 
-        with pytest.raises(InternalPaymentError, match="Transaction not found"):
+        with pytest.raises(InternalPaymentError) as raised:
             await charge_intent.verify(credential, request_dict)
+        assert str(internal_cause(raised.value)) == "Transaction not found"
 
     async def test_verify_external_id_propagated(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id

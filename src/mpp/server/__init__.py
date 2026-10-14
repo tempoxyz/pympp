@@ -20,6 +20,7 @@ Example:
 from mpp import _expires as Expires
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
@@ -30,7 +31,6 @@ from mpp.errors import (
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
     PaymentRequiredError,
-    TransactionHashUsedError,
     VerificationFailedError,
 )
 from mpp.events import (

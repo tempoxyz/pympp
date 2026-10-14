@@ -25,6 +25,7 @@ from mpp._parsing import (
 )
 from mpp.errors import (
     BadRequestError,
+    CredentialReplayedError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
@@ -36,7 +37,6 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
-    TransactionHashUsedError,
     VerificationFailedError,
 )
 from mpp.events import (

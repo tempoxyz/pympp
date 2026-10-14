@@ -85,7 +85,7 @@ class StripeChargeIntent:
             )
         except stripe.error.StripeError as e:
             # Not a bad credential: answer 5xx instead of asking the client to pay again.
-            raise InternalPaymentError("Stripe request failed") from e
+            raise InternalPaymentError() from e
 ```
 
 ## Usage with Server

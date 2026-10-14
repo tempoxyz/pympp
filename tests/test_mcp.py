@@ -829,7 +829,7 @@ class TestVerifyOrChallenge:
         "make_error",
         [
             lambda challenge: PaymentOutcomeUnknownError(challenge, RuntimeError("lost")),
-            lambda challenge: InternalPaymentError("RPC unavailable"),
+            lambda challenge: InternalPaymentError(),
         ],
         ids=["outcome-unknown", "internal"],
     )

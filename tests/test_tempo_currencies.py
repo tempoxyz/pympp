@@ -44,7 +44,7 @@ from mpp.methods.tempo.schemas import ChargeRequest
 from mpp.runtime import PaymentRuntime
 from mpp.server import ComposedChallenges, Intent, Mpp, VerifiableIntent
 from mpp.server.intent import VerificationError
-from tests import MockRequest, make_bound_credential
+from tests import MockRequest, internal_cause, make_bound_credential
 
 REALM = "api.example.com"
 SECRET = "test-secret"
@@ -959,8 +959,9 @@ class TestSponsoredFeeToken:
     )
     async def test_disallowed_fee_token_is_rejected(self, kwargs: dict[str, Any]) -> None:
         intent = sponsor_intent(**kwargs)
-        with pytest.raises(InternalPaymentError, match="feeToken is not allowed"):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent._resolve_fee_token(None, charge_request())
+        assert "feeToken is not allowed" in str(internal_cause(raised.value))
 
     @pytest.mark.asyncio
     async def test_configured_fee_token_matches_case_insensitively(self) -> None:
@@ -969,8 +970,9 @@ class TestSponsoredFeeToken:
 
     @pytest.mark.asyncio
     async def test_resolution_requires_a_local_fee_payer(self) -> None:
-        with pytest.raises(InternalPaymentError, match="No fee payer"):
+        with pytest.raises(InternalPaymentError) as raised:
             await ChargeIntent()._resolve_fee_token(None, charge_request())
+        assert "No fee payer" in str(internal_cause(raised.value))
 
     def test_fee_token_requires_local_fee_payer(self) -> None:
         with pytest.raises(ValueError, match="local fee_payer"):

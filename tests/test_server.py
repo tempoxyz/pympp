@@ -14,9 +14,9 @@ from mpp import (
     _b64url_encode,
 )
 from mpp.errors import (
+    CredentialReplayedError,
     InternalPaymentError,
     PaymentError,
-    TransactionHashUsedError,
     VerificationFailedError,
 )
 from mpp.events import EventDispatcher
@@ -470,8 +470,8 @@ class TestVerificationError:
         ("error", "retryable"),
         [
             (VerificationError("Payment verification failed"), True),
-            (TransactionHashUsedError(), True),
-            (InternalPaymentError("RPC unavailable"), False),
+            (CredentialReplayedError("Transaction hash already used"), True),
+            (InternalPaymentError(), False),
         ],
         ids=["verification", "replay", "internal"],
     )
@@ -1215,7 +1215,10 @@ class TestPay:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "error",
-        [VerificationError("memo is not bound to this challenge"), TransactionHashUsedError()],
+        [
+            VerificationError("memo is not bound to this challenge"),
+            CredentialReplayedError("Transaction hash already used"),
+        ],
         ids=["verification", "replay"],
     )
     async def test_returns_402_for_invalid_credential(self, error: PaymentError) -> None:
@@ -1261,7 +1264,7 @@ class TestPay:
 
         @intent(name="charge")
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
-            raise InternalPaymentError("Transaction receipt lookup failed") from cause
+            raise InternalPaymentError() from cause
 
         @pay(
             intent=failing_intent,

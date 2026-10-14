@@ -14,6 +14,7 @@ from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
 from mpp.server import Mpp
+from tests import internal_cause
 
 PAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PAYER = Account.from_key(PAYER_KEY).address
@@ -100,8 +101,12 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
             payload=payload,
             source=f"did:pkh:eip155:{CHAIN_ID}:{PAYER}",
         )
-        with pytest.raises(error, match=reason):
+        with pytest.raises(error) as validated:
             await server.validate_credential(credential)
-        with pytest.raises(error, match=reason):
+        with pytest.raises(error) as charged:
             await server.charge(credential.to_authorization(), **options)
+        for failure in (validated.value, charged.value):
+            if isinstance(failure, InternalPaymentError):
+                failure = internal_cause(failure)
+            assert reason in str(failure)
         assert methods == (["eth_chainId", "eth_chainId"] if credential_type == "hash" else [])
