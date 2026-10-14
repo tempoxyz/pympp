@@ -193,8 +193,11 @@ class TestTempoMethod:
         raw_tx = "0x" + (encode_fee_payer_envelope(signed) if sponsored else signed.encode()).hex()
         credential = make_credential(payload={"type": "transaction", "signature": raw_tx})
 
+        trailing = make_credential(payload={"type": "transaction", "signature": raw_tx + "00"})
+
         expected = None if sponsored else _raw_transaction_hash(raw_tx)
         assert TempoMethod().transaction_hash(credential) == expected
+        assert TempoMethod().transaction_hash(trailing) is None
 
     @pytest.mark.parametrize(
         "payload",
@@ -203,6 +206,34 @@ class TestTempoMethod:
             {"type": "transaction"},
             {"type": "transaction", "signature": ""},
             {"type": "transaction", "signature": "0xnothex"},
+            {"type": "transaction", "signature": "0x01"},
+            {"type": "transaction", "signature": "0x02" + "c0"},
+            {"type": "transaction", "signature": "0x76"},
+            {"type": "transaction", "signature": "0x76ff"},
+            {"type": "transaction", "signature": "0x76" + rlp.encode(b"\x01").hex()},
+            {"type": "transaction", "signature": "0x76" + rlp.encode([b"\x01"] * 14).hex()},
+            {
+                "type": "transaction",
+                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[]] + [b"\x01"] * 9).hex(),
+            },
+            {
+                "type": "transaction",
+                "signature": "0x76" + rlp.encode([b"\x01"] * 4 + [[[b"\x01"]]] + [b""] * 9).hex(),
+            },
+        ],
+        ids=[
+            "hash-payload",
+            "missing",
+            "empty",
+            "not-hex",
+            "unknown-type",
+            "eip1559",
+            "no-body",
+            "malformed-rlp",
+            "not-a-list",
+            "calls-not-a-list",
+            "no-calls",
+            "unsigned",
         ],
     )
     def test_transaction_hash_unknown_without_signed_transaction(self, payload: dict) -> None:

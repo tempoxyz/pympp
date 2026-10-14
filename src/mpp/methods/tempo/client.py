@@ -245,15 +245,14 @@ class TempoMethod:
         )
 
     def transaction_hash(self, credential: Credential) -> str | None:
-        """Return the on-chain hash of a credential's signed transaction.
+        """Return the on-chain hash of a credential's signed 0x76 transaction.
 
-        Returns ``None`` for sponsored (0x78 fee payer envelope) transactions,
-        whose final hash depends on the fee payer's co-signature, and for
-        payloads that do not carry a signed transaction.
+        Returns ``None`` unless the payload decodes as a sender-signed 0x76
+        transaction. Sponsored (0x78 fee payer envelope) transactions return
+        ``None`` because their final hash depends on the fee payer's co-signature.
         """
+        import rlp
         from eth_hash.auto import keccak
-
-        from mpp.methods.tempo.fee_payer_envelope import FEE_PAYER_ENVELOPE_TYPE_ID
 
         payload = credential.payload
         raw_tx = payload.get("signature")
@@ -261,9 +260,18 @@ class TempoMethod:
             return None
         try:
             tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
-        except ValueError:
+            fields = rlp.decode(tx_bytes[1:]) if tx_bytes[:1] == b"\x76" else None
+        except (ValueError, rlp.DecodingError):
             return None
-        if not tx_bytes or tx_bytes[0] == FEE_PAYER_ENVELOPE_TYPE_ID:
+        # 0x76 || rlp([13 body fields, key_authorization?, sender_signature])
+        if (
+            not isinstance(fields, list)
+            or len(fields) not in (14, 15)
+            or not isinstance(fields[4], list)
+            or not fields[4]
+            or not isinstance(fields[-1], bytes)
+            or not fields[-1]
+        ):
             return None
         return "0x" + keccak(tx_bytes).hex()
 
