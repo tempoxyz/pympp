@@ -116,6 +116,33 @@ class TestSQLiteStore:
         await store.close()
 
     @pytest.mark.asyncio
+    async def test_replay_claim_survives_ttl_and_reopen(self, tmp_path) -> None:
+        path = str(tmp_path / "replay.db")
+        with patch("mpp.stores.sqlite.time.time", return_value=1000):
+            async with await SQLiteStore.create(path, ttl_seconds=1) as store:
+                assert await store.put_if_absent("replay", "original") is True
+
+        with patch("mpp.stores.sqlite.time.time", return_value=1002):
+            async with await SQLiteStore.create(path, ttl_seconds=1) as store:
+                assert await store.put_if_absent("replay", "duplicate") is False
+                assert await store.get("replay") == "original"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("write_method", ["put", "put_if_absent"])
+    async def test_global_cleanup_preserves_replay_claim(self, write_method) -> None:
+        async with await SQLiteStore.create(":memory:", ttl_seconds=1) as store:
+            with patch("mpp.stores.sqlite.time.time", return_value=1000):
+                await store.put("temporary", "value")
+                assert await store.put_if_absent("replay", "original") is True
+
+            with patch("mpp.stores.sqlite.time.time", return_value=1002):
+                await getattr(store, write_method)("fresh", "value")
+                cursor = await store._db.execute("SELECT key FROM kv ORDER BY key")
+                assert await cursor.fetchall() == [("fresh",), ("replay",)]
+                assert await store.put_if_absent("replay", "duplicate") is False
+                assert await store.get("replay") == "original"
+
+    @pytest.mark.asyncio
     async def test_default_store_entries_do_not_expire(self) -> None:
         store = await SQLiteStore.create(":memory:")
         await store.put("persist", "val")

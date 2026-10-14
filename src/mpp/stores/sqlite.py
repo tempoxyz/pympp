@@ -23,11 +23,12 @@ NO_TTL_EXPIRES_AT = 253402300799.0
 class SQLiteStore:
     """Async key-value store backed by a local SQLite file.
 
-    Keys are stored in a ``kv`` table with optional TTL. Expired rows
-    are pruned globally on writes so one-shot replay keys do not
-    accumulate forever.
+    Keys are stored in a ``kv`` table. Optional TTL applies to ``put``;
+    expired rows are pruned globally on writes. New ``put_if_absent``
+    claims do not expire, preserving replay protection independently of TTL.
+    Existing rows retain their stored expiry when upgrading.
 
-    ``put_if_absent`` uses ``INSERT OR IGNORE`` — a single atomic SQL
+    ``put_if_absent`` uses ``INSERT OR IGNORE``, a single atomic SQL
     statement with no TOCTOU race.
     """
 
@@ -52,7 +53,8 @@ class SQLiteStore:
         Args:
             path: Filesystem path for the database file.
                 Use ``":memory:"`` for an ephemeral in-memory database.
-            ttl_seconds: Optional key TTL in seconds. Defaults to no expiry.
+            ttl_seconds: Optional TTL in seconds for ``put`` writes.
+                Defaults to no expiry; ``put_if_absent`` claims never expire.
         """
         import aiosqlite
 
@@ -112,7 +114,8 @@ class SQLiteStore:
         """Atomic conditional insert.
 
         Prunes expired rows first, then uses ``INSERT OR IGNORE`` so the
-        write only succeeds when the key does not already exist.
+        write only succeeds when the key does not already exist. New claims
+        do not expire, regardless of ``ttl_seconds``.
 
         Returns ``True`` if the key was new, ``False`` if it existed.
         """
@@ -120,7 +123,7 @@ class SQLiteStore:
         await self._prune_expired(now)
         cursor = await self._db.execute(
             "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
-            (key, value, self._expires_at()),
+            (key, value, NO_TTL_EXPIRES_AT),
         )
         await self._db.commit()
         return cursor.rowcount > 0
