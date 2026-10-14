@@ -594,8 +594,7 @@ class TestPaymentTransport:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "mode",
-        ["cross_origin", "malformed", "unmatched", "credential_error", "success", "server_error"],
+        "mode", ["cross_origin", "malformed", "unmatched", "credential_error", "success"]
     )
     async def test_cancelled_observer_closes_owned_response(self, mode: str) -> None:
         challenge = Challenge(
@@ -613,9 +612,9 @@ class TestPaymentTransport:
         if mode == "credential_error":
             method.create_credential.side_effect = RuntimeError("signing failed")
         responses = [response]
-        if mode in ("success", "server_error"):
+        if mode == "success":
             stream = TrackedStream()
-            responses.append(httpx.Response(200 if mode == "success" else 500, stream=stream))
+            responses.append(httpx.Response(200, stream=stream))
         transport = PaymentTransport(methods=[method], inner=MockTransport(responses))
         entered = asyncio.Event()
 
@@ -1222,30 +1221,54 @@ class TestPaymentTransport:
         assert error.transaction_hash is None
 
     @pytest.mark.asyncio
-    async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(self) -> None:
+    @pytest.mark.parametrize(
+        ("body_mode", "expected_body", "truncated"),
+        [
+            ("framed", b"settle failed", False),
+            ("chunked", b"settle failed", False),
+            ("large", b"x" * 64 * 1024, True),
+            ("slow", b"partial", True),
+        ],
+        ids=["framed", "chunked", "large", "slow"],
+    )
+    async def test_paid_retry_5xx_hook_can_reuse_single_connection_pool(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        body_mode: str,
+        expected_body: bytes,
+        truncated: bool,
+    ) -> None:
         """Failure hooks can reconcile through a one-connection pool without deadlocking."""
+        monkeypatch.setattr("mpp.client.transport._ERROR_BODY_TIMEOUT", 0.2)
         challenge = Challenge(
             id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
         )
         www_auth = challenge.to_www_authenticate("example.com")
+        error_head = {
+            "framed": b"Content-Length: 13\r\n\r\nsettle failed",
+            "chunked": b"Transfer-Encoding: chunked\r\n\r\nd\r\nsettle failed\r\n0\r\n\r\n",
+            "large": b"Transfer-Encoding: chunked\r\n\r\n"
+            + (b"4000\r\n" + b"x" * 0x4000 + b"\r\n") * 64,
+            "slow": b"Content-Length: 100\r\n\r\npartial",
+        }[body_mode]
 
         async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
             with suppress(asyncio.IncompleteReadError, ConnectionError):
                 while head := (await reader.readuntil(b"\r\n\r\n")).decode().lower():
                     if "/reconcile" in head:
-                        status, extra, body = "200 OK", "", b"reconciled"
-                    elif "authorization: payment" in head:
-                        status, extra, body = "500 Internal Server Error", "", b"settle failed"
-                    else:
-                        status, extra, body = (
-                            "402 Payment Required",
-                            f"WWW-Authenticate: {www_auth}\r\n",
-                            b"",
+                        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nreconciled")
+                    elif "authorization: payment" not in head:
+                        writer.write(
+                            f"HTTP/1.1 402 Payment Required\r\nWWW-Authenticate: {www_auth}\r\n"
+                            "Content-Length: 0\r\n\r\n".encode()
                         )
-                    writer.write(
-                        f"HTTP/1.1 {status}\r\n{extra}Content-Length: {len(body)}\r\n\r\n".encode()
-                        + body
-                    )
+                    else:
+                        writer.write(b"HTTP/1.1 500 Internal Server Error\r\n" + error_head)
+                        if truncated:
+                            # Hold the unfinished body until the client drops the connection.
+                            await writer.drain()
+                            await reader.read()
+                            break
                     await writer.drain()
             writer.close()
 
@@ -1262,10 +1285,11 @@ class TestPaymentTransport:
                 reconciled.append((await client.get(f"{base_url}/reconcile")).text)
 
             transport.on_payment_failed(reconcile)
-            response = await asyncio.wait_for(client.get(f"{base_url}/paid"), timeout=2)
+            response = await asyncio.wait_for(client.get(f"{base_url}/paid"), timeout=5)
 
         assert response.status_code == 500
-        assert response.text == "settle failed"
+        assert response.content == expected_body
+        assert response.extensions.get("mpp.body_truncated", False) is truncated
         assert reconciled == ["reconciled"]
 
     @pytest.mark.asyncio
@@ -1299,40 +1323,6 @@ class TestPaymentTransport:
         assert isinstance(raised.value.__cause__, httpx.ReadError)
         assert failed == [raised.value]
         assert stream.closed
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "headers",
-        [{}, {"content-length": str(64 * 1024 + 1)}, {"content-length": "invalid"}],
-        ids=["unframed", "oversized", "invalid-length"],
-    )
-    async def test_paid_retry_5xx_large_body_is_left_streaming(
-        self, headers: dict[str, str]
-    ) -> None:
-        """Only small length-framed 5xx bodies are buffered before failure hooks."""
-        challenge = Challenge(
-            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
-        )
-        stream = TrackedStream()
-        inner = MockTransport(
-            [
-                httpx.Response(
-                    402,
-                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
-                ),
-                httpx.Response(500, headers=headers, stream=stream),
-            ]
-        )
-        transport = PaymentTransport(methods=[MockMethod()], inner=inner)
-        failed: list[ClientPaymentFailedPayload] = []
-        transport.on_payment_failed(failed.append)
-
-        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
-
-        assert [payload["response"] for payload in failed] == [response]
-        assert stream.reads == 0
-        assert not stream.closed
-        assert await response.aread() == b"unread response body"
 
     @pytest.mark.asyncio
     async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:

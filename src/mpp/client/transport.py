@@ -43,6 +43,8 @@ _DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
 _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
 _MAX_BUFFERED_ERROR_BODY = 64 * 1024
+_ERROR_BODY_TIMEOUT = 2.0
+_BODY_TRUNCATED_EXTENSION = "mpp.body_truncated"
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
@@ -73,21 +75,33 @@ def _accept_payment(methods: Sequence[Method]) -> str:
     return ", ".join(dict.fromkeys(capabilities))
 
 
-async def _release_small_body(response: httpx.Response) -> None:
-    """Buffer a small length-framed body so its connection returns to the pool.
+async def _buffer_error_body(response: httpx.Response) -> None:
+    """Buffer a paid-retry error body within a size and time bound, then release it.
 
-    Unframed or larger bodies are left streaming for the caller to read or close.
+    The body is diagnostic only. One larger than 64 KiB, or still arriving after
+    2 seconds, is cut to what arrived and flagged with
+    ``response.extensions["mpp.body_truncated"] = True``.
     """
     stream = response.stream
+    if not isinstance(stream, httpx.AsyncByteStream):
+        return
+    body = bytearray()
+    truncated = True
     try:
-        length = int(response.headers["content-length"])
-    except (KeyError, ValueError):
-        return
-    if not 0 <= length <= _MAX_BUFFERED_ERROR_BODY or not isinstance(stream, httpx.AsyncByteStream):
-        return
-    body = b"".join([chunk async for chunk in stream])
+        async with asyncio.timeout(_ERROR_BODY_TIMEOUT):
+            async for chunk in stream:
+                body += chunk
+                if len(body) > _MAX_BUFFERED_ERROR_BODY:
+                    break
+            else:
+                truncated = False
+    except TimeoutError:
+        pass
     await stream.aclose()
-    response.stream = httpx.ByteStream(body)
+    response.stream = httpx.ByteStream(bytes(body[:_MAX_BUFFERED_ERROR_BODY]))
+    if truncated:
+        response.headers.pop("content-length", None)
+        response.extensions = {**response.extensions, _BODY_TRUNCATED_EXTENSION: True}
 
 
 def _transaction_hash(method: Method, credential: Credential) -> str | None:
@@ -319,7 +333,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     if payment_response.is_server_error:
                         # Release the connection before failure hooks can make auxiliary
                         # requests; the buffered body stays readable for the caller.
-                        await _release_small_body(payment_response)
+                        await _buffer_error_body(payment_response)
                 except (Exception, asyncio.CancelledError) as cause:
                     error = PaymentOutcomeUnknownError(
                         challenge,
