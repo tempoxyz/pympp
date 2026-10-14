@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import time
 from collections.abc import Callable
@@ -37,6 +38,8 @@ if TYPE_CHECKING:
     import httpx
 
     from mpp.methods.tempo.account import TempoAccount
+
+logger = logging.getLogger(__name__)
 
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
@@ -484,7 +487,8 @@ class ChargeIntent:
             store: Key-value store for tx hash replay protection. Defaults to
                 an in-memory store capped at 10,000 entries on first settlement.
                 New payments fail at capacity without evicting used hashes. Use a shared persistent
-                store across server replicas and restarts.
+                store across server replicas and restarts. A warning is logged when the
+                in-memory default is used.
             validate_sender: Optional callback invoked when a hash-credential
                 transfer's sender differs from the expected sender; return
                 ``True`` to accept (e.g. smart-account / relayer flows).
@@ -648,6 +652,13 @@ class ChargeIntent:
         """
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
+            logger.warning(
+                "No replay store configured; falling back to an in-memory replay store. "
+                "Replay protection only holds within this process, so a settled credential "
+                "can be accepted again by another worker or replica, or after a restart. "
+                "Pass a shared store via Mpp.create(store=...) or ChargeIntent(store=...), "
+                "e.g. mpp.stores.RedisStore (or SQLiteStore for a single instance)."
+            )
             self._store = MemoryStore(max_entries=10_000)
 
         req, payload = self._prepare_credential(credential, request)
