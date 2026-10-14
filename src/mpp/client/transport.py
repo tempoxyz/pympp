@@ -382,18 +382,22 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         request=request,
                         transaction_hash=_transaction_hash(matched_method, credential),
                     )
-                    await self._events.emit(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
-                            credential=credential,
-                            error=error,
-                            method=matched_method,
-                            request=request,
-                            response=payment_response,
-                        ),
-                    )
+                    try:
+                        await self._events.emit(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
+                                credential=credential,
+                                error=error,
+                                method=matched_method,
+                                request=request,
+                                response=payment_response,
+                            ),
+                        )
+                    except asyncio.CancelledError as cancelled:
+                        # Like a cancelled paid request, surface the credential.
+                        raise error from cancelled
 
             return response
         except BaseException:

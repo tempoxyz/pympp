@@ -1325,6 +1325,41 @@ class TestPaymentTransport:
         assert stream.closed
 
     @pytest.mark.asyncio
+    async def test_cancelled_5xx_observer_raises_unknown_outcome(self) -> None:
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                ),
+                httpx.Response(500),
+            ]
+        )
+        method = MockMethod(transaction_hash=lambda credential: "0xhash")
+        transport = PaymentTransport(methods=[method], inner=inner)
+        entered = asyncio.Event()
+
+        async def observer(_payload: ClientPaymentFailedPayload) -> None:
+            entered.set()
+            await asyncio.Future()
+
+        transport.on_payment_failed(observer)
+        task = asyncio.create_task(
+            transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        task.cancel()
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await task
+        assert isinstance(raised.value.__cause__, asyncio.CancelledError)
+        assert raised.value.credential is method.create_credential.return_value
+        assert raised.value.transaction_hash == "0xhash"
+
+    @pytest.mark.asyncio
     async def test_cancelled_paid_retry_has_unknown_outcome(self) -> None:
         challenge = Challenge(
             id="test-id",
