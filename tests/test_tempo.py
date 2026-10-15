@@ -3547,6 +3547,63 @@ class TestCosignAsFeePayer:
         result, _ = intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
         assert result.startswith("0x76")
 
+    @pytest.mark.parametrize(
+        ("amount_out", "max_input", "approval", "token_out", "error"),
+        [
+            (1, 2, 2, None, None),
+            (500000, 600000, 600000, None, None),
+            (0, 1, 1, None, "swap output must be positive"),
+            (1000001, 2000000, 2000000, None, "not exceed payment"),
+            (1000000, 0, 0, None, "positive swap maximum input"),
+            (1000000, 2000000, 3000000, None, "approval must match"),
+            (
+                1000000,
+                2000000,
+                2000000,
+                "0x0000000000000000000000000000000000000004",
+                "output token",
+            ),
+        ],
+    )
+    def test_cosign_bounds_swap_amounts(
+        self,
+        amount_out: int,
+        max_input: int,
+        approval: int,
+        token_out: str | None,
+        error: str | None,
+    ) -> None:
+        from pytempo import Call
+
+        currency = "0x20c0000000000000000000000000000000000000"
+        token_in = "0x0000000000000000000000000000000000000003"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to=token_in, value=0, data=self._encode_approve_data(STABLECOIN_DEX, approval)
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        token_in, token_out or currency, amount_out, max_input
+                    ),
+                ),
+                Call.create(
+                    to=currency, value=0, data=self._encode_transfer_data(recipient, 1000000)
+                ),
+            )
+        )
+        request = ChargeRequest(amount="1000000", currency=currency, recipient=recipient)
+        intent = self._make_intent()
+        if error:
+            with pytest.raises(VerificationError, match=error):
+                intent._cosign_as_fee_payer(raw_tx, currency, request=request)
+        else:
+            result, _ = intent._cosign_as_fee_payer(raw_tx, currency, request=request)
+            assert result.startswith("0x76")
+
     # The simulate payload must target the co-signed tx: the recovered sender as
     # `from`, the sponsor fields the node needs (feeToken, feePayerSignature), the
     # payment calls, the expiring nonceKey, the validity window, and validation off.

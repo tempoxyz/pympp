@@ -528,6 +528,32 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
 
 def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: ChargeRequest) -> None:
     prefix_len = _validate_call_scope(calls)
+    if prefix_len == 2:
+        approve = _decode_static_call_args(
+            calls[0][2], ("address", "uint256"), APPROVE_CALL_DATA_HEX_LEN
+        )
+        swap = _decode_static_call_args(
+            calls[1][2],
+            ("address", "address", "uint256", "uint256"),
+            SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
+        )
+        # Call scope validation has already checked the canonical encoding.
+        assert approve is not None and swap is not None
+        token_in, token_out, amount_out, max_amount_in = swap
+        if token_out.lower() != request.currency.lower():
+            raise VerificationError(
+                "Invalid transaction: swap output token does not match currency"
+            )
+        if token_in.lower() == token_out.lower():
+            raise VerificationError("Invalid transaction: swap input and output tokens must differ")
+        if not 0 < amount_out <= int(request.amount):
+            raise VerificationError(
+                "Invalid transaction: swap output must be positive and not exceed payment"
+            )
+        if max_amount_in <= 0 or approve[1] != max_amount_in:
+            raise VerificationError(
+                "Invalid transaction: approval must match positive swap maximum input"
+            )
     payment_calls = calls[prefix_len:]
 
     expected = get_transfers(
