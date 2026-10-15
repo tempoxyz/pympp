@@ -93,7 +93,8 @@ def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> 
 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
-    return (url.scheme, url.host, url.port)
+    port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
+    return (url.scheme, url.host, port)
 
 
 def _payment_origins(
@@ -300,16 +301,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 if response.status_code != 402:
                     return response
 
-                origin_denied = (
-                    self._allowed_origins is not None
-                    and current_origin not in self._allowed_origins
-                )
-                if original_origin != current_origin or origin_denied:
-                    error = PaymentError(
-                        "Payment origin is not allowed"
-                        if origin_denied
-                        else "Refusing to send payment credential across redirect"
-                    )
+                if original_origin != current_origin:
+                    error = PaymentError("Refusing to send payment credential across redirect")
                     await self._events.emit(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(
@@ -355,6 +348,25 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             ),
                         )
                     return response
+
+                if (
+                    self._allowed_origins is not None
+                    and current_origin not in self._allowed_origins
+                ):
+                    error = PaymentError("Payment origin is not allowed")
+                    await self._events.emit(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=challenge,
+                            challenges=challenges,
+                            credential=None,
+                            error=error,
+                            method=matched_method,
+                            request=request,
+                            response=response,
+                        ),
+                    )
+                    raise error
 
                 if not replayable:
                     raise PaymentError(

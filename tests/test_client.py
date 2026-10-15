@@ -1789,6 +1789,7 @@ class TestConvenienceFunctions:
     [
         ("https://trusted.test/paid", ["https://trusted.test"], True),
         ("https://trusted.test/paid", ["https://TRUSTED.test:443"], True),
+        ("https://trusted.test/paid", ["HTTPS://trusted.test:443"], True),
         ("https://evil.test/paid", ["https://trusted.test"], False),
         ("http://trusted.test/paid", ["https://trusted.test"], False),
         ("https://trusted.test:8443/paid", ["https://trusted.test"], False),
@@ -1842,3 +1843,21 @@ async def test_payment_origin_allowlist(url, allowed, pays):
 def test_invalid_payment_origin(origin):
     with pytest.raises(ValueError, match="allowed_origins"):
         PaymentTransport(methods=[], allowed_origins=[origin])
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,
+        "Bearer realm=auth",
+        'Payment id="x", realm="test", method="unknown", intent="charge", request="e30"',
+    ],
+)
+async def test_origin_policy_preserves_unmatched_402(header):
+    method = MockMethod()
+    response = httpx.Response(402, headers={} if header is None else {"WWW-Authenticate": header})
+    inner = MockTransport([response])
+    transport = PaymentTransport(methods=[method], inner=inner, allowed_origins=[])
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await client.get("https://unapproved.test/") is response
+    method.create_credential.assert_not_awaited()
