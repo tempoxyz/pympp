@@ -5442,6 +5442,62 @@ class TestSplitLogMemoStrictness:
             "data": "0x" + hex(amount)[2:].zfill(64),
         }
 
+    @pytest.mark.parametrize("movements", [1, 2, 3])
+    @pytest.mark.parametrize("plain_first", [False, True])
+    @pytest.mark.parametrize("explicit_memo", [False, True])
+    def test_companion_events_count_as_one_split_payment(
+        self, movements: int, plain_first: bool, explicit_memo: bool
+    ) -> None:
+        memo = "0x" + "ff" * 32
+        request = ChargeRequest(
+            amount="2000000",
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[
+                    Split(
+                        amount="1000000",
+                        recipient=self.RECIPIENT,
+                        memo=memo if explicit_memo else None,
+                    )
+                ]
+            ),
+        )
+        logs = []
+        for _ in range(movements):
+            pair = [
+                self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 1000000),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 1000000, memo),
+            ]
+            logs.extend(pair if plain_first else pair[::-1])
+        matches = ChargeIntent(rpc_url="https://rpc.test")._verify_transfer_logs(
+            {"logs": logs}, request
+        )
+        assert bool(matches) == (movements >= 2)
+
+    def test_plain_transfer_and_memo_movement_can_pay_equal_splits(self) -> None:
+        request = ChargeRequest(
+            amount="2000000",
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[
+                    Split(
+                        amount="1000000",
+                        recipient=self.RECIPIENT,
+                    )
+                ]
+            ),
+        )
+        logs = [
+            self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 1000000),
+            self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 1000000),
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 1000000, "0x" + "ff" * 32),
+        ]
+        assert ChargeIntent(rpc_url="https://rpc.test")._verify_transfer_logs(
+            {"logs": logs}, request
+        )
+
     def test_single_transfer_accepts_transfer_with_memo_log(self) -> None:
         """A memo-less single transfer accepts TransferWithMemo logs.
 
