@@ -124,3 +124,23 @@ Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org
 ## License
 
 MIT OR Apache-2.0
+
+### Restrict automatic payment origins
+
+When fetching URLs from untrusted sources, configure exact origins before enabling
+payments. Origins include the scheme and port; paths and credentials are rejected.
+An empty allowlist disables automatic payments. Omitting it preserves the default
+of allowing payments to any directly requested origin.
+
+```python
+async with Client(
+    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
+    allowed_origins=["https://api.example.com"],
+) as client:
+    response = await client.get("https://api.example.com/paid")
+```
+
+Use method-level amount, currency, and recipient limits as well. A challenge realm
+is a protection-space name, not an authenticated origin. This policy prevents
+payments to unapproved origins; it cannot identify a relayed challenge served by
+an origin you have already approved.

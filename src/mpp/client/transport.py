@@ -96,6 +96,29 @@ def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     return (url.scheme, url.host, url.port)
 
 
+def _payment_origins(
+    origins: Sequence[str] | None,
+) -> frozenset[tuple[str, str, int | None]] | None:
+    if origins is None:
+        return None
+    result = set()
+    for value in origins:
+        url = httpx.URL(value)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.host
+            or url.userinfo
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "allowed_origins entries must be HTTP(S) origins without credentials or paths"
+            )
+        result.add(_origin(url))
+    return frozenset(result)
+
+
 def _accept_payment(methods: Sequence[Method]) -> str:
     capabilities = (
         f"{method.name}/{intent}"
@@ -202,12 +225,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         events: EventDispatcher | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        allowed_origins: Sequence[str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
         """Initialize the transport.
 
         Args:
+            allowed_origins: Exact HTTP(S) origins authorized for automatic payments.
+                Includes scheme and port. An empty sequence denies all payments;
+                ``None`` preserves unrestricted origin selection. Configure method
+                amount and recipient limits separately. Challenge realms are not
+                authenticated origins and are not compared with this allowlist.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
@@ -220,6 +249,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._runtime = (
             runtime if runtime is not None else PaymentRuntime(methods or (), events=events)
         )
+        self._allowed_origins = _payment_origins(allowed_origins)
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
@@ -270,8 +300,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 if response.status_code != 402:
                     return response
 
-                if original_origin != current_origin:
-                    error = PaymentError("Refusing to send payment credential across redirect")
+                origin_denied = (
+                    self._allowed_origins is not None
+                    and current_origin not in self._allowed_origins
+                )
+                if original_origin != current_origin or origin_denied:
+                    error = PaymentError(
+                        "Payment origin is not allowed"
+                        if origin_denied
+                        else "Refusing to send payment credential across redirect"
+                    )
                     await self._events.emit(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(
@@ -479,12 +517,14 @@ class Client:
         methods: Sequence[Method] | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        allowed_origins: Sequence[str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
         self._transport = PaymentTransport(
             methods,
             runtime=runtime,
+            allowed_origins=allowed_origins,
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
         )
