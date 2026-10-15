@@ -93,7 +93,31 @@ def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> 
 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
-    return (url.scheme, url.host, url.port)
+    port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
+    return (url.scheme, url.host, port)
+
+
+def _payment_origins(
+    origins: Sequence[str] | None,
+) -> frozenset[tuple[str, str, int | None]] | None:
+    if origins is None:
+        return None
+    result = set()
+    for value in origins:
+        url = httpx.URL(value)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.host
+            or url.userinfo
+            or url.path not in {"", "/"}
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "allowed_origins entries must be HTTP(S) origins without credentials or paths"
+            )
+        result.add(_origin(url))
+    return frozenset(result)
 
 
 def _accept_payment(methods: Sequence[Method]) -> str:
@@ -202,12 +226,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         events: EventDispatcher | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        allowed_origins: Sequence[str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
         """Initialize the transport.
 
         Args:
+            allowed_origins: Exact HTTP(S) origins authorized for automatic payments.
+                Includes scheme and port. An empty sequence denies all payments;
+                ``None`` preserves unrestricted origin selection. Configure method
+                amount and recipient limits separately. Challenge realms are not
+                authenticated origins and are not compared with this allowlist.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
@@ -220,6 +250,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._runtime = (
             runtime if runtime is not None else PaymentRuntime(methods or (), events=events)
         )
+        self._allowed_origins = _payment_origins(allowed_origins)
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
@@ -317,6 +348,25 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             ),
                         )
                     return response
+
+                if (
+                    self._allowed_origins is not None
+                    and current_origin not in self._allowed_origins
+                ):
+                    error = PaymentError("Payment origin is not allowed")
+                    await self._events.emit(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=challenge,
+                            challenges=challenges,
+                            credential=None,
+                            error=error,
+                            method=matched_method,
+                            request=request,
+                            response=response,
+                        ),
+                    )
+                    raise error
 
                 if not replayable:
                     raise PaymentError(
@@ -479,12 +529,14 @@ class Client:
         methods: Sequence[Method] | None = None,
         *,
         runtime: PaymentRuntime | None = None,
+        allowed_origins: Sequence[str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
         self._transport = PaymentTransport(
             methods,
             runtime=runtime,
+            allowed_origins=allowed_origins,
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
         )

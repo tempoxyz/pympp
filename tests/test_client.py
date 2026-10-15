@@ -1782,3 +1782,82 @@ class TestConvenienceFunctions:
 
         response = await post("https://example.com/test", methods=[])
         assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("url", "allowed", "pays"),
+    [
+        ("https://trusted.test/paid", ["https://trusted.test"], True),
+        ("https://trusted.test/paid", ["https://TRUSTED.test:443"], True),
+        ("https://trusted.test/paid", ["HTTPS://trusted.test:443"], True),
+        ("https://evil.test/paid", ["https://trusted.test"], False),
+        ("http://trusted.test/paid", ["https://trusted.test"], False),
+        ("https://trusted.test:8443/paid", ["https://trusted.test"], False),
+        ("https://trusted.test.evil.test/paid", ["https://trusted.test"], False),
+        ("https://trusted.test/paid", [], False),
+    ],
+)
+async def test_payment_origin_allowlist(url, allowed, pays):
+    method = MockMethod()
+    challenge = Challenge(
+        id="relayed",
+        realm="arbitrary protection space",
+        method="tempo",
+        intent="charge",
+        request={"amount": "1", "currency": "USD"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers={
+                    "WWW-Authenticate": challenge.to_www_authenticate("arbitrary protection space")
+                },
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner, allowed_origins=allowed)
+    async with httpx.AsyncClient(transport=transport) as client:
+        if pays:
+            assert (await client.get(url)).status_code == 200
+            method.create_credential.assert_awaited_once()
+        else:
+            with pytest.raises(PaymentError, match="origin is not allowed"):
+                await client.get(url)
+            method.create_credential.assert_not_awaited()
+            assert len(inner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "example.com",
+        "ftp://example.com",
+        "https://u:p@example.com",
+        "https://example.com/path",
+        "https://example.com?a=b",
+        "https://example.com#fragment",
+    ],
+)
+def test_invalid_payment_origin(origin):
+    with pytest.raises(ValueError, match="allowed_origins"):
+        PaymentTransport(methods=[], allowed_origins=[origin])
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        None,
+        "Bearer realm=auth",
+        'Payment id="x", realm="test", method="unknown", intent="charge", request="e30"',
+    ],
+)
+async def test_origin_policy_preserves_unmatched_402(header):
+    method = MockMethod()
+    response = httpx.Response(402, headers={} if header is None else {"WWW-Authenticate": header})
+    inner = MockTransport([response])
+    transport = PaymentTransport(methods=[method], inner=inner, allowed_origins=[])
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await client.get("https://unapproved.test/") is response
+    method.create_credential.assert_not_awaited()
