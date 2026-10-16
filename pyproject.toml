@@ -69,7 +69,7 @@ mcp = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "hypothesis>=6.0",
+    "hypothesis==6.151.9",
     "ruff==0.16.6",
     "starlette>=0.37",
 ]
@@ -79,7 +79,7 @@ dev = [
     "trio>=0.30",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
-    "hypothesis>=6.0",
+    "hypothesis==6.151.9",
     "ruff==0.16.6",
     "pytest-cov>=7.0.0",
     "coverage==7.16.0",
@@ -129,7 +129,3 @@ markers = [
     "integration: requires TEMPO_RPC_URL (real Tempo node)",
     "redis: requires REDIS_URL (real Redis instance)",
 ]
-
-[tool.uv]
-# Published Hypothesis wheel metadata returns HTTP 403 during universal resolution.
-no-binary-package = ["hypothesis"]
