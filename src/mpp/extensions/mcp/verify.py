@@ -225,7 +225,8 @@ async def verify_or_challenge(
         raise
     except PaymentError as e:
         raise PaymentVerificationError(
-            challenges=[new_challenge()],
+            challenges=[] if e.status == 403 else [new_challenge()],
+            http_status=403 if e.status == 403 else 402,
             reason="verification-failed",
             detail=str(e),
             details=getattr(e, "details", None),

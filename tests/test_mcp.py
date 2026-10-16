@@ -1644,3 +1644,34 @@ async def test_decorator_automatically_separates_tools() -> None:
     with pytest.raises(PaymentRequiredError):
         await second(_meta=credential.to_meta())
     intent.verify.assert_not_awaited()
+
+
+async def test_terminal_replay_does_not_issue_mcp_challenge() -> None:
+    from unittest.mock import AsyncMock
+
+    from mpp.errors import CredentialReplayedError
+
+    intent = AsyncMock(spec=["verify"])
+    intent.name = "charge"
+    intent.verify = AsyncMock(side_effect=CredentialReplayedError("Already settled"))
+    challenge = create_challenge(
+        tool="paid",
+        method="stripe",
+        intent_name="charge",
+        request={"amount": "1000"},
+        realm="shared",
+        secret_key=MCP_TEST_SECRET,
+    )
+    with pytest.raises(PaymentVerificationError) as raised:
+        await verify_or_challenge(
+            tool="paid",
+            meta=MCPCredential(challenge=challenge, payload={}).to_meta(),
+            intent=intent,
+            request=challenge.request,
+            realm="shared",
+            secret_key=MCP_TEST_SECRET,
+            method="stripe",
+        )
+    data = raised.value.to_jsonrpc_error()["data"]
+    assert data["httpStatus"] == 403
+    assert data["challenges"] == []

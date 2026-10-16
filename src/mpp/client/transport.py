@@ -386,8 +386,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     await response.aclose()
 
                 try:
-                    # HTTPX carries these extensions onto redirect requests.
-                    request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                     credential = await self._runtime.create_credential(
                         challenge,
                         matched_method,
@@ -437,6 +435,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     extensions=_paid_retry_extensions(request.extensions, self._paid_retry_timeout),
                 )
 
+                # HTTPX redirects from the original request, not the inner retry.
+                request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
+                retry_request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                 try:
                     payment_response = await self._inner.handle_async_request(retry_request)
                     response = payment_response

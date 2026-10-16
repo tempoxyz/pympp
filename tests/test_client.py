@@ -1903,3 +1903,25 @@ async def test_paid_redirect_does_not_start_another_payment() -> None:
     assert response.status_code == 402
     assert len(inner.requests) == 3
     method.create_credential.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_credential_creation_does_not_poison_request() -> None:
+    method = MockMethod()
+    credential = method.create_credential.return_value
+    method.create_credential.side_effect = [RuntimeError("signer unavailable"), credential]
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    required = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+    inner = MockTransport(
+        [
+            httpx.Response(402, headers=required),
+            httpx.Response(402, headers=required),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+    request = httpx.Request("GET", "https://example.com")
+    with pytest.raises(RuntimeError, match="signer unavailable"):
+        await transport.handle_async_request(request)
+    assert (await transport.handle_async_request(request)).status_code == 200
+    assert method.create_credential.call_count == 2
