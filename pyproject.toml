@@ -129,3 +129,7 @@ markers = [
     "integration: requires TEMPO_RPC_URL (real Tempo node)",
     "redis: requires REDIS_URL (real Redis instance)",
 ]
+
+[tool.uv]
+# Published Hypothesis wheel metadata returns HTTP 403 during universal resolution.
+no-binary-package = ["hypothesis"]
