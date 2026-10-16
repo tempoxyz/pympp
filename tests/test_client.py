@@ -1861,3 +1861,45 @@ async def test_origin_policy_preserves_unmatched_402(header):
     async with httpx.AsyncClient(transport=transport) as client:
         assert await client.get("https://unapproved.test/") is response
     method.create_credential.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["Authorization", "Payment-Authorization"])
+async def test_caller_payment_is_not_replaced(header: str) -> None:
+    method = MockMethod()
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+    response = await transport.handle_async_request(
+        httpx.Request("GET", "https://example.com", headers={header: "Payment existing"})
+    )
+    assert response.status_code == 402
+    method.create_credential.assert_not_called()
+    assert inner.requests[0].headers[header] == "Payment existing"
+
+
+@pytest.mark.asyncio
+async def test_paid_redirect_does_not_start_another_payment() -> None:
+    method = MockMethod()
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    required = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+    inner = MockTransport(
+        [
+            httpx.Response(402, headers=required),
+            httpx.Response(302, headers={"location": "/next"}),
+            httpx.Response(402, headers=required),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=PaymentTransport(methods=[method], inner=inner), follow_redirects=True
+    ) as client:
+        response = await client.get("https://example.com/start")
+    assert response.status_code == 402
+    assert len(inner.requests) == 3
+    method.create_credential.assert_called_once()

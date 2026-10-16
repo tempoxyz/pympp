@@ -9,6 +9,7 @@ Example with raw JSON-RPC handling:
     async def handle_tool_call(params: dict) -> dict:
         meta = params.get("_meta", {})
         result = await verify_or_challenge(
+            tool="expensive_tool",
             meta=meta,
             intent=intent,
             request={"amount": "1000", ...},
@@ -62,6 +63,7 @@ async def verify_or_challenge(
     request: dict[str, Any],
     realm: str,
     secret_key: str,
+    tool: str,
     method: str | None = None,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
@@ -81,6 +83,7 @@ async def verify_or_challenge(
             as HMAC-SHA256 over the challenge parameters.
         method: Payment method name (defaults to "tempo").
         expires_in: Challenge validity duration (default: 5 minutes).
+        tool: Stable receiving tool identity. Must match at issuance and verification.
         description: Human-readable description of what the payment is for.
 
     Returns:
@@ -97,6 +100,7 @@ async def verify_or_challenge(
         # In any MCP server handler
         meta = params.get("_meta", {})
         result = await verify_or_challenge(
+            tool="expensive_tool",
             meta=meta,
             intent=intent,  # ChargeIntent with rpc_url set by tempo()
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
@@ -119,6 +123,8 @@ async def verify_or_challenge(
             }
         }
     """
+    if not tool:
+        raise ValueError("tool must be a non-empty stable identifier")
     method_name = method or "tempo"
     meta = meta or {}
 
@@ -129,6 +135,7 @@ async def verify_or_challenge(
             request=request,
             realm=realm,
             secret_key=secret_key,
+            tool=tool,
             expires_in=expires_in,
             description=description,
         )
@@ -164,6 +171,10 @@ async def verify_or_challenge(
 
     # Assert echoed challenge fields match server's values
     if echoed.realm != realm or echoed.method != method_name or echoed.intent != intent.name:
+        return new_challenge()
+
+    # Tool scope is authenticated through opaque; reject before settlement.
+    if not isinstance(echoed.opaque, dict) or echoed.opaque.get("tool") != tool:
         return new_challenge()
 
     # Assert echoed request matches server's current request
@@ -237,6 +248,7 @@ def create_challenge(
     request: dict[str, Any],
     realm: str,
     secret_key: str,
+    tool: str,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
 ) -> MCPChallenge:
@@ -251,11 +263,14 @@ def create_challenge(
         realm: Protection space identifier.
         secret_key: Server secret for HMAC-bound challenge IDs.
         expires_in: Challenge validity duration.
+        tool: Stable receiving tool identity. Must match at issuance and verification.
         description: Human-readable description.
 
     Returns:
         An MCPChallenge ready to be included in a -32042 error response.
     """
+    if not tool:
+        raise ValueError("tool must be a non-empty stable identifier")
     expires = (datetime.now(UTC) + expires_in).isoformat()
     if expires.endswith("+00:00"):
         expires = expires[:-6] + "Z"
@@ -267,6 +282,7 @@ def create_challenge(
         intent=intent_name,
         request=request,
         expires=expires,
+        opaque={"tool": tool},
     )
 
     return MCPChallenge(
@@ -277,6 +293,7 @@ def create_challenge(
         request=request,
         expires=expires,
         description=description,
+        opaque={"tool": tool},
     )
 
 

@@ -144,3 +144,11 @@ Use method-level amount, currency, and recipient limits as well. A challenge rea
 is a protection-space name, not an authenticated origin. This policy prevents
 payments to unapproved origins; it cannot identify a relayed challenge served by
 an origin you have already approved.
+
+### MCP tool identity migration
+
+Low-level MCP handlers must pass the receiving tool name to both `create_challenge(..., tool=name)` and `verify_or_challenge(..., tool=name, meta=meta)`. Obtain `name` from server dispatch, never from the credential. Tool identity is included in authenticated challenge metadata, so another tool cannot consume the payment. Existing unscoped challenges must be reissued.
+
+`@pay(...)` derives identity from the handler's module and qualified name. Use `@pay(..., tool="premium_search")` when a handler has multiple tool aliases or a dynamically generated name, assigning a distinct identity to each paid tool.
+
+HTTP and MCP clients preserve caller-supplied payment credentials. An additional payment-required response is returned to the caller without replacing them. HTTP redirects after a payment attempt also cannot initiate another payment; configured replacement-challenge retries remain bounded within the original request.

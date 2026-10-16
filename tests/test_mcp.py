@@ -62,6 +62,7 @@ def _make_bound_mcp_challenge(
         request = {"amount": "1000"}
     if expires is None and not _no_default_expires:
         expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    opaque = {**(opaque or {}), "tool": "test-tool"}
     challenge_id = generate_challenge_id(
         secret_key=secret_key,
         realm=realm,
@@ -439,6 +440,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -465,6 +467,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000", "currency": "usd"},
             realm="api.example.com",
@@ -493,6 +496,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -517,6 +521,7 @@ class TestPayDecorator:
                 raise VerificationError("Payment failed")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             realm="api.example.com",
@@ -546,6 +551,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request=lambda query, **kw: {"amount": str(len(query) * 10)},
             realm="api.example.com",
@@ -570,6 +576,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             secret_key=MCP_TEST_SECRET,
@@ -601,6 +608,7 @@ class TestPayDecorator:
                 return Receipt.success(reference="0x123")
 
         @pay(
+            tool="test-tool",
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
             secret_key=MCP_TEST_SECRET,
@@ -626,6 +634,7 @@ class TestVerifyOrChallenge:
                 return Receipt.success(reference="0x123")
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=None,
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -646,6 +655,7 @@ class TestVerifyOrChallenge:
                 return Receipt.success(reference="0x123")
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta={},
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -672,6 +682,7 @@ class TestVerifyOrChallenge:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000", "currency": "usd"},
@@ -706,6 +717,7 @@ class TestVerifyOrChallenge:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -736,6 +748,7 @@ class TestVerifyOrChallenge:
         credential = MCPCredential(challenge=challenge, payload={"signature": "0xabc"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -754,6 +767,7 @@ class TestVerifyOrChallenge:
 
         with pytest.raises(MalformedCredentialError):
             await verify_or_challenge(
+                tool="test-tool",
                 meta={META_CREDENTIAL: {"bad": "data"}},
                 intent=MockIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
@@ -778,6 +792,7 @@ class TestVerifyOrChallenge:
 
         with pytest.raises(PaymentVerificationError) as exc_info:
             await verify_or_challenge(
+                tool="test-tool",
                 meta=mcp_credential.to_meta(),
                 intent=MockIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
@@ -807,6 +822,7 @@ class TestVerifyOrChallenge:
 
         with pytest.raises(PaymentVerificationError) as exc_info:
             await verify_or_challenge(
+                tool="test-tool",
                 meta=mcp_credential.to_meta(),
                 intent=VerifiableIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
@@ -861,6 +877,7 @@ class TestVerifyOrChallenge:
 
         with pytest.raises(PaymentError) as raised:
             await verify_or_challenge(
+                tool="test-tool",
                 meta=mcp_credential.to_meta(),
                 intent=VerifiableIntent(),  # type: ignore[arg-type]
                 request={"amount": "1000"},
@@ -888,6 +905,7 @@ class TestVerifyOrChallenge:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request=request,
@@ -913,6 +931,7 @@ class TestVerifyOrChallenge:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request=request,
@@ -939,6 +958,7 @@ class TestVerifyOrChallenge:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=SessionIntent(),  # type: ignore[arg-type]
             request=request,
@@ -962,6 +982,7 @@ class TestVerifyOrChallenge:
 
         expensive_request = {"amount": "999999"}
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request=expensive_request,
@@ -987,6 +1008,7 @@ class TestVerifyOrChallenge:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request=request,
@@ -1012,6 +1034,7 @@ class TestVerifyOrChallenge:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request=request,
@@ -1043,6 +1066,7 @@ class TestMCPChallengeExpiryEnforcement:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -1074,6 +1098,7 @@ class TestMCPChallengeExpiryEnforcement:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -1108,6 +1133,7 @@ class TestMCPExpiryFailClosed:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -1136,6 +1162,7 @@ class TestMCPExpiryFailClosed:
         )
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=MockIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -1170,6 +1197,7 @@ class TestMCPCrossEndpointReplay:
 
         # Present it to the "charge" endpoint
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=mcp_credential.to_meta(),
             intent=ChargeIntent(),  # type: ignore[arg-type]
             request={"amount": "1000"},
@@ -1185,6 +1213,7 @@ class TestCreateChallenge:
 
     def test_creates_challenge_with_required_fields(self) -> None:
         challenge = create_challenge(
+            tool="test-tool",
             method="tempo",
             intent_name="charge",
             request={"amount": "1000"},
@@ -1201,6 +1230,7 @@ class TestCreateChallenge:
 
     def test_creates_challenge_with_description(self) -> None:
         challenge = create_challenge(
+            tool="test-tool",
             method="tempo",
             intent_name="charge",
             request={"amount": "1000"},
@@ -1213,6 +1243,7 @@ class TestCreateChallenge:
 
     def test_challenge_id_is_hmac_bound(self) -> None:
         challenge = create_challenge(
+            tool="test-tool",
             method="tempo",
             intent_name="charge",
             request={"amount": "1000"},
@@ -1227,11 +1258,13 @@ class TestCreateChallenge:
             intent="charge",
             request={"amount": "1000"},
             expires=challenge.expires,
+            opaque={"tool": "test-tool"},
         )
         assert challenge.id == expected_id
 
     def test_challenge_id_deterministic(self) -> None:
         challenge1 = create_challenge(
+            tool="test-tool",
             method="tempo",
             intent_name="charge",
             request={"amount": "1000"},
@@ -1239,6 +1272,7 @@ class TestCreateChallenge:
             secret_key=MCP_TEST_SECRET,
         )
         challenge2 = create_challenge(
+            tool="test-tool",
             method="tempo",
             intent_name="charge",
             request={"amount": "1000"},
@@ -1319,6 +1353,7 @@ class TestMCPDigestOpaque:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),
             request=request,
@@ -1344,6 +1379,7 @@ class TestMCPDigestOpaque:
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),
             request=request,
@@ -1380,6 +1416,7 @@ class TestMCPDigestOpaque:
         cred = MCPCredential(challenge=ch, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
+            tool="test-tool",
             meta=cred.to_meta(),
             intent=MockIntent(),
             request=request,
@@ -1462,7 +1499,7 @@ class TestMCPCredentialToCoreDigestOpaque:
 
         echo = core.challenge
         assert echo.request == canonical_b64url(request)
-        assert echo.opaque == canonical_b64url(opaque)
+        assert echo.opaque == canonical_b64url({**opaque, "tool": "test-tool"})
         echo_request = _b64_decode(echo.request) if echo.request else {}
         echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
         recomputed_id = generate_challenge_id(
@@ -1499,6 +1536,111 @@ class TestMCPCredentialToCoreDigestOpaque:
             request=echo_request,
             expires=echo.expires,
             digest=echo.digest,
-            opaque=None,
+            opaque={"tool": "test-tool"},
         )
         assert recomputed_id == challenge.id
+
+
+@pytest.mark.parametrize("target", ["tool-b", "tool-a"])
+async def test_tool_scope_checked_before_settlement(target: str) -> None:
+    from unittest.mock import AsyncMock
+
+    intent = AsyncMock(spec=["verify"])
+    intent.verify = AsyncMock(return_value=Receipt.success(reference="settled"))
+    intent.name = "charge"
+    intent.verify.return_value = Receipt.success(reference="settled")
+    request = {"amount": "1000"}
+    challenge = create_challenge(
+        tool="tool-a",
+        method="tempo",
+        intent_name="charge",
+        request=request,
+        realm="shared",
+        secret_key=MCP_TEST_SECRET,
+    )
+    credential = MCPCredential(challenge=challenge, payload={"type": "hash", "hash": "0x123"})
+    result = await verify_or_challenge(
+        tool=target,
+        meta=credential.to_meta(),
+        intent=intent,
+        request=request,
+        realm="shared",
+        secret_key=MCP_TEST_SECRET,
+    )
+    if target == "tool-b":
+        assert isinstance(result, MCPChallenge)
+        intent.verify.assert_not_awaited()
+    else:
+        assert isinstance(result, tuple)
+        intent.verify.assert_awaited_once()
+
+
+@pytest.mark.parametrize("tampering", ["replace", "remove", "legacy"])
+async def test_tool_scope_cannot_be_forged_or_omitted(tampering: str) -> None:
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    intent = AsyncMock(spec=["verify"])
+    intent.verify = AsyncMock(return_value=Receipt.success(reference="settled"))
+    intent.name = "charge"
+    challenge = create_challenge(
+        tool="tool-a",
+        method="tempo",
+        intent_name="charge",
+        request={"amount": "1000"},
+        realm="shared",
+        secret_key=MCP_TEST_SECRET,
+    )
+    opaque = {"tool": "tool-b"} if tampering == "replace" else None
+    challenge = replace(challenge, opaque=opaque)
+    if tampering == "legacy":
+        challenge = replace(
+            challenge,
+            id=generate_challenge_id(
+                secret_key=MCP_TEST_SECRET,
+                realm="shared",
+                method="tempo",
+                intent="charge",
+                request=challenge.request,
+                expires=challenge.expires,
+            ),
+        )
+    result = await verify_or_challenge(
+        tool="tool-b",
+        meta=MCPCredential(challenge=challenge, payload={}).to_meta(),
+        intent=intent,
+        request=challenge.request,
+        realm="shared",
+        secret_key=MCP_TEST_SECRET,
+    )
+    assert isinstance(result, MCPChallenge)
+    intent.verify.assert_not_awaited()
+
+
+async def test_decorator_automatically_separates_tools() -> None:
+    from unittest.mock import AsyncMock
+
+    intent = AsyncMock(spec=["verify"])
+    intent.verify = AsyncMock(return_value=Receipt.success(reference="settled"))
+    intent.name = "charge"
+    options: dict[str, Any] = {
+        "intent": intent,
+        "request": {"amount": "1000"},
+        "realm": "shared",
+        "secret_key": MCP_TEST_SECRET,
+    }
+
+    @pay(**options)
+    async def first(**kwargs):
+        return "first"
+
+    @pay(**options)
+    async def second(**kwargs):
+        return "second"
+
+    with pytest.raises(PaymentRequiredError) as issued:
+        await first()
+    credential = MCPCredential(challenge=issued.value.challenges[0], payload={})
+    with pytest.raises(PaymentRequiredError):
+        await second(_meta=credential.to_meta())
+    intent.verify.assert_not_awaited()

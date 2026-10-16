@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
-from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_RECEIPT
+from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import Method as Method
 from mpp.runtime import _method_accepts_challenge
@@ -197,7 +197,7 @@ class McpClient:
             return McpToolResult(result=result, receipt=receipt)
 
         except McpError as e:
-            if not _is_payment_required_error(e):
+            if not _is_payment_required_error(e) or (meta and META_CREDENTIAL in meta):
                 raise
 
             challenges = _extract_challenges(e)

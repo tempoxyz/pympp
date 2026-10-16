@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
+_PAYMENT_ATTEMPTED_EXTENSION = "mpp.payment_attempted"
 _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
 _MAX_BUFFERED_ERROR_BODY = 64 * 1024
 _ERROR_BODY_TIMEOUT = 2.0
@@ -278,6 +279,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        if request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION) or any(
+            request.headers.get(header, "").lower().startswith("payment ")
+            for header in _CREDENTIAL_HEADERS
+        ):
+            return await self._inner.handle_async_request(request)
+
         accept_payment = _accept_payment(self._runtime.methods)
         if accept_payment and "accept-payment" not in request.headers:
             request.headers["Accept-Payment"] = accept_payment
@@ -379,6 +386,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     await response.aclose()
 
                 try:
+                    # HTTPX carries these extensions onto redirect requests.
+                    request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                     credential = await self._runtime.create_credential(
                         challenge,
                         matched_method,
