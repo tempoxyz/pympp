@@ -279,21 +279,23 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
-        if request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION) or any(
+        current_origin = _origin(request.url)
+        original_origin = request.extensions.setdefault(_ORIGINAL_ORIGIN_EXTENSION, current_origin)
+        supplied_payment = any(
             request.headers.get(header, "").lower().startswith("payment ")
             for header in _CREDENTIAL_HEADERS
-        ):
+        )
+        if supplied_payment:
+            if current_origin != original_origin:
+                raise PaymentError("Refusing to send payment credential across redirect")
+            request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
+        if supplied_payment or request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION):
             return await self._inner.handle_async_request(request)
 
         accept_payment = _accept_payment(self._runtime.methods)
         if accept_payment and "accept-payment" not in request.headers:
             request.headers["Accept-Payment"] = accept_payment
 
-        current_origin = _origin(request.url)
-        original_origin = request.extensions.setdefault(
-            _ORIGINAL_ORIGIN_EXTENSION,
-            current_origin,
-        )
         replayable = not (
             isinstance(request.stream, httpx.AsyncByteStream)
             and not isinstance(request.stream, httpx.SyncByteStream)

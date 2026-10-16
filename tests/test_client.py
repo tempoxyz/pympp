@@ -1925,3 +1925,32 @@ async def test_failed_credential_creation_does_not_poison_request() -> None:
         await transport.handle_async_request(request)
     assert (await transport.handle_async_request(request)).status_code == 200
     assert method.create_credential.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["Authorization", "Payment-Authorization"])
+async def test_supplied_payment_keeps_redirect_guards(header: str) -> None:
+    method = MockMethod()
+    challenge = Challenge(
+        id="redirect", method="tempo", intent="charge", request={"amount": "1000"}
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(302, headers={"location": "https://other.example/paid"}),
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("other.example")}
+            ),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=PaymentTransport(methods=[method], inner=inner), follow_redirects=True
+    ) as client:
+        if header == "Payment-Authorization":
+            with pytest.raises(PaymentError, match="across redirect"):
+                await client.get("https://example.com", headers={header: "Payment existing"})
+            assert len(inner.requests) == 1
+        else:
+            response = await client.get("https://example.com", headers={header: "Payment existing"})
+            assert response.status_code == 402
+            assert header not in inner.requests[1].headers
+    method.create_credential.assert_not_called()

@@ -121,6 +121,16 @@ def pay(
     def decorator(
         handler: Callable[P, Awaitable[R]],
     ) -> Callable[P, Awaitable[R]]:
+        tool_name = tool
+        if tool_name is None:
+            module = getattr(handler, "__module__", None)
+            name = getattr(handler, "__qualname__", None)
+            if not module or not name:
+                raise ValueError("tool must be explicit for partials and callable instances")
+            tool_name = f"{module}.{name}"
+        if not tool_name:
+            raise ValueError("tool must be a non-empty stable identifier")
+
         @wraps(handler)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             meta: dict[str, Any] | None = kwargs.pop("_meta", None)  # type: ignore[arg-type]
@@ -136,7 +146,7 @@ def pay(
                 request=request_params,
                 realm=resolved_realm,
                 secret_key=resolved_secret_key,
-                tool=tool if tool is not None else f"{handler.__module__}.{handler.__qualname__}",
+                tool=tool_name,
                 method=method_name,
                 expires_in=expires_in,
                 description=description,

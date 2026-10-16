@@ -1675,3 +1675,23 @@ async def test_terminal_replay_does_not_issue_mcp_challenge() -> None:
     data = raised.value.to_jsonrpc_error()["data"]
     assert data["httpStatus"] == 403
     assert data["challenges"] == []
+
+
+def test_unnamed_decorated_handlers_require_explicit_identity() -> None:
+    from functools import partial
+    from unittest.mock import AsyncMock
+
+    async def handler(value: str, **kwargs):
+        return value
+
+    options: dict[str, Any] = {
+        "intent": AsyncMock(),
+        "request": {"amount": "1000"},
+        "realm": "shared",
+        "secret_key": MCP_TEST_SECRET,
+    }
+    with pytest.raises(ValueError, match="explicit"):
+        pay(**options)(partial(handler, "value"))
+    assert callable(pay(**options, tool="named")(partial(handler, "value")))
+    with pytest.raises(ValueError, match="non-empty"):
+        pay(**options, tool="")(handler)
