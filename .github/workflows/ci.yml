@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  # Install for each runner instead of resolving unused platform wheels.
+  UV_NO_SYNC: "true"
+
 permissions:
   contents: read
 
@@ -61,7 +65,11 @@ jobs:
           PYTHON_VERSION: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          uv venv --python "$PYTHON_VERSION"
+          uv pip install --group dev --all-extras -e .
 
       - name: Lint
         if: matrix.python-version == '3.12'
@@ -122,7 +130,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: |
+          uv venv --python 3.12
+          uv pip install --group dev --all-extras -e .
 
       - name: Start Tempo localnet and Redis
         run: docker compose up -d --wait
@@ -159,7 +169,9 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --dev
+        run: |
+          uv venv --python 3.12
+          uv pip install --group dev -e .
 
       - name: Build and validate package
         run: |
