@@ -51,6 +51,7 @@ For FastMCP-style frameworks, use the @pay decorator:
 
     @mcp.tool()
     @pay(
+        tool="expensive_tool",
         intent=intent,
         request={"amount": "1000", ...},
         realm="api.example.com",

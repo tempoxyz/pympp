@@ -151,6 +151,6 @@ Low-level MCP handlers must pass the receiving tool name to both `create_challen
 
 Partials and callable instances require an explicit `tool` identity at decoration time.
 
-`@pay(...)` derives identity from the handler's module and qualified name. Use `@pay(..., tool="premium_search")` when a handler has multiple tool aliases or a dynamically generated name, assigning a distinct identity to each paid tool.
+`@pay(..., tool="premium_search")` requires the registered MCP tool name. Assign a distinct, stable identity to each paid tool, including aliases and factory-generated handlers. Handler names are not inferred because wrappers and factories can share the same qualified name.
 
 HTTP and MCP clients preserve caller-supplied payment credentials. An additional payment-required response is returned to the caller without replacing them. HTTP redirects after a payment attempt also cannot initiate another payment; configured replacement-challenge retries remain bounded within the original request.

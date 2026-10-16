@@ -1617,7 +1617,7 @@ async def test_tool_scope_cannot_be_forged_or_omitted(tampering: str) -> None:
     intent.verify.assert_not_awaited()
 
 
-async def test_decorator_automatically_separates_tools() -> None:
+async def test_decorator_explicitly_separates_factory_tools() -> None:
     from unittest.mock import AsyncMock
 
     intent = AsyncMock(spec=["verify"])
@@ -1630,13 +1630,16 @@ async def test_decorator_automatically_separates_tools() -> None:
         "secret_key": MCP_TEST_SECRET,
     }
 
-    @pay(**options)
-    async def first(**kwargs):
-        return "first"
+    def factory(tool: str):
+        @pay(**options, tool=tool)
+        async def handler(**kwargs):
+            return tool
 
-    @pay(**options)
-    async def second(**kwargs):
-        return "second"
+        return handler
+
+    first = factory("first")
+    second = factory("second")
+    assert first.__qualname__ == second.__qualname__
 
     with pytest.raises(PaymentRequiredError) as issued:
         await first()
@@ -1690,7 +1693,7 @@ def test_unnamed_decorated_handlers_require_explicit_identity() -> None:
         "realm": "shared",
         "secret_key": MCP_TEST_SECRET,
     }
-    with pytest.raises(ValueError, match="explicit"):
+    with pytest.raises(TypeError, match="tool"):
         pay(**options)(partial(handler, "value"))
     assert callable(pay(**options, tool="named")(partial(handler, "value")))
     with pytest.raises(ValueError, match="non-empty"):
