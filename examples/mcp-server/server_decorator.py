@@ -105,6 +105,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
             )
 
         result = await verify_or_challenge(
+            tool=name,
+            secret_key=os.environ["MPP_SECRET_KEY"],
             meta=meta_dict,
             intent=intent,
             request=PAYMENT_REQUEST,

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
 _ORIGINAL_ORIGIN_EXTENSION = "mpp.original_origin"
+_PAYMENT_ATTEMPTED_EXTENSION = "mpp.payment_attempted"
 _CREDENTIAL_HEADERS = (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
 _MAX_BUFFERED_ERROR_BODY = 64 * 1024
 _ERROR_BODY_TIMEOUT = 2.0
@@ -278,15 +279,23 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         """Handle request, automatically retrying on 402 with credentials."""
+        current_origin = _origin(request.url)
+        original_origin = request.extensions.setdefault(_ORIGINAL_ORIGIN_EXTENSION, current_origin)
+        supplied_payment = any(
+            request.headers.get(header, "").lower().startswith("payment ")
+            for header in _CREDENTIAL_HEADERS
+        )
+        if supplied_payment:
+            if current_origin != original_origin:
+                raise PaymentError("Refusing to send payment credential across redirect")
+            request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
+        if supplied_payment or request.extensions.get(_PAYMENT_ATTEMPTED_EXTENSION):
+            return await self._inner.handle_async_request(request)
+
         accept_payment = _accept_payment(self._runtime.methods)
         if accept_payment and "accept-payment" not in request.headers:
             request.headers["Accept-Payment"] = accept_payment
 
-        current_origin = _origin(request.url)
-        original_origin = request.extensions.setdefault(
-            _ORIGINAL_ORIGIN_EXTENSION,
-            current_origin,
-        )
         replayable = not (
             isinstance(request.stream, httpx.AsyncByteStream)
             and not isinstance(request.stream, httpx.SyncByteStream)
@@ -428,6 +437,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     extensions=_paid_retry_extensions(request.extensions, self._paid_retry_timeout),
                 )
 
+                # HTTPX redirects from the original request, not the inner retry.
+                request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
+                retry_request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                 try:
                     payment_response = await self._inner.handle_async_request(retry_request)
                     response = payment_response

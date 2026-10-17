@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from mpp import Challenge, ChallengeEcho, Credential
 from mpp.errors import (
+    CredentialReplayedError,
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
@@ -640,7 +641,7 @@ class TestChargeIntent:
         intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
+        with pytest.raises(CredentialReplayedError, match="already been processed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -842,7 +843,7 @@ class TestChargeIntentRawHttp:
         intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="already been processed"):
+        with pytest.raises(CredentialReplayedError, match="already been processed"):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -945,3 +946,45 @@ class TestStripeFactory:
                 intents={"charge": ChargeIntent(secret_key="sk_test")},
                 secret_key="sk_test",  # type: ignore[call-arg]
             )
+
+
+@pytest.mark.parametrize("backend", ["sdk", "http"])
+@pytest.mark.parametrize("status", ["succeeded", "requires_action", "processing"])
+async def test_cached_stripe_success_never_issues_replacement_challenge(backend, status):
+    from mpp.server.verify import verify_or_challenge
+    from tests import TEST_SECRET
+
+    if backend == "sdk":
+        intent = ChargeIntent(
+            client=FakeStripeClient(
+                result=FakePaymentIntent(
+                    status=status,
+                    last_response=FakeLastResponse(headers={"idempotent-replayed": "true"}),
+                )
+            )
+        )
+    else:
+        http_client = AsyncMock(spec=httpx.AsyncClient)
+        http_client.post.return_value = httpx.Response(
+            200,
+            json={"id": "pi_settled", "status": status},
+            headers={"idempotent-replayed": "true"},
+            request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+        )
+        intent = ChargeIntent(secret_key="sk_test_raw", http_client=http_client)
+    options: dict[str, Any] = {
+        "intent": intent,
+        "request": SAMPLE_REQUEST,
+        "realm": "test",
+        "secret_key": TEST_SECRET,
+        "method": "stripe",
+    }
+    challenge = await verify_or_challenge(authorization=None, **options)
+    assert isinstance(challenge, Challenge)
+    credential = Credential(challenge=challenge.to_echo(), payload={"spt": "spt_test_123"})
+    from mpp.errors import PaymentError
+
+    with pytest.raises(PaymentError) as caught:
+        await verify_or_challenge(authorization=credential.to_authorization(), **options)
+    assert caught.value.status == (403 if status == "succeeded" else 402)
+    assert (caught.value.retry_challenge is None) == (status == "succeeded")

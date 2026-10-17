@@ -1861,3 +1861,96 @@ async def test_origin_policy_preserves_unmatched_402(header):
     async with httpx.AsyncClient(transport=transport) as client:
         assert await client.get("https://unapproved.test/") is response
     method.create_credential.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["Authorization", "Payment-Authorization"])
+async def test_caller_payment_is_not_replaced(header: str) -> None:
+    method = MockMethod()
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+    response = await transport.handle_async_request(
+        httpx.Request("GET", "https://example.com", headers={header: "Payment existing"})
+    )
+    assert response.status_code == 402
+    method.create_credential.assert_not_called()
+    assert inner.requests[0].headers[header] == "Payment existing"
+
+
+@pytest.mark.asyncio
+async def test_paid_redirect_does_not_start_another_payment() -> None:
+    method = MockMethod()
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    required = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+    inner = MockTransport(
+        [
+            httpx.Response(402, headers=required),
+            httpx.Response(302, headers={"location": "/next"}),
+            httpx.Response(402, headers=required),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=PaymentTransport(methods=[method], inner=inner), follow_redirects=True
+    ) as client:
+        response = await client.get("https://example.com/start")
+    assert response.status_code == 402
+    assert len(inner.requests) == 3
+    method.create_credential.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_credential_creation_does_not_poison_request() -> None:
+    method = MockMethod()
+    credential = method.create_credential.return_value
+    method.create_credential.side_effect = [RuntimeError("signer unavailable"), credential]
+    challenge = Challenge(id="retry", method="tempo", intent="charge", request={"amount": "1000"})
+    required = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+    inner = MockTransport(
+        [
+            httpx.Response(402, headers=required),
+            httpx.Response(402, headers=required),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+    request = httpx.Request("GET", "https://example.com")
+    with pytest.raises(RuntimeError, match="signer unavailable"):
+        await transport.handle_async_request(request)
+    assert (await transport.handle_async_request(request)).status_code == 200
+    assert method.create_credential.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("header", ["Authorization", "Payment-Authorization"])
+async def test_supplied_payment_keeps_redirect_guards(header: str) -> None:
+    method = MockMethod()
+    challenge = Challenge(
+        id="redirect", method="tempo", intent="charge", request={"amount": "1000"}
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(302, headers={"location": "https://other.example/paid"}),
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("other.example")}
+            ),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=PaymentTransport(methods=[method], inner=inner), follow_redirects=True
+    ) as client:
+        if header == "Payment-Authorization":
+            with pytest.raises(PaymentError, match="across redirect"):
+                await client.get("https://example.com", headers={header: "Payment existing"})
+            assert len(inner.requests) == 1
+        else:
+            response = await client.get("https://example.com", headers={header: "Payment existing"})
+            assert response.status_code == 402
+            assert header not in inner.requests[1].headers
+    method.create_credential.assert_not_called()

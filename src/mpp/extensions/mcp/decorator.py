@@ -13,6 +13,7 @@ For other MCP server implementations, use verify_or_challenge() directly:
 
     async def handle_tool(params: dict):
         result = await verify_or_challenge(
+            tool="expensive_tool",
             meta=params.get("_meta"),
             intent=intent,
             request={"amount": "1000"},
@@ -56,6 +57,7 @@ def pay(
     realm: str | None = None,
     secret_key: str | None = None,
     method: str | None = None,
+    tool: str,
     expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
     description: str | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
@@ -83,6 +85,8 @@ def pay(
             Auto-detected from environment if omitted.
         secret_key: Server secret for HMAC-bound challenge IDs.
             Auto-detected from MPP_SECRET_KEY env var if omitted.
+        tool: Explicit stable identity, unique to this paid tool within the realm.
+            Use the registered MCP tool name, including for generated handlers.
         method: Payment method name (defaults to "tempo").
         expires_in: Challenge validity duration (default: 5 minutes).
         description: Human-readable description of what the payment is for.
@@ -90,6 +94,7 @@ def pay(
     Example:
         @mcp.tool()
         @pay(
+            tool="expensive_tool",
             intent=ChargeIntent(),
             request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
         )
@@ -99,6 +104,7 @@ def pay(
         # With dynamic request params:
         @mcp.tool()
         @pay(
+            tool="dynamic_pricing",
             intent=ChargeIntent(),
             request=lambda query, **kw: {"amount": str(len(query) * 10), ...},
         )
@@ -110,6 +116,8 @@ def pay(
         PaymentVerificationError: When credential verification fails (-32043).
         MalformedCredentialError: When credential structure is invalid (-32602).
     """
+    if not isinstance(tool, str) or not tool.strip():
+        raise ValueError("tool must be a non-empty stable identifier")
     resolved_realm = realm if realm is not None else detect_realm()
     resolved_secret_key = secret_key if secret_key is not None else detect_secret_key()
     method_name = method or "tempo"
@@ -132,6 +140,7 @@ def pay(
                 request=request_params,
                 realm=resolved_realm,
                 secret_key=resolved_secret_key,
+                tool=tool,
                 method=method_name,
                 expires_in=expires_in,
                 description=description,

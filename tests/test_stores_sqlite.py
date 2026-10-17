@@ -138,3 +138,25 @@ class TestSQLiteStore:
         assert await store.get("a") == "1"
         assert await store.get("b") == "2"
         assert await store.get("c") == "3"
+
+
+async def test_existing_database_gets_expiry_index_without_losing_rows(tmp_path) -> None:
+    import aiosqlite
+
+    path = str(tmp_path / "existing.db")
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires_at REAL NOT NULL)"
+        )
+        await db.execute("INSERT INTO kv VALUES (?, ?, ?)", ("live", "value", time.time() + 3600))
+        await db.execute("INSERT INTO kv VALUES (?, ?, ?)", ("expired", "old", 1))
+        await db.commit()
+    async with await SQLiteStore.create(path) as store:
+        assert await store.get("live") == "value"
+        plan = await store._db.execute(
+            "EXPLAIN QUERY PLAN DELETE FROM kv WHERE expires_at <= ?", (time.time(),)
+        )
+        assert "idx_kv_expires_at" in str(await plan.fetchall())
+        await store.put("new", "value")
+        rows = await store._db.execute("SELECT key FROM kv ORDER BY key")
+        assert await rows.fetchall() == [("live",), ("new",)]

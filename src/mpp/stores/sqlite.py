@@ -64,6 +64,7 @@ class SQLiteStore:
             "  expires_at REAL NOT NULL"
             ")"
         )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires_at ON kv(expires_at)")
         await db.commit()
         return cls(db, ttl_seconds=ttl_seconds)
 
