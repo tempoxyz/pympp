@@ -5,7 +5,7 @@ Per draft-payment-transport-mcp-00:
 - -32043 PaymentVerificationError: Credential provided but verification failed
 - -32602 MalformedCredentialError: Credential structure invalid
 
-All payment errors include httpStatus: 402 in error.data.
+Payment-required errors include httpStatus: 402; terminal verification failures use 403.
 """
 
 from __future__ import annotations
@@ -98,11 +98,13 @@ class PaymentVerificationError(McpError):
         detail: str | None = None,
         details: dict[str, Any] | None = None,
         message: str = "Payment Verification Failed",
+        http_status: int = HTTP_STATUS_PAYMENT_REQUIRED,
     ) -> None:
         self.challenges = challenges
         self.reason = reason
         self.detail = detail
         self.details = details
+        self.http_status = http_status
         self.message = message
 
         error = ErrorData(
@@ -114,7 +116,7 @@ class PaymentVerificationError(McpError):
 
     def _error_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
+            "httpStatus": self.http_status,
             "challenges": [c.to_dict() for c in self.challenges],
         }
         failure: dict[str, Any] = {}

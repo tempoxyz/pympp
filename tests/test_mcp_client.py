@@ -682,3 +682,23 @@ class TestMcpToolResult:
         result = McpToolResult(result=FakeCallToolResult(), receipt=None)
 
         assert result.content[0]["text"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_caller_payment_is_not_replaced() -> None:
+    exceptions = pytest.importorskip("mcp.shared.exceptions")
+    types = pytest.importorskip("mcp.types")
+    error = exceptions.McpError(
+        types.ErrorData(
+            code=-32042, message="Payment Required", data={"challenges": [_make_challenge_dict()]}
+        )
+    )
+    session = AsyncMock()
+    session.call_tool.side_effect = error
+    method = FakeMethod()
+    method.create_credential = AsyncMock()
+    client = McpClient(session, methods=[method])
+    with pytest.raises(exceptions.McpError):
+        await client.call_tool("paid", meta={META_CREDENTIAL: {"existing": True}})
+    method.create_credential.assert_not_called()
+    session.call_tool.assert_awaited_once()

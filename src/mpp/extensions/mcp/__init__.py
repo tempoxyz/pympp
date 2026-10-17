@@ -16,6 +16,7 @@ For any MCP server, use verify_or_challenge() directly:
 
     async def handle_tool_call(params: dict):
         result = await verify_or_challenge(
+            tool="expensive_tool",
             meta=params.get("_meta"),
             intent=intent,
             request={"amount": "1000", ...},
@@ -50,6 +51,7 @@ For FastMCP-style frameworks, use the @pay decorator:
 
     @mcp.tool()
     @pay(
+        tool="expensive_tool",
         intent=intent,
         request={"amount": "1000", ...},
         realm="api.example.com",
