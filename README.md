@@ -144,3 +144,20 @@ Use method-level amount, currency, and recipient limits as well. A challenge rea
 is a protection-space name, not an authenticated origin. This policy prevents
 payments to unapproved origins; it cannot identify a relayed challenge served by
 an origin you have already approved.
+
+### External fee-payer services
+
+An external `feePayerUrl` signs sponsored transactions through `eth_signRawTransaction`.
+Treat the returned transaction as a spending capability: callers can broadcast it
+without passing through pympp. Before returning a signature, the service must
+validate the complete transaction and caller authorization, simulate execution,
+and enforce gas-price, gas-limit, per-caller, and aggregate spending budgets.
+Simulation is a point-in-time check; state can change before inclusion, so it does
+not replace hard spending limits.
+
+These requirements apply to any external sponsor. pympp validates the expected
+payment before requesting sponsorship, but its checks cannot protect a sponsor
+that also accepts direct signing requests. Local sponsorship uses pympp's local
+simulation path; externally signed transactions rely on the external service's
+pre-sign controls. Adding a simulation after receiving the signature would not
+prevent a caller from broadcasting that same transaction elsewhere.

@@ -20,7 +20,14 @@ class MethodDetails(BaseModel):
 
     chainId: int = 4217
     feePayer: bool = False
-    feePayerUrl: str | None = None
+    feePayerUrl: str | None = Field(
+        default=None,
+        description=(
+            "External signing service. It must authorize, validate, simulate, and enforce "
+            "gas and spending limits before returning a broadcastable signature; "
+            "pympp does not enforce the external sponsor's policy."
+        ),
+    )
     splits: list[Split] | None = None
 
 

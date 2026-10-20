@@ -1373,8 +1373,12 @@ class ChargeIntent:
         Pre-validates the transaction contains the expected TIP-20 transfer call
         before broadcasting. For sponsored transactions (methodDetails.feePayer
         = True), co-signs locally if a fee payer account is configured, otherwise
-        forwards to an external fee payer service. For regular transactions,
-        submits directly.
+        forwards to an external fee payer service. The external service must
+        authorize the caller, validate and simulate the complete transaction,
+        and enforce gas and spending limits before releasing its signature.
+        A returned signature is broadcastable independently of this SDK, so
+        simulation here cannot enforce an external sponsor's spending policy.
+        For regular transactions, submits directly.
         """
         self._validate_transaction_payload(payload.signature, request)
         sender = self._transaction_payer(payload.signature, source, request.methodDetails.chainId)
