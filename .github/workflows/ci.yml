@@ -117,7 +117,7 @@ jobs:
           if [[ "$PYTHON_VERSION" == "3.12" ]]; then
             cov_reports+=(--cov-report=xml:coverage.xml --cov-report=html:htmlcov)
           fi
-          uv run pytest -v -n auto --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
+          uv run pytest -v -n logical --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
 
       - name: Upload coverage artifacts
         if: always() && matrix.python-version == '3.12'
@@ -145,7 +145,7 @@ jobs:
       # Start the containers in the background so pulling and booting them
       # overlaps the setup below; a later step waits for `up --wait` to finish.
       - name: Start Tempo localnet and Redis
-        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") &
+        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") > /dev/null 2>&1 &
 
       - name: Install uv
         uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
