@@ -13,6 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Aegis blocks packages published within Socket's cooldown window. The
+  # project does not commit a lockfile, so resolve as of a week ago to keep a
+  # fresh upstream release from failing every job.
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   ci-gate:
     name: CI Gate
