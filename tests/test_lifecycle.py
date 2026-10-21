@@ -434,6 +434,8 @@ async def test_mpp_rejects_malformed_serialized_credential(value: str) -> None:
         (datetime.now() + timedelta(hours=1)).isoformat(),  # naive: no timezone
         (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
     ],
+    # Stable IDs: timestamp IDs differ between pytest-xdist workers' collections.
+    ids=["missing", "unparseable", "naive", "expired"],
 )
 async def test_mpp_rejects_missing_or_invalid_expiry(expires: str | None) -> None:
     challenge = Challenge.create(

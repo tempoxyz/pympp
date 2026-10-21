@@ -23,7 +23,7 @@ jobs:
   ci-gate:
     name: CI Gate
     if: always()
-    needs: [test, integration, package, install-smoke]
+    needs: [lint, test, integration, package, install-smoke]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -37,6 +37,45 @@ jobs:
             echo "One or more required jobs failed or were cancelled"
             exit 1
           fi
+
+  # Pyright took ~10s inside the 3.12 test job, the longest one; on its own
+  # it runs alongside the tests instead.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Add venv to PATH
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Type check
+        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          version: PATH
 
   test:
     runs-on: ubuntu-latest
@@ -69,22 +108,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Lint
-        if: matrix.python-version == '3.12'
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
-
-      - name: Add venv to PATH
-        if: matrix.python-version == '3.12'
-        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-
-      - name: Type check
-        if: matrix.python-version == '3.12'
-        uses: tempoxyz/gh-actions/vendor/jakebailey/pyright-action@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
-        with:
-          version: PATH
-
+      # pytest-xdist spreads the suite over the runner's cores (~20s -> ~10s).
       - name: Run tests
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
@@ -93,7 +117,7 @@ jobs:
           if [[ "$PYTHON_VERSION" == "3.12" ]]; then
             cov_reports+=(--cov-report=xml:coverage.xml --cov-report=html:htmlcov)
           fi
-          uv run pytest -v --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
+          uv run pytest -v -n auto --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
 
       - name: Upload coverage artifacts
         if: always() && matrix.python-version == '3.12'
@@ -117,6 +141,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      # Pull while uv and Python are set up; `docker compose up` reuses the images.
+      - name: Pull Tempo localnet and Redis images
+        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
 
       - name: Install uv
         uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
@@ -167,9 +195,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
+      # `uv build` uses the same hatchling backend as `python -m build` but
+      # creates its isolated build environment with uv instead of pip.
       - name: Build and validate package
         run: |
-          uv run python -m build
+          uv build
           uv run twine check --strict dist/*
 
       - name: Upload package artifacts
