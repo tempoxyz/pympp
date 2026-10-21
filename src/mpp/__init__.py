@@ -336,6 +336,7 @@ class Challenge:
             digest=self.digest,
             opaque=opaque_b64,
             header=self.header,
+            description=self.description,
         )
 
 
@@ -365,6 +366,7 @@ class ChallengeEcho:
     digest: str | None = None
     opaque: str | None = None
     header: str | None = None
+    description: str | None = None
 
     def __post_init__(self) -> None:
         advertised = advertised_credential_header(self.header)
