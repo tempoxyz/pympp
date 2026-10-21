@@ -203,6 +203,9 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
+          # Each profile installs different extras. With a shared key the first
+          # job to finish saved its cache and the heavier profiles ran cold.
+          cache-suffix: smoke-${{ matrix.profile }}
 
       - name: Set up Python
         run: uv python install 3.12
