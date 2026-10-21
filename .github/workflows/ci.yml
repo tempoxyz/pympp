@@ -108,7 +108,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      # pytest-xdist spreads the suite over the runner's cores (~20s -> ~10s).
       - name: Run tests
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
@@ -117,7 +116,7 @@ jobs:
           if [[ "$PYTHON_VERSION" == "3.12" ]]; then
             cov_reports+=(--cov-report=xml:coverage.xml --cov-report=html:htmlcov)
           fi
-          uv run pytest -v -n logical --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
+          uv run pytest -v --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
 
       - name: Upload coverage artifacts
         if: always() && matrix.python-version == '3.12'
