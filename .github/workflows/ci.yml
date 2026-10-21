@@ -13,6 +13,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Aegis blocks packages published within Socket's cooldown window. The
+  # project does not commit a lockfile, so resolve as of a week ago to keep a
+  # fresh upstream release from failing every job.
+  UV_EXCLUDE_NEWER: "7 days"
+
 jobs:
   ci-gate:
     name: CI Gate
@@ -173,8 +179,9 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Builds its own wheel rather than waiting on the package job's artifact,
+  # so it runs alongside the other jobs.
   install-smoke:
-    needs: package
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -196,15 +203,15 @@ jobs:
         with:
           enable-cache: true
           cache-dependency-glob: "pyproject.toml"
+          # Each profile installs different extras. With a shared key the first
+          # job to finish saved its cache and the heavier profiles ran cold.
+          cache-suffix: smoke-${{ matrix.profile }}
 
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Download package artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: package-dist
-          path: dist
+      - name: Build wheel
+        run: uv build --wheel --out-dir dist
 
       - name: Create clean virtualenv
         run: uv venv .smoke-venv --python 3.12
