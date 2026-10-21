@@ -142,9 +142,10 @@ jobs:
         with:
           persist-credentials: false
 
-      # Pull while uv and Python are set up; `docker compose up` reuses the images.
-      - name: Pull Tempo localnet and Redis images
-        run: docker compose pull --quiet > "$RUNNER_TEMP/compose-pull.log" 2>&1 &
+      # Start the containers in the background so pulling and booting them
+      # overlaps the setup below; a later step waits for `up --wait` to finish.
+      - name: Start Tempo localnet and Redis
+        run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") &
 
       - name: Install uv
         uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
@@ -158,8 +159,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Start Tempo localnet and Redis
-        run: docker compose up -d --wait
+      - name: Wait for Tempo localnet and Redis
+        run: |
+          timeout 180 bash -c 'until [[ -s "$RUNNER_TEMP/compose-up.status" ]]; do sleep 0.5; done' || true
+          cat "$RUNNER_TEMP/compose-up.log"
+          [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
       - name: Run integration tests
         run: uv run pytest -m "integration or redis" -v
