@@ -966,6 +966,7 @@ class TestPay:
                 "route": "/paid/{id}",
                 "resource": "/paid/one",
                 "query": "view=full",
+                "http_method": "GET",
             }
 
             credential = Credential(

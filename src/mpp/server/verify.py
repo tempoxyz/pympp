@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -198,7 +199,7 @@ async def verify_or_challenge(
             credential,
         )
 
-    if echo_opaque != meta:
+    if _application_meta(echo_opaque) != (meta or None):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -331,6 +332,9 @@ def _create_challenge(
         expires = expires_dt.isoformat().replace("+00:00", "Z")
 
     digest = _body_digest.compute(body) if body is not None else None
+    if meta is not None and "_mpp_nonce" in meta:
+        raise ValueError("_mpp_nonce is reserved for challenge issuance")
+    issued_meta = {**(meta or {}), "_mpp_nonce": secrets.token_hex(32)}
 
     return Challenge.create(
         secret_key=secret_key,
@@ -341,7 +345,7 @@ def _create_challenge(
         expires=expires,
         digest=digest,
         description=description,
-        meta=meta,
+        meta=issued_meta,
         header=header,
     )
 
@@ -391,3 +395,10 @@ def _extract_payment_scheme(header: str) -> str | None:
         if scheme.lower().startswith("payment "):
             return scheme
     return None
+
+
+def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
+    """Remove the HMAC-authenticated issuance nonce for route comparison."""
+    if meta is None or "_mpp_nonce" not in meta:
+        return meta
+    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None

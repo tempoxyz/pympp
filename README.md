@@ -161,3 +161,27 @@ that also accepts direct signing requests. Local sponsorship uses pympp's local
 simulation path; externally signed transactions rely on the external service's
 pre-sign controls. Adding a simulation after receiving the signature would not
 prevent a caller from broadcasting that same transaction elsewhere.
+
+### Payment request context
+
+Direct and composed payment gates bind `meta` into their signed challenges:
+
+```python
+result = await payment.charge(
+    authorization, "1.00", meta={"account": authenticated_account_id}
+)
+```
+
+Derive `authenticated_account_id` from trusted session authentication, not an
+unverified request field. Framework decorators also bind the HTTP method and
+actual route, path, and query, including when custom `_mppx_scope` is provided.
+Custom request objects should expose their HTTP `method`.
+
+Server issuance adds random opaque `_mpp_nonce` metadata; this key is reserved.
+Nonces prevent identical challenges across callers even with fixed expirations,
+but do not authenticate a presenter who stole the entire credential. Low-level
+`Challenge.create()` remains deterministic; custom issuance must provide its own
+unique authenticated context. Previously issued challenges remain valid until
+expiry, and HTTP credentials lacking method scope must obtain a new challenge
+after upgrading. Keep credentials confidential and share an atomic replay store
+across workers and replicas.

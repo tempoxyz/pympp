@@ -312,7 +312,10 @@ async def test_meta_disambiguates_wire_identical_cross_instance_offers() -> None
 
     unpaid = await configured.verify(None)
     assert isinstance(unpaid, ComposedChallenges)
-    assert [challenge.opaque for challenge in unpaid.challenges] == [
+    assert [
+        {k: v for k, v in (challenge.opaque or {}).items() if k != "_mpp_nonce"}
+        for challenge in unpaid.challenges
+    ] == [
         {"plan": "first"},
         {"plan": "second"},
     ]

@@ -126,14 +126,22 @@ def framework_scope(request: Any) -> dict[str, str]:
         if isinstance(query, str) and query:
             scope.setdefault("query", query)
 
+    method = getattr(request, "method", None)
+    if not isinstance(method, str) and isinstance(raw_scope, dict):
+        method = raw_scope.get("method")
+    if isinstance(method, str) and method:
+        scope["http_method"] = method.upper()
     return scope
 
 
 def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
     """Return request params with automatic framework scope when available."""
-    if "_mppx_scope" in request_params:
-        return request_params
     scope = framework_scope(request_obj)
+    configured = request_params.get("_mppx_scope")
+    if configured is not None:
+        if not isinstance(configured, dict):
+            raise ValueError("_mppx_scope must be a mapping")
+        scope = {**configured, **scope}
     if not scope:
         return request_params
     return {**request_params, "_mppx_scope": scope}
