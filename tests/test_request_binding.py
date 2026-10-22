@@ -217,3 +217,40 @@ async def test_staged_rollout_switch_applies_to_direct_and_composed():
         Credential(challenge=current.challenges[0].to_echo(), payload={}).to_authorization()
     )
     assert isinstance(result, tuple)
+
+
+@pytest.mark.parametrize("key", ["route", "resource", "query", "http_method", "custom"])
+def test_custom_business_scope_cannot_be_overwritten(key):
+    calls = []
+    account = {"value": "invoice:42"}
+
+    @intent(name="charge")
+    async def paid(credential, request):
+        calls.append(credential)
+        return Receipt.success("paid")
+
+    @pay(
+        intent=paid,
+        request=lambda request: {
+            "amount": "100",
+            "_mppx_scope": {key: account["value"]},
+        },
+        realm="testserver",
+        secret_key="secret",
+    )
+    async def handler(request, credential, receipt):
+        return JSONResponse({"paid": True})
+
+    app = Starlette(routes=[Route("/paid", handler)])
+    with TestClient(app) as client:
+        challenge = Challenge.from_www_authenticate(
+            client.get("/paid?item=one").headers["WWW-Authenticate"]
+        )
+        credential = Credential(challenge=challenge.to_echo(), payload={})
+        headers = {"Authorization": credential.to_authorization()}
+        account["value"] = "invoice:43"
+        assert client.get("/paid?item=one", headers=headers).status_code == 402
+        assert not calls
+        account["value"] = "invoice:42"
+        assert client.get("/paid?item=one", headers=headers).status_code == 200
+        assert len(calls) == 1

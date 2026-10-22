@@ -139,9 +139,7 @@ def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> di
     scope = framework_scope(request_obj)
     configured = request_params.get("_mppx_scope")
     if configured is not None:
-        if not isinstance(configured, dict):
-            configured = {"custom": configured}
-        scope = {**configured, **scope}
+        scope = {**scope, "custom": configured}
     if not scope:
         return request_params
     return {**request_params, "_mppx_scope": scope}
