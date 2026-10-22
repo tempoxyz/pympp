@@ -43,6 +43,7 @@ from mpp.server.intent import broadcast_credential as broadcast_intent_credentia
 from mpp.server.intent import validate_credential as validate_intent_credential
 from mpp.server.method import _SupportsPaymentSuccess, prepare_intent, transform_request
 from mpp.server.verify import (
+    _application_meta,
     _authenticate_echo,
     _body_digest_error,
     _challenge_from_echo,
@@ -115,6 +116,7 @@ class Mpp:
         defaults: dict[str, Any] | None = None,
         store: Store | None = None,
         requires_auth: bool = False,
+        unique_challenges: bool = True,
     ) -> None:
         """Initialize the payment handler.
 
@@ -127,6 +129,8 @@ class Mpp:
             store: Optional key-value store for replay protection.
                 When provided, automatically wired into intents that
                 accept a ``store`` (e.g., ``ChargeIntent``).
+            unique_challenges: Disable only while rolling out nonce-aware verification
+                to all replicas; enable afterward to prevent fixed-expiry collisions.
             requires_auth: When True, challenges advertise
                 ``header="Payment-Authorization"`` so ``Authorization`` remains
                 available for application authentication.
@@ -136,6 +140,7 @@ class Mpp:
         self.realm = realm
         self.secret_key = secret_key
         self.defaults = defaults or {}
+        self.unique_challenges = unique_challenges
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
         self._compose_implicit_methods = False
@@ -236,7 +241,7 @@ class Mpp:
         if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
             expected_meta = None if meta is _CONTEXT_UNSET else meta
             expected_body = None if body is _CONTEXT_UNSET else body
-            if echoed_opaque != expected_meta:
+            if _application_meta(echoed_opaque) != (expected_meta or None):
                 raise InvalidChallengeError(echo.id, "credential opaque does not match")
             if digest_error := _body_digest_error(echo.digest, expected_body):
                 raise InvalidChallengeError(echo.id, digest_error)
@@ -419,6 +424,7 @@ class Mpp:
         store: Store | None = None,
         *,
         requires_auth: bool = False,
+        unique_challenges: bool = True,
     ) -> Mpp: ...
 
     @classmethod
@@ -431,6 +437,7 @@ class Mpp:
         secret_key: str | None = None,
         store: Store | None = None,
         requires_auth: bool = False,
+        unique_challenges: bool = True,
     ) -> Mpp: ...
 
     @classmethod
@@ -443,6 +450,7 @@ class Mpp:
         *,
         methods: Sequence[Method] | None = None,
         requires_auth: bool = False,
+        unique_challenges: bool = True,
     ) -> Mpp:
         """Create an Mpp instance with smart defaults.
 
@@ -453,6 +461,7 @@ class Mpp:
             secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
             store: Optional key-value store for replay protection.
                 Automatically wired into intents that accept a store.
+            unique_challenges: Disable only for a staged verifier-first rollout.
             requires_auth: Uses ``Payment-Authorization`` for Payment credentials
                 so ``Authorization`` remains available for application
                 authentication.
@@ -476,6 +485,7 @@ class Mpp:
             secret_key=resolved_secret_key,
             store=store,
             requires_auth=requires_auth,
+            unique_challenges=unique_challenges,
         )
         server._compose_implicit_methods = methods is not None
         if methods is not None:
@@ -598,6 +608,7 @@ class Mpp:
             body=body,
             events=self._events,
             header=self.credential_header,
+            unique_challenges=self.unique_challenges,
         )
 
     def pay(
@@ -701,6 +712,7 @@ class Mpp:
                     body=await resolve_body_param(body, _request_obj),
                     events=self._events,
                     header=self.credential_header,
+                    unique_challenges=self.unique_challenges,
                 )
 
             return wrap_payment_handler(

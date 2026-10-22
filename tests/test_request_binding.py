@@ -86,7 +86,8 @@ async def test_fixed_expiry_nonce(meta):
     )
 
 
-def test_http_verbs_cannot_share_credential():
+@pytest.mark.parametrize("configured_scope", [{"custom": "scope"}, "scope"])
+def test_http_verbs_cannot_share_credential(configured_scope):
     calls = []
 
     @intent(name="charge")
@@ -96,7 +97,7 @@ def test_http_verbs_cannot_share_credential():
 
     @pay(
         intent=paid,
-        request={"amount": "100", "_mppx_scope": {"custom": "scope"}},
+        request={"amount": "100", "_mppx_scope": configured_scope},
         realm="testserver",
         secret_key="secret",
     )
@@ -112,3 +113,107 @@ def test_http_verbs_cannot_share_credential():
         assert not calls
         assert client.get("/paid", headers=headers).status_code == 200
         assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_nonce_bound_lifecycle_and_legacy_empty_metadata():
+    from tests import make_bound_credential
+    from tests.test_lifecycle import VerifiableCharge, _server
+
+    payment = _server(VerifiableCharge())
+    request = {"amount": "1000"}
+    for unique in [False, True]:
+        challenge = await verify_or_challenge(
+            authorization=None,
+            intent=payment.method.intents["charge"],
+            request=request,
+            realm=payment.realm,
+            secret_key=payment.secret_key,
+            meta={},
+            unique_challenges=unique,
+        )
+        assert isinstance(challenge, Challenge)
+        credential = Credential(challenge=challenge.to_echo(), payload={})
+        await payment.validate_credential(credential, request=request, meta={})
+        await payment.broadcast_credential(credential, request=request, meta={})
+    legacy = make_bound_credential(
+        payload={}, request=request, realm=payment.realm, secret_key=payment.secret_key, meta={}
+    )
+    result = await verify_or_challenge(
+        authorization=legacy.to_authorization(),
+        intent=payment.method.intents["charge"],
+        request=request,
+        realm=payment.realm,
+        secret_key=payment.secret_key,
+        meta={},
+    )
+    assert isinstance(result, tuple)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opaque", [1, True, "text", [1, 2]])
+async def test_composed_malformed_opaque_is_rejected(opaque):
+    from mpp import _b64url_encode
+    from mpp.server import Mpp
+    from mpp.server.compose import ComposedChallenges
+    from tests.test_compose import MockMethod
+
+    method = MockMethod("shared")
+    payment = Mpp.create(method=method, realm="example.com", secret_key="secret")
+    gate = payment.compose((method, {"amount": "1.00"}))
+    initial = await gate.verify(None)
+    assert isinstance(initial, ComposedChallenges)
+    echo = replace(initial.challenges[0].to_echo(), opaque=_b64url_encode(json.dumps(opaque)))
+    result = await gate.verify(Credential(challenge=echo, payload={}).to_authorization())
+    assert isinstance(result, ComposedChallenges)
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_reuses_authenticated_challenge():
+    from mpp.errors import VerificationFailedError
+
+    @intent(name="charge")
+    async def paid(credential, request):
+        raise VerificationFailedError("receipt not visible")
+
+    options = {
+        "intent": paid,
+        "request": {"amount": "100"},
+        "realm": "example.com",
+        "secret_key": "secret",
+    }
+    challenge = await verify_or_challenge(authorization=None, **options)
+    assert isinstance(challenge, Challenge)
+    credential = Credential(challenge=challenge.to_echo(), payload={})
+    with pytest.raises(VerificationFailedError) as error:
+        await verify_or_challenge(authorization=credential.to_authorization(), **options)
+    assert error.value.retry_challenge is not None
+    assert error.value.retry_challenge.id == challenge.id
+
+
+@pytest.mark.asyncio
+async def test_staged_rollout_switch_applies_to_direct_and_composed():
+    from mpp.server import Mpp
+    from mpp.server.compose import ComposedChallenges
+    from tests.test_compose import MockMethod
+
+    method = MockMethod("shared")
+    payment = Mpp.create(
+        method=method, realm="example.com", secret_key="secret", unique_challenges=False
+    )
+    direct = await payment.charge(None, "1.00")
+    assert isinstance(direct, Challenge)
+    assert not direct.opaque
+    gate = payment.compose((method, {"amount": "1.00"}))
+    initial = await gate.verify(None)
+    assert isinstance(initial, ComposedChallenges)
+    assert not initial.challenges[0].opaque
+    payment.unique_challenges = True
+    current = await gate.verify(None)
+    assert isinstance(current, ComposedChallenges)
+    assert current.challenges[0].opaque
+    payment.unique_challenges = False
+    result = await gate.verify(
+        Credential(challenge=current.challenges[0].to_echo(), payload={}).to_authorization()
+    )
+    assert isinstance(result, tuple)

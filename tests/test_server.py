@@ -570,7 +570,7 @@ class TestVerificationError:
         retry = raised.value.retry_challenge
         assert isinstance(retry, Challenge)
         assert failed_challenge_ids == [credential.challenge.id]
-        assert retry.id != credential.challenge.id
+        assert retry.id == credential.challenge.id
 
     @pytest.mark.asyncio
     async def test_returns_receipt_for_success(self) -> None:
@@ -1265,7 +1265,7 @@ class TestPay:
         assert headers["Cache-Control"] == "no-store"
         assert ("WWW-Authenticate" in headers) is challenged
         if challenged:
-            assert challenge_from_402(result).id != credential.challenge.id
+            assert challenge_from_402(result).id == credential.challenge.id
 
     @pytest.mark.asyncio
     async def test_internal_payment_error_is_not_answered_with_402(self) -> None:

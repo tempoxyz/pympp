@@ -140,7 +140,7 @@ def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> di
     configured = request_params.get("_mppx_scope")
     if configured is not None:
         if not isinstance(configured, dict):
-            raise ValueError("_mppx_scope must be a mapping")
+            configured = {"custom": configured}
         scope = {**configured, **scope}
     if not scope:
         return request_params
@@ -247,6 +247,7 @@ def wrap_payment_handler(
         verify_fn: Called with ``(authorization, request_obj)``; must return
             a ``Challenge``, composed challenges, or ``(Credential, Receipt)`` tuple.
         realm_fn: Returns the realm string for challenge responses.
+        unique_challenges: Disable only during a verifier-first rolling upgrade.
         requires_auth: When True, read the Payment credential from
             ``Payment-Authorization`` instead of ``Authorization``.
     """
@@ -311,6 +312,7 @@ def pay(
     body: BodyParamsType = None,
     events: EventDispatcher | None = None,
     requires_auth: bool = False,
+    unique_challenges: bool = True,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
     Callable[[Any], Awaitable[R | Any]],
@@ -339,6 +341,7 @@ def pay(
         body: Optional static body bytes/string/dict or callback receiving the
             request object. The resolved value is bound into issued challenges
             via digest and used to verify paid retries.
+        unique_challenges: Disable only during a verifier-first rolling upgrade.
         requires_auth: When True, challenges advertise
             ``header="Payment-Authorization"`` and credentials are read from
             that header so ``Authorization`` can carry application auth.
@@ -379,6 +382,7 @@ def pay(
                 body=await resolve_body_param(body, request_obj),
                 events=events,
                 header=PAYMENT_AUTHORIZATION_HEADER if requires_auth else None,
+                unique_challenges=unique_challenges,
             )
 
         return wrap_payment_handler(

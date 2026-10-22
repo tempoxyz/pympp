@@ -167,9 +167,7 @@ prevent a caller from broadcasting that same transaction elsewhere.
 Direct and composed payment gates bind `meta` into their signed challenges:
 
 ```python
-result = await payment.charge(
-    authorization, "1.00", meta={"account": authenticated_account_id}
-)
+result = await payment.charge(authorization, "1.00", meta={"account": authenticated_account_id})
 ```
 
 Derive `authenticated_account_id` from trusted session authentication, not an
@@ -185,3 +183,11 @@ unique authenticated context. Previously issued challenges remain valid until
 expiry, and HTTP credentials lacking method scope must obtain a new challenge
 after upgrading. Keep credentials confidential and share an atomic replay store
 across workers and replicas.
+
+For rolling upgrades, first deploy all servers with `unique_challenges=False`
+(`Mpp.create`, standalone `pay`, or `verify_or_challenge`), then enable the default
+`True` after every replica understands nonces. The temporary compatibility phase
+retains the fixed-expiry collision risk. Do not mix nonce-issuing replicas with
+old verifiers: a hash payment may settle before the old replica rejects its
+opaque metadata. Alternatively perform an atomic rollout or route retries to
+the issuing version. Shared application authentication is still required.

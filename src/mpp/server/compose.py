@@ -125,6 +125,7 @@ class _PreparedOffer:
             body=self.body,
             events=server._events,
             header=server.credential_header,
+            unique_challenges=server.unique_challenges,
         )
 
 
@@ -251,6 +252,8 @@ class ComposedHandler:
         except ParseError:
             return None
 
+        if echoed_meta is not None and not isinstance(echoed_meta, dict):
+            return None
         request_matches = [offer for offer in offers if offer.request == echoed_request]
         digest = credential.challenge.digest
         binding_matches = [
