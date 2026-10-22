@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,7 @@ from mpp._units import transform_units
 from mpp.errors import (
     InternalPaymentError,
     InvalidChallengeError,
+    InvalidPayloadError,
     MalformedCredentialError,
     PaymentError,
     PaymentExpiredError,
@@ -48,8 +50,11 @@ async def verify_or_challenge(
     body: str | bytes | dict[str, Any] | None = None,
     events: EventDispatcher | None = None,
     header: str | None = None,
+    unique_challenges: bool = True,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
+
+    Set ``unique_challenges=False`` only for a verifier-first rolling upgrade.
 
     This is the core server-side function for handling payment authentication.
     It checks for an Authorization header, verifies the credential if present,
@@ -123,6 +128,7 @@ async def verify_or_challenge(
             expires,
             body,
             header,
+            unique_challenges,
         )
         if events is not None:
             await events.emit(
@@ -198,7 +204,7 @@ async def verify_or_challenge(
             credential,
         )
 
-    if echo_opaque != meta:
+    if _application_meta(echo_opaque) != (meta or None):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -238,7 +244,11 @@ async def verify_or_challenge(
         # 403 means the payment was valid but cannot pay for this request, so a
         # fresh challenge would only invite the client to pay again.
         if error.status != 403:
-            error.retry_challenge = await new_challenge()
+            error.retry_challenge = (
+                await new_challenge()
+                if isinstance(error, InvalidPayloadError)
+                else submitted_challenge
+            )
         await emit_failure(error, submitted_challenge, credential)
         raise
     except Exception as error:
@@ -282,6 +292,8 @@ def _authenticate_echo(
     try:
         echo_request = _b64_decode(echo.request) if echo.request else {}
         echo_opaque = _b64_decode(echo.opaque) if echo.opaque else None
+        if echo_opaque is not None and not isinstance(echo_opaque, dict):
+            raise MalformedCredentialError("Challenge opaque must be an object")
     except ParseError as error:
         raise MalformedCredentialError(str(error)) from error
 
@@ -315,6 +327,7 @@ def _create_challenge(
     expires: str | None = None,
     body: str | bytes | dict[str, Any] | None = None,
     header: str | None = None,
+    unique_challenges: bool = True,
 ) -> Challenge:
     """Create a new payment challenge with HMAC-bound ID.
 
@@ -331,6 +344,11 @@ def _create_challenge(
         expires = expires_dt.isoformat().replace("+00:00", "Z")
 
     digest = _body_digest.compute(body) if body is not None else None
+    if meta is not None and "_mpp_nonce" in meta:
+        raise ValueError("_mpp_nonce is reserved for challenge issuance")
+    issued_meta = (
+        {**(meta or {}), "_mpp_nonce": secrets.token_hex(32)} if unique_challenges else meta
+    )
 
     return Challenge.create(
         secret_key=secret_key,
@@ -341,7 +359,7 @@ def _create_challenge(
         expires=expires,
         digest=digest,
         description=description,
-        meta=meta,
+        meta=issued_meta,
         header=header,
     )
 
@@ -391,3 +409,10 @@ def _extract_payment_scheme(header: str) -> str | None:
         if scheme.lower().startswith("payment "):
             return scheme
     return None
+
+
+def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
+    """Remove the HMAC-authenticated issuance nonce for route comparison."""
+    if not isinstance(meta, dict):
+        return None
+    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None

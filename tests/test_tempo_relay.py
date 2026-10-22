@@ -256,7 +256,7 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
     retry = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
     assert status == 402
     assert headers["Content-Type"] == "application/problem+json"
-    assert retry.id != challenge.id
+    assert retry.id == challenge.id
     assert body["type"].endswith("/verification-failed")
     assert body["status"] == 402
     assert body["challengeId"] == retry.id

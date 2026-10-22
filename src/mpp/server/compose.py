@@ -15,7 +15,12 @@ from mpp._units import parse_units
 from mpp.errors import InvalidChallengeError, MalformedCredentialError
 from mpp.server.decorator import BodyParamsType, resolve_body_param, wrap_payment_handler
 from mpp.server.method import Method, _SupportsCanOffer, prepare_intent
-from mpp.server.verify import _authenticate_echo, _extract_payment_scheme, verify_or_challenge
+from mpp.server.verify import (
+    _application_meta,
+    _authenticate_echo,
+    _extract_payment_scheme,
+    verify_or_challenge,
+)
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent, VerifiableIntent
@@ -120,6 +125,7 @@ class _PreparedOffer:
             body=self.body,
             events=server._events,
             header=server.credential_header,
+            unique_challenges=server.unique_challenges,
         )
 
 
@@ -246,13 +252,15 @@ class ComposedHandler:
         except ParseError:
             return None
 
+        if echoed_meta is not None and not isinstance(echoed_meta, dict):
+            return None
         request_matches = [offer for offer in offers if offer.request == echoed_request]
         digest = credential.challenge.digest
         binding_matches = [
             offer
             for offer in request_matches
             if digest == (_body_digest.compute(offer.body) if offer.body is not None else None)
-            and echoed_meta == offer.offer.options.get("meta")
+            and _application_meta(echoed_meta) == (offer.offer.options.get("meta") or None)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:

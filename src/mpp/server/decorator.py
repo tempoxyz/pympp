@@ -126,14 +126,20 @@ def framework_scope(request: Any) -> dict[str, str]:
         if isinstance(query, str) and query:
             scope.setdefault("query", query)
 
+    method = getattr(request, "method", None)
+    if not isinstance(method, str) and isinstance(raw_scope, dict):
+        method = raw_scope.get("method")
+    if isinstance(method, str) and method:
+        scope["http_method"] = method.upper()
     return scope
 
 
 def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
     """Return request params with automatic framework scope when available."""
-    if "_mppx_scope" in request_params:
-        return request_params
     scope = framework_scope(request_obj)
+    configured = request_params.get("_mppx_scope")
+    if configured is not None:
+        scope = {**scope, "custom": configured}
     if not scope:
         return request_params
     return {**request_params, "_mppx_scope": scope}
@@ -239,6 +245,7 @@ def wrap_payment_handler(
         verify_fn: Called with ``(authorization, request_obj)``; must return
             a ``Challenge``, composed challenges, or ``(Credential, Receipt)`` tuple.
         realm_fn: Returns the realm string for challenge responses.
+        unique_challenges: Disable only during a verifier-first rolling upgrade.
         requires_auth: When True, read the Payment credential from
             ``Payment-Authorization`` instead of ``Authorization``.
     """
@@ -303,6 +310,7 @@ def pay(
     body: BodyParamsType = None,
     events: EventDispatcher | None = None,
     requires_auth: bool = False,
+    unique_challenges: bool = True,
 ) -> Callable[
     [Callable[[Any, Credential, Receipt], Awaitable[R]]],
     Callable[[Any], Awaitable[R | Any]],
@@ -331,6 +339,7 @@ def pay(
         body: Optional static body bytes/string/dict or callback receiving the
             request object. The resolved value is bound into issued challenges
             via digest and used to verify paid retries.
+        unique_challenges: Disable only during a verifier-first rolling upgrade.
         requires_auth: When True, challenges advertise
             ``header="Payment-Authorization"`` and credentials are read from
             that header so ``Authorization`` can carry application auth.
@@ -371,6 +380,7 @@ def pay(
                 body=await resolve_body_param(body, request_obj),
                 events=events,
                 header=PAYMENT_AUTHORIZATION_HEADER if requires_auth else None,
+                unique_challenges=unique_challenges,
             )
 
         return wrap_payment_handler(

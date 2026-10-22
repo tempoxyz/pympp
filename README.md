@@ -161,3 +161,40 @@ that also accepts direct signing requests. Local sponsorship uses pympp's local
 simulation path; externally signed transactions rely on the external service's
 pre-sign controls. Adding a simulation after receiving the signature would not
 prevent a caller from broadcasting that same transaction elsewhere.
+
+### Payment request context
+
+Direct and composed payment gates bind `meta` into their signed challenges:
+
+```python
+result = await payment.charge(authorization, "1.00", meta={"account": authenticated_account_id})
+```
+
+Derive `authenticated_account_id` from trusted session authentication, not an
+unverified request field. Framework decorators also bind the HTTP method and
+actual route, path, and query. Configured `_mppx_scope` is preserved in full
+under the signed scope’s `custom` key, alongside trusted framework fields.
+Custom request objects should expose their HTTP `method`.
+
+Server issuance adds random opaque `_mpp_nonce` metadata; this key is reserved.
+Nonces prevent identical challenges across callers even with fixed expirations,
+but do not authenticate a presenter who stole the entire credential. Low-level
+`Challenge.create()` remains deterministic; custom issuance must provide its own
+unique authenticated context. Nonce-free challenges remain valid when their
+other bindings match. HTTP credentials lacking method scope or using the old custom-scope representation
+will be rejected after upgrading. Keep credentials confidential and share an
+atomic replay store across workers and replicas.
+
+This release changes HTTP method scope, custom scope representation, and direct
+metadata binding as well as nonce issuance. Use an atomic rollout with payment
+traffic drained, or pin challenge issuance and all credential retries to the
+same version until outstanding challenges expire. Merely switching all replicas
+at once can still strand payments already issued by the old version.
+
+`unique_challenges=False` (`Mpp.create`, standalone `pay`, or
+`verify_or_challenge`) disables only nonce issuance; it does **not** make this
+release compatible with old verifiers. It cannot disable the new method,
+custom-scope, or metadata bindings. Mixing versions can reject already settled
+hash payments and cause a client to pay again. Nonce-only staging is useful only
+when all other challenge bindings already match; it temporarily retains the
+fixed-expiry collision risk. Shared application authentication is still required.
