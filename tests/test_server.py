@@ -663,6 +663,42 @@ class TestChallengeExpiryEnforcement:
         assert receipt.status == "success"
 
     @pytest.mark.asyncio
+    async def test_rejects_credential_at_expiry_instant(self) -> None:
+        """Should treat a challenge as expired once its expires instant is reached."""
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return now
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        credential = make_bound_credential(
+            payload={"hash": "0xabc"},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            expires="2030-01-01T00:00:00Z",
+        )
+
+        with patch("mpp.server.verify.datetime", FrozenDatetime):
+            result = await verify_or_challenge(
+                authorization=credential.to_authorization(),
+                intent=test_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+            )
+
+        assert isinstance(result, Challenge)
+
+    @pytest.mark.asyncio
     async def test_rejects_missing_expires(self) -> None:
         """Should reject credentials that lack an expires field (fail closed)."""
 

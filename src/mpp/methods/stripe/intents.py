@@ -168,7 +168,7 @@ class ChargeIntent:
 
         if challenge.expires:
             expires = datetime.fromisoformat(challenge.expires.replace("Z", "+00:00"))
-            if expires < datetime.now(UTC):
+            if expires <= datetime.now(UTC):
                 raise PaymentExpiredError(challenge.expires)
 
         try:
