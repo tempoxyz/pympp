@@ -259,7 +259,11 @@ class ComposedHandler:
         binding_matches = [
             offer
             for offer in request_matches
-            if digest == (_body_digest.compute(offer.body) if offer.body is not None else None)
+            if (
+                digest is None
+                if offer.body is None
+                else digest is not None and _body_digest.verify(digest, offer.body)
+            )
             and _application_meta(echoed_meta) == (offer.offer.options.get("meta") or None)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]

@@ -121,3 +121,35 @@ class TestVerify:
     def test_empty_digest_string(self) -> None:
         """Empty digest string should fail verification."""
         assert verify("", "test") is False
+
+
+class TestJavaScriptKeyOrder:
+    def test_integer_keys_first_like_json_stringify(self) -> None:
+        """Integer-index keys come first in numeric order, like JSON.stringify."""
+        body = {"b": 1, "1": 2}
+        assert compute(body) == compute('{"1":2,"b":1}')
+        body = {"z": "1", "10": "a", "2": "b", "a": "c"}
+        assert compute(body) == compute('{"2":"b","10":"a","z":"1","a":"c"}')
+
+    def test_non_index_numeric_keys_keep_insertion_order(self) -> None:
+        """Leading zeros, negatives and keys above 2**32-2 are ordinary string keys."""
+        body = {"b": 1, "01": 2, "-1": 3, "4294967295": 4, "4294967294": 5}
+        assert compute(body) == compute('{"4294967294":5,"b":1,"01":2,"-1":3,"4294967295":4}')
+
+    def test_nested_integer_keys(self) -> None:
+        """Ordering applies inside nested dicts and lists."""
+        body = {"x": [{"b": 1, "0": 2}], "5": {"a": 1, "3": 2}}
+        assert compute(body) == compute('{"5":{"3":2,"a":1},"x":[{"0":2,"b":1}]}')
+
+
+class TestLegacyDigest:
+    def test_accepts_sorted_key_digest_for_dict(self) -> None:
+        """Digests issued by earlier releases (sorted keys) still verify."""
+        body = {"z": "1", "a": "2"}
+        legacy = compute('{"a":"2","z":"1"}')
+        assert compute(body) != legacy
+        assert verify(legacy, body) is True
+
+    def test_legacy_fallback_is_dict_only(self) -> None:
+        """String bodies are hashed as-is with no fallback."""
+        assert verify(compute('{"a":"2","z":"1"}'), '{"z":"1","a":"2"}') is False
