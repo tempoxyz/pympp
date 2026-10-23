@@ -1760,6 +1760,17 @@ class TestClient:
 
 class TestConvenienceFunctions:
     @pytest.mark.asyncio
+    async def test_get_accepts_trusted_tempo_realms(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url="https://example.com/test", json={"ok": True})
+
+        response = await get(
+            "https://example.com/test",
+            methods=[],
+            trusted_tempo_realms={"https://example.com": "MPP Payment"},
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_request_function(self, httpx_mock: HTTPXMock) -> None:
         """Should send request with automatic payment handling."""
         httpx_mock.add_response(url="https://example.com/test", json={"ok": True})

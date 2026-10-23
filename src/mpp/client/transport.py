@@ -666,6 +666,7 @@ async def request(
     *,
     methods: Sequence[Method],
     paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+    trusted_tempo_realms: Mapping[str, str] | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -680,7 +681,11 @@ async def request(
             methods=[tempo(...)],
         )
     """
-    async with Client(methods, paid_retry_timeout=paid_retry_timeout) as client:
+    async with Client(
+        methods,
+        paid_retry_timeout=paid_retry_timeout,
+        trusted_tempo_realms=trusted_tempo_realms,
+    ) as client:
         return await client.request(method, url, **kwargs)
 
 
