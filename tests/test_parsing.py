@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -144,6 +145,34 @@ class TestChallenge:
             'intent="charge", intent="session", request="e30"'
         )
         with pytest.raises(ParseError, match="Duplicate parameter: intent"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize(
+        "rename",
+        [str.upper, lambda name: name[0].upper() + name[1:]],
+        ids=["uppercase", "mixed-case"],
+    )
+    def test_parse_case_insensitive_param_names(self, rename) -> None:
+        header = Challenge(
+            id="test-id-123",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+        ).to_www_authenticate("api.example.com")
+        renamed = re.sub(
+            r"\b(id|realm|method|intent|request)=",
+            lambda match: f"{rename(match.group(1))}=",
+            header,
+        )
+        assert renamed != header
+
+        assert Challenge.from_www_authenticate(renamed) == Challenge.from_www_authenticate(header)
+
+    def test_parse_case_insensitive_duplicate_param_raises(self) -> None:
+        header = (
+            'Payment id="a", realm="api", method="tempo", intent="charge", request="e30", ID="b"'
+        )
+        with pytest.raises(ParseError, match="Duplicate parameter: id"):
             Challenge.from_www_authenticate(header)
 
     def test_parse_request_too_large(self) -> None:
