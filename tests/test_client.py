@@ -1760,6 +1760,17 @@ class TestClient:
 
 class TestConvenienceFunctions:
     @pytest.mark.asyncio
+    async def test_get_accepts_trusted_tempo_realms(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url="https://example.com/test", json={"ok": True})
+
+        response = await get(
+            "https://example.com/test",
+            methods=[],
+            trusted_tempo_realms={"https://example.com": "MPP Payment"},
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
     async def test_request_function(self, httpx_mock: HTTPXMock) -> None:
         """Should send request with automatic payment handling."""
         httpx_mock.add_response(url="https://example.com/test", json={"ok": True})
@@ -1827,6 +1838,177 @@ async def test_payment_origin_allowlist(url, allowed, pays):
                 await client.get(url)
             method.create_credential.assert_not_awaited()
             assert len(inner.requests) == 1
+
+
+@pytest.mark.parametrize("amount", ["0", "00", " 0 ", 0])
+async def test_rejects_relayed_zero_amount_tempo_charge(amount):
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="target.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": amount},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            )
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    with pytest.raises(PaymentError, match="trusted_tempo_realms"):
+        await transport.handle_async_request(httpx.Request("GET", "https://attacker.example/"))
+
+    method.create_credential.assert_not_awaited()
+    assert len(inner.requests) == 1
+
+
+async def test_allows_zero_amount_tempo_charge_at_matching_realm():
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="target.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://TARGET.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
+async def test_allows_explicitly_pinned_tempo_realm():
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="MPP Payment",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(
+        methods=[method],
+        inner=inner,
+        trusted_tempo_realms={"https://api.example": "MPP Payment"},
+    )
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://api.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
+async def test_pinned_tempo_realm_is_case_sensitive():
+    method = MockMethod()
+    challenge = Challenge(
+        id="case-sensitive",
+        realm="Tenant-A",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            )
+        ]
+    )
+    transport = PaymentTransport(
+        methods=[method], inner=inner, trusted_tempo_realms={"https://relay.example": "tenant-a"}
+    )
+
+    with pytest.raises(PaymentError, match="trusted_tempo_realms"):
+        await transport.handle_async_request(httpx.Request("GET", "https://relay.example/"))
+    method.create_credential.assert_not_awaited()
+
+
+async def test_allows_punycode_realm_for_internationalized_host():
+    method = MockMethod()
+    challenge = Challenge(
+        id="idn-challenge",
+        realm="xn--bcher-kva.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://bücher.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
+async def test_skips_relayed_zero_offer_for_paid_alternative():
+    method = MockMethod()
+    relayed = Challenge(
+        id="relayed",
+        realm="target.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    paid = Challenge(
+        id="paid", realm="target.example", method="tempo", intent="charge", request={"amount": "1"}
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers=[
+                    ("WWW-Authenticate", relayed.to_www_authenticate(relayed.realm)),
+                    ("WWW-Authenticate", paid.to_www_authenticate(paid.realm)),
+                ],
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://other.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+    assert method.create_credential.await_args is not None
+    assert method.create_credential.await_args.args[0].id == "paid"
+
+
+def test_invalid_trusted_tempo_realm_origin_names_parameter():
+    with pytest.raises(ValueError, match="trusted_tempo_realms entries"):
+        PaymentTransport(
+            methods=[MockMethod()], trusted_tempo_realms={"https://api.example/x": "r"}
+        )
 
 
 @pytest.mark.parametrize(

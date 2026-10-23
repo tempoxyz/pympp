@@ -37,7 +37,7 @@ from mpp.events import (
 from mpp.runtime import Method, PaymentRuntime
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
@@ -95,11 +95,22 @@ def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
-    return (url.scheme, url.host, port)
+    return (url.scheme, url.raw_host.decode("ascii"), port)
+
+
+def _is_zero_tempo_charge(challenge: Challenge) -> bool:
+    if challenge.method != "tempo" or challenge.intent != "charge":
+        return False
+    try:
+        return int(challenge.request["amount"]) == 0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def _payment_origins(
     origins: Sequence[str] | None,
+    *,
+    parameter: str = "allowed_origins",
 ) -> frozenset[tuple[str, str, int | None]] | None:
     if origins is None:
         return None
@@ -115,7 +126,7 @@ def _payment_origins(
             or url.fragment
         ):
             raise ValueError(
-                "allowed_origins entries must be HTTP(S) origins without credentials or paths"
+                f"{parameter} entries must be HTTP(S) origins without credentials or paths"
             )
         result.add(_origin(url))
     return frozenset(result)
@@ -228,6 +239,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         *,
         runtime: PaymentRuntime | None = None,
         allowed_origins: Sequence[str] | None = None,
+        trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
@@ -239,6 +251,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 ``None`` preserves unrestricted origin selection. Configure method
                 amount and recipient limits separately. Challenge realms are not
                 authenticated origins and are not compared with this allowlist.
+            trusted_tempo_realms: Explicit origin-to-realm pins for zero-amount
+                Tempo charges when a server uses a realm other than its hostname.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
@@ -252,6 +266,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             runtime if runtime is not None else PaymentRuntime(methods or (), events=events)
         )
         self._allowed_origins = _payment_origins(allowed_origins)
+        self._trusted_tempo_realms: dict[tuple[str, str, int | None], str] = {}
+        for origin, realm in (trusted_tempo_realms or {}).items():
+            _payment_origins([origin], parameter="trusted_tempo_realms")
+            self._trusted_tempo_realms[_origin(httpx.URL(origin))] = realm
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
@@ -376,6 +394,39 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         ),
                     )
                     raise error
+
+                # A zero-value Tempo transaction still signs the challenge realm
+                # into its memo. Do not let a different host obtain a transaction
+                # that it can relay to the server named by that realm.
+                remaining = challenges
+                while (
+                    _is_zero_tempo_charge(challenge)
+                    and challenge.realm.lower() != request.url.host.lower()
+                    and challenge.realm.lower() != request.url.raw_host.decode("ascii").lower()
+                    and challenge.realm != self._trusted_tempo_realms.get(current_origin)
+                ):
+                    error = PaymentError(
+                        f"Zero-amount Tempo realm {challenge.realm!r} differs from "
+                        f"request host {request.url.host!r}; configure trusted_tempo_realms "
+                        "for a known server origin"
+                    )
+                    remaining = [offer for offer in remaining if offer is not challenge]
+                    try:
+                        challenge, matched_method = self._runtime.match_challenge(remaining)
+                    except ValueError:
+                        await self._events.emit(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
+                                credential=None,
+                                error=error,
+                                method=matched_method,
+                                request=request,
+                                response=response,
+                            ),
+                        )
+                        raise error from None
 
                 if not replayable:
                     raise PaymentError(
@@ -542,6 +593,7 @@ class Client:
         *,
         runtime: PaymentRuntime | None = None,
         allowed_origins: Sequence[str] | None = None,
+        trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
@@ -549,6 +601,7 @@ class Client:
             methods,
             runtime=runtime,
             allowed_origins=allowed_origins,
+            trusted_tempo_realms=trusted_tempo_realms,
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
         )
@@ -613,6 +666,7 @@ async def request(
     *,
     methods: Sequence[Method],
     paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+    trusted_tempo_realms: Mapping[str, str] | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
     """Send an HTTP request with automatic payment handling.
@@ -627,7 +681,11 @@ async def request(
             methods=[tempo(...)],
         )
     """
-    async with Client(methods, paid_retry_timeout=paid_retry_timeout) as client:
+    async with Client(
+        methods,
+        paid_retry_timeout=paid_retry_timeout,
+        trusted_tempo_realms=trusted_tempo_realms,
+    ) as client:
         return await client.request(method, url, **kwargs)
 
 

@@ -26,6 +26,7 @@ Example:
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -140,6 +141,8 @@ class McpClient:
     Args:
         session: An initialized ``mcp.ClientSession``.
         methods: Payment methods available for credential creation.
+        trusted_tempo_realms: Explicitly trusted realms for zero-amount Tempo
+            charges; MCP has no authenticated HTTP host to compare.
 
     Example:
         client = McpClient(session, methods=[tempo(...)])
@@ -147,9 +150,16 @@ class McpClient:
         print(result.receipt)
     """
 
-    def __init__(self, session: Any, methods: list[Method]) -> None:
+    def __init__(
+        self,
+        session: Any,
+        methods: list[Method],
+        *,
+        trusted_tempo_realms: Sequence[str] = (),
+    ) -> None:
         self._session = session
         self._methods = methods
+        self._trusted_tempo_realms = set(trusted_tempo_realms)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
@@ -237,14 +247,25 @@ class McpClient:
                     challenge.method == method.name
                     and challenge.intent in supported_intents
                     and _method_accepts_challenge(method, challenge.to_core())
+                    and not self._is_untrusted_zero_tempo_charge(challenge)
                 ):
                     return challenge, method
 
         available = [challenge.method for challenge in challenges]
         installed = [m.name for m in self._methods]
         raise ValueError(
-            f"No compatible payment method. Server offered: {available}, client has: {installed}"
+            f"No compatible payment method. Server offered: {available}, client has: {installed}. "
+            "Zero-amount Tempo charges require a pinned trusted_tempo_realms entry."
         )
+
+    def _is_untrusted_zero_tempo_charge(self, challenge: MCPChallenge) -> bool:
+        if challenge.method != "tempo" or challenge.intent != "charge":
+            return False
+        try:
+            zero = int(challenge.request["amount"]) == 0
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+        return zero and challenge.realm not in self._trusted_tempo_realms
 
     @staticmethod
     def _intent_names(method: Method) -> set[str]:
