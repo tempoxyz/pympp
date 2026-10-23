@@ -306,7 +306,8 @@ jobs:
           if os.environ["PROFILE"] == "stripe":
               from stripe import StripeClient
               from mpp.methods.stripe import create
-              payments = create(network_id="bn_test", livemode=False, client=StripeClient("sk_test"), deposit_addresses={"tempo": "0x" + "1" * 40})
+              from mpp.store import MemoryStore
+              payments = create(network_id="bn_test", livemode=False, client=StripeClient("sk_test"), store=MemoryStore(), deposit_addresses={"tempo": "0x" + "1" * 40})
               assert [method.name for method in payments.default_methods()] == ["tempo", "stripe"]
           PY
 
