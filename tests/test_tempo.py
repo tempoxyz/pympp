@@ -15,7 +15,7 @@ import rlp
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
-from mpp.errors import CredentialReplayedError, InternalPaymentError
+from mpp.errors import CredentialReplayedError, InternalPaymentError, PaymentExpiredError
 from mpp.methods.tempo import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -1031,11 +1031,12 @@ class TestExpiringNonce:
         with (
             patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc(rpc_methods)),
             patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
-            pytest.raises(ValueError, match="expires in less than 15 seconds"),
+            pytest.raises(PaymentExpiredError) as excinfo,
         ):
             await method.create_credential(
                 self._challenge("near-expiry", fee_payer=True, expires=expires)
             )
+        assert "expires in less than 15 seconds" in str(excinfo.value.__cause__)
         assert rpc_methods == []
 
     @pytest.mark.asyncio
