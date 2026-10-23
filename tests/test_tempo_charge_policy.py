@@ -202,6 +202,43 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             id="explicit-chain-mismatch",
         ),
         pytest.param({}, make_challenge(chain_id="abc"), None, id="chain-not-numeric"),
+        # allowed_chain_ids
+        pytest.param(
+            {"allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(chain_id=CHAIN_ID),
+            None,
+            id="allowed-chain",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": [CHAIN_ID, TESTNET_CHAIN_ID]},
+            make_challenge(),
+            None,
+            id="allowed-chain-from-client-pin",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID, "allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(),
+            f"Chain ID not allowed: {TESTNET_CHAIN_ID}",
+            id="client-pin-not-allowed",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID, "allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(chain_id=TESTNET_CHAIN_ID),
+            f"Chain ID not allowed: {TESTNET_CHAIN_ID}",
+            id="challenge-chain-not-allowed",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": [TESTNET_CHAIN_ID]},
+            make_challenge(chain_id=CHAIN_ID),
+            "Chain ID not allowed",
+            id="pinned-chain-outside-allowlist",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": []},
+            make_challenge(chain_id=CHAIN_ID),
+            "Chain ID not allowed",
+            id="empty-chain-allowlist",
+        ),
         # expected_recipients
         pytest.param(
             {"expected_recipients": [RECIPIENT]}, make_challenge(), None, id="recipient-allowed"
@@ -668,3 +705,16 @@ def test_invalid_caps_fail_at_construction(
 def test_tempo_rejects_invalid_expected_recipients(kwargs: dict[str, Any], error: str) -> None:
     with pytest.raises(ValueError, match=error):
         tempo_charge(**kwargs)
+
+
+def test_allowed_chain_ids_rejects_unknown_chain_only_when_empty() -> None:
+    method = make_method(allowed_chain_ids=[CHAIN_ID])
+    method._check_allowed_chain_id(None)
+    with pytest.raises(ValueError, match="Chain ID not allowed: unknown"):
+        make_method(allowed_chain_ids=[])._check_allowed_chain_id(None)
+
+
+@pytest.mark.parametrize("value", ["4217", [True], ["4217"]])
+def test_allowed_chain_ids_rejects_invalid_values(value: Any) -> None:
+    with pytest.raises(ValueError, match="allowed_chain_ids|Invalid Tempo chain ID"):
+        make_method(allowed_chain_ids=value)
