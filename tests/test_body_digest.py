@@ -67,23 +67,19 @@ class TestCompute:
         raw = base64.b64decode(payload)
         assert len(raw) == 32
 
-    def test_key_order_independent(self) -> None:
-        """Dict digests should be identical regardless of key insertion order."""
-        d1 = {"z": "1", "a": "2", "m": "3"}
-        d2 = {"a": "2", "m": "3", "z": "1"}
-        assert compute(d1) == compute(d2)
+    def test_preserves_insertion_order_like_mppx(self) -> None:
+        """Dict digests hash JSON in insertion order, matching mppx's JSON.stringify."""
+        body = {"z": "1", "a": "2"}
+        # mppx: BodyDigest.compute({ z: '1', a: '2' })
+        assert compute(body) == "sha-256=WSxerte9Ij4rZhT5zPpISv1H2Sjidi2PaHo2Iu8d+Mc="
+        assert compute(body) == compute('{"z":"1","a":"2"}')
+        assert compute(body) != compute({"a": "2", "z": "1"})
 
-    def test_matches_canonical_json(self) -> None:
-        """Dict digest should match digest of canonical (sorted) JSON string."""
-        d = {"b": "2", "a": "1"}
-        canonical = json.dumps(d, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-        assert compute(d) == compute(canonical)
-
-    def test_nested_dict_key_order(self) -> None:
-        """Nested dict should also be sorted by keys."""
-        d1 = {"outer_z": {"inner_b": 1, "inner_a": 2}, "outer_a": 3}
-        d2 = {"outer_a": 3, "outer_z": {"inner_a": 2, "inner_b": 1}}
-        assert compute(d1) == compute(d2)
+    def test_nested_dict_preserves_insertion_order(self) -> None:
+        """Nested dicts also keep insertion order."""
+        body = {"outer_z": {"inner_b": 1, "inner_a": 2}, "outer_a": 3}
+        assert compute(body) == "sha-256=EVh89pgYAJz45/LcDMXKrGwCn8DVHGu3b28UfZw1dBE="
+        assert compute(body) == compute(json.dumps(body, separators=(",", ":")))
 
 
 class TestVerify:
