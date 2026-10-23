@@ -428,17 +428,17 @@ class Receipt:
     subscription_id: str | None = None
     extra: dict[str, Any] | None = None
     extensions: dict[str, Any] | None = None
-    funding_currency: str | None = None
-    """Currency actually debited to fund the payment, when known.
-
-    Serialized as ``fundingCurrency``. For Tempo pull-mode charges this is the
-    swap input token of a DEX auto-swap route, or the charge currency otherwise.
-    """
     payer: str | None = None
     """Payer identity verified by the payment method (``Validation.payer``).
 
     Server-side only: set on receipts returned by server verification and
     never serialized into the ``Payment-Receipt`` header.
+    """
+    funding_currency: str | None = None
+    """Currency actually debited to fund the payment, when known.
+
+    Serialized as ``fundingCurrency``. For Tempo pull-mode charges this is the
+    swap input token of a DEX auto-swap route, or the charge currency otherwise.
     """
 
     @classmethod

@@ -451,6 +451,9 @@ def format_payment_receipt(receipt: Receipt) -> str:
         payload["subscriptionId"] = receipt.subscription_id
     if receipt.funding_currency:
         payload["fundingCurrency"] = receipt.funding_currency
+    elif receipt.extensions and receipt.extensions.get("fundingCurrency"):
+        # Callers that set it through extensions before the field existed.
+        payload["fundingCurrency"] = receipt.extensions["fundingCurrency"]
     if receipt.extra:
         payload["extra"] = receipt.extra
     if receipt.extensions:

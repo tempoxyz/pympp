@@ -243,11 +243,13 @@ def _receipt(value: Any) -> Receipt:
     reference = value.get("reference")
     timestamp = value.get("timestamp")
     external_id = value.get("externalId")
+    funding_currency = value.get("fundingCurrency")
     if (
         method != "tempo"
         or not isinstance(reference, str)
         or not isinstance(timestamp, str)
         or (external_id is not None and not isinstance(external_id, str))
+        or (funding_currency is not None and not isinstance(funding_currency, str))
     ):
         raise _failure()
     try:
@@ -261,6 +263,7 @@ def _receipt(value: Any) -> Receipt:
         timestamp=parsed_timestamp,
         method=method,
         external_id=external_id,
+        funding_currency=funding_currency or None,
     )
 
 
