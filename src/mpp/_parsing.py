@@ -26,6 +26,10 @@ if TYPE_CHECKING:
 
 
 MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
+# A credential echoes its challenge, whose request alone may reach
+# MAX_HEADER_PAYLOAD_SIZE, so Authorization values need room to expand during
+# JSON and base64url encoding. Matches mppx.
+MAX_AUTHORIZATION_SIZE = 64 * 1024
 
 # RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
@@ -48,13 +52,13 @@ def _b64_encode(data: dict[str, Any]) -> str:
     return encoded.rstrip("=")
 
 
-def _b64_decode(encoded: str) -> dict[str, Any]:
+def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
     """Decode URL-safe base64 JSON to dict.
 
     Raises:
         ParseError: If input exceeds size limit, is invalid base64/JSON, or not a dict.
     """
-    if len(encoded) > MAX_HEADER_PAYLOAD_SIZE:
+    if len(encoded) > max_size:
         raise ParseError("Header payload exceeds maximum size")
 
     try:
@@ -265,6 +269,8 @@ def parse_authorization(header: str) -> Credential:
     Expected format:
         Payment <base64-credential>
 
+    Values longer than 64 KiB are rejected before decoding.
+
     The credential payload is a base64-encoded JSON object with:
         - challenge: ChallengeEcho object containing id, realm, method, intent, request
         - payload: Method-specific credential data
@@ -272,13 +278,16 @@ def parse_authorization(header: str) -> Credential:
     """
     from mpp import ChallengeEcho, Credential, advertised_credential_header
 
+    if len(header) > MAX_AUTHORIZATION_SIZE:
+        raise ParseError("Authorization header exceeds maximum size")
+
     header = header.strip()
 
     if not header.lower().startswith("payment "):
         raise ParseError("Expected 'Payment' authentication scheme")
 
     credential_b64 = header[8:].strip()
-    data = _b64_decode(credential_b64)
+    data = _b64_decode(credential_b64, max_size=MAX_AUTHORIZATION_SIZE)
 
     if "challenge" not in data:
         raise ParseError("Credential missing required field: challenge")

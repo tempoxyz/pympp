@@ -16,7 +16,7 @@ from mpp import (
     _constant_time_equal,
     generate_challenge_id,
 )
-from mpp._parsing import ParseError, _b64_decode
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
 from mpp._units import transform_units
 from mpp.errors import (
     InternalPaymentError,
@@ -403,7 +403,10 @@ def _extract_payment_scheme(header: str) -> str | None:
 
     Supports comma-separated multiple schemes per RFC 9110.
     Returns the full ``Payment ...`` string, or None if not found.
+    Headers longer than 64 KiB are rejected before splitting.
     """
+    if len(header) > MAX_AUTHORIZATION_SIZE:
+        return None
     for scheme in header.split(","):
         scheme = scheme.strip()
         if scheme.lower().startswith("payment "):
