@@ -1100,15 +1100,27 @@ class ChargeIntent:
         challenge_id: str,
         realm: str,
     ) -> None:
-        from mpp.methods.tempo._attribution import verify_challenge_binding, verify_server
+        """Require a challenge-bound memo and reject conflicting attribution.
 
-        bound = any(
-            matched_log.kind == "memo"
-            and matched_log.memo is not None
-            and verify_server(matched_log.memo, realm)
-            and verify_challenge_binding(matched_log.memo, challenge_id)
-            for matched_log in matched_logs
+        Every matched transfer carrying an MPP attribution memo must be bound to
+        this challenge and realm; otherwise one split payment could authorize
+        another challenge after this challenge's replay marker expires. Plain
+        transfers and non-MPP memos remain allowed.
+        """
+        from mpp.methods.tempo._attribution import (
+            is_mpp_memo,
+            verify_challenge_binding,
+            verify_server,
         )
+
+        bound = False
+        for matched_log in matched_logs:
+            memo = matched_log.memo if matched_log.kind == "memo" else None
+            if memo is None or not is_mpp_memo(memo):
+                continue
+            if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
+                raise CredentialReplayedError("memo is not bound to this challenge")
+            bound = True
         if not bound:
             # The transfer already settled to the recipient, so another payment
             # would not help this credential.
