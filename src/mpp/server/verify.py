@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -170,9 +171,12 @@ async def verify_or_challenge(
     if authorization is None:
         return await new_challenge()
 
-    # Reject oversized values before extraction, but still report them as a
-    # rejected credential so payment.failed hooks see them.
+    # Reject oversized values before extraction. Report them as a rejected
+    # credential only when they carry a Payment scheme, so oversized
+    # non-payment auth (e.g. a large Bearer token) stays a silent challenge.
     if len(authorization) > MAX_AUTHORIZATION_SIZE:
+        if _PAYMENT_SCHEME_RE.search(authorization) is None:
+            return await new_challenge()
         return await fail(MalformedCredentialError("Authorization header exceeds maximum size"))
 
     payment_scheme = _extract_payment_scheme(authorization)
@@ -401,6 +405,9 @@ def _challenge_from_echo(
         opaque=opaque,
         header=echo.header,
     )
+
+
+_PAYMENT_SCHEME_RE = re.compile(r"(?:^|,)[ \t]*payment ", re.IGNORECASE)
 
 
 def _extract_payment_scheme(header: str) -> str | None:

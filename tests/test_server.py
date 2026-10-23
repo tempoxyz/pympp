@@ -463,6 +463,45 @@ class TestVerificationError:
         assert events == [f"failed:{result.id}:MalformedCredentialError"]
 
     @pytest.mark.asyncio
+    async def test_oversized_non_payment_authorization_is_silent(self) -> None:
+        """Oversized Authorization values without a Payment scheme emit no event."""
+        from mpp._parsing import MAX_AUTHORIZATION_SIZE
+
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on("payment.failed", lambda payload: events.append("failed"))
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        for authorization in (
+            "Bearer " + "a" * MAX_AUTHORIZATION_SIZE,
+            "Bearer x" + "payment " * (MAX_AUTHORIZATION_SIZE // 8),
+        ):
+            result = await verify_or_challenge(
+                authorization=authorization,
+                intent=test_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+                events=dispatcher,
+            )
+            assert isinstance(result, Challenge)
+        assert events == []
+
+        result = await verify_or_challenge(
+            authorization="Bearer " + "a" * MAX_AUTHORIZATION_SIZE + ", PAYMENT abc",
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+        assert isinstance(result, Challenge)
+        assert events == ["failed"]
+
+    @pytest.mark.asyncio
     async def test_emits_payment_failed_on_invalid_hmac(self) -> None:
         """Should emit payment.failed when the challenge ID is not server-issued."""
         events: list[str] = []
