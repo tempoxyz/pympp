@@ -98,6 +98,20 @@ RECEIPT_POLL_INTERVAL = 0.5
 VALID_BEFORE_GRACE = 2.0
 
 
+def _assert_remaining_validity(valid_before: int) -> None:
+    """Reject a sponsored transaction that could expire before it is included."""
+    if valid_before <= int(time.time()):
+        raise VerificationError(
+            f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
+        )
+    # Leave time to simulate, broadcast and include the sponsored transaction.
+    if valid_before < math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS:
+        raise VerificationError(
+            "Invalid transaction: fee-sponsored transaction needs at least "
+            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds of remaining validity"
+        )
+
+
 def _transaction_valid_before(raw_tx: str) -> int | None:
     """Return a Tempo transaction's ``valid_before`` timestamp, if it has one."""
     try:
@@ -1572,6 +1586,11 @@ class ChargeIntent:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                # The store reservation and simulation can take a while: recheck
+                # the sponsored window right before submission.
+                valid_before = _transaction_valid_before(raw_tx)
+                if valid_before is not None:
+                    _assert_remaining_validity(valid_before)
 
             # The send and any receipt recovery share one confirmation deadline.
             # The send may use at most two thirds of it, leaving the rest for
@@ -1782,17 +1801,7 @@ class ChargeIntent:
         if not valid_before_raw:
             raise VerificationError("Fee payer envelope must include valid_before")
         valid_before = _int(valid_before_raw)
-        if valid_before <= int(time.time()):
-            raise VerificationError(
-                f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
-            )
-
-        # Leave time to simulate, broadcast and include the sponsored transaction.
-        if valid_before < math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS:
-            raise VerificationError(
-                "Invalid transaction: fee-sponsored transaction needs at least "
-                f"{MIN_REMAINING_VALIDITY_SECONDS} seconds of remaining validity"
-            )
+        _assert_remaining_validity(valid_before)
 
         chain_id = _int(decoded[0])
         policy = get_policy(chain_id)

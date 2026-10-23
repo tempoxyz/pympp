@@ -3997,6 +3997,49 @@ class TestCosignAsFeePayer:
         assert "eth_sendRawTransactionSync" not in methods
 
     @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_rechecks_validity_after_simulation(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """A slow simulation must not lead to broadcasting an expiring transaction."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        start = float(int(time.time()))
+        clock = [start]
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(start) + 30,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        async def slow_simulation(*_args: object) -> None:
+            clock[0] = start + 20
+
+        with (
+            patch("mpp.methods.tempo.intents.time.time", side_effect=lambda: clock[0]),
+            patch.object(intent, "_simulate_before_broadcast", side_effect=slow_simulation),
+            pytest.raises(VerificationError, match="at least 15 seconds"),
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.asyncio
     async def test_verify_local_fee_payer_rejects_unsimulatable_authorization(
         self, httpx_mock: HTTPXMock
     ) -> None:
