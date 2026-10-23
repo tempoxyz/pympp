@@ -304,7 +304,7 @@ async def verify_or_challenge(
         # it to an aware "now" raises TypeError. Reject it like any other
         # unparseable value so the route still fails closed.
         return await fail(InvalidChallengeError(echo.id, "invalid expires"), credential)
-    if expires_dt < datetime.now(UTC):
+    if expires_dt <= datetime.now(UTC):
         return await fail(PaymentExpiredError(echo.expires), credential)
 
     submitted_challenge = _challenge_from_echo(echo, echo_request, echo_opaque)

@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 _warned_fallback_stores: set[str] = set()
 
 
+def _challenge_expired(expires: str) -> bool:
+    """Return whether a challenge ``expires`` timestamp has been reached."""
+    return datetime.fromisoformat(expires.replace("Z", "+00:00")) <= datetime.now(UTC)
+
+
 def _fallback_store(method: str) -> MemoryStore:
     """Create the in-memory replay store used when *method* has no store configured.
 
@@ -814,8 +819,7 @@ class ChargeIntent:
         challenge_expires = credential.challenge.expires
         if not challenge_expires:
             raise VerificationError("Request has expired (no expires)")
-        expires = datetime.fromisoformat(challenge_expires.replace("Z", "+00:00"))
-        if expires < datetime.now(UTC):
+        if _challenge_expired(challenge_expires):
             raise VerificationError("Request has expired")
 
         payload_data = credential.payload
@@ -940,6 +944,7 @@ class ChargeIntent:
             challenge_id=credential.challenge.id,
             realm=credential.challenge.realm,
             source=credential.source,
+            expires=credential.challenge.expires,
         )
         funding_currency = _funding_currency(payload.signature, req)
         if funding_currency is None:
@@ -1496,6 +1501,7 @@ class ChargeIntent:
         challenge_id: str,
         realm: str,
         source: str | None = None,
+        expires: str | None = None,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -1661,6 +1667,10 @@ class ChargeIntent:
                     await self._store.put(broadcast_key, fee_token_used)
                 except Exception as err:
                     raise InternalPaymentError() from err
+            # Authorize before the irreversible send: a challenge that expired
+            # during sponsorship or simulation must not be settled.
+            if expires is not None and _challenge_expired(expires):
+                raise VerificationError("Request has expired")
             broadcast_attempted = True
             outcome_unknown = True
             try:

@@ -185,7 +185,7 @@ async def verify_or_challenge(
     if echoed.expires:
         try:
             expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
-            if expires_dt < datetime.now(UTC):
+            if expires_dt <= datetime.now(UTC):
                 return new_challenge()
         except (ValueError, TypeError):
             pass
@@ -208,7 +208,7 @@ async def verify_or_challenge(
         expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
     except ValueError:
         return new_challenge()
-    if expires_dt < datetime.now(UTC):
+    if expires_dt <= datetime.now(UTC):
         return new_challenge()
 
     from mpp.server.intent import broadcast_credential
