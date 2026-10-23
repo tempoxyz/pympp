@@ -1829,6 +1829,86 @@ async def test_payment_origin_allowlist(url, allowed, pays):
             assert len(inner.requests) == 1
 
 
+@pytest.mark.parametrize("amount", ["0", "00", " 0 ", 0])
+async def test_rejects_relayed_zero_amount_tempo_charge(amount):
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="target.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": amount},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            )
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    with pytest.raises(PaymentError, match="another realm"):
+        await transport.handle_async_request(httpx.Request("GET", "https://attacker.example/"))
+
+    method.create_credential.assert_not_awaited()
+    assert len(inner.requests) == 1
+
+
+async def test_allows_zero_amount_tempo_charge_at_matching_realm():
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="target.example",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://TARGET.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
+async def test_allows_explicitly_pinned_tempo_realm():
+    method = MockMethod()
+    challenge = Challenge(
+        id="target-challenge",
+        realm="MPP Payment",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(
+        methods=[method],
+        inner=inner,
+        trusted_tempo_realms={"https://api.example": "MPP Payment"},
+    )
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://api.example/"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "origin",
     [
