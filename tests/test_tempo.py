@@ -5498,6 +5498,66 @@ class TestSplitLogMemoStrictness:
             {"logs": logs}, request
         )
 
+    def _split_request(self) -> ChargeRequest:
+        return ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+
+    def test_split_rejects_conflicting_challenge_memo(self) -> None:
+        """A split leg bound to another challenge cannot ride on this payment."""
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
+            ],
+        }
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
+
+    def test_split_rejects_conflicting_realm_memo(self) -> None:
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-b", server_id="other.example.com")
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
+            ],
+        }
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
+
+    def test_split_allows_plain_and_non_mpp_memo_legs(self) -> None:
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        for split_log in (
+            self._make_log(TRANSFER_TOPIC, self.SPLIT_RECIPIENT, 300000),
+            self._make_log(
+                TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, "0x" + "ff" * 32
+            ),
+        ):
+            receipt = {
+                "status": "0x1",
+                "logs": [
+                    self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                    split_log,
+                ],
+            }
+            assert ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
+
     def test_single_transfer_accepts_transfer_with_memo_log(self) -> None:
         """A memo-less single transfer accepts TransferWithMemo logs.
 
