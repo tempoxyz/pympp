@@ -19,6 +19,10 @@ def _is_array_index(key: str) -> bool:
         return False
     if len(key) > 1 and key[0] == "0":
         return False
+    # Check length before int() so huge digit strings never hit Python's
+    # int-conversion limit; 2**32 - 2 has 10 digits.
+    if len(key) > len(str(_MAX_ARRAY_INDEX)):
+        return False
     return int(key) <= _MAX_ARRAY_INDEX
 
 
@@ -104,6 +108,10 @@ def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
     Returns:
         True if the digest matches, False otherwise.
     """
+    # The digest may come from an unauthenticated credential; hmac.compare_digest
+    # raises TypeError for non-ASCII str inputs, so reject those outright.
+    if not isinstance(digest, str) or not digest.isascii():
+        return False
     if hmac.compare_digest(compute(body), digest):
         return True
     if isinstance(body, dict):

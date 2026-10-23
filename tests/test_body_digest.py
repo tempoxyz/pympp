@@ -153,3 +153,18 @@ class TestLegacyDigest:
     def test_legacy_fallback_is_dict_only(self) -> None:
         """String bodies are hashed as-is with no fallback."""
         assert verify(compute('{"a":"2","z":"1"}'), '{"z":"1","a":"2"}') is False
+
+
+class TestHostileInputs:
+    def test_non_ascii_digest_returns_false(self) -> None:
+        """A non-ASCII digest from an untrusted credential is rejected, not raised."""
+        assert verify("sha-256=\u00e9", "test") is False
+        assert verify("sha-256=\u00e9", {"a": 1}) is False
+
+    def test_very_long_decimal_key_is_ordinary_string(self) -> None:
+        """Digit-only keys beyond int()'s conversion limit do not raise."""
+        key = "9" * 5000
+        body = {"b": 1, key: 2}
+        expected = '{"b":1,"' + key + '":2}'
+        assert compute(body) == compute(expected)
+        assert verify(compute(expected), body) is True
