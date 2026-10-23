@@ -702,3 +702,19 @@ async def test_caller_payment_is_not_replaced() -> None:
         await client.call_tool("paid", meta={META_CREDENTIAL: {"existing": True}})
     method.create_credential.assert_not_called()
     session.call_tool.assert_awaited_once()
+
+
+def test_mcp_zero_amount_tempo_charge_requires_pinned_realm() -> None:
+    from mpp.extensions.mcp.types import MCPChallenge
+
+    raw = _make_challenge_dict()
+    raw["request"]["amount"] = "00"
+    challenge = MCPChallenge.from_dict(raw)
+    method = FakeMethod()
+    unpinned = McpClient(AsyncMock(), methods=[method])
+
+    with pytest.raises(ValueError, match="trusted_tempo_realms"):
+        unpinned._match_challenge([challenge])
+
+    pinned = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["api.example.com"])
+    assert pinned._match_challenge([challenge])[0] == challenge

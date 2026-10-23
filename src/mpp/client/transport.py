@@ -95,11 +95,22 @@ def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> 
 
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
-    return (url.scheme, url.host, port)
+    return (url.scheme, url.raw_host.decode("ascii"), port)
+
+
+def _is_zero_tempo_charge(challenge: Challenge) -> bool:
+    if challenge.method != "tempo" or challenge.intent != "charge":
+        return False
+    try:
+        return int(challenge.request["amount"]) == 0
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def _payment_origins(
     origins: Sequence[str] | None,
+    *,
+    parameter: str = "allowed_origins",
 ) -> frozenset[tuple[str, str, int | None]] | None:
     if origins is None:
         return None
@@ -115,7 +126,7 @@ def _payment_origins(
             or url.fragment
         ):
             raise ValueError(
-                "allowed_origins entries must be HTTP(S) origins without credentials or paths"
+                f"{parameter} entries must be HTTP(S) origins without credentials or paths"
             )
         result.add(_origin(url))
     return frozenset(result)
@@ -257,7 +268,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._allowed_origins = _payment_origins(allowed_origins)
         self._trusted_tempo_realms: dict[tuple[str, str, int | None], str] = {}
         for origin, realm in (trusted_tempo_realms or {}).items():
-            _payment_origins([origin])
+            _payment_origins([origin], parameter="trusted_tempo_realms")
             self._trusted_tempo_realms[_origin(httpx.URL(origin))] = realm.lower()
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
@@ -387,35 +398,37 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 # A zero-value Tempo transaction still signs the challenge realm
                 # into its memo. Do not let a different host obtain a transaction
                 # that it can relay to the server named by that realm.
-                amount = challenge.request.get("amount")
-                try:
-                    zero_tempo_charge = (
-                        challenge.method == "tempo"
-                        and challenge.intent == "charge"
-                        and amount is not None
-                        and int(amount) == 0
+                remaining = challenges
+                while _is_zero_tempo_charge(challenge) and all(
+                    challenge.realm.lower() != known_realm
+                    for known_realm in (
+                        request.url.host.lower(),
+                        request.url.raw_host.decode("ascii").lower(),
+                        self._trusted_tempo_realms.get(current_origin),
                     )
-                except (TypeError, ValueError):
-                    zero_tempo_charge = False
-                if (
-                    zero_tempo_charge
-                    and challenge.realm.lower() != request.url.host.lower()
-                    and challenge.realm.lower() != self._trusted_tempo_realms.get(current_origin)
                 ):
-                    error = PaymentError("Refusing zero-amount Tempo charge for another realm")
-                    await self._events.emit(
-                        PAYMENT_FAILED,
-                        _client_payment_failed_payload(
-                            challenge=challenge,
-                            challenges=challenges,
-                            credential=None,
-                            error=error,
-                            method=matched_method,
-                            request=request,
-                            response=response,
-                        ),
+                    error = PaymentError(
+                        f"Zero-amount Tempo realm {challenge.realm!r} differs from "
+                        f"request host {request.url.host!r}; configure trusted_tempo_realms "
+                        "for a known server origin"
                     )
-                    raise error
+                    remaining = [offer for offer in remaining if offer is not challenge]
+                    try:
+                        challenge, matched_method = self._runtime.match_challenge(remaining)
+                    except ValueError:
+                        await self._events.emit(
+                            PAYMENT_FAILED,
+                            _client_payment_failed_payload(
+                                challenge=challenge,
+                                challenges=challenges,
+                                credential=None,
+                                error=error,
+                                method=matched_method,
+                                request=request,
+                                response=response,
+                            ),
+                        )
+                        raise error from None
 
                 if not replayable:
                     raise PaymentError(
