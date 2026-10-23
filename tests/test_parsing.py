@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
-from mpp._parsing import MAX_HEADER_PAYLOAD_SIZE, ParseError
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, MAX_HEADER_PAYLOAD_SIZE, ParseError
+from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
 INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo2", "tempo-pay", "tempo_pay", "tempo.pay")
@@ -385,6 +386,47 @@ class TestCredential:
         parsed = Credential.from_authorization(credential.to_authorization())
 
         assert parsed.challenge.header == "Payment-Authorization"
+
+
+class TestAuthorizationSizeLimit:
+    @pytest.mark.parametrize(
+        "header",
+        [
+            "Bearer " + "a" * MAX_AUTHORIZATION_SIZE + ", Payment abc",
+            "Basic a," * MAX_AUTHORIZATION_SIZE,
+            " " * MAX_AUTHORIZATION_SIZE + "Payment abc",
+            "Payment " + "a" * MAX_AUTHORIZATION_SIZE,
+        ],
+    )
+    def test_rejects_oversized_input_before_extraction(self, header: str) -> None:
+        assert _extract_payment_scheme(header) is None
+        with pytest.raises(ParseError, match="exceeds maximum size"):
+            Credential.from_authorization(header)
+
+    def test_accepts_credential_echoing_request_at_the_limit(self) -> None:
+        request = _b64_json({"data": "a" * 12276})
+        assert len(request) == MAX_HEADER_PAYLOAD_SIZE
+        credential = make_credential(payload={"hash": "0x1"}, request=request)
+
+        header = credential.to_authorization()
+        assert len(header) > MAX_HEADER_PAYLOAD_SIZE
+        assert _extract_payment_scheme(header) == header
+        parsed = Credential.from_authorization(header)
+
+        assert parsed.challenge.request == request
+
+    def test_accepts_credential_at_the_limit(self) -> None:
+        credential = make_credential(payload={"hash": "0x1"})
+        token = credential.to_authorization()[len("Payment ") :]
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode()
+        padded = raw.ljust((MAX_AUTHORIZATION_SIZE - len("Payment ")) // 4 * 3)
+        header = "Payment " + base64.urlsafe_b64encode(padded.encode()).decode().rstrip("=")
+        assert len(header) == MAX_AUTHORIZATION_SIZE
+
+        assert _extract_payment_scheme(header) == header
+        parsed = Credential.from_authorization(header)
+
+        assert parsed.challenge.id == credential.challenge.id
 
 
 class TestReceipt:
