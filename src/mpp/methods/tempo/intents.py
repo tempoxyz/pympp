@@ -526,6 +526,28 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
     return 2 if has_swap_prefix else 0
 
 
+def _funding_currency(raw_tx: str, request: ChargeRequest) -> str | None:
+    """Return the token a validated pull-mode transaction debits to fund the payment.
+
+    A DEX auto-swap route (approve, swap, transfers) is funded by the approved
+    swap input token; a direct transfer route by the charge currency. Call
+    validation has already bound the route to the expected transfers.
+    """
+    import rlp
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        first_call = rlp.decode(tx_bytes[1:])[4][0]
+        call_to, call_data = first_call[0], first_call[2]
+    except Exception:
+        return None
+    if not isinstance(call_to, bytes) or not isinstance(call_data, bytes):
+        return None
+    if call_data[:4].hex() == APPROVE_SELECTOR:
+        return "0x" + call_to.hex()
+    return request.currency
+
+
 def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: ChargeRequest) -> None:
     prefix_len = _validate_call_scope(calls)
     if prefix_len == 2:
@@ -854,13 +876,17 @@ class ChargeIntent:
                 if store_key is not None and self._store is not None:
                     await self._store.delete(store_key)
                 raise
-        return await self._broadcast_transaction(
+        receipt = await self._broadcast_transaction(
             payload,
             req,
             challenge_id=credential.challenge.id,
             realm=credential.challenge.realm,
             source=credential.source,
         )
+        funding_currency = _funding_currency(payload.signature, req)
+        if funding_currency is None:
+            return receipt
+        return replace(receipt, funding_currency=funding_currency)
 
     async def verify(
         self,

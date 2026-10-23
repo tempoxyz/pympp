@@ -3328,6 +3328,45 @@ class TestCosignAsFeePayer:
         with pytest.raises(VerificationError, match="disallowed call pattern"):
             intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
 
+    def test_funding_currency_reports_route_source_token(self) -> None:
+        """Pull-mode receipts report the token that funds the payment."""
+        from pytempo import Call
+
+        from mpp.methods.tempo.intents import _funding_currency
+
+        currency = "0x20c0000000000000000000000000000000000000"
+        token_in = "0x20c0000000000000000000000000000000000001"
+        request = ChargeRequest(
+            amount="1000000",
+            currency=currency,
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+        assert _funding_currency(self._build_client_tx(), request) == currency
+
+        swap_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to=token_in,
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, 2000000),
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(token_in, currency, 1000000, 2000000),
+                ),
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        assert _funding_currency(swap_tx, request) == token_in
+        assert _funding_currency("0x76abcdef", request) is None
+
     def test_cosign_rejects_approve_binding_mismatch(self) -> None:
         """Should reject swap prefixes whose approval is bound to the wrong token."""
         from pytempo import Call
@@ -6255,4 +6294,5 @@ class TestTransactionCredentialPayer:
             )
 
         assert receipt.payer == sender.lower()
+        assert receipt.funding_currency == self.CURRENCY
         assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
