@@ -507,6 +507,21 @@ class TestReceipt:
         roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
         assert roundtripped.subscription_id == "sub_123"
 
+    def test_roundtrip_preserves_funding_currency(self) -> None:
+        receipt = Receipt.success(
+            "0xabc", funding_currency="0x20c0000000000000000000000000000000000001"
+        )
+        header = receipt.to_payment_receipt()
+        encoded = json.loads(base64.urlsafe_b64decode(header + "==").decode())
+        assert encoded["fundingCurrency"] == "0x20c0000000000000000000000000000000000001"
+
+        parsed = Receipt.from_payment_receipt(header)
+        assert parsed.funding_currency == "0x20c0000000000000000000000000000000000001"
+        assert parsed.extensions is None
+        assert "fundingCurrency" not in json.loads(
+            base64.urlsafe_b64decode(Receipt.success("0xabc").to_payment_receipt() + "==").decode()
+        )
+
     def test_roundtrip_preserves_method_specific_fields(self) -> None:
         payload = {
             "status": "success",
