@@ -1909,6 +1909,31 @@ async def test_allows_explicitly_pinned_tempo_realm():
     method.create_credential.assert_awaited_once()
 
 
+async def test_pinned_tempo_realm_is_case_sensitive():
+    method = MockMethod()
+    challenge = Challenge(
+        id="case-sensitive",
+        realm="Tenant-A",
+        method="tempo",
+        intent="charge",
+        request={"amount": "0"},
+    )
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+            )
+        ]
+    )
+    transport = PaymentTransport(
+        methods=[method], inner=inner, trusted_tempo_realms={"https://relay.example": "tenant-a"}
+    )
+
+    with pytest.raises(PaymentError, match="trusted_tempo_realms"):
+        await transport.handle_async_request(httpx.Request("GET", "https://relay.example/"))
+    method.create_credential.assert_not_awaited()
+
+
 async def test_allows_punycode_realm_for_internationalized_host():
     method = MockMethod()
     challenge = Challenge(

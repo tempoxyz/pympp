@@ -269,7 +269,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._trusted_tempo_realms: dict[tuple[str, str, int | None], str] = {}
         for origin, realm in (trusted_tempo_realms or {}).items():
             _payment_origins([origin], parameter="trusted_tempo_realms")
-            self._trusted_tempo_realms[_origin(httpx.URL(origin))] = realm.lower()
+            self._trusted_tempo_realms[_origin(httpx.URL(origin))] = realm
         self._inner = inner or httpx.AsyncHTTPTransport()
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
@@ -399,13 +399,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 # into its memo. Do not let a different host obtain a transaction
                 # that it can relay to the server named by that realm.
                 remaining = challenges
-                while _is_zero_tempo_charge(challenge) and all(
-                    challenge.realm.lower() != known_realm
-                    for known_realm in (
-                        request.url.host.lower(),
-                        request.url.raw_host.decode("ascii").lower(),
-                        self._trusted_tempo_realms.get(current_origin),
-                    )
+                while (
+                    _is_zero_tempo_charge(challenge)
+                    and challenge.realm.lower() != request.url.host.lower()
+                    and challenge.realm.lower() != request.url.raw_host.decode("ascii").lower()
+                    and challenge.realm != self._trusted_tempo_realms.get(current_origin)
                 ):
                     error = PaymentError(
                         f"Zero-amount Tempo realm {challenge.realm!r} differs from "

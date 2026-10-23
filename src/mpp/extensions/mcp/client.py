@@ -159,7 +159,7 @@ class McpClient:
     ) -> None:
         self._session = session
         self._methods = methods
-        self._trusted_tempo_realms = {realm.lower() for realm in trusted_tempo_realms}
+        self._trusted_tempo_realms = set(trusted_tempo_realms)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
@@ -265,7 +265,7 @@ class McpClient:
             zero = int(challenge.request["amount"]) == 0
         except (KeyError, TypeError, ValueError, OverflowError):
             return False
-        return zero and challenge.realm.lower() not in self._trusted_tempo_realms
+        return zero and challenge.realm not in self._trusted_tempo_realms
 
     @staticmethod
     def _intent_names(method: Method) -> set[str]:

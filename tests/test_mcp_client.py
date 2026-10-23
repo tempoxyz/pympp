@@ -718,3 +718,7 @@ def test_mcp_zero_amount_tempo_charge_requires_pinned_realm() -> None:
 
     pinned = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["api.example.com"])
     assert pinned._match_challenge([challenge])[0] == challenge
+
+    wrong_case = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["API.EXAMPLE.COM"])
+    with pytest.raises(ValueError, match="trusted_tempo_realms"):
+        wrong_case._match_challenge([challenge])
