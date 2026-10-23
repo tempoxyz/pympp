@@ -19,6 +19,7 @@ from mpp.methods.stripe import (
     stripe,
 )
 from mpp.methods.tempo import ChargeIntent, tempo
+from mpp.store import MemoryStore
 
 
 async def on_payment_success(_payload: ServerPaymentSuccessPayload) -> None:
@@ -59,7 +60,11 @@ server_api.Mpp.create(method=method, methods=[method])  # pyright: ignore[report
 stripe_client = StripeClient("sk_test")
 deposit_addresses: DepositAddresses = {"tempo": "0x" + "1" * 40}
 machine_payments = create(
-    network_id="bn_test", livemode=False, client=stripe_client, deposit_addresses=deposit_addresses
+    network_id="bn_test",
+    livemode=False,
+    client=stripe_client,
+    deposit_addresses=deposit_addresses,
+    store=MemoryStore(),
 )
 assert_type(machine_payments, MachinePayments)
 machine_payments.spt.charge()
@@ -73,7 +78,9 @@ machine_server.compose(
 )
 spt(intents={})
 stripe(intents={})
-stripe_module.create(network_id="bn_test", livemode=False, client=stripe_client)
+stripe_module.create(
+    network_id="bn_test", livemode=False, client=stripe_client, store=MemoryStore()
+)
 
 stripe(intents={}, unknown=True)  # pyright: ignore[reportCallIssue]
 server_api.Mpp.create(

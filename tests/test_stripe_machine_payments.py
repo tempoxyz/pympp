@@ -9,6 +9,7 @@ from mpp import Challenge, Credential, Receipt
 from mpp.errors import CredentialReplayedError
 from mpp.methods.stripe import MachinePayments, create
 from mpp.methods.stripe import _defaults as stripe_defaults
+from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID, USDC
 from mpp.server import Mpp
 from mpp.store import MemoryStore
@@ -169,8 +170,8 @@ async def test_tempo_charge_uses_factory_store_for_replay_protection() -> None:
     _, first = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
     _, second = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
 
-    first_intent = first.tempo.charge().intents["charge"]
-    second_intent = second.tempo.charge().intents["charge"]
+    first_intent = cast(TempoChargeIntent, first.tempo.charge().intents["charge"])
+    second_intent = cast(TempoChargeIntent, second.tempo.charge().intents["charge"])
 
     assert first_intent._store is store
     assert second_intent._store is store
