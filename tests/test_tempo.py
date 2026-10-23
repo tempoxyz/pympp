@@ -6184,6 +6184,66 @@ class TestTransactionCredentialPayer:
         validation = await intent.validate(self._credential(forged, None), self._request())
         assert validation.payer is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("allowed", "sponsor_token", "accepted"),
+        [
+            (None, USDC, True),
+            ((PATH_USD,), PATH_USD, True),
+            ((PATH_USD,), USDC, False),
+            ((PATH_USD,), None, True),
+        ],
+    )
+    async def test_external_fee_payer_token_respects_configured_allowlist(
+        self, allowed: tuple[str, ...] | None, sponsor_token: str | None, accepted: bool
+    ) -> None:
+        from eth_account import Account
+
+        from mpp.server.intent import broadcast_credential
+
+        sender = Account.from_key(TEST_PRIVATE_KEY).address
+        signed = self._tx(awaiting_fee_payer=True, fee_token=sponsor_token).sign(TEST_PRIVATE_KEY)
+        cosigned = "0x" + signed.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex()
+        log = {
+            "address": self.CURRENCY,
+            "topics": [
+                TRANSFER_WITH_MEMO_TOPIC,
+                "0x" + sender[2:].lower().zfill(64),
+                "0x" + self.RECIPIENT[2:].lower().zfill(64),
+                self._memo,
+            ],
+            "data": amount_data(1000),
+        }
+        methods: list[str] = []
+
+        def rpc(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            methods.append(body["method"])
+            if body["method"] == "eth_signRawTransaction":
+                result: object = cosigned
+            else:
+                tx_hash = _raw_transaction_hash(body["params"][0])
+                result = {"status": "0x1", "transactionHash": tx_hash, "logs": [log]}
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
+            intent = ChargeIntent(rpc_url="https://rpc.test", http_client=client)
+            tempo(intents={"charge": intent}, allowed_fee_tokens=allowed)
+            credential = self._credential(self._envelope(), None)
+            request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
+
+            if not accepted:
+                with pytest.raises(VerificationError, match="feeToken is not allowed"):
+                    await broadcast_credential(
+                        intent=intent, credential=credential, request=request
+                    )
+                assert methods == ["eth_signRawTransaction"]
+                return
+
+            await broadcast_credential(intent=intent, credential=credential, request=request)
+
+        assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
+
     @pytest.mark.parametrize(
         "raw_tx",
         [
