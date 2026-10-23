@@ -3680,6 +3680,26 @@ class TestCosignAsFeePayer:
             with pytest.raises(VerificationError, match="validity window exceeds sponsor policy"):
                 intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
 
+    @pytest.mark.parametrize(
+        ("milliseconds", "remaining", "accepted"),
+        [(0, 14, False), (0, 15, True), (1, 15, False), (1, 16, True), (999, 16, True)],
+    )
+    def test_cosign_requires_minimum_remaining_validity(
+        self, milliseconds: int, remaining: int, accepted: bool
+    ) -> None:
+        """Should require 15 seconds of remaining validity before sponsoring."""
+        intent = self._make_intent()
+        now = 2_000_000_000 + milliseconds / 1000
+        raw_tx = self._build_client_tx(valid_before=2_000_000_000 + remaining)
+        with patch("mpp.methods.tempo.intents.time.time", return_value=now):
+            if accepted:
+                intent._cosign_as_fee_payer(raw_tx, "0x20c0000000000000000000000000000000000000")
+            else:
+                with pytest.raises(VerificationError, match="at least 15 seconds"):
+                    intent._cosign_as_fee_payer(
+                        raw_tx, "0x20c0000000000000000000000000000000000000"
+                    )
+
     def test_cosign_rejects_non_empty_access_list(self) -> None:
         """Should reject sponsored transactions with access lists."""
         from pytempo import AccessListItem

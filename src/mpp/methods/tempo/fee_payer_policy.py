@@ -17,6 +17,10 @@ class Policy:
     max_validity_window_seconds: int
 
 
+# Sponsored transactions must stay valid at least this long after cosigning.
+MIN_REMAINING_VALIDITY_SECONDS = 15
+
+
 DEFAULT_POLICY = Policy(
     max_gas=2_000_000,
     max_fee_per_gas=100_000_000_000,

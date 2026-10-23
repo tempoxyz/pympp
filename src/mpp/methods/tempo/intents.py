@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -29,7 +30,7 @@ from mpp.errors import (
 )
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
-from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -1784,6 +1785,13 @@ class ChargeIntent:
         if valid_before <= int(time.time()):
             raise VerificationError(
                 f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
+            )
+
+        # Leave time to simulate, broadcast and include the sponsored transaction.
+        if valid_before < math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS:
+            raise VerificationError(
+                "Invalid transaction: fee-sponsored transaction needs at least "
+                f"{MIN_REMAINING_VALIDITY_SECONDS} seconds of remaining validity"
             )
 
         chain_id = _int(decoded[0])
