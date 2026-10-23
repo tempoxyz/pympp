@@ -21,10 +21,12 @@ class RedisStore:
     """Async key-value store backed by Redis.
 
     Each key is prefixed with ``key_prefix`` (default ``"mpp:"``).
-    Keys do not expire by default; set ``ttl_seconds`` to opt into expiry.
+    Keys written by ``put`` do not expire by default; set ``ttl_seconds``
+    to opt into expiry for those writes.
 
-    ``put_if_absent`` maps to ``SET key value NX`` with an optional
-    ``EX ttl`` — a single atomic Redis command with no TOCTOU race.
+    ``put_if_absent`` always creates persistent replay claims using
+    ``SET key value NX``, regardless of ``ttl_seconds``. Existing keys
+    retain their previous expiry.
     """
 
     def __init__(
@@ -54,13 +56,10 @@ class RedisStore:
         await self._redis.delete(self._key(key))
 
     async def put_if_absent(self, key: str, value: Any) -> bool:
-        """Atomic ``SETNX`` with an optional TTL.
+        """Atomic ``SETNX`` without expiry, preserving replay protection.
 
         Returns ``True`` when the key was new and the write succeeded,
         ``False`` when the key already existed (duplicate).
         """
-        if self._ttl is None:
-            result = await self._redis.set(self._key(key), value, nx=True)
-            return result is not None
-        result = await self._redis.set(self._key(key), value, nx=True, ex=self._ttl)
+        result = await self._redis.set(self._key(key), value, nx=True)
         return result is not None
