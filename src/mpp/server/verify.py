@@ -170,6 +170,11 @@ async def verify_or_challenge(
     if authorization is None:
         return await new_challenge()
 
+    # Reject oversized values before extraction, but still report them as a
+    # rejected credential so payment.failed hooks see them.
+    if len(authorization) > MAX_AUTHORIZATION_SIZE:
+        return await fail(MalformedCredentialError("Authorization header exceeds maximum size"))
+
     payment_scheme = _extract_payment_scheme(authorization)
     if payment_scheme is None:
         return await new_challenge()

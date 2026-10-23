@@ -433,6 +433,36 @@ class TestVerificationError:
         assert events == [f"failed:{result.id}:MalformedCredentialError"]
 
     @pytest.mark.asyncio
+    async def test_emits_payment_failed_on_oversized_authorization(self) -> None:
+        """Should emit payment.failed for Authorization values over the size limit."""
+        from mpp._parsing import MAX_AUTHORIZATION_SIZE
+
+        events: list[str] = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed",
+            lambda payload: events.append(
+                f"failed:{payload['challenge'].id}:{type(payload['error']).__name__}"
+            ),
+        )
+
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
+
+        result = await verify_or_challenge(
+            authorization="Payment " + "a" * MAX_AUTHORIZATION_SIZE,
+            intent=test_intent,
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+            events=dispatcher,
+        )
+
+        assert isinstance(result, Challenge)
+        assert events == [f"failed:{result.id}:MalformedCredentialError"]
+
+    @pytest.mark.asyncio
     async def test_emits_payment_failed_on_invalid_hmac(self) -> None:
         """Should emit payment.failed when the challenge ID is not server-issued."""
         events: list[str] = []
