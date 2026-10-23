@@ -1964,6 +1964,7 @@ async def test_skips_relayed_zero_offer_for_paid_alternative():
 
     assert response.status_code == 200
     method.create_credential.assert_awaited_once()
+    assert method.create_credential.await_args is not None
     assert method.create_credential.await_args.args[0].id == "paid"
 
 
