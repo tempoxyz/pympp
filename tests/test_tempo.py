@@ -67,7 +67,7 @@ from mpp.methods.tempo.schemas import (
     TransactionCredentialPayload,
 )
 from mpp.server.intent import VerificationError
-from tests import internal_cause, make_credential
+from tests import TEST_REALM, internal_cause, make_credential
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -3749,7 +3749,12 @@ class TestCosignAsFeePayer:
         recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 
         intent = self._make_intent()
-        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+        )
         credential = make_credential(
             payload={"type": "transaction", "signature": raw_tx},
             expires=future,
@@ -3785,6 +3790,56 @@ class TestCosignAsFeePayer:
         methods = [json.loads(r.read().decode())["method"] for r in requests]
         assert methods == ["tempo_simulateV1"]
         assert "eth_sendRawTransactionSync" not in methods
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_conflicting_pull_memo_before_broadcast(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        """A transaction memo bound elsewhere is rejected before any RPC call moves funds."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        split_recipient = "0x1111111111111111111111111111111111111111"
+        bound = encode_attribution(challenge_id="test", server_id=TEST_REALM)
+        other = encode_attribution(challenge_id="other", server_id=TEST_REALM)
+
+        from pytempo import Call
+
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(recipient, 700000, bound),
+                ),
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(split_recipient, 300000, other),
+                ),
+            )
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            await self._make_intent().verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {
+                        "feePayer": True,
+                        "chainId": TESTNET_CHAIN_ID,
+                        "splits": [{"amount": "300000", "recipient": split_recipient}],
+                    },
+                },
+            )
+
+        assert httpx_mock.get_requests() == []
 
     @pytest.mark.asyncio
     async def test_verify_local_fee_payer_rejects_unsimulatable_authorization(
@@ -3835,7 +3890,12 @@ class TestCosignAsFeePayer:
         intent._store = store
         currency = "0x20c0000000000000000000000000000000000000"
         recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
-        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+        )
         cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
         tx_hash = _raw_transaction_hash(cosigned_raw)
         await store.put_if_absent(f"mpp:charge:{tx_hash.lower()}", tx_hash)
@@ -3870,7 +3930,12 @@ class TestCosignAsFeePayer:
         store = MemoryStore()
         intent._store = store
 
-        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+        )
         cosigned_raw, _ = intent._cosign_as_fee_payer(raw_tx, currency)
         tx_hash = _raw_transaction_hash(cosigned_raw)
 
@@ -5497,6 +5562,138 @@ class TestSplitLogMemoStrictness:
         assert ChargeIntent(rpc_url="https://rpc.test")._verify_transfer_logs(
             {"logs": logs}, request
         )
+
+    def _split_request(self) -> ChargeRequest:
+        return ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT)]
+            ),
+        )
+
+    def test_split_rejects_conflicting_challenge_memo(self) -> None:
+        """A split leg bound to another challenge cannot ride on this payment."""
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
+            ],
+        }
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
+
+    def test_split_rejects_conflicting_realm_memo(self) -> None:
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-b", server_id="other.example.com")
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
+            ],
+        }
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
+
+    def test_single_transfer_prefers_leg_bound_to_this_challenge(self) -> None:
+        """An equal transfer for another challenge in the same receipt is not this payment."""
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT), currency=self.CURRENCY, recipient=self.RECIPIENT
+        )
+        for logs in (
+            [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, self.AMOUNT, other),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, self.AMOUNT, bound),
+            ],
+            [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, self.AMOUNT, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, self.AMOUNT, other),
+            ],
+        ):
+            matches = ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                {"status": "0x1", "logs": logs},
+                request,
+                challenge_id="challenge-b",
+                realm="api.example.com",
+            )
+            assert [m.memo for m in matches] == [bound]
+
+    def test_split_prefers_legs_bound_to_this_challenge(self) -> None:
+        """Unrelated equal transfers for another challenge don't fill this charge's legs."""
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        other = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, other),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, bound),
+            ],
+        }
+        matches = ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+            receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+        )
+        assert [m.memo for m in matches] == [bound, bound]
+
+    def test_split_allows_server_fixed_mpp_memo(self) -> None:
+        """A split memo the server itself set is not checked against this challenge."""
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        partner = encode_attribution(challenge_id="partner", server_id="partner.example.com")
+        request = ChargeRequest(
+            amount=str(self.AMOUNT),
+            currency=self.CURRENCY,
+            recipient=self.RECIPIENT,
+            methodDetails=MethodDetails(
+                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT, memo=partner)]
+            ),
+        )
+        receipt = {
+            "status": "0x1",
+            "logs": [
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, partner),
+            ],
+        }
+        assert ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+            receipt, request, challenge_id="challenge-b", realm="api.example.com"
+        )
+        # Still requires a memo bound to this challenge on a payer-chosen leg.
+        receipt["logs"][0] = self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 700000)
+        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, request, challenge_id="challenge-b", realm="api.example.com"
+            )
+
+    def test_split_allows_plain_and_non_mpp_memo_legs(self) -> None:
+        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        for split_log in (
+            self._make_log(TRANSFER_TOPIC, self.SPLIT_RECIPIENT, 300000),
+            self._make_log(
+                TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, "0x" + "ff" * 32
+            ),
+        ):
+            receipt = {
+                "status": "0x1",
+                "logs": [
+                    self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
+                    split_log,
+                ],
+            }
+            assert ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
 
     def test_single_transfer_accepts_transfer_with_memo_log(self) -> None:
         """A memo-less single transfer accepts TransferWithMemo logs.

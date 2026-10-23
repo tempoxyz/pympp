@@ -407,7 +407,7 @@ async def test_charge_validation_uses_python_field_names() -> None:
         "recipient": "0x4567890123456789012345678901234567890123",
     }
 
-    with patch.object(intent, "_validate_transaction_payload"):
+    with patch.object(intent, "_validate_transaction_payload", return_value=None):
         result = await intent.validate(payment, request)
 
     assert result.details == {

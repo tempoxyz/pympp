@@ -340,6 +340,8 @@ class MatchedTransferLog:
     memo: str | None = None
     sender: str | None = None
     """Lowercase ``from`` address of the transfer."""
+    fixed: bool = False
+    """Whether the request fixed this leg's memo (e.g. a split ``memo``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,7 +528,10 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
     return 2 if has_swap_prefix else 0
 
 
-def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: ChargeRequest) -> None:
+def _validate_normalized_calls(
+    calls: list[tuple[str, int, str]], request: ChargeRequest
+) -> list[MatchedTransferLog]:
+    """Validate calls against the expected transfers and return the payment legs."""
     prefix_len = _validate_call_scope(calls)
     if prefix_len == 2:
         approve = _decode_static_call_args(
@@ -568,6 +573,7 @@ def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: Charg
 
     sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
     used_calls: set[int] = set()
+    legs: list[MatchedTransferLog] = []
 
     for transfer in sorted_expected:
         found = False
@@ -582,6 +588,7 @@ def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: Charg
                 call_data, transfer.recipient, transfer.amount, transfer.memo
             ):
                 used_calls.add(call_idx)
+                legs.append(_payment_call_leg(call_data, fixed=transfer.memo is not None))
                 found = True
                 break
         if not found:
@@ -589,6 +596,21 @@ def _validate_normalized_calls(calls: list[tuple[str, int, str]], request: Charg
 
     if len(used_calls) != len(payment_calls):
         raise VerificationError("Invalid transaction: contains unauthorized extra calls")
+    return legs
+
+
+def _payment_call_leg(call_data_hex: str, *, fixed: bool) -> MatchedTransferLog:
+    """Describe a validated payment call as a transfer leg for memo binding checks."""
+    call_data_hex = _strip_0x(call_data_hex)
+    if call_data_hex[:SELECTOR_HEX_LEN].lower() == TRANSFER_WITH_MEMO_SELECTOR:
+        decoded = _decode_static_call_args(
+            call_data_hex,
+            ("address", "uint256", "bytes32"),
+            TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
+        )
+        if decoded is not None:
+            return MatchedTransferLog(kind="memo", memo="0x" + decoded[2].hex(), fixed=fixed)
+    return MatchedTransferLog(kind="transfer", fixed=fixed)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -793,7 +815,13 @@ class ChargeIntent:
             payer = receipt.payer
             details: dict[str, Any] = {"mode": "push"}
         else:
-            self._validate_transaction_payload(payload.signature, req, strict=True)
+            legs = self._validate_transaction_payload(payload.signature, req, strict=True)
+            if legs is not None:
+                self._assert_challenge_bound_memo(
+                    legs,
+                    challenge_id=credential.challenge.id,
+                    realm=credential.challenge.realm,
+                )
             payer = self._transaction_payer(
                 payload.signature, credential.source, req.methodDetails.chainId
             )
@@ -991,15 +1019,28 @@ class ChargeIntent:
         challenge_id: str,
         realm: str,
     ) -> None:
-        from mpp.methods.tempo._attribution import verify_challenge_binding, verify_server
+        """Require a challenge-bound memo and reject conflicting attribution.
 
-        bound = any(
-            matched_log.kind == "memo"
-            and matched_log.memo is not None
-            and verify_server(matched_log.memo, realm)
-            and verify_challenge_binding(matched_log.memo, challenge_id)
-            for matched_log in matched_logs
+        Every matched transfer carrying an MPP attribution memo must be bound to
+        this challenge and realm; otherwise one split payment could authorize
+        another challenge after this challenge's replay marker expires. Plain
+        transfers, non-MPP memos and memos the request itself fixed (such as a
+        split ``memo``) remain allowed.
+        """
+        from mpp.methods.tempo._attribution import (
+            is_mpp_memo,
+            verify_challenge_binding,
+            verify_server,
         )
+
+        bound = False
+        for matched_log in matched_logs:
+            memo = matched_log.memo if matched_log.kind == "memo" else None
+            if memo is None or matched_log.fixed or not is_mpp_memo(memo):
+                continue
+            if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
+                raise CredentialReplayedError("memo is not bound to this challenge")
+            bound = True
         if not bound:
             # The transfer already settled to the recipient, so another payment
             # would not help this credential.
@@ -1116,6 +1157,8 @@ class ChargeIntent:
             expected_sender=expected_sender,
             source=source,
             validate_sender=validate_sender,
+            challenge_id=challenge_id,
+            realm=realm,
         )
         if not matched_logs:
             raise VerificationError(
@@ -1206,11 +1249,30 @@ class ChargeIntent:
         expected_sender: str | None = None,
         source: str | None = None,
         validate_sender: ValidateSender | None = None,
+        challenge_id: str | None = None,
+        realm: str | None = None,
     ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer or TransferWithMemo logs.
 
-        Returns matched logs. Empty list means no match.
+        Returns the payment legs. Empty list means no match. With
+        ``challenge_id`` and ``realm``, legs bound to this challenge are chosen
+        over interchangeable logs, so unrelated transfers in the same
+        transaction (e.g. a batched payment for another challenge) are not
+        mistaken for this payment.
         """
+
+        def is_bound(memo: str) -> bool:
+            if challenge_id is None or realm is None:
+                return False
+            from mpp.methods.tempo._attribution import verify_challenge_binding, verify_server
+
+            return verify_server(memo, realm) and verify_challenge_binding(memo, challenge_id)
+
+        def is_foreign(memo: str) -> bool:
+            from mpp.methods.tempo._attribution import is_mpp_memo
+
+            return challenge_id is not None and is_mpp_memo(memo) and not is_bound(memo)
+
         expected = get_transfers(
             int(request.amount),
             request.recipient,
@@ -1220,7 +1282,7 @@ class ChargeIntent:
 
         if len(expected) == 1:
             t = expected[0]
-            return self._verify_single_transfer_log(
+            matches = self._verify_single_transfer_log(
                 receipt,
                 request.currency,
                 t.recipient,
@@ -1230,6 +1292,14 @@ class ChargeIntent:
                 source,
                 validate_sender,
             )
+            # Prefer legs bound to this challenge over interchangeable logs,
+            # e.g. an equal transfer for another challenge in the same batch.
+            bound_matches = [
+                match
+                for match in matches
+                if match.kind == "memo" and match.memo is not None and is_bound(match.memo)
+            ]
+            return bound_matches or matches
 
         # Multi-transfer: order-insensitive matching
         sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
@@ -1267,13 +1337,25 @@ class ChargeIntent:
                 if candidates := companions.get(key):
                     paired.add(candidates.pop())
         indexed_logs = [(index, log) for index, log in indexed_logs if index not in paired]
+
         # Prefer memo logs so memo-less transfers still preserve attribution
         # memos for challenge binding verification when both log types exist.
-        indexed_logs.sort(
-            key=lambda item: (
-                0 if item[1].get("topics", [None])[0] == TRANSFER_WITH_MEMO_TOPIC else 1
-            )
-        )
+        # Among memo logs, prefer ones bound to this challenge and try memos
+        # bound elsewhere last, so interchangeable legs don't pick them.
+        def log_rank(item: tuple[int, dict[str, Any]]) -> int:
+            topics = item[1].get("topics") or [None]
+            if topics[0] != TRANSFER_WITH_MEMO_TOPIC or len(topics) < 4:
+                return 2
+            memo = topics[3]
+            if not isinstance(memo, str):
+                return 1
+            if is_bound(memo):
+                return 0
+            if is_foreign(memo):
+                return 3
+            return 1
+
+        indexed_logs.sort(key=log_rank)
         used_logs: set[int] = set()
         all_matches: list[MatchedTransferLog] = []
 
@@ -1317,7 +1399,7 @@ class ChargeIntent:
                         used_logs.add(log_idx)
                         all_matches.append(
                             MatchedTransferLog(
-                                kind="memo", memo=memo_topic, sender=from_addr.lower()
+                                kind="memo", memo=memo_topic, sender=from_addr.lower(), fixed=True
                             )
                         )
                         found = True
@@ -1380,7 +1462,10 @@ class ChargeIntent:
         simulation here cannot enforce an external sponsor's spending policy.
         For regular transactions, submits directly.
         """
-        self._validate_transaction_payload(payload.signature, request)
+        legs = self._validate_transaction_payload(payload.signature, request)
+        if legs is not None:
+            # Reject unbound or conflicting MPP memos before any funds move.
+            self._assert_challenge_bound_memo(legs, challenge_id=challenge_id, realm=realm)
         sender = self._transaction_payer(payload.signature, source, request.methodDetails.chainId)
 
         client = await self._get_client()
@@ -1881,34 +1966,38 @@ class ChargeIntent:
         request: ChargeRequest,
         *,
         strict: bool = False,
-    ) -> None:
-        """Validate a transaction, failing closed for advisory validation."""
+    ) -> list[MatchedTransferLog] | None:
+        """Validate a transaction, failing closed for advisory validation.
+
+        Returns the payment legs, or ``None`` when non-strict validation could
+        not decode the transaction.
+        """
         try:
             import rlp
         except ImportError as error:
             if strict:
                 raise InternalPaymentError() from error
-            return
+            return None
         try:
             tx_bytes = bytes.fromhex(signature[2:] if signature.startswith("0x") else signature)
         except ValueError as error:
             if strict:
                 raise VerificationError("Invalid serialized transaction") from error
-            return
+            return None
         if not tx_bytes or tx_bytes[0] not in (0x76, 0x78):
             if strict:
                 raise VerificationError("Only Tempo (0x76/0x78) transactions are supported")
-            return
+            return None
         try:
             decoded = rlp.decode(tx_bytes[1:])
         except Exception as error:
             if strict:
                 raise VerificationError("Invalid serialized transaction") from error
-            return
+            return None
         if not isinstance(decoded, list) or len(decoded) < 5:
             if strict:
                 raise VerificationError("Invalid serialized transaction")
-            return
+            return None
 
         if not isinstance(decoded[0], bytes):
             raise VerificationError("Invalid transaction chain ID")
@@ -1937,4 +2026,4 @@ class ChargeIntent:
 
             normalized_calls.append(("0x" + call_to_raw.hex(), call_value, call_data_raw.hex()))
 
-        _validate_normalized_calls(normalized_calls, request)
+        return _validate_normalized_calls(normalized_calls, request)
