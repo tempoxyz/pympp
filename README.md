@@ -186,7 +186,9 @@ will be rejected after upgrading. Keep credentials confidential and share an
 atomic replay store across workers and replicas.
 
 This release changes HTTP method scope, custom scope representation, and direct
-metadata binding as well as nonce issuance. Use an atomic rollout with payment
+metadata binding as well as nonce issuance. Dict request bodies are now digested
+like mppx (`JSON.stringify` key order) instead of with sorted keys; verifiers
+still accept the old sorted-key digest, but older verifiers reject new ones. Use an atomic rollout with payment
 traffic drained, or pin challenge issuance and all credential retries to the
 same version until outstanding challenges expire. Merely switching all replicas
 at once can still strand payments already issued by the old version.

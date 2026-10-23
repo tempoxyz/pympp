@@ -67,23 +67,19 @@ class TestCompute:
         raw = base64.b64decode(payload)
         assert len(raw) == 32
 
-    def test_key_order_independent(self) -> None:
-        """Dict digests should be identical regardless of key insertion order."""
-        d1 = {"z": "1", "a": "2", "m": "3"}
-        d2 = {"a": "2", "m": "3", "z": "1"}
-        assert compute(d1) == compute(d2)
+    def test_preserves_insertion_order_like_mppx(self) -> None:
+        """Dict digests hash JSON in insertion order, matching mppx's JSON.stringify."""
+        body = {"z": "1", "a": "2"}
+        # mppx: BodyDigest.compute({ z: '1', a: '2' })
+        assert compute(body) == "sha-256=WSxerte9Ij4rZhT5zPpISv1H2Sjidi2PaHo2Iu8d+Mc="
+        assert compute(body) == compute('{"z":"1","a":"2"}')
+        assert compute(body) != compute({"a": "2", "z": "1"})
 
-    def test_matches_canonical_json(self) -> None:
-        """Dict digest should match digest of canonical (sorted) JSON string."""
-        d = {"b": "2", "a": "1"}
-        canonical = json.dumps(d, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-        assert compute(d) == compute(canonical)
-
-    def test_nested_dict_key_order(self) -> None:
-        """Nested dict should also be sorted by keys."""
-        d1 = {"outer_z": {"inner_b": 1, "inner_a": 2}, "outer_a": 3}
-        d2 = {"outer_a": 3, "outer_z": {"inner_a": 2, "inner_b": 1}}
-        assert compute(d1) == compute(d2)
+    def test_nested_dict_preserves_insertion_order(self) -> None:
+        """Nested dicts also keep insertion order."""
+        body = {"outer_z": {"inner_b": 1, "inner_a": 2}, "outer_a": 3}
+        assert compute(body) == "sha-256=EVh89pgYAJz45/LcDMXKrGwCn8DVHGu3b28UfZw1dBE="
+        assert compute(body) == compute(json.dumps(body, separators=(",", ":")))
 
 
 class TestVerify:
@@ -125,3 +121,50 @@ class TestVerify:
     def test_empty_digest_string(self) -> None:
         """Empty digest string should fail verification."""
         assert verify("", "test") is False
+
+
+class TestJavaScriptKeyOrder:
+    def test_integer_keys_first_like_json_stringify(self) -> None:
+        """Integer-index keys come first in numeric order, like JSON.stringify."""
+        body = {"b": 1, "1": 2}
+        assert compute(body) == compute('{"1":2,"b":1}')
+        body = {"z": "1", "10": "a", "2": "b", "a": "c"}
+        assert compute(body) == compute('{"2":"b","10":"a","z":"1","a":"c"}')
+
+    def test_non_index_numeric_keys_keep_insertion_order(self) -> None:
+        """Leading zeros, negatives and keys above 2**32-2 are ordinary string keys."""
+        body = {"b": 1, "01": 2, "-1": 3, "4294967295": 4, "4294967294": 5}
+        assert compute(body) == compute('{"4294967294":5,"b":1,"01":2,"-1":3,"4294967295":4}')
+
+    def test_nested_integer_keys(self) -> None:
+        """Ordering applies inside nested dicts and lists."""
+        body = {"x": [{"b": 1, "0": 2}], "5": {"a": 1, "3": 2}}
+        assert compute(body) == compute('{"5":{"3":2,"a":1},"x":[{"0":2,"b":1}]}')
+
+
+class TestLegacyDigest:
+    def test_accepts_sorted_key_digest_for_dict(self) -> None:
+        """Digests issued by earlier releases (sorted keys) still verify."""
+        body = {"z": "1", "a": "2"}
+        legacy = compute('{"a":"2","z":"1"}')
+        assert compute(body) != legacy
+        assert verify(legacy, body) is True
+
+    def test_legacy_fallback_is_dict_only(self) -> None:
+        """String bodies are hashed as-is with no fallback."""
+        assert verify(compute('{"a":"2","z":"1"}'), '{"z":"1","a":"2"}') is False
+
+
+class TestHostileInputs:
+    def test_non_ascii_digest_returns_false(self) -> None:
+        """A non-ASCII digest from an untrusted credential is rejected, not raised."""
+        assert verify("sha-256=\u00e9", "test") is False
+        assert verify("sha-256=\u00e9", {"a": 1}) is False
+
+    def test_very_long_decimal_key_is_ordinary_string(self) -> None:
+        """Digit-only keys beyond int()'s conversion limit do not raise."""
+        key = "9" * 5000
+        body = {"b": 1, key: 2}
+        expected = '{"b":1,"' + key + '":2}'
+        assert compute(body) == compute(expected)
+        assert verify(compute(expected), body) is True
