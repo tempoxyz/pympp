@@ -6,10 +6,12 @@ from typing import Any, cast
 import pytest
 
 from mpp import Challenge, Credential, Receipt
+from mpp.errors import CredentialReplayedError
 from mpp.methods.stripe import MachinePayments, create
 from mpp.methods.stripe import _defaults as stripe_defaults
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID, USDC
 from mpp.server import Mpp
+from mpp.store import MemoryStore
 from tests import MockRequest
 
 TEMPO_ADDRESS = "0x" + "1" * 40
@@ -45,6 +47,7 @@ def make_payments(**overrides: Any) -> tuple[FakeStripeClient, MachinePayments]:
         network_id=overrides.pop("network_id", "bn_test"),
         livemode=overrides.pop("livemode", False),
         client=cast(Any, client),
+        store=overrides.pop("store", MemoryStore()),
         **overrides,
     )
 
@@ -122,6 +125,8 @@ async def test_spt_only_defaults_enforce_minimum_through_implicit_handlers() -> 
 def test_configuration_boundary_errors() -> None:
     with pytest.raises(TypeError, match="Unsupported Stripe client"):
         make_payments(client=object())
+    with pytest.raises(ValueError, match="shared atomic"):
+        make_payments(store=object())
     with pytest.raises(ValueError, match=r"deposit_addresses\['tempo'\]"):
         make_payments()[1].tempo.charge()
 
@@ -156,3 +161,20 @@ async def test_spt_uses_pinned_explicit_request_shape() -> None:
         "max_network_retries": 0,
         "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
     }
+
+
+@pytest.mark.asyncio
+async def test_tempo_charge_uses_factory_store_for_replay_protection() -> None:
+    store = MemoryStore()
+    _, first = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
+    _, second = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
+
+    first_intent = first.tempo.charge().intents["charge"]
+    second_intent = second.tempo.charge().intents["charge"]
+
+    assert first_intent._store is store
+    assert second_intent._store is store
+    tx_hash = "0x" + "ab" * 32
+    assert await first_intent._reserve_hash(tx_hash) is not None
+    with pytest.raises(CredentialReplayedError):
+        await second_intent._reserve_hash(tx_hash)
