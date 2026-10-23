@@ -2280,7 +2280,91 @@ class TestChargeIntent:
 
         assert await store.get(f"mpp:charge:{tx_hash}") is None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_sendRawTransactionSync"]
+        # A definitive error still gets one receipt lookup before giving up.
+        assert methods == ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outcome", "expected_error"),
+        [
+            pytest.param("included", None, id="included"),
+            pytest.param("missing", "Broadcast reply unavailable", id="missing"),
+            pytest.param("lookup_error", "Broadcast reply unavailable", id="lookup-error"),
+            pytest.param("wrong_hash", "does not match submitted", id="wrong-hash"),
+            pytest.param("wrong_transfer", None, id="wrong-transfer"),
+            pytest.param("reverted", None, id="reverted"),
+        ],
+    )
+    async def test_verify_transaction_recovers_receipt_after_rpc_error(
+        self, outcome: str, expected_error: str | None
+    ) -> None:
+        from mpp.store import MemoryStore
+
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        store = MemoryStore()
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=store)
+
+        asset = "0x1234567890123456789012345678901234567890"
+        destination = "0x4567890123456789012345678901234567890123"
+        raw_signature = "0xabcdef1234567890"
+        tx_hash = _raw_transaction_hash(raw_signature)
+        challenge_id = "challenge-123"
+        realm = "api.example.com"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+        receipt = {
+            "transactionHash": "0x" + "12" * 32 if outcome == "wrong_hash" else tx_hash,
+            "status": "0x0" if outcome == "reverted" else "0x1",
+            "logs": [
+                {
+                    "address": asset,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "0" * 24 + "abcd" * 10,
+                        "0x" + "0" * 24 + destination[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1 if outcome == "wrong_transfer" else 1000),
+                }
+            ],
+        }
+        lookups: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if json["method"] == "eth_sendRawTransactionSync":
+                return mock_response(
+                    200, {"error": {"code": -32000, "message": "Broadcast reply unavailable"}}
+                )
+            assert json["method"] == "eth_getTransactionReceipt"
+            lookups.append(json["params"][0])
+            if outcome == "missing":
+                return mock_response(200, {"result": None})
+            if outcome == "lookup_error":
+                raise httpx.ConnectError("lookup unavailable")
+            return mock_response(200, {"result": receipt})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_signature},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+        request = {"amount": "1000", "currency": asset, "recipient": destination}
+
+        if outcome == "included":
+            result = await intent.verify(credential, request)
+            assert result.reference == tx_hash
+            assert await store.get(f"mpp:charge:{tx_hash}") is not None
+        else:
+            with pytest.raises(InternalPaymentError) as raised:
+                await intent.verify(credential, request)
+            if expected_error is not None:
+                assert expected_error in str(internal_cause(raised.value))
+            assert await store.get(f"mpp:charge:{tx_hash}") is None
+        assert lookups == [tx_hash]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2723,7 +2807,7 @@ class TestChargeIntent:
             pytest.param(429, id="http-429"),
         ],
     )
-    async def test_verify_transaction_definitive_send_failure_skips_receipt_lookup(
+    async def test_verify_transaction_definitive_send_failure_raises_original_error(
         self, send_result: Exception | dict | int
     ) -> None:
         from mpp.store import MemoryStore
@@ -2761,7 +2845,11 @@ class TestChargeIntent:
         assert isinstance(internal_cause(raised.value), (VerificationError, httpx.HTTPError))
         assert await store.get(f"mpp:charge:{tx_hash}") is None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_sendRawTransactionSync"]
+        # Transport failures never reached the node; JSON-RPC errors get one lookup.
+        expected = ["eth_sendRawTransactionSync"]
+        if isinstance(send_result, dict):
+            expected.append("eth_getTransactionReceipt")
+        assert methods == expected
 
     @pytest.mark.asyncio
     async def test_verify_transaction_missing_receipt(self) -> None:

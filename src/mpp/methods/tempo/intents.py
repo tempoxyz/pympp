@@ -1082,6 +1082,51 @@ class ChargeIntent:
         if receipt_data is None:
             raise error
 
+        return self._verify_recovered_receipt(
+            receipt_data, tx_hash, request, challenge_id=challenge_id, realm=realm
+        )
+
+    async def _lookup_broadcast_receipt(
+        self,
+        client: Any,
+        tx_hash: str,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+        deadline: float,
+        error: Exception,
+    ) -> Receipt:
+        """Verify a transaction whose broadcast returned a definitive-looking error.
+
+        The node may have included the transaction before its reply failed, so
+        one receipt lookup, bounded by the time left before ``deadline``, runs
+        before giving up. Raises the original broadcast ``error`` if no receipt
+        is found or the lookup fails.
+        """
+        remaining = deadline - time.monotonic()
+        try:
+            receipt_data = await asyncio.wait_for(
+                self._get_transaction_receipt(client, tx_hash),
+                remaining if remaining > 0 else RECEIPT_POLL_INTERVAL,
+            )
+        except Exception:
+            receipt_data = None
+        if receipt_data is None:
+            raise error
+
+        return self._verify_recovered_receipt(
+            receipt_data, tx_hash, request, challenge_id=challenge_id, realm=realm
+        )
+
+    def _verify_recovered_receipt(
+        self,
+        receipt_data: dict[str, Any],
+        tx_hash: str,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+    ) -> Receipt:
+        """Verify a receipt found after a failed broadcast belongs to ``tx_hash``."""
         receipt_tx_hash = receipt_data.get("transactionHash")
         if not isinstance(receipt_tx_hash, str) or receipt_tx_hash.lower() != tx_hash.lower():
             raise VerificationError("Receipt transaction hash does not match submitted transaction")
@@ -1507,7 +1552,17 @@ class ChargeIntent:
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
                 if not _is_ambiguous_broadcast_error(result):
-                    raise rpc_error
+                    # The node answered, so it may have included the transaction
+                    # before its reply failed: look for a receipt once.
+                    return await self._lookup_broadcast_receipt(
+                        client,
+                        reserved_tx_hash or _raw_transaction_hash(raw_tx),
+                        request,
+                        challenge_id=challenge_id,
+                        realm=realm,
+                        deadline=deadline,
+                        error=rpc_error,
+                    )
                 return await self._recover_broadcast_receipt(
                     client,
                     raw_tx,
