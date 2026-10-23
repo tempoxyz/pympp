@@ -108,7 +108,7 @@ class PaymentRuntime:
                 raise InvalidChallengeError(challenge.id, "invalid expires") from error
             if expires.tzinfo is None:
                 raise InvalidChallengeError(challenge.id, "invalid expires")
-            if expires < datetime.now(UTC):
+            if expires <= datetime.now(UTC):
                 raise PaymentExpiredError(challenge.expires)
 
         payload = {
