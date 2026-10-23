@@ -948,6 +948,69 @@ class TestExpiringNonce:
         assert method.transaction_hash(credential) == expected_hash
 
     @pytest.mark.asyncio
+    async def test_verify_broadcasts_canonical_recovery_id(self) -> None:
+        """Raw 0/1 recovery IDs are canonicalized before hashing and broadcast."""
+        from mpp.store import MemoryStore
+
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc([])),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+        ):
+            expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+            challenge = self._challenge("canonical", fee_payer=False, expires=expires)
+            credential = await method.create_credential(challenge)
+
+        canonical_tx = credential.payload["signature"]
+        fields = _decode_signed_charge(canonical_tx)
+        signature = fields[-1]
+        assert len(signature) == 65 and signature[64] in (27, 28)
+        raw_signature = signature[:64] + bytes([signature[64] - 27])
+        submitted_tx = "0x" + (b"\x76" + rlp.encode([*fields[:-1], raw_signature])).hex()
+        canonical_hash = _raw_transaction_hash(canonical_tx)
+        assert _raw_transaction_hash(submitted_tx) != canonical_hash
+
+        broadcasts: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            assert json["method"] == "eth_sendRawTransactionSync"
+            broadcasts.append(json["params"][0])
+            receipt = {"transactionHash": canonical_hash, "status": "0x1", "logs": []}
+            return mock_response(200, {"jsonrpc": "2.0", "result": receipt, "id": 1})
+
+        intent = ChargeIntent(rpc_url="https://rpc.test", store=MemoryStore())
+        intent._http_client = with_chain_id(AsyncMock(post=AsyncMock(side_effect=post)))
+        request = challenge.request
+        submitted = make_credential(
+            payload={"type": "transaction", "signature": submitted_tx},
+            challenge_id=credential.challenge.id,
+            realm=credential.challenge.realm,
+            request=credential.challenge.request,
+            expires=expires,
+        )
+
+        with patch.object(ChargeIntent, "_verify_receipt_transfers"):
+            receipt = await intent.verify(submitted, request)
+            assert receipt.reference == canonical_hash
+            assert broadcasts == [canonical_tx]
+
+            replay = make_credential(
+                payload={"type": "transaction", "signature": canonical_tx},
+                challenge_id=credential.challenge.id,
+                realm=credential.challenge.realm,
+                request=credential.challenge.request,
+                expires=expires,
+            )
+            with pytest.raises(CredentialReplayedError):
+                await intent.verify(replay, request)
+        assert broadcasts == [canonical_tx]
+
+    @pytest.mark.asyncio
     async def test_valid_before_is_set_after_slow_rpc_preparation(self) -> None:
         method = tempo(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
