@@ -27,7 +27,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
-from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -42,7 +42,12 @@ if TYPE_CHECKING:
 # AA-aware eth_estimateGas calls, matching the approach used by mpp-rs.
 DEFAULT_GAS_LIMIT = 1_000_000
 EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
-EXPIRING_NONCE_VALID_BEFORE_SECS = 25
+# Lifetime of the expiring-nonce ``valid_before`` the client signs, capped at
+# the challenge expiry + 1. Sponsoring servers require at least
+# MIN_REMAINING_VALIDITY_SECONDS (15s) of remaining validity at cosigning, so a
+# 60s window leaves about 45s for client/server clock skew, signing and the
+# HTTP and RPC round trips. Deliberately wider than mppx's 25s.
+EXPIRING_NONCE_VALID_BEFORE_SECS = 60
 FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated alias.
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
@@ -348,6 +353,8 @@ class TempoMethod:
         use_fee_payer = (
             method_details.get("feePayer", False) if isinstance(method_details, dict) else False
         )
+        if use_fee_payer:
+            _assert_sponsored_challenge_time_left(challenge.expires)
 
         memo = encode_attribution(
             challenge_id=challenge.id,
@@ -585,6 +592,27 @@ class TempoMethod:
         if len(memo_clean) != 64:
             raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _assert_sponsored_challenge_time_left(expires: str | None) -> None:
+    """Refuse a sponsored challenge too close to expiry for the server to cosign.
+
+    The client caps ``valid_before`` at the challenge expiry, and a sponsoring
+    server rejects transactions with less than
+    ``MIN_REMAINING_VALIDITY_SECONDS`` of validity left, so signing such a
+    challenge could only produce a rejected payment. Raises before signing.
+    """
+    if not expires:
+        return
+    try:
+        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return
+    if challenge_expiry - time.time() < MIN_REMAINING_VALIDITY_SECONDS:
+        raise ValueError(
+            "Sponsored challenge expires in less than "
+            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds; request a new challenge"
+        )
 
 
 def _expiring_valid_before(expires: str | None) -> int:

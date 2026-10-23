@@ -40,7 +40,7 @@ from mpp.methods.tempo.client import (
     _expiring_valid_before,
 )
 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
-from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.intents import (
     APPROVE_SELECTOR,
     STABLECOIN_DEX,
@@ -66,6 +66,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
+from mpp.server.compose import ComposedChallenges
 from mpp.server.intent import VerificationError
 from tests import internal_cause, make_credential
 
@@ -908,7 +909,7 @@ class TestExpiringNonce:
             pytest.param(False, None, None, id="unsponsored"),
             pytest.param(True, None, None, id="sponsored"),
             pytest.param(False, 10, None, id="unsponsored-capped-by-challenge-expiry"),
-            pytest.param(True, 10, None, id="sponsored-capped-by-challenge-expiry"),
+            pytest.param(True, 20, None, id="sponsored-capped-by-challenge-expiry"),
             pytest.param(False, None, {"nonce_key": "0x5"}, id="ignores-challenge-nonce-key"),
         ],
     )
@@ -1005,6 +1006,54 @@ class TestExpiringNonce:
         assert valid_before == expected
         # Still valid at signing time, even when the challenge expires this second.
         assert valid_before > now
+
+    def test_window_is_sixty_seconds(self) -> None:
+        """The window leaves ~45s of clock-skew budget above the server's 15s floor."""
+        assert EXPIRING_NONCE_VALID_BEFORE_SECS == 60
+        assert EXPIRING_NONCE_VALID_BEFORE_SECS - MIN_REMAINING_VALIDITY_SECONDS == 45
+        with patch("mpp.methods.tempo.client.time.time", return_value=_NOW):
+            assert _expiring_valid_before(_iso(_NOW + 300)) == _NOW + 60
+            # The challenge expiry cap still binds inside the window.
+            assert _expiring_valid_before(_iso(_NOW + 30)) == _NOW + 31
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("seconds_left", [14.9, 10, 0.5])
+    async def test_sponsored_challenge_near_expiry_is_refused(self, seconds_left: float) -> None:
+        """A sponsored challenge with under 15s left is refused before signing."""
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        rpc_methods: list[str] = []
+        expires = _iso(time.time() + seconds_left)
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc(rpc_methods)),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+            pytest.raises(ValueError, match="expires in less than 15 seconds"),
+        ):
+            await method.create_credential(
+                self._challenge("near-expiry", fee_payer=True, expires=expires)
+            )
+        assert rpc_methods == []
+
+    @pytest.mark.asyncio
+    async def test_unsponsored_challenge_near_expiry_still_signs(self) -> None:
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc([])),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+        ):
+            credential = await method.create_credential(
+                self._challenge("near-expiry", fee_payer=False, expires=_iso(time.time() + 10))
+            )
+        assert credential.payload["type"] == "transaction"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fee_payer", [False, True], ids=["unsponsored", "sponsored"])
@@ -3920,6 +3969,85 @@ class TestCosignAsFeePayer:
             )
         mock_client.post.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_verify_replay_near_expiry_is_terminal(self) -> None:
+        """A replay in its last 15s gets the terminal replay error, not a payable 402."""
+        from mpp.store import MemoryStore
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(time.time()) + 10,
+        )
+        cosigned_raw, _ = intent._cosign_as_fee_payer(
+            raw_tx, currency, require_remaining_validity=False
+        )
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+        await store.put_if_absent(f"mpp:charge:{tx_hash.lower()}", tx_hash)
+        mock_client = AsyncMock()
+        intent._http_client = mock_client
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        with pytest.raises(CredentialReplayedError, match="Transaction hash already used"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+        mock_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_verify_near_expiry_releases_reservation(self) -> None:
+        """A fresh sponsored tx under the floor is refused and its reservation released."""
+        from mpp.store import MemoryStore
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(time.time()) + 10,
+        )
+        cosigned_raw, _ = intent._cosign_as_fee_payer(
+            raw_tx, currency, require_remaining_validity=False
+        )
+        tx_hash = _raw_transaction_hash(cosigned_raw)
+        mock_client = AsyncMock()
+        intent._http_client = mock_client
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        with pytest.raises(VerificationError, match="at least 15 seconds") as raised:
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+        assert not isinstance(raised.value, CredentialReplayedError)
+        mock_client.post.assert_not_awaited()
+        assert await store.get(f"mpp:charge:{tx_hash.lower()}") is None
+
     # A simulation failure releases the reservation and does not broadcast.
     @pytest.mark.asyncio
     async def test_verify_simulation_failure_releases_reservation(self) -> None:
@@ -5667,6 +5795,56 @@ class TestSplitsFeePayerRejection:
                 ],
                 fee_payer=True,
             )
+
+
+class TestSponsoredChallengeLifetime:
+    """Servers refuse to issue sponsored charges that expire before the 15s floor."""
+
+    @staticmethod
+    def _server(monkeypatch: pytest.MonkeyPatch):
+        from mpp.server import Mpp
+
+        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+        return Mpp.create(
+            method=tempo(
+                intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            ),
+        )
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("seconds", [0, 10, 14])
+    async def test_sponsored_challenge_under_floor_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch, seconds: int
+    ) -> None:
+        server = self._server(monkeypatch)
+        expires = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+        with pytest.raises(ValueError, match="at least 15 seconds after issuance"):
+            await server.charge(authorization=None, amount="1.00", fee_payer=True, expires=expires)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("fee_payer", "seconds"),
+        [(True, 20), (True, None), (False, 10)],
+        ids=["sponsored-20s", "sponsored-default", "unsponsored-10s"],
+    )
+    async def test_challenge_issued(
+        self, monkeypatch: pytest.MonkeyPatch, fee_payer: bool, seconds: int | None
+    ) -> None:
+        server = self._server(monkeypatch)
+        expires = (
+            None
+            if seconds is None
+            else (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
+        )
+        result = await server.charge(
+            authorization=None, amount="1.00", fee_payer=fee_payer, expires=expires
+        )
+        challenges = result.challenges if isinstance(result, ComposedChallenges) else (result,)
+        assert challenges
+        for challenge in challenges:
+            assert isinstance(challenge, Challenge)
+            assert bool(challenge.request.get("methodDetails", {}).get("feePayer")) is fee_payer
 
 
 class TestGetTransfersInvalidMemo:

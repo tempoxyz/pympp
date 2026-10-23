@@ -98,12 +98,17 @@ RECEIPT_POLL_INTERVAL = 0.5
 VALID_BEFORE_GRACE = 2.0
 
 
-def _assert_remaining_validity(valid_before: int) -> None:
-    """Reject a sponsored transaction that could expire before it is included."""
+def _assert_not_expired(valid_before: int) -> None:
+    """Reject a sponsored transaction whose ``valid_before`` has passed."""
     if valid_before <= int(time.time()):
         raise VerificationError(
             f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
         )
+
+
+def _assert_remaining_validity(valid_before: int) -> None:
+    """Reject a sponsored transaction that could expire before it is included."""
+    _assert_not_expired(valid_before)
     # Leave time to simulate, broadcast and include the sponsored transaction.
     if valid_before < math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS:
         raise VerificationError(
@@ -1418,8 +1423,10 @@ class ChargeIntent:
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 fee_token = await self._resolve_fee_token(client, request, required_balance)
+                # The 15s floor is enforced after the replay reservation below,
+                # so a replay near expiry still gets the terminal replay error.
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
-                    raw_tx, fee_token, request=request
+                    raw_tx, fee_token, request=request, require_remaining_validity=False
                 )
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
@@ -1473,6 +1480,9 @@ class ChargeIntent:
         try:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
+                valid_before = _transaction_valid_before(raw_tx)
+                if valid_before is not None:
+                    _assert_remaining_validity(valid_before)
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
                 # The store reservation and simulation can take a while: recheck
                 # the sponsored window right before submission.
@@ -1616,7 +1626,12 @@ class ChargeIntent:
         return allowed[0]
 
     def _cosign_as_fee_payer(
-        self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
+        self,
+        raw_tx: str,
+        fee_token: str | None = None,
+        request: ChargeRequest | None = None,
+        *,
+        require_remaining_validity: bool = True,
     ) -> tuple[str, dict[str, Any]]:
         """Co-sign a client-signed transaction as fee payer.
 
@@ -1627,6 +1642,10 @@ class ChargeIntent:
 
         Authorization-bearing envelopes are rejected before signing because
         their authorization fields cannot yet be faithfully simulated.
+
+        With ``require_remaining_validity=False`` only an already expired
+        ``valid_before`` is rejected here; the caller must enforce
+        ``MIN_REMAINING_VALIDITY_SECONDS`` before broadcasting.
         """
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature, as_address
@@ -1679,7 +1698,10 @@ class ChargeIntent:
         if not valid_before_raw:
             raise VerificationError("Fee payer envelope must include valid_before")
         valid_before = _int(valid_before_raw)
-        _assert_remaining_validity(valid_before)
+        if require_remaining_validity:
+            _assert_remaining_validity(valid_before)
+        else:
+            _assert_not_expired(valid_before)
 
         chain_id = _int(decoded[0])
         policy = get_policy(chain_id)
