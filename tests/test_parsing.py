@@ -251,6 +251,55 @@ class TestChallenge:
 
 
 class TestCredential:
+    @pytest.mark.parametrize(
+        "description", [None, "", "Test purchase", "Payment for caf\u00e9 \u2615"]
+    )
+    def test_description_survives_challenge_to_credential(self, description: str | None) -> None:
+        challenge = Challenge.create(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            description=description,
+        )
+        echo = challenge.to_echo()
+        assert echo.description == description
+
+        credential = Credential(challenge=echo, payload={"proof": "synthetic"})
+        header = credential.to_authorization()
+        encoded = header.removeprefix("Payment ")
+        wire = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        if description is None:
+            assert "description" not in wire["challenge"]
+        else:
+            assert wire["challenge"]["description"] == description
+        assert Credential.from_authorization(header).challenge.description == description
+
+        changed = replace(challenge, description="Different display text")
+        assert changed.id == challenge.id
+        assert changed.verify("test-secret", "api.example.com")
+
+    @pytest.mark.parametrize(
+        "description", [None, "", "Test purchase", "Payment for caf\u00e9 \u2615"]
+    )
+    def test_parse_preserves_credential_description(self, description: str | None) -> None:
+        challenge = {
+            "id": "test-id",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": "e30",
+        }
+        if description is not None:
+            challenge["description"] = description
+        data = {"challenge": challenge, "payload": {"proof": "synthetic"}}
+
+        credential = Credential.from_authorization("Payment " + _b64_json(data))
+        assert credential.challenge.description == description
+        encoded = credential.to_authorization().removeprefix("Payment ")
+        assert json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))) == data
+
     def test_roundtrip(self) -> None:
         """Credential should survive roundtrip through header format."""
         credential = make_credential(
