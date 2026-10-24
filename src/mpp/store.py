@@ -5,7 +5,9 @@ Modeled after Cloudflare KV's API (get/put/delete).
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+import math
+import time
+from typing import Any, Protocol, runtime_checkable
 
 
 class Store(Protocol):
@@ -26,6 +28,24 @@ class Store(Protocol):
         ...
 
 
+@runtime_checkable
+class ExpiringStore(Store, Protocol):
+    """Optional atomic absolute-expiry support for temporary recovery records."""
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        """Insert without replacing a live key, expiring at this Unix timestamp.
+
+        An existing key's value and expiry must remain unchanged. This deadline
+        overrides a store-wide TTL and must be finite and in the future.
+        """
+        ...
+
+
+def _validate_expiry(expires_at: float) -> None:
+    if not math.isfinite(expires_at) or expires_at <= time.time():
+        raise ValueError("expires_at must be a finite future Unix timestamp")
+
+
 class MemoryStore:
     """In-memory store for development/testing.
 
@@ -39,8 +59,17 @@ class MemoryStore:
             raise ValueError("max_entries must be positive")
         self._max_entries = max_entries
         self._data: dict[str, Any] = {}
+        self._expires: dict[str, float] = {}
+
+    def _prune_expired(self) -> None:
+        now = time.time()
+        for key, expires_at in list(self._expires.items()):
+            if expires_at <= now:
+                self._data.pop(key, None)
+                del self._expires[key]
 
     def _check_capacity(self, key: str) -> None:
+        self._prune_expired()
         if (
             key not in self._data
             and self._max_entries is not None
@@ -49,18 +78,29 @@ class MemoryStore:
             raise RuntimeError("Replay store capacity reached; configure a persistent store")
 
     async def get(self, key: str) -> Any | None:
+        self._prune_expired()
         return self._data.get(key)
 
     async def put(self, key: str, value: Any) -> None:
         self._check_capacity(key)
         self._data[key] = value
+        self._expires.pop(key, None)
 
     async def delete(self, key: str) -> None:
         self._data.pop(key, None)
+        self._expires.pop(key, None)
 
     async def put_if_absent(self, key: str, value: Any) -> bool:
+        self._prune_expired()
         if key in self._data:
             return False
         self._check_capacity(key)
         self._data[key] = value
+        return True
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        _validate_expiry(expires_at)
+        if not await self.put_if_absent(key, value):
+            return False
+        self._expires[key] = expires_at
         return True

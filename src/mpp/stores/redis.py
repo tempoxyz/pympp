@@ -14,7 +14,10 @@ Example::
 
 from __future__ import annotations
 
+import math
 from typing import Any
+
+from mpp.store import _validate_expiry
 
 
 class RedisStore:
@@ -63,4 +66,12 @@ class RedisStore:
             result = await self._redis.set(self._key(key), value, nx=True)
             return result is not None
         result = await self._redis.set(self._key(key), value, nx=True, ex=self._ttl)
+        return result is not None
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        """Atomically insert with an absolute expiry, overriding the default TTL."""
+        _validate_expiry(expires_at)
+        result = await self._redis.set(
+            self._key(key), value, nx=True, pxat=math.ceil(expires_at * 1000)
+        )
         return result is not None

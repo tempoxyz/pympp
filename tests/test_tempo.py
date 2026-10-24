@@ -4043,6 +4043,47 @@ class TestCosignAsFeePayer:
         return intent, store, raw, signed, credential, request, receipt
 
     @pytest.mark.asyncio
+    async def test_unknown_recovery_expires_at_challenge_deadline(self):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        assert credential.challenge.expires is not None
+        expires_at = datetime.fromisoformat(credential.challenge.expires).timestamp()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        intent._confirmation_timeout = 0.01
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=httpx.ReadTimeout("unknown")))
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(intent, "_get_transaction_receipt", AsyncMock(return_value=None)),
+        ):
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+        with patch("time.time", return_value=expires_at - 0.001):
+            assert await store.get(marker) == signed
+        with patch("time.time", return_value=expires_at):
+            assert await store.get(marker) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", ["sign", "simulate"])
+    async def test_expired_recovery_cannot_invite_second_payment(self, stage):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        assert credential.challenge.expires is not None
+        expires_at = datetime.fromisoformat(credential.challenge.expires).timestamp()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+
+        def fail_after_expiry(*args, **kwargs):
+            # An earlier concurrent send's record expired while this request
+            # was suspended, so absence cannot establish that it never paid.
+            clock.return_value = expires_at + 1
+            raise VerificationError("valid_before expired")
+
+        method = "_cosign_as_fee_payer" if stage == "sign" else "_simulate_before_broadcast"
+        failing = fail_after_expiry if stage == "sign" else AsyncMock(side_effect=fail_after_expiry)
+        with patch("time.time", return_value=expires_at - 3600) as clock:
+            with patch.object(intent, method, side_effect=failing):
+                with pytest.raises(InternalPaymentError):
+                    await intent.verify(credential, request)
+        assert await store.get(marker) is None
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("path", ["direct", "rpc_error", "timeout", "reconcile"])
     @pytest.mark.parametrize("deleted", [False, True])
     async def test_cleanup_cancellation_preserves_settled_reservation(self, path, deleted):

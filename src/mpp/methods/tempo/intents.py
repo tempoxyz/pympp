@@ -40,7 +40,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
-from mpp.store import MemoryStore, Store
+from mpp.store import ExpiringStore, MemoryStore, Store
 
 if TYPE_CHECKING:
     import httpx
@@ -1550,6 +1550,11 @@ class ChargeIntent:
         reconciling = False
         legacy_record = False
         client_store_key: str | None = None
+        recovery_expires_at = (
+            datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+            if expires is not None
+            else None
+        )
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1615,7 +1620,13 @@ class ChargeIntent:
                         if (
                             self._store is not None
                             and broadcast_key is not None
-                            and (await self._store.get(broadcast_key) is not None)
+                            and (
+                                await self._store.get(broadcast_key) is not None
+                                or (
+                                    recovery_expires_at is not None
+                                    and recovery_expires_at <= time.time()
+                                )
+                            )
                         ):
                             raise InternalPaymentError() from error
                         raise
@@ -1749,7 +1760,12 @@ class ChargeIntent:
                 # Persist the marker before sending, and fail closed: a submission
                 # whose outcome could be lost must not be broadcast at all.
                 try:
-                    marker_created = await self._store.put_if_absent(broadcast_key, raw_tx)
+                    if recovery_expires_at is not None and isinstance(self._store, ExpiringStore):
+                        marker_created = await self._store.put_if_absent_until(
+                            broadcast_key, raw_tx, recovery_expires_at
+                        )
+                    else:
+                        marker_created = await self._store.put_if_absent(broadcast_key, raw_tx)
                 except Exception as err:
                     raise InternalPaymentError() from err
                 if not marker_created:
@@ -1876,6 +1892,16 @@ class ChargeIntent:
                     await self._clear_broadcast_marker(broadcast_key)
                 for key in store_keys:
                     await self._store.delete(key)
+            # Expiry may have removed an earlier attempt's recovery record
+            # while this request was signing or simulating. Absence no longer
+            # proves that asking for a new payment is safe.
+            if (
+                broadcast_key is not None
+                and recovery_expires_at is not None
+                and recovery_expires_at <= time.time()
+                and isinstance(err, VerificationError)
+            ):
+                raise InternalPaymentError() from err
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
             if (

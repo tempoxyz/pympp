@@ -225,6 +225,16 @@ a replacement key. Resume traffic after the migration; retries will reconcile
 the stored transaction. If the original bytes or key are unavailable, retain the
 record for operator reconciliation rather than deleting an unknown payment.
 
+Recovery records created by `MemoryStore`, `SQLiteStore`, and `RedisStore` expire
+at the authenticated challenge's absolute expiry. Retries do not extend this
+deadline, and a store-wide TTL does not shorten it. Replay reservations retain
+their existing retention policy. Memory and SQLite reclaim abandoned expired
+records during subsequent store activity; Redis expires them automatically.
+Custom stores can implement `mpp.store.ExpiringStore.put_if_absent_until(key,
+value, expires_at)` with an atomic insert and absolute Unix timestamp to support
+this cleanup. Stores without that method, and challenges without an expiry,
+retain durable recovery records. Existing records keep their original retention.
+
 ### Payment request context
 
 Direct and composed payment gates bind `meta` into their signed challenges:
