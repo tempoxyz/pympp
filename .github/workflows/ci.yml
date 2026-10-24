@@ -143,7 +143,7 @@ jobs:
 
       # Start the containers in the background so pulling and booting them
       # overlaps the setup below; a later step waits for `up --wait` to finish.
-      - name: Start Tempo localnet and Redis
+      - name: Start Tempo localnet, Anvil and Redis
         run: (docker compose up -d --wait --quiet-pull > "$RUNNER_TEMP/compose-up.log" 2>&1; echo $? > "$RUNNER_TEMP/compose-up.status") > /dev/null 2>&1 &
 
       - name: Install uv
@@ -158,17 +158,18 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
-      - name: Wait for Tempo localnet and Redis
+      - name: Wait for Tempo localnet, Anvil and Redis
         run: |
           for _ in {1..360}; do [[ -s "$RUNNER_TEMP/compose-up.status" ]] && break; sleep 0.5; done
           cat "$RUNNER_TEMP/compose-up.log"
           [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
       - name: Run integration tests
-        run: uv run pytest -m "integration or redis" -v
+        run: uv run pytest -m "integration or redis or x402_localnet" -v
         env:
           TEMPO_RPC_URL: http://localhost:8545
           REDIS_URL: redis://localhost:6379
+          X402_ANVIL_RPC_URL: http://localhost:18546
 
       - name: Stop containers
         if: always()
@@ -222,7 +223,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, tempo, stripe, mcp]
+        profile: [base, tempo, stripe, mcp, evm]
 
     steps:
       - name: Secure runner
@@ -267,6 +268,9 @@ jobs:
             mcp)
               INSTALL_TARGET="${WHEEL}[mcp]"
               ;;
+            evm)
+              INSTALL_TARGET="${WHEEL}[evm]"
+              ;;
           esac
           uv pip install --python .smoke-venv/bin/python "$INSTALL_TARGET"
 
@@ -276,14 +280,19 @@ jobs:
           .smoke-venv/bin/python - <<'PY'
           import mpp
           import mpp.extensions.mcp as mcp
+          import mpp.methods.evm as evm
           import mpp.methods.tempo as tempo
+          import mpp.x402 as x402
 
           assert tempo.CHAIN_ID == 4217
           assert mcp.CODE_PAYMENT_REQUIRED == -32042
+          assert x402.X402_VERSION == 2
+          assert evm.BASE_USDC.chain_id == 8453
 
           for expr, hint in (
               ("tempo.ChargeIntent", "pympp[tempo]"),
               ("mcp.PaymentRequiredError", "pympp[mcp]"),
+              ("evm.evm", "pympp[evm]"),
           ):
               try:
                   eval(expr)
@@ -309,6 +318,24 @@ jobs:
               from mpp.store import MemoryStore
               payments = create(network_id="bn_test", livemode=False, client=StripeClient("sk_test"), store=MemoryStore(), deposit_addresses={"tempo": "0x" + "1" * 40})
               assert [method.name for method in payments.default_methods()] == ["tempo", "stripe"]
+          PY
+
+      - name: Smoke test built wheel (evm)
+        if: matrix.profile == 'evm'
+        run: |
+          .smoke-venv/bin/python - <<'PY'
+          from mpp.methods.evm import BASE_USDC, evm
+          from mpp.server import Mpp
+
+          method = evm(
+              currency=BASE_USDC,
+              recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+              facilitator="https://facilitator.example.com",
+          )
+          server = Mpp.create(method=method, realm="api.example.com", secret_key="k")
+          assert server.method.name == "evm"
+
+          print("evm install smoke test passed")
           PY
 
       - name: Smoke test built wheel (mcp)

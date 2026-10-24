@@ -30,6 +30,7 @@ from mpp.errors import (
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 from mpp.server.intent import broadcast_credential
+from mpp.x402._server import X402Input, X402Intent, x402_credential
 
 DEFAULT_EXPIRES_MINUTES = 5
 
@@ -52,6 +53,7 @@ async def verify_or_challenge(
     events: EventDispatcher | None = None,
     header: str | None = None,
     unique_challenges: bool = True,
+    x402: X402Input | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -86,6 +88,10 @@ async def verify_or_challenge(
         header: Optional HTTP field for the Payment credential. When set to
             ``Payment-Authorization``, issued challenges advertise that field
             so ``Authorization`` can carry application authentication.
+        x402: Optional x402 request context. When the intent supports x402
+            (:class:`~mpp.x402.X402Intent`) and the request carries no Payment
+            credential, its ``PAYMENT-SIGNATURE`` value is bound to this route
+            and verified instead.
 
     Returns:
         If no valid Authorization header:
@@ -168,19 +174,78 @@ async def verify_or_challenge(
                 },
             )
 
-    if authorization is None:
-        return await new_challenge()
+    async def verify_x402(payment_signature: str, resource_url: str) -> tuple[Credential, Receipt]:
+        assert isinstance(intent, X402Intent)
+        try:
+            credential = x402_credential(
+                payment_signature,
+                intent,
+                method=method_name,
+                request=request,
+                realm=realm,
+                resource_url=resource_url,
+            )
+        except PaymentError as error:
+            error.retry_challenge = await new_challenge()
+            await emit_failure(error, error.retry_challenge)
+            raise
+        submitted_challenge = Challenge(
+            id=credential.challenge.id,
+            realm=realm,
+            method=method_name,
+            intent=intent.name,
+            request=request,
+            request_b64=credential.challenge.request,
+        )
+        try:
+            receipt = await broadcast_credential(
+                intent=intent,
+                credential=credential,
+                request=request,
+            )
+        except (InternalPaymentError, PaymentOutcomeUnknownError) as error:
+            # The payment may have landed; a retryable 402 would invite a second one.
+            await emit_failure(error, submitted_challenge, credential)
+            raise
+        except PaymentError as error:
+            if error.status != 403:
+                error.retry_challenge = await new_challenge()
+            await emit_failure(error, submitted_challenge, credential)
+            raise
+        except Exception as error:
+            await emit_failure(error, submitted_challenge, credential)
+            raise
+        if events is not None:
+            await events.emit(
+                PAYMENT_SUCCESS,
+                {
+                    "challenge": submitted_challenge,
+                    "credential": credential,
+                    "intent": intent.name,
+                    "method": method_name,
+                    "receipt": receipt,
+                    "request": request,
+                },
+            )
+        return (credential, receipt)
 
-    # Reject oversized values before extraction. Report them as a rejected
-    # credential only when they carry a Payment scheme, so oversized
-    # non-payment auth (e.g. a large Bearer token) stays a silent challenge.
-    if len(authorization) > MAX_AUTHORIZATION_SIZE:
-        if _PAYMENT_SCHEME_RE.search(authorization) is None:
-            return await new_challenge()
-        return await fail(MalformedCredentialError("Authorization header exceeds maximum size"))
-
-    payment_scheme = _extract_payment_scheme(authorization)
+    payment_scheme = None
+    if authorization is not None:
+        # Reject oversized values before extraction. Report them as a rejected
+        # credential only when they carry a Payment scheme, so oversized
+        # non-payment auth (e.g. a large Bearer token) stays a silent challenge.
+        if len(authorization) > MAX_AUTHORIZATION_SIZE:
+            if _PAYMENT_SCHEME_RE.search(authorization) is not None:
+                return await fail(
+                    MalformedCredentialError("Authorization header exceeds maximum size")
+                )
+        else:
+            payment_scheme = _extract_payment_scheme(authorization)
     if payment_scheme is None:
+        # A Payment credential takes precedence; otherwise accept an x402
+        # payment for intents that support it, like mppx (MPP, then x402).
+        if x402 is not None and x402.payment_signature and isinstance(intent, X402Intent):
+            return await verify_x402(x402.payment_signature, x402.resource_url)
         return await new_challenge()
 
     try:

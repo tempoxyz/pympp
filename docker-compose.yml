@@ -15,3 +15,20 @@ services:
     ports:
       - "127.0.0.1:8545:8545"
     stop_grace_period: 10s
+
+  # Anvil for the x402 localnet tests (tests/test_x402_localnet.py).
+  anvil:
+    image: ghcr.io/foundry-rs/foundry@sha256:ede4c35d3e9310f6c77f09952cd666e17e4ee7cd5228290d8b4fc9d5cdd37eb1
+    entrypoint: ["anvil"]
+    command:
+      - --host=0.0.0.0
+      - --port=8545
+      - --chain-id=31337
+      - --mnemonic=test test test test test test test test test test test junk
+    ports:
+      - "127.0.0.1:18546:8545"
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
