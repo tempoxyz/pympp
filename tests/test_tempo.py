@@ -4331,6 +4331,40 @@ class TestCosignAsFeePayer:
             assert methods == ["eth_getTransactionReceipt"]
 
     @pytest.mark.asyncio
+    async def test_expiring_retry_preserves_unknown_sponsored_outcome(self) -> None:
+        from mpp.store import MemoryStore
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        raw = self._build_client_tx()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        await store.put(marker, PATH_USD)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        client = AsyncMock()
+        intent._http_client = client
+        with (
+            patch("mpp.methods.tempo.intents._challenge_expired", side_effect=[False, True]),
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            pytest.raises(InternalPaymentError) as raised,
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": PATH_USD,
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+        assert raised.value.retry_challenge is None
+        assert await store.get(marker) == PATH_USD
+        client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_reuses_fee_token(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

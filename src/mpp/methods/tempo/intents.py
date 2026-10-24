@@ -1529,6 +1529,7 @@ class ChargeIntent:
         # client-signed envelope so it is stable across retries of a credential.
         broadcast_key: str | None = None
         fee_token_used: str | None = None
+        reconciling = False
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1543,7 +1544,6 @@ class ChargeIntent:
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 prior_fee_token: Any = None
-                reconciling = False
                 if self._store is not None:
                     broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
                     prior_fee_token = await self._store.get(broadcast_key)
@@ -1671,6 +1671,10 @@ class ChargeIntent:
             # Authorize before the irreversible send: a challenge that expired
             # during sponsorship or simulation must not be settled.
             if expires is not None and _challenge_expired(expires):
+                if reconciling:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Earlier submission of this transaction has an unknown outcome"
+                    )
                 raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
