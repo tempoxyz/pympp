@@ -287,7 +287,13 @@ class ComposedHandler:
             for offer in x402_offers:
                 intent = offer.intent
                 assert isinstance(intent, X402Intent)
-                if requirements_match(payment["accepted"], intent.x402_requirements(offer.request)):
+                if not requirements_match(
+                    payment["accepted"], intent.x402_requirements(offer.request)
+                ):
+                    continue
+                # Like a native credential, an x402 payment can only pay an offer
+                # this request would have advertised.
+                if await offer.is_available():
                     result = await offer.verify(None, x402)
                     return (
                         ComposedChallenges((result,)) if isinstance(result, Challenge) else result
@@ -324,11 +330,18 @@ class ComposedHandler:
         """Return the x402 requirements that pay one of this handler's challenges."""
         if not x402_bindable(challenge):
             return None
+        details = challenge.request.get("methodDetails")
+        chain_id = details.get("chainId") if isinstance(details, Mapping) else None
+        currency = str(challenge.request.get("currency", "")).lower()
         for offer in self._offers:
             if (
                 offer.method.name != challenge.method
                 or offer.intent != challenge.intent
                 or offer.server.realm != challenge.realm
+                # Composed servers may share a realm with different tokens: use the
+                # method that issued this challenge, so its EIP-712 domain applies.
+                or str(getattr(offer.method, "currency", "")).lower() != currency
+                or getattr(offer.method, "chain_id", chain_id) != chain_id
             ):
                 continue
             intent = offer.method.intents.get(offer.intent)

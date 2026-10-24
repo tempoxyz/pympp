@@ -9,6 +9,7 @@ settles either through an x402 facilitator or a custom ``settle`` hook.
 from __future__ import annotations
 
 import inspect
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
@@ -34,6 +35,7 @@ from mpp.methods.evm._eip3009 import (
     recover_authorizer,
     to_source,
 )
+from mpp.store import MemoryStore
 from mpp.x402._server import is_x402_credential
 from mpp.x402._types import (
     EIP3009,
@@ -48,6 +50,25 @@ from mpp.x402.facilitator import Facilitator, FacilitatorError
 
 if TYPE_CHECKING:
     from mpp.store import Store
+
+logger = logging.getLogger(__name__)
+_warned_fallback_store = False
+
+
+def _fallback_store() -> MemoryStore:
+    """Create the in-memory claim store used when no store is configured."""
+    global _warned_fallback_store
+    if not _warned_fallback_store:
+        _warned_fallback_store = True
+        logger.warning(
+            "evm.charge has no store configured and is using an in-memory store. Replay "
+            "protection is scoped to this process, so an authorization accepted by one "
+            "worker or replica can be submitted again through another. Pass a shared "
+            "store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) when running "
+            "more than one instance."
+        )
+    return MemoryStore(max_entries=10_000)
+
 
 CREDENTIAL_TYPE = "authorization"
 """The only EVM charge credential type: an EIP-3009 authorization."""
@@ -333,7 +354,9 @@ class ChargeIntent:
         payload = _parse_authorization_payload(credential.payload)
         payer = to_checksum_address(payload["from"])
         claim_key = self._claim_key(payload, request)
-        if self._store is not None and not await self._store.put_if_absent(claim_key, "pending"):
+        if self._store is None:
+            self._store = _fallback_store()
+        if not await self._store.put_if_absent(claim_key, "pending"):
             raise CredentialReplayedError("EVM authorization has already been used")
 
         try:

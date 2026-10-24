@@ -576,6 +576,19 @@ class TestBroadcast:
         # Reported before asking the facilitator.
         assert facilitator.verified == []
 
+    async def test_claims_without_a_configured_store(self) -> None:
+        facilitator = FakeFacilitator()
+        method = server_method(facilitator)
+        intent = method.intents["charge"]
+        req = request(method)
+        credential = native_credential(req)
+        await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        with pytest.raises(CredentialReplayedError):
+            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        with pytest.raises(CredentialReplayedError):
+            await intent.validate(credential, req)  # type: ignore[union-attr]
+        assert len(facilitator.settled) == 1
+
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
@@ -689,6 +702,7 @@ class TestClient:
             {"recipient": "bob"},
             {"methodDetails": None},
             {"amount": "20001"},
+            {"amount": "0"},
         ],
     )
     async def test_refuses_challenges_it_cannot_pay(self, overrides: dict[str, Any]) -> None:

@@ -130,6 +130,10 @@ class EvmMethod:
         recipient = request.get("recipient")
         if not isinstance(amount, str) or not amount.isdigit():
             raise ValueError("EVM challenge amount is malformed")
+        if int(amount) == 0:
+            # A zero-value authorization still signs the challenge realm into its
+            # nonce; another host could relay it to the server that realm names.
+            raise ValueError("EVM client does not sign zero-amount charges")
         if not isinstance(recipient, str) or not _ADDRESS_RE.fullmatch(recipient):
             raise ValueError("EVM challenge recipient is malformed")
         if self.max_amount is not None and int(amount) > self.max_amount:

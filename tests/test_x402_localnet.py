@@ -278,7 +278,7 @@ async def test_native_evm_charge_uses_the_challenge_hash_as_nonce(chain: Chain) 
             assert chain.authorization_used(payer.address, nonce)
 
             replayed = await http.get(url, headers={"Authorization": credential.to_authorization()})
-        assert replayed.status_code == 402
+        assert replayed.status_code == 403
     finally:
         await stop()
 
@@ -304,9 +304,9 @@ async def test_replayed_x402_payment_is_rejected_without_a_second_transfer(chain
             assert first.status_code == 200, first.text
             second = await http.get(url, headers=headers)
 
-        assert second.status_code == 402
-        rejected = decode_payment_required(second.headers[PAYMENT_REQUIRED_HEADER])
-        assert rejected.get("error", "").startswith("Payment verification failed")
+        # A replay gets a 403 and no new challenge, so clients aren't invited to pay again.
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
         assert chain.balance(recipient.address) == recipient_before + 10_000
         assert facilitator.settle_requests == 1
     finally:

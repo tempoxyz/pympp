@@ -376,6 +376,7 @@ def wrap_payment_handler(
         credential, receipt = result
         response = await handler(request_obj, credential, receipt)
         if is_x402_credential(credential):
+            response = _as_response(response)
             _set_response_header(
                 response, PAYMENT_RESPONSE_HEADER, payment_response_header(credential, receipt)
             )
@@ -397,6 +398,31 @@ def _set_response_header(response: Any, name: str, value: str | None) -> None:
             headers[name] = value
     except TypeError:
         return
+
+
+def _as_response(value: Any) -> Any:
+    """Wrap plain JSON data in a response so x402 headers can be added to it.
+
+    Frameworks serialize a returned dict or list after the wrapper runs, which
+    would drop ``PAYMENT-RESPONSE`` and ``Cache-Control: private``. Values that
+    already are responses, and anything when Starlette is not installed, pass
+    through unchanged.
+    """
+    if not isinstance(value, dict | list):
+        return value
+    try:
+        from starlette.responses import JSONResponse
+    except ImportError:
+        return value
+    try:
+        from fastapi.encoders import (  # pyright: ignore[reportMissingImports]
+            jsonable_encoder,
+        )
+
+        value = jsonable_encoder(value)
+    except ImportError:
+        pass
+    return JSONResponse(value)
 
 
 def _mark_private(response: Any) -> None:

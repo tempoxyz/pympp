@@ -30,10 +30,10 @@ from x402.mechanisms.evm.exact import register_exact_evm_client
 from mpp import Challenge, Credential, Receipt
 from mpp.client import Client
 from mpp.events import PAYMENT_FAILED, PAYMENT_SUCCESS
-from mpp.methods.evm import BASE_SEPOLIA_USDC, evm
+from mpp.methods.evm import BASE_SEPOLIA_USDC, CELO_USDT, evm
 from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
 from mpp.methods.tempo import tempo
-from mpp.server import Mpp, pay
+from mpp.server import Mpp, compose, pay
 from mpp.store import MemoryStore
 from mpp.x402 import (
     PAYMENT_REQUIRED_HEADER,
@@ -94,6 +94,10 @@ def build_app(server: Mpp) -> Starlette:
         return receipt_response("sub-cent", receipt)
 
     @server.pay(amount="0.01")
+    async def plain(request: Request, credential: Credential, receipt: Receipt):
+        return {"payer": receipt.payer}
+
+    @server.pay(amount="0.01")
     async def public(request: Request, credential: Credential, receipt: Receipt):
         return PlainTextResponse(
             "public", headers={"Cache-Control": "public, max-age=60, s-maxage=600"}
@@ -128,6 +132,7 @@ def build_app(server: Mpp) -> Starlette:
             Route("/paid", paid),
             Route("/sub-cent", sub_cent),
             Route("/public", public),
+            Route("/plain", plain),
             Route("/body-bound", body_bound),
             Route("/composed", composed),
             Route("/direct", direct),
@@ -246,6 +251,14 @@ class TestCoinbaseClient:
             public = await client.get(f"{live.url}/public")
         assert paid.headers["cache-control"] == "private"
         assert public.headers["cache-control"] == "private, max-age=60"
+
+    async def test_plain_data_responses_get_x402_headers(self, live: Live) -> None:
+        async with coinbase_client() as client:
+            response = await client.get(f"{live.url}/plain")
+        assert response.status_code == 200, response.text
+        assert response.json() == {"payer": payer.address}
+        assert response.headers["cache-control"] == "private"
+        assert PAYMENT_RESPONSE_HEADER in response.headers
 
     async def test_body_bound_routes_are_not_offered_to_x402(self, live: Live) -> None:
         unpaid = await live.unpaid("/body-bound?order=1")
@@ -439,8 +452,9 @@ class TestRejectedX402Payments:
         second = await live.get(**{PAYMENT_SIGNATURE_HEADER: signature})
 
         assert first.status_code == 200
-        error = await self.rejected(second)
-        assert "authorization nonce already used" in error
+        # Claimed by the per-process fallback store: a 403 without a new challenge.
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
         assert len(live.facilitator.settle_requests) == 1
 
     async def test_composed_payment_matching_no_offer(self, live: Live) -> None:
@@ -599,6 +613,88 @@ class TestReplayStore:
         assert PAYMENT_REQUIRED_HEADER not in second.headers
         assert "WWW-Authenticate" not in second.headers
         assert len(facilitator.verify_requests) == 1
+
+
+class TestComposedServers:
+    async def test_can_offer_excludes_x402_payment(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            open_server = Mpp.create(
+                method=evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=recipient.address,
+                    facilitator=facilitator_url,
+                ),
+                realm=REALM,
+                secret_key=SECRET_KEY,
+            )
+            closed_server = Mpp.create(
+                method=evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=recipient.address,
+                    facilitator=facilitator_url,
+                    can_offer=lambda request: False,
+                ),
+                realm=REALM,
+                secret_key=SECRET_KEY,
+            )
+
+            @open_server.pay(amount="0.01")
+            async def open_route(request: Request, credential: Credential, receipt: Receipt):
+                return receipt_response("open", receipt)
+
+            closed = compose(closed_server.compose(("evm", {"amount": "0.01"})))
+
+            @closed
+            async def closed_route(request: Request, credential: Credential, receipt: Receipt):
+                return receipt_response("closed", receipt)
+
+            app = Starlette(routes=[Route("/open", open_route), Route("/closed", closed_route)])
+            async with serve(app) as url, httpx.AsyncClient() as http:
+                unpaid = await http.get(f"{url}/open")
+                accepted = dict(
+                    decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"][0]
+                )
+                signature = sign_x402_payment(payer, accepted, f"{url}/closed")
+                response = await http.get(
+                    f"{url}/closed", headers={PAYMENT_SIGNATURE_HEADER: signature}
+                )
+
+        assert response.status_code != 200
+        assert facilitator.settle_requests == []
+
+    async def test_shared_realm_advertises_each_tokens_domain(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            servers = [
+                Mpp.create(
+                    method=evm(
+                        currency=asset,
+                        recipient=recipient.address,
+                        facilitator=facilitator_url,
+                    ),
+                    realm=REALM,
+                    secret_key=SECRET_KEY,
+                )
+                for asset in (BASE_SEPOLIA_USDC, CELO_USDT)
+            ]
+            both = compose(*(server.compose(("evm", {"amount": "0.01"})) for server in servers))
+
+            @both
+            async def paid(request: Request, credential: Credential, receipt: Receipt):
+                return receipt_response("paid", receipt)
+
+            async with serve(Starlette(routes=[Route("/paid", paid)])) as url:
+                async with httpx.AsyncClient() as http:
+                    unpaid = await http.get(f"{url}/paid")
+
+        accepts = decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"]
+        extras = {a["asset"]: a.get("extra") or {} for a in accepts}
+        domains = {asset: (extra["name"], extra["version"]) for asset, extra in extras.items()}
+        assert domains == {
+            BASE_SEPOLIA_USDC.address: ("USDC", "2"),
+            CELO_USDT.address: ("Tether USD", "1"),
+        }
 
 
 class TestOtherServers:
