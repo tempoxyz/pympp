@@ -202,6 +202,43 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             id="explicit-chain-mismatch",
         ),
         pytest.param({}, make_challenge(chain_id="abc"), None, id="chain-not-numeric"),
+        # allowed_chain_ids
+        pytest.param(
+            {"allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(chain_id=CHAIN_ID),
+            None,
+            id="allowed-chain",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": [CHAIN_ID, TESTNET_CHAIN_ID]},
+            make_challenge(),
+            None,
+            id="allowed-chain-from-client-pin",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID, "allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(),
+            f"Chain ID not allowed: {TESTNET_CHAIN_ID}",
+            id="client-pin-not-allowed",
+        ),
+        pytest.param(
+            {"chain_id": TESTNET_CHAIN_ID, "allowed_chain_ids": [CHAIN_ID]},
+            make_challenge(chain_id=TESTNET_CHAIN_ID),
+            f"Chain ID not allowed: {TESTNET_CHAIN_ID}",
+            id="challenge-chain-not-allowed",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": [TESTNET_CHAIN_ID]},
+            make_challenge(chain_id=CHAIN_ID),
+            "Chain ID not allowed",
+            id="pinned-chain-outside-allowlist",
+        ),
+        pytest.param(
+            {"allowed_chain_ids": []},
+            make_challenge(chain_id=CHAIN_ID),
+            "Chain ID not allowed",
+            id="empty-chain-allowlist",
+        ),
         # expected_recipients
         pytest.param(
             {"expected_recipients": [RECIPIENT]}, make_challenge(), None, id="recipient-allowed"
@@ -501,7 +538,10 @@ async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
     build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
 
     assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[1], method)
-    with patch.object(method, "_build_tempo_transfer", build):
+    with (
+        patch.object(method, "_build_tempo_transfer", build),
+        patch.object(method, "_get_chain_id", AsyncMock(return_value=CHAIN_ID)),
+    ):
         with pytest.raises(ValueError, match="not a currency the client pinned"):
             await method.create_credential(challenges[0])
     build.assert_not_awaited()
@@ -668,3 +708,28 @@ def test_invalid_caps_fail_at_construction(
 def test_tempo_rejects_invalid_expected_recipients(kwargs: dict[str, Any], error: str) -> None:
     with pytest.raises(ValueError, match=error):
         tempo_charge(**kwargs)
+
+
+def test_allowed_chain_ids_rejects_unknown_chain_only_when_empty() -> None:
+    method = make_method(allowed_chain_ids=[CHAIN_ID])
+    method._check_allowed_chain_id(None)
+    with pytest.raises(ValueError, match="Chain ID not allowed: unknown"):
+        make_method(allowed_chain_ids=[])._check_allowed_chain_id(None)
+
+
+@pytest.mark.parametrize("construct", [tempo_charge, TempoMethod])
+@pytest.mark.parametrize("value", ["4217", b"4217", [True], ["4217"], [1.5]])
+def test_allowed_chain_ids_rejects_invalid_values(construct: Callable, value: Any) -> None:
+    with pytest.raises(ValueError, match="allowed_chain_ids|Invalid Tempo chain ID"):
+        construct(allowed_chain_ids=value)
+
+
+@pytest.mark.parametrize("construct", [tempo_charge, TempoMethod])
+@pytest.mark.parametrize("value", [None, [], [CHAIN_ID], (CHAIN_ID, TESTNET_CHAIN_ID)])
+def test_allowed_chain_ids_normalized_at_construction(construct: Callable, value: Any) -> None:
+    value = value.copy() if isinstance(value, list) else value
+    method = construct(allowed_chain_ids=value)
+    assert method.allowed_chain_ids == (None if value is None else tuple(value))
+    if isinstance(value, list):
+        value.append(1)
+        assert 1 not in method.allowed_chain_ids

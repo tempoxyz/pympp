@@ -120,6 +120,8 @@ class TempoMethod:
     max_amount: str | Decimal | None = field(default=None, kw_only=True)
     max_amount_decimals: int | None = field(default=None, kw_only=True)
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
+    # Chains a client may pay on. ``None`` allows any chain; empty rejects all.
+    allowed_chain_ids: Sequence[int] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -130,8 +132,15 @@ class TempoMethod:
     )
 
     def __post_init__(self) -> None:
-        """Validate the amount caps so an invalid cap fails at construction."""
+        """Validate charge policy at construction."""
         self._amount_caps()
+        if self.allowed_chain_ids is not None:
+            if isinstance(self.allowed_chain_ids, (str, bytes)):
+                raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
+            self.allowed_chain_ids = tuple(self.allowed_chain_ids)
+            for chain_id in self.allowed_chain_ids:
+                if not isinstance(chain_id, int) or isinstance(chain_id, bool):
+                    raise ValueError(f"Invalid Tempo chain ID: {chain_id!r}")
 
     def _amount_caps(self) -> tuple[int | None, int | None]:
         """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""
@@ -240,8 +249,25 @@ class TempoMethod:
                 f"Challenge requests chain ID {challenge_chain_id}, "
                 f"but client is restricted to {expected_chain_id}"
             )
+        self._check_allowed_chain_id(
+            challenge_chain_id if challenge_chain_id is not None else expected_chain_id
+        )
         self._check_expected_recipients(request)
         self._check_amount_caps(request)
+
+    def _check_allowed_chain_id(self, chain_id: int | None) -> None:
+        """Reject a payment chain outside ``allowed_chain_ids``.
+
+        An unknown chain is only rejected by an empty allowlist; signing
+        always resolves the chain first, so it is checked again then.
+        """
+        allowed = self.allowed_chain_ids
+        if allowed is None:
+            return
+        if not allowed or (chain_id is not None and chain_id not in allowed):
+            raise ValueError(
+                f"Chain ID not allowed: {chain_id if chain_id is not None else 'unknown'}"
+            )
 
     def _check_amount_caps(self, request: dict) -> None:
         """Reject a challenge above either cap or outside the pinned currencies.
@@ -662,6 +688,7 @@ def tempo(
     max_amount: str | Decimal | None = None,
     max_amount_decimals: int | None = None,
     expected_recipients: Sequence[str] | None = None,
+    allowed_chain_ids: Sequence[int] | None = None,
 ) -> TempoMethod:
     """Create a Tempo payment method.
 
@@ -723,6 +750,12 @@ def tempo(
             (case-insensitive). Other challenges are skipped during challenge
             selection and rejected before signing. An empty sequence rejects
             every charge.
+        allowed_chain_ids: Client-side allowlist of chain IDs a charge may be
+            paid on. The challenge's chain, or the client's pinned chain when
+            the challenge omits one, must be listed. Combined with the
+            ``chain_id``/``rpc_url`` pin, a charge must satisfy both. Other
+            challenges are skipped during challenge selection and rejected
+            before signing. An empty sequence rejects every charge.
 
     Returns:
         A configured TempoMethod instance.
@@ -809,6 +842,7 @@ def tempo(
         max_amount=max_amount,
         max_amount_decimals=max_amount_decimals,
         expected_recipients=resolved_expected_recipients,
+        allowed_chain_ids=allowed_chain_ids,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
