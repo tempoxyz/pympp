@@ -1410,6 +1410,10 @@ class ChargeIntent:
 
         # Simulation payload for the locally co-signed tx, if we sponsor it.
         simulate_payload: dict[str, Any] | None = None
+        # Outcome marker for a locally sponsored submission, keyed on the
+        # client-signed envelope so it is stable across retries of a credential.
+        broadcast_key: str | None = None
+        fee_token_used: str | None = None
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1423,7 +1427,18 @@ class ChargeIntent:
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
-                fee_token = await self._resolve_fee_token(client, request, required_balance)
+                prior_fee_token: Any = None
+                if self._store is not None:
+                    broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
+                    prior_fee_token = await self._store.get(broadcast_key)
+                if isinstance(prior_fee_token, str) and prior_fee_token:
+                    # An earlier submission of this credential has an unknown
+                    # outcome: co-sign with the same fee token so the retry is the
+                    # same transaction and can be reconciled against it.
+                    fee_token = prior_fee_token
+                else:
+                    fee_token = await self._resolve_fee_token(client, request, required_balance)
+                fee_token_used = fee_token
                 # The 15s floor is enforced after the replay reservation below,
                 # so a replay near expiry still gets the terminal replay error.
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
@@ -1478,14 +1493,12 @@ class ChargeIntent:
                 raise CredentialReplayedError("Transaction hash already used")
 
         broadcast_attempted = False
-        # Recorded when a submitted transaction's attempt fails. Unlike the replay
-        # reservation it survives the failure, so a retry of a submission whose
-        # outcome is unknown is reconciled instead of refused as unpaid.
-        broadcast_key = (
-            f"mpp:charge-broadcast:{reserved_tx_hash.lower()}"
-            if reserved_tx_hash is not None
-            else None
-        )
+        # True while a submitted transaction may still be included. Only then is
+        # the broadcast marker recorded: unlike the replay reservation it survives
+        # the failure, so a retry of a locally sponsored submission whose outcome
+        # is unknown is reconciled instead of refused as unpaid. Definitive
+        # rejections and unsponsored submissions retain nothing.
+        outcome_unknown = False
         try:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
@@ -1510,6 +1523,7 @@ class ChargeIntent:
             send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
             send_timeout = send_timeout_ms / 1000
             broadcast_attempted = True
+            outcome_unknown = True
             try:
                 response = await asyncio.wait_for(
                     client.post(
@@ -1533,8 +1547,9 @@ class ChargeIntent:
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
                 if not _is_ambiguous_broadcast_error(send_error):
+                    outcome_unknown = False
                     raise
-                return await self._recover_broadcast_receipt(
+                receipt = await self._recover_broadcast_receipt(
                     client,
                     raw_tx,
                     reserved_tx_hash or _raw_transaction_hash(raw_tx),
@@ -1544,14 +1559,17 @@ class ChargeIntent:
                     deadline=deadline,
                     error=send_error,
                 )
+                await self._clear_broadcast_marker(broadcast_key)
+                return receipt
 
             if "error" in result:
                 rpc_error = VerificationError(
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
                 if not _is_ambiguous_broadcast_error(result):
+                    outcome_unknown = False
                     raise rpc_error
-                return await self._recover_broadcast_receipt(
+                receipt = await self._recover_broadcast_receipt(
                     client,
                     raw_tx,
                     reserved_tx_hash or _raw_transaction_hash(raw_tx),
@@ -1561,10 +1579,14 @@ class ChargeIntent:
                     deadline=deadline,
                     error=rpc_error,
                 )
+                await self._clear_broadcast_marker(broadcast_key)
+                return receipt
 
             receipt_data = result.get("result")
             if not receipt_data:
                 raise VerificationError("No transaction receipt returned")
+            # The transaction was included: its outcome is known.
+            outcome_unknown = False
             if not isinstance(receipt_data, dict):
                 raise VerificationError("Invalid transaction receipt")
 
@@ -1586,15 +1608,16 @@ class ChargeIntent:
                     "Receipt transaction hash does not match submitted transaction"
                 )
 
+            await self._clear_broadcast_marker(broadcast_key)
             return Receipt.success(receipt_tx_hash)
         except (Exception, asyncio.CancelledError) as err:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if self._store is not None and store_key is not None:
-                if broadcast_attempted and broadcast_key is not None:
+                if outcome_unknown and broadcast_key is not None:
                     # Best effort: a full store must not mask the original error.
                     with contextlib.suppress(Exception):
-                        await self._store.put(broadcast_key, reserved_tx_hash)
+                        await self._store.put(broadcast_key, fee_token_used)
                 await self._store.delete(store_key)
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
@@ -1649,7 +1672,15 @@ class ChargeIntent:
         self._verify_receipt_transfers(
             receipt_data, request, challenge_id=challenge_id, realm=realm
         )
+        await self._clear_broadcast_marker(broadcast_key)
         return Receipt.success(tx_hash)
+
+    async def _clear_broadcast_marker(self, broadcast_key: str | None) -> None:
+        """Drop a broadcast outcome marker once its transaction has settled."""
+        if self._store is not None and broadcast_key is not None:
+            # Best effort: the payment is confirmed either way.
+            with contextlib.suppress(Exception):
+                await self._store.delete(broadcast_key)
 
     async def _resolve_fee_token(
         self, client: Any, request: ChargeRequest, required_balance: int = 1
