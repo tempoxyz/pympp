@@ -56,19 +56,24 @@ logger = logging.getLogger(__name__)
 _warned_fallback_store = False
 
 
+class _ClaimCacheFull(Exception):
+    """The in-process claim cache holds as many live claims as it may."""
+
+
 class _ClaimCache(MemoryStore):
     """In-process claims that expire with their authorization.
 
     A claim only has to outlive its authorization's ``validBefore``: after that
-    the authorization can't settle on-chain. ``ChargeIntent`` caps how far in the
-    future that can be (``max_validity_seconds``), so expired claims are pruned
-    from a heap on write and memory is bounded by the payment rate times that
-    window. As a backstop the cache holds at most ``max_entries`` claims and evicts
-    the soonest-expiring one when full, rather than refusing payments; on the
-    facilitator path the on-chain EIP-3009 nonce still blocks a replay.
+    the authorization can't settle on-chain, and ``ChargeIntent`` caps how far in
+    the future that can be. Expired claims are pruned from a heap on write, so
+    memory is bounded by the payment rate times that window. Live claims, pending
+    or settled, are never evicted: at ``max_entries`` the cache refuses new claims
+    (the payment fails without a new challenge) rather than forget a payment and
+    invite a second one. The heap is compacted when rolled-back claims leave
+    stale entries in it.
     """
 
-    def __init__(self, max_entries: int = 100_000) -> None:
+    def __init__(self, max_entries: int = 1_000_000) -> None:
         super().__init__()
         self._limit = max_entries
         self._expires: dict[str, float] = {}
@@ -78,31 +83,29 @@ class _ClaimCache(MemoryStore):
         expires = valid_before + 60
         self._expires[key] = expires
         heapq.heappush(self._heap, (expires, key))
-
-    def _pop_soonest(self) -> None:
-        expires, key = heapq.heappop(self._heap)
-        if self._expires.get(key) == expires:
-            del self._expires[key]
-            self._data.pop(key, None)
+        if len(self._heap) > 2 * len(self._expires) + 1024:
+            self._heap = [(when, name) for name, when in self._expires.items()]
+            heapq.heapify(self._heap)
 
     def _prune(self, now: float) -> None:
         while self._heap and self._heap[0][0] <= now:
-            self._pop_soonest()
-
-    def _evict_for_room(self) -> None:
-        while len(self._data) >= self._limit and self._heap:
-            self._pop_soonest()
+            expires, key = heapq.heappop(self._heap)
+            if self._expires.get(key) == expires:
+                del self._expires[key]
+                self._data.pop(key, None)
 
     async def put_if_absent(self, key: str, value: Any) -> bool:
         self._prune(time.time())
         if key in self._data:
             return False
-        self._evict_for_room()
-        return await super().put_if_absent(key, value)
+        if len(self._data) >= self._limit:
+            raise _ClaimCacheFull("in-process EVM claim cache is full; configure a store")
+        self._data[key] = value
+        return True
 
     async def delete(self, key: str) -> None:
         self._expires.pop(key, None)
-        await super().delete(key)
+        self._data.pop(key, None)
 
 
 def _fallback_store() -> _ClaimCache:
@@ -175,6 +178,17 @@ def _parse_authorization_payload(payload: Any) -> dict[str, Any]:
     return dict(payload)
 
 
+def _timestamp(value: str | None) -> int:
+    """Return an ISO 8601 instant as Unix seconds, or 0 when absent or invalid."""
+    if not value:
+        return 0
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return 0
+    return int(parsed.timestamp()) if parsed.tzinfo is not None else 0
+
+
 def _same_address(left: Any, right: Any) -> bool:
     return isinstance(left, str) and isinstance(right, str) and left.lower() == right.lower()
 
@@ -198,8 +212,9 @@ class ChargeIntent:
             routes with a framework scope, body digest or metadata;
             ``"resource"`` also accepts payments bound by their echoed terms and
             resource URL, which other x402 clients send.
-        max_validity_seconds: Longest an authorization may stay valid from now
-            (default one hour). Longer-lived authorizations are rejected.
+        max_validity_seconds: Longest an x402 authorization may stay valid from
+            now (default one hour); longer-lived ones are rejected. Native
+            credentials may also run to their challenge's expiry.
         store: Optional store that claims each authorization before
             settlement so concurrent requests can't settle it twice.
             ``Mpp.create(store=...)`` wires it automatically.
@@ -359,8 +374,12 @@ class ChargeIntent:
         if int(payload["validBefore"]) <= now:
             raise VerificationFailedError("EVM authorization has expired")
         # The payer picks validBefore; cap it so claims (and an authorization a
-        # facilitator holds) can't stay live indefinitely.
-        if int(payload["validBefore"]) > now + self.max_validity_seconds:
+        # facilitator holds) can't stay live indefinitely. A native credential
+        # may run to its challenge's expiry, which the server set and HMAC-binds.
+        limit = now + self.max_validity_seconds
+        if not is_x402_credential(credential):
+            limit = max(limit, _timestamp(credential.challenge.expires))
+        if int(payload["validBefore"]) > limit:
             raise VerificationFailedError("EVM authorization is valid for too long")
 
         try:
@@ -429,7 +448,12 @@ class ChargeIntent:
         claim_key = self._claim_key(payload, request)
         if self._store is None:
             self._store = _fallback_store()
-        if not await self._store.put_if_absent(claim_key, "pending"):
+        try:
+            claimed = await self._store.put_if_absent(claim_key, "pending")
+        except _ClaimCacheFull as error:
+            # Refuse without a new challenge rather than forget a live claim.
+            raise InternalPaymentError() from error
+        if not claimed:
             raise CredentialReplayedError("EVM authorization has already been used")
         if isinstance(self._store, _ClaimCache):
             self._store.claim_until(claim_key, int(payload["validBefore"]))

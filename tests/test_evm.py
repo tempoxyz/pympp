@@ -396,13 +396,33 @@ class TestValidate:
     async def test_rejects_authorizations_valid_for_too_long(self) -> None:
         method = server_method()
         req = request(method)
-        credential = native_credential(req, validBefore=str(int(time.time()) + 7200))
+        credential = x402_echo(native_credential(req, validBefore=str(int(time.time()) + 7200)))
         with pytest.raises(VerificationFailedError, match="valid for too long"):
             await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
         longer = server_method(max_validity_seconds=86_400)
         await longer.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
         with pytest.raises(ValueError, match="max_validity_seconds"):
             server_method(max_validity_seconds=10)
+
+    async def test_native_credentials_may_run_to_challenge_expiry(self) -> None:
+        method = server_method()
+        req = request(method)
+        valid_before = int(time.time()) + 7200
+        signed = native_credential(req, validBefore=str(valid_before))
+        expires = datetime.fromtimestamp(valid_before, UTC).isoformat().replace("+00:00", "Z")
+        echo = ChallengeEcho(
+            id=signed.challenge.id,
+            realm=REALM,
+            method="evm",
+            intent="charge",
+            request=signed.challenge.request,
+            expires=expires,
+        )
+        credential = Credential(challenge=echo, payload=signed.payload, source=signed.source)
+        await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        # Without a challenge expiry the one-hour cap still applies.
+        with pytest.raises(VerificationFailedError, match="valid for too long"):
+            await method.intents["charge"].validate(signed, req)  # type: ignore[union-attr]
 
     async def test_rejects_values_too_long_to_parse(self) -> None:
         method = server_method()
@@ -617,19 +637,35 @@ class TestBroadcast:
         await cache.delete("new")
         assert await cache.put_if_absent("new", "pending")
 
-    async def test_full_fallback_cache_evicts_instead_of_refusing(self) -> None:
+    async def test_full_fallback_cache_refuses_without_evicting_live_claims(self) -> None:
         from mpp.methods.evm.intents import _ClaimCache
 
         cache = _ClaimCache(max_entries=2)
         now = int(time.time())
-        for key, valid_before in (("a", now + 100), ("b", now + 300)):
+        for key in ("a", "b"):
             assert await cache.put_if_absent(key, "pending")
-            cache.claim_until(key, valid_before)
-        assert await cache.put_if_absent("c", "pending")
-        cache.claim_until("c", now + 300)
-        # The soonest-expiring claim made room; the others still block duplicates.
-        assert await cache.get("a") is None
+            cache.claim_until(key, now + 300)
+        method = server_method()
+        intent = method.intents["charge"]
+        intent._store = cache  # type: ignore[union-attr]
+        req = request(method)
+        with pytest.raises(InternalPaymentError):
+            await intent.broadcast(native_credential(req), req)  # type: ignore[union-attr]
+        # Live claims are kept and still block duplicates.
+        assert not await cache.put_if_absent("a", "pending")
         assert not await cache.put_if_absent("b", "pending")
+
+    async def test_rolled_back_claims_do_not_grow_the_heap(self) -> None:
+        from mpp.methods.evm.intents import _ClaimCache
+
+        cache = _ClaimCache()
+        now = int(time.time())
+        for _ in range(5000):
+            assert await cache.put_if_absent("k", "pending")
+            cache.claim_until("k", now + 300)
+            await cache.delete("k")
+        assert len(cache._heap) <= 1025
+        assert cache._data == {} and cache._expires == {}
 
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()
