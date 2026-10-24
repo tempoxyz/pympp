@@ -714,7 +714,19 @@ def test_allowed_chain_ids_rejects_unknown_chain_only_when_empty() -> None:
         make_method(allowed_chain_ids=[])._check_allowed_chain_id(None)
 
 
-@pytest.mark.parametrize("value", ["4217", [True], ["4217"]])
-def test_allowed_chain_ids_rejects_invalid_values(value: Any) -> None:
+@pytest.mark.parametrize("construct", [tempo_charge, TempoMethod])
+@pytest.mark.parametrize("value", ["4217", b"4217", [True], ["4217"], [1.5]])
+def test_allowed_chain_ids_rejects_invalid_values(construct: Callable, value: Any) -> None:
     with pytest.raises(ValueError, match="allowed_chain_ids|Invalid Tempo chain ID"):
-        make_method(allowed_chain_ids=value)
+        construct(allowed_chain_ids=value)
+
+
+@pytest.mark.parametrize("construct", [tempo_charge, TempoMethod])
+@pytest.mark.parametrize("value", [None, [], [CHAIN_ID], (CHAIN_ID, TESTNET_CHAIN_ID)])
+def test_allowed_chain_ids_normalized_at_construction(construct: Callable, value: Any) -> None:
+    value = value.copy() if isinstance(value, list) else value
+    method = construct(allowed_chain_ids=value)
+    assert method.allowed_chain_ids == (None if value is None else tuple(value))
+    if isinstance(value, list):
+        value.append(1)
+        assert 1 not in method.allowed_chain_ids

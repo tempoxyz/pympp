@@ -114,7 +114,7 @@ class TempoMethod:
     max_amount_decimals: int | None = field(default=None, kw_only=True)
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     # Chains a client may pay on. ``None`` allows any chain; empty rejects all.
-    allowed_chain_ids: tuple[int, ...] | None = field(default=None, kw_only=True)
+    allowed_chain_ids: Sequence[int] | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -125,8 +125,15 @@ class TempoMethod:
     )
 
     def __post_init__(self) -> None:
-        """Validate the amount caps so an invalid cap fails at construction."""
+        """Validate charge policy at construction."""
         self._amount_caps()
+        if self.allowed_chain_ids is not None:
+            if isinstance(self.allowed_chain_ids, (str, bytes)):
+                raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
+            self.allowed_chain_ids = tuple(self.allowed_chain_ids)
+            for chain_id in self.allowed_chain_ids:
+                if not isinstance(chain_id, int) or isinstance(chain_id, bool):
+                    raise ValueError(f"Invalid Tempo chain ID: {chain_id!r}")
 
     def _amount_caps(self) -> tuple[int | None, int | None]:
         """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""
@@ -786,15 +793,6 @@ def tempo(
             if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:
                 raise ValueError(f"Invalid Tempo recipient address: {address!r}")
 
-    resolved_allowed_chain_ids: tuple[int, ...] | None = None
-    if allowed_chain_ids is not None:
-        if isinstance(allowed_chain_ids, (str, bytes)):
-            raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
-        resolved_allowed_chain_ids = tuple(allowed_chain_ids)
-        for allowed_chain_id in resolved_allowed_chain_ids:
-            if not isinstance(allowed_chain_id, int) or isinstance(allowed_chain_id, bool):
-                raise ValueError(f"Invalid Tempo chain ID: {allowed_chain_id!r}")
-
     method = TempoMethod(
         account=account,
         fee_payer=fee_payer,
@@ -812,7 +810,7 @@ def tempo(
         max_amount=max_amount,
         max_amount_decimals=max_amount_decimals,
         expected_recipients=resolved_expected_recipients,
-        allowed_chain_ids=resolved_allowed_chain_ids,
+        allowed_chain_ids=allowed_chain_ids,
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
