@@ -725,9 +725,11 @@ def tempo(
             the allowed fee tokens. If omitted, the first allowed token the
             fee payer holds a balance of is used, else the first allowed.
             Independent of the charge currency. Requires ``fee_payer``.
-        allowed_fee_tokens: Tokens a local ``fee_payer`` may pay gas in.
-            Defaults to :func:`fee_tokens_for_chain` (pathUSD, then USDC.e
-            on mainnet). Must contain at least one token.
+        allowed_fee_tokens: Tokens a sponsored charge may pay gas in. A local
+            ``fee_payer`` defaults to :func:`fee_tokens_for_chain` (pathUSD,
+            then USDC.e on mainnet). An external ``feePayerUrl`` sponsor picks
+            its own token unless this is set, in which case its token must be
+            explicitly set and in the list. Must contain at least one token.
         max_atomic_amount: Client-side cap on a charge's ``amount``, in base
             units of the challenge currency, as an int or a string of digits
             (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
