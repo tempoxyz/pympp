@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
     from mpp import Credential, Receipt
     from mpp.methods.tempo.client import TempoMethod
+    from mpp.store import Store
 
 _SPT_MINIMUM, _RAW_UNITS_PER_CENT = 50, 10_000
 
@@ -66,11 +67,13 @@ class TempoPayments:
         client: StripeClient,
         recipient: str | None,
         metadata: dict[str, str] | None,
+        store: Store,
     ) -> None:
         self._livemode = livemode
         self._client = client
         self._recipient = recipient
         self._metadata = metadata
+        self._store = store
 
     def charge(self) -> TempoMethod:
         if self._recipient is None:
@@ -81,7 +84,7 @@ class TempoPayments:
 
         chain_id = CHAIN_ID if self._livemode else TESTNET_CHAIN_ID
         method = tempo(
-            intents={"charge": TempoChargeIntent()},
+            intents={"charge": TempoChargeIntent(store=self._store)},
             chain_id=chain_id,
             # Keep Stripe's Tempo rail on one currency: USDC.e live, pathUSD test.
             currencies=[default_currency_for_chain(chain_id)],
@@ -125,16 +128,19 @@ class MachinePayments:
         network_id: str,
         livemode: bool,
         client: StripeClient,
+        store: Store,
         deposit_addresses: DepositAddresses | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> None:
         stripe_intents._resolve_payment_intents(client)
+        if not callable(getattr(store, "put_if_absent", None)):
+            raise ValueError("create() requires a shared atomic `store` for replay protection")
         tempo_address = deposit_addresses.get("tempo") if deposit_addresses is not None else None
 
         resolved_metadata = dict(metadata) if metadata is not None else None
         self._tempo_address = tempo_address
         self.spt = SptPayments(network_id, client, resolved_metadata)
-        self.tempo = TempoPayments(livemode, client, tempo_address, resolved_metadata)
+        self.tempo = TempoPayments(livemode, client, tempo_address, resolved_metadata, store)
 
     def default_methods(self) -> list[StripeMethod | TempoMethod]:
         """Return configured methods in preferred negotiation order."""
@@ -147,14 +153,20 @@ def create(
     network_id: str,
     livemode: bool,
     client: StripeClient,
+    store: Store,
     deposit_addresses: DepositAddresses | None = None,
     metadata: Mapping[str, str] | None = None,
 ) -> MachinePayments:
-    """Create machine payments from an initialized StripeClient."""
+    """Create machine payments from an initialized StripeClient.
+
+    ``store`` is the atomic replay store shared by every server instance; Tempo
+    charges use it to reject replayed transaction hashes across replicas.
+    """
     return MachinePayments(
         network_id=network_id,
         livemode=livemode,
         client=client,
+        store=store,
         deposit_addresses=deposit_addresses,
         metadata=metadata,
     )
