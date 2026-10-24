@@ -128,6 +128,43 @@ def _raw_transaction_hash(raw_tx: str) -> str:
     return "0x" + keccak(tx_bytes).hex()
 
 
+def _canonical_signature(signature: bytes) -> bytes:
+    """Encode secp256k1 recovery IDs as 27/28, including inside keychain signatures."""
+    if len(signature) == 65 and signature[64] in (0, 1):
+        return signature[:64] + bytes([signature[64] + 27])
+    if len(signature) > 21 and signature[0] in (0x03, 0x04):
+        return signature[:21] + _canonical_signature(signature[21:])
+    return signature
+
+
+def _canonical_raw_transaction(raw_tx: str) -> str:
+    """Return the canonical encoding of a signed 0x76 Tempo transaction.
+
+    Tempo nodes accept raw (0/1) secp256k1 recovery IDs and normalize them to
+    27/28 before deriving the transaction hash. Broadcasting and hashing the
+    canonical envelope keeps replay keys and receipt hashes equal to the node's.
+    Anything that does not decode as a 0x76 transaction is returned unchanged.
+    """
+    import rlp
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        if tx_bytes[:1] != b"\x76":
+            return raw_tx
+        fields = rlp.decode(tx_bytes[1:])
+    except Exception:
+        return raw_tx
+    if not isinstance(fields, list) or len(fields) not in (14, 15):
+        return raw_tx
+    signature = fields[-1]
+    if not isinstance(signature, bytes):
+        return raw_tx
+    canonical = _canonical_signature(signature)
+    if canonical == signature:
+        return raw_tx
+    return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
+
+
 def _transaction_sender(raw_tx: str) -> str | None:
     """Return the lowercase address of the account a Tempo transaction debits.
 
@@ -1469,6 +1506,10 @@ class ChargeIntent:
             # Fee payer signing must not change who the transaction debits.
             if sender is not None and _transaction_sender(raw_tx) != sender:
                 raise VerificationError("Fee payer transaction sender does not match the sender.")
+
+        # Nodes normalize accepted signature encodings before deriving transaction
+        # hashes. Broadcast the same canonical envelope so replay keys match the node.
+        raw_tx = _canonical_raw_transaction(raw_tx)
 
         rpc_url = self._get_rpc_url()
 
