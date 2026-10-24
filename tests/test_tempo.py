@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from unittest.mock import AsyncMock, patch
@@ -4043,8 +4044,20 @@ class TestCosignAsFeePayer:
         return intent, store, raw, signed, credential, request, receipt
 
     @pytest.mark.asyncio
-    async def test_unknown_recovery_expires_at_challenge_deadline(self):
+    @pytest.mark.parametrize("challenge_seconds", [60, 3600])
+    async def test_unknown_recovery_expires_after_challenge_and_transaction(
+        self, challenge_seconds
+    ):
+        from mpp.methods.tempo.intents import VALID_BEFORE_GRACE, _transaction_valid_before
+
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        credential = replace(
+            credential,
+            challenge=replace(
+                credential.challenge,
+                expires=(datetime.now(UTC) + timedelta(seconds=challenge_seconds)).isoformat(),
+            ),
+        )
         assert credential.challenge.expires is not None
         expires_at = datetime.fromisoformat(credential.challenge.expires).timestamp()
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
@@ -4056,9 +4069,12 @@ class TestCosignAsFeePayer:
         ):
             with pytest.raises(InternalPaymentError):
                 await intent.verify(credential, request)
-        with patch("time.time", return_value=expires_at - 0.001):
+        valid_before = _transaction_valid_before(signed)
+        assert valid_before is not None
+        deadline = max(expires_at, valid_before + VALID_BEFORE_GRACE)
+        with patch("time.time", return_value=deadline - 0.001):
             assert await store.get(marker) == signed
-        with patch("time.time", return_value=expires_at):
+        with patch("time.time", return_value=deadline):
             assert await store.get(marker) is None
 
     @pytest.mark.asyncio

@@ -71,3 +71,19 @@ async def test_redis_uses_atomic_absolute_deadline_over_default_ttl(result, inse
     with patch("time.time", return_value=1000):
         assert await store.put_if_absent_until("recovery", "raw", 1100.0001) is inserted
     client.set.assert_awaited_once_with("mpp:recovery", "raw", nx=True, pxat=1100001)
+
+
+async def test_settled_evm_claim_keeps_its_own_expiry():
+    from mpp.methods.evm.intents import _ClaimCache
+
+    cache = _ClaimCache(max_entries=1)
+    with patch("time.time", return_value=1000):
+        assert await cache.put_if_absent("claim", "pending")
+        cache.claim_until("claim", 1100)
+        await cache.put("claim", "settled")
+    with patch("time.time", return_value=1159):
+        assert await cache.get("claim") == "settled"
+        assert not await cache.put_if_absent("claim", "pending")
+    with patch("time.time", return_value=1160):
+        assert await cache.put_if_absent("new", "pending")
+        assert await cache.get("claim") is None

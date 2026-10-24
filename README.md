@@ -226,10 +226,12 @@ the stored transaction. If the original bytes or key are unavailable, retain the
 record for operator reconciliation rather than deleting an unknown payment.
 
 Recovery records created by `MemoryStore`, `SQLiteStore`, and `RedisStore` expire
-at the authenticated challenge's absolute expiry. Retries do not extend this
-deadline, and a store-wide TTL does not shorten it. Replay reservations retain
+after both the authenticated challenge's expiry and the signed transaction's
+`valid_before` plus the inclusion grace period. Retries do not extend this deadline, and a store-wide TTL does not shorten it. Replay reservations retain
 their existing retention policy. Memory and SQLite reclaim abandoned expired
 records during subsequent store activity; Redis expires them automatically.
+Redis-backed sponsored recovery requires Redis 6.2 or later for atomic
+[`SET NX PXAT`](https://redis.io/docs/latest/commands/set/) absolute expiry.
 Custom stores can implement `mpp.store.ExpiringStore.put_if_absent_until(key,
 value, expires_at)` with an atomic insert and absolute Unix timestamp to support
 this cleanup. Stores without that method, and challenges without an expiry,

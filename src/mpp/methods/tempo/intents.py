@@ -1761,8 +1761,15 @@ class ChargeIntent:
                 # whose outcome could be lost must not be broadcast at all.
                 try:
                     if recovery_expires_at is not None and isinstance(self._store, ExpiringStore):
+                        valid_before = _transaction_valid_before(raw_tx)
+                        marker_expires_at = max(
+                            recovery_expires_at,
+                            valid_before + VALID_BEFORE_GRACE
+                            if valid_before is not None
+                            else recovery_expires_at,
+                        )
                         marker_created = await self._store.put_if_absent_until(
-                            broadcast_key, raw_tx, recovery_expires_at
+                            broadcast_key, raw_tx, marker_expires_at
                         )
                     else:
                         marker_created = await self._store.put_if_absent(broadcast_key, raw_tx)

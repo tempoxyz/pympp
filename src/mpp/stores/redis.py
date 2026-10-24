@@ -69,7 +69,10 @@ class RedisStore:
         return result is not None
 
     async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
-        """Atomically insert with an absolute expiry, overriding the default TTL."""
+        """Atomically insert with absolute expiry; requires Redis server >= 6.2.
+
+        Overrides the default TTL using ``SET NX PXAT``.
+        """
         _validate_expiry(expires_at)
         result = await self._redis.set(
             self._key(key), value, nx=True, pxat=math.ceil(expires_at * 1000)

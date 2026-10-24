@@ -59,14 +59,14 @@ class MemoryStore:
             raise ValueError("max_entries must be positive")
         self._max_entries = max_entries
         self._data: dict[str, Any] = {}
-        self._expires: dict[str, float] = {}
+        self._expiry_deadlines: dict[str, float] = {}
 
     def _prune_expired(self) -> None:
         now = time.time()
-        for key, expires_at in list(self._expires.items()):
+        for key, expires_at in list(self._expiry_deadlines.items()):
             if expires_at <= now:
                 self._data.pop(key, None)
-                del self._expires[key]
+                del self._expiry_deadlines[key]
 
     def _check_capacity(self, key: str) -> None:
         self._prune_expired()
@@ -84,11 +84,11 @@ class MemoryStore:
     async def put(self, key: str, value: Any) -> None:
         self._check_capacity(key)
         self._data[key] = value
-        self._expires.pop(key, None)
+        self._expiry_deadlines.pop(key, None)
 
     async def delete(self, key: str) -> None:
         self._data.pop(key, None)
-        self._expires.pop(key, None)
+        self._expiry_deadlines.pop(key, None)
 
     async def put_if_absent(self, key: str, value: Any) -> bool:
         self._prune_expired()
@@ -102,5 +102,5 @@ class MemoryStore:
         _validate_expiry(expires_at)
         if not await self.put_if_absent(key, value):
             return False
-        self._expires[key] = expires_at
+        self._expiry_deadlines[key] = expires_at
         return True
