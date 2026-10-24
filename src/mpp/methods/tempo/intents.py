@@ -1548,6 +1548,8 @@ class ChargeIntent:
         # client-signed envelope so it is stable across retries of a credential.
         broadcast_key: str | None = None
         reconciling = False
+        legacy_record = False
+        client_store_key: str | None = None
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1563,20 +1565,37 @@ class ChargeIntent:
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 prior_transaction: Any = None
                 if self._store is not None:
-                    broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
+                    client_hash = _raw_transaction_hash(raw_tx).lower()
+                    broadcast_key = f"mpp:charge-broadcast:{client_hash}"
+                    client_store_key = f"mpp:charge-client:{client_hash}"
+                    if await self._store.get(client_store_key) is not None:
+                        raise CredentialReplayedError("Transaction hash already used")
                     prior_transaction = await self._store.get(broadcast_key)
                 if isinstance(prior_transaction, bytes):
                     prior_transaction = prior_transaction.decode("utf-8")
                 if prior_transaction is not None:
-                    # Persist the signed envelope, not just the fee token: a
-                    # different worker may use a different sponsor key.
-                    if not isinstance(prior_transaction, str) or not prior_transaction.startswith(
+                    if isinstance(prior_transaction, str) and re.fullmatch(
+                        r"0x[0-9a-fA-F]{40}", prior_transaction
+                    ):
+                        # Legacy records omit the sponsor signature. Recreate a
+                        # candidate for receipt lookup only, never for resubmission
+                        # or a conclusion that the original payment did not land.
+                        raw_tx, _ = self._cosign_as_fee_payer(
+                            raw_tx,
+                            prior_transaction,
+                            request=request,
+                            require_remaining_validity=False,
+                            allow_expired=True,
+                        )
+                        legacy_record = True
+                    elif isinstance(prior_transaction, str) and prior_transaction.startswith(
                         "0x76"
                     ):
+                        raw_tx = prior_transaction
+                    else:
                         raise InternalPaymentError() from RuntimeError(
                             "Recovery record lacks the original signed transaction"
                         )
-                    raw_tx = prior_transaction
                     reconciling = True
                 else:
                     fee_token = await self._resolve_fee_token(client, request, required_balance)
@@ -1647,12 +1666,23 @@ class ChargeIntent:
         rpc_url = self._get_rpc_url()
 
         reserved_tx_hash: str | None = None
-        store_key: str | None = None
+        store_keys: list[str] = []
         if self._store is not None:
             reserved_tx_hash = _raw_transaction_hash(raw_tx)
-            store_key = f"mpp:charge:{reserved_tx_hash.lower()}"
-            if not await self._store.put_if_absent(store_key, reserved_tx_hash):
-                raise CredentialReplayedError("Transaction hash already used")
+            keys = [f"mpp:charge:{reserved_tx_hash.lower()}"]
+            if client_store_key is not None:
+                keys.insert(0, client_store_key)
+            try:
+                for key in keys:
+                    if not await self._store.put_if_absent(key, reserved_tx_hash):
+                        raise CredentialReplayedError("Transaction hash already used")
+                    store_keys.append(key)
+            except (Exception, asyncio.CancelledError) as error:
+                for key in store_keys:
+                    await self._store.delete(key)
+                if isinstance(error, (CredentialReplayedError, asyncio.CancelledError)):
+                    raise
+                raise InternalPaymentError() from error
 
         broadcast_attempted = False
         # True while a submitted transaction may still be included. The broadcast
@@ -1675,6 +1705,7 @@ class ChargeIntent:
                     challenge_id,
                     realm,
                     reconcile=True,
+                    legacy_record=legacy_record,
                 )
                 if prior is not None:
                     verified = True
@@ -1828,10 +1859,11 @@ class ChargeIntent:
         except (Exception, asyncio.CancelledError) as err:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
-            if not verified and self._store is not None and store_key is not None:
+            if not verified and self._store is not None:
                 if marker_created and not outcome_unknown:
                     await self._clear_broadcast_marker(broadcast_key)
-                await self._store.delete(store_key)
+                for key in store_keys:
+                    await self._store.delete(key)
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
             if (
@@ -1852,6 +1884,7 @@ class ChargeIntent:
         realm: str,
         *,
         reconcile: bool = False,
+        legacy_record: bool = False,
     ) -> Receipt | None:
         """Apply the sponsored validity floor before a first submission.
 
@@ -1870,8 +1903,10 @@ class ChargeIntent:
         tx_hash = _raw_transaction_hash(raw_tx)
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
         if receipt_data is None:
-            if valid_before + VALID_BEFORE_GRACE < time.time() and (
-                await self._confirm_not_included(client, tx_hash, valid_before)
+            if (
+                not legacy_record
+                and valid_before + VALID_BEFORE_GRACE < time.time()
+                and (await self._confirm_not_included(client, tx_hash, valid_before))
             ):
                 # Chain time is past its inclusion window with no receipt: it
                 # never landed.

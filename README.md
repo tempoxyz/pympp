@@ -208,6 +208,23 @@ simulation path; externally signed transactions rely on the external service's
 pre-sign controls. Adding a simulation after receiving the signature would not
 prevent a caller from broadcasting that same transaction elsewhere.
 
+### Sponsored recovery records
+
+Sponsored charge recovery records now retain the original signed transaction.
+Legacy records containing only a fee-token address can recover confirmed
+receipts while the original sponsor key is available. A missing receipt for a
+reconstructed transaction is not proof that the original payment failed, so
+these records remain non-payable until reconciled.
+
+Before rotating sponsor keys, drain outstanding sponsored submissions. To
+migrate a remaining legacy record, pause payment traffic and replace its value
+under the existing `mpp:charge-broadcast:<client-envelope-hash>` key with the
+original canonical signed `0x76` transaction from your submission log. Keep the
+key unchanged and use the actual submitted bytes, not a transaction signed with
+a replacement key. Resume traffic after the migration; retries will reconcile
+the stored transaction. If the original bytes or key are unavailable, retain the
+record for operator reconciliation rather than deleting an unknown payment.
+
 ### Payment request context
 
 Direct and composed payment gates bind `meta` into their signed challenges:

@@ -4076,6 +4076,8 @@ class TestCosignAsFeePayer:
             with pytest.raises(asyncio.CancelledError):
                 await intent.verify(credential, request)
         assert await store.get(f"mpp:charge:{receipt['transactionHash']}") is not None
+        assert intent._method is not None
+        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
         with pytest.raises(CredentialReplayedError):
             await intent.verify(credential, request)
 
@@ -4102,6 +4104,34 @@ class TestCosignAsFeePayer:
         assert await store.get(marker) is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_bytes", [False, True])
+    @pytest.mark.parametrize("outcome", ["confirmed", "missing", "rotated"])
+    async def test_legacy_token_marker_only_recovers_confirmed_payments(self, as_bytes, outcome):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        token = PATH_USD.encode() if as_bytes else PATH_USD
+        await store.put(marker, token)
+        if outcome == "rotated":
+            assert intent._method is not None
+            intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+
+        async def post(url, *, json):
+            assert json["method"] == "eth_getTransactionReceipt"
+            found = outcome == "confirmed" and json["params"][0] == receipt["transactionHash"]
+            return mock_response(200, {"result": receipt if found else None})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        with patch("mpp.methods.tempo.intents.time.time", return_value=time.time() + 600):
+            if outcome == "confirmed":
+                result = await intent.verify(credential, request)
+                assert result.reference == receipt["transactionHash"]
+            else:
+                with pytest.raises(InternalPaymentError) as raised:
+                    await intent.verify(credential, request)
+                assert raised.value.retry_challenge is None
+                assert await store.get(marker) == token
+
+    @pytest.mark.asyncio
     async def test_concurrent_sponsors_do_not_overwrite_unknown_submission(self):
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         other = self._make_intent()
@@ -4114,12 +4144,13 @@ class TestCosignAsFeePayer:
         count = 0
         sends = []
 
-        async def simulate(*args):
+        async def resolve(token):
             nonlocal count
             count += 1
             if count == 2:
                 ready.set()
             await asyncio.wait_for(ready.wait(), 2)
+            return token
 
         async def post(url, *, json):
             if json["method"] == "eth_sendRawTransactionSync":
@@ -4128,17 +4159,26 @@ class TestCosignAsFeePayer:
             assert json["method"] == "eth_getTransactionReceipt"
             return mock_response(200, {"result": None})
 
+        async def first_token(*args):
+            return await resolve(PATH_USD)
+
+        async def second_token(*args):
+            return await resolve("0x20c0000000000000000000000000000000000001")
+
         intent._http_client = other._http_client = AsyncMock(post=AsyncMock(side_effect=post))
         with (
-            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
-            patch.object(other, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(other, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(intent, "_resolve_fee_token", side_effect=first_token),
+            patch.object(other, "_resolve_fee_token", side_effect=second_token),
         ):
             results = await asyncio.gather(
                 intent.verify(credential, request),
                 other.verify(credential, request),
                 return_exceptions=True,
             )
-        assert all(isinstance(result, InternalPaymentError) for result in results)
+        assert sum(isinstance(result, InternalPaymentError) for result in results) == 1
+        assert sum(isinstance(result, CredentialReplayedError) for result in results) == 1
         assert len(sends) == 1
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         assert await store.get(marker) == sends[0]
