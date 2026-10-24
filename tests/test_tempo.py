@@ -6472,6 +6472,38 @@ class TestSplitLogMemoStrictness:
             ),
         )
 
+    @pytest.mark.parametrize("kind", ["plain", "neutral", "fixed"])
+    @pytest.mark.parametrize("challenge_id", ["challenge-a", "challenge-b"])
+    def test_split_cannot_share_neutral_leg_between_challenges(
+        self, kind: str, challenge_id: str
+    ) -> None:
+        request = self._split_request()
+        memo = "0x" + "dd" * 32
+        if kind == "fixed":
+            request.methodDetails.splits[0].memo = memo
+        shared = self._make_log(
+            TRANSFER_TOPIC if kind == "plain" else TRANSFER_WITH_MEMO_TOPIC,
+            self.SPLIT_RECIPIENT,
+            300000,
+            None if kind == "plain" else memo,
+        )
+        logs = [shared] + [
+            self._make_log(
+                TRANSFER_WITH_MEMO_TOPIC,
+                self.RECIPIENT,
+                700000,
+                encode_attribution(challenge_id=cid, server_id="api.example.com"),
+            )
+            for cid in ("challenge-a", "challenge-b")
+        ]
+        with pytest.raises(CredentialReplayedError, match="Unbound split leg"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                {"status": "0x1", "logs": logs},
+                request,
+                challenge_id=challenge_id,
+                realm="api.example.com",
+            )
+
     def test_split_rejects_conflicting_challenge_memo(self) -> None:
         """A split leg bound to another challenge cannot ride on this payment."""
         bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")

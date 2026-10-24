@@ -1325,6 +1325,36 @@ class ChargeIntent:
             realm=realm,
         )
 
+        # A neutral leg cannot be assigned to one of several challenges in a
+        # batched receipt. Require every leg to be bound in that case, so two
+        # charges cannot share a single plain or fixed-memo transfer.
+        from mpp.methods.tempo._attribution import (
+            is_mpp_memo,
+            verify_challenge_binding,
+            verify_server,
+        )
+
+        def is_bound(memo: str | None) -> bool:
+            return (
+                memo is not None
+                and verify_server(memo, realm)
+                and verify_challenge_binding(memo, challenge_id)
+            )
+
+        if any(not is_bound(log.memo) for log in matched_logs):
+            fixed_memos = {log.memo for log in matched_logs if log.fixed}
+            for log in receipt_data.get("logs", []):
+                topics = log.get("topics", [])
+                if (
+                    log.get("address", "").lower() == request.currency.lower()
+                    and len(topics) == 4
+                    and topics[0] == TRANSFER_WITH_MEMO_TOPIC
+                    and topics[3] not in fixed_memos
+                    and is_mpp_memo(topics[3])
+                    and not is_bound(topics[3])
+                ):
+                    raise CredentialReplayedError("Unbound split leg in a multi-challenge receipt")
+
         return matched_logs
 
     def _verify_single_transfer_log(
