@@ -574,7 +574,7 @@ class TestFacilitatorFailures:
 
 
 class TestRouteBinding:
-    """mppx's default @@routeBinding: 'required'@@ on scoped routes."""
+    """mppx's default ``routeBinding: 'required'`` on scoped routes."""
 
     @staticmethod
     async def strict(facilitator_url: str) -> Mpp:

@@ -149,6 +149,11 @@ class TestHeaders:
         with pytest.raises(InvalidHeaderError):
             decode_payment_signature(encoded)
 
+    def test_rejects_deeply_nested_json(self) -> None:
+        encoded = base64.b64encode(b"[" * 30_000 + b"]" * 30_000).decode()
+        with pytest.raises(InvalidHeaderError):
+            decode_payment_signature(encoded)
+
     def test_rejects_oversized_headers(self) -> None:
         with pytest.raises(InvalidHeaderError, match="too large"):
             decode_payment_signature("A" * (MAX_HEADER_SIZE + 1))

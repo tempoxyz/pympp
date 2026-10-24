@@ -52,7 +52,8 @@ def _decode(value: str, parse: Callable[[Any], T]) -> T:
         # JSON escapes can smuggle lone UTF-16 surrogates that break any later
         # UTF-8 encoding of the value, such as echoing it in an error header.
         json.dumps(decoded, ensure_ascii=False).encode("utf-8")
-    except (binascii.Error, ValueError) as error:
+    except (binascii.Error, ValueError, RecursionError) as error:
+        # RecursionError: deeply nested JSON inside the 64 KiB limit.
         raise InvalidHeaderError() from error
     try:
         return parse(decoded)

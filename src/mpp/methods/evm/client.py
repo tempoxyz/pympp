@@ -189,6 +189,7 @@ def evm(
     settle: SettleFn | None = None,
     max_timeout_seconds: int = 300,
     route_binding: RouteBinding = "required",
+    max_validity_seconds: int = 3600,
     account: Any = None,
     max_amount: str | Decimal | None = None,
     can_offer: CanOfferFn | None = None,
@@ -231,6 +232,8 @@ def evm(
             scoped. ``"required"`` (the default) accepts only clients that sign
             mppx's route binding there; set ``"resource"`` to accept standard
             x402 clients, which bind by the echoed terms and resource URL.
+        max_validity_seconds: Longest an authorization may stay valid from now
+            (servers, default one hour).
         account: eth-account ``LocalAccount`` that signs credentials (clients).
         max_amount: Largest display-unit amount the client pays (clients).
         can_offer: Optional callback deciding whether to offer a request.
@@ -287,6 +290,7 @@ def evm(
             settle=settle,
             max_timeout_seconds=max_timeout_seconds,
             route_binding=route_binding,
+            max_validity_seconds=max_validity_seconds,
         )
     elif account is None:
         raise ValueError(

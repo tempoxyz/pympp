@@ -393,6 +393,17 @@ class TestValidate:
         with pytest.raises(InvalidPayloadError):
             await method.intents["charge"].validate(bad, req)  # type: ignore[union-attr]
 
+    async def test_rejects_authorizations_valid_for_too_long(self) -> None:
+        method = server_method()
+        req = request(method)
+        credential = native_credential(req, validBefore=str(int(time.time()) + 7200))
+        with pytest.raises(VerificationFailedError, match="valid for too long"):
+            await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        longer = server_method(max_validity_seconds=86_400)
+        await longer.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        with pytest.raises(ValueError, match="max_validity_seconds"):
+            server_method(max_validity_seconds=10)
+
     async def test_rejects_values_too_long_to_parse(self) -> None:
         method = server_method()
         req = request(method)
@@ -605,6 +616,20 @@ class TestBroadcast:
         assert not await cache.put_if_absent("new", "pending")
         await cache.delete("new")
         assert await cache.put_if_absent("new", "pending")
+
+    async def test_full_fallback_cache_evicts_instead_of_refusing(self) -> None:
+        from mpp.methods.evm.intents import _ClaimCache
+
+        cache = _ClaimCache(max_entries=2)
+        now = int(time.time())
+        for key, valid_before in (("a", now + 100), ("b", now + 300)):
+            assert await cache.put_if_absent(key, "pending")
+            cache.claim_until(key, valid_before)
+        assert await cache.put_if_absent("c", "pending")
+        cache.claim_until("c", now + 300)
+        # The soonest-expiring claim made room; the others still block duplicates.
+        assert await cache.get("a") is None
+        assert not await cache.put_if_absent("b", "pending")
 
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()

@@ -8,6 +8,7 @@ settles either through an x402 facilitator or a custom ``settle`` hook.
 
 from __future__ import annotations
 
+import heapq
 import inspect
 import logging
 import re
@@ -58,27 +59,45 @@ _warned_fallback_store = False
 class _ClaimCache(MemoryStore):
     """In-process claims that expire with their authorization.
 
-    A claim only has to outlive its authorization's @@validBefore@@: after that
-    the authorization can't settle on-chain. Expired claims are pruned on write,
-    so memory is bounded by the payment rate times the validity window, and the
-    cache never fills up and refuses payments.
+    A claim only has to outlive its authorization's ``validBefore``: after that
+    the authorization can't settle on-chain. ``ChargeIntent`` caps how far in the
+    future that can be (``max_validity_seconds``), so expired claims are pruned
+    from a heap on write and memory is bounded by the payment rate times that
+    window. As a backstop the cache holds at most ``max_entries`` claims and evicts
+    the soonest-expiring one when full, rather than refusing payments; on the
+    facilitator path the on-chain EIP-3009 nonce still blocks a replay.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = 100_000) -> None:
         super().__init__()
+        self._limit = max_entries
         self._expires: dict[str, float] = {}
+        self._heap: list[tuple[float, str]] = []
 
     def claim_until(self, key: str, valid_before: int) -> None:
-        self._expires[key] = valid_before + 60
+        expires = valid_before + 60
+        self._expires[key] = expires
+        heapq.heappush(self._heap, (expires, key))
 
-    def _prune(self) -> None:
-        now = time.time()
-        for key in [key for key, expires in self._expires.items() if expires <= now]:
-            self._expires.pop(key, None)
+    def _pop_soonest(self) -> None:
+        expires, key = heapq.heappop(self._heap)
+        if self._expires.get(key) == expires:
+            del self._expires[key]
             self._data.pop(key, None)
 
+    def _prune(self, now: float) -> None:
+        while self._heap and self._heap[0][0] <= now:
+            self._pop_soonest()
+
+    def _evict_for_room(self) -> None:
+        while len(self._data) >= self._limit and self._heap:
+            self._pop_soonest()
+
     async def put_if_absent(self, key: str, value: Any) -> bool:
-        self._prune()
+        self._prune(time.time())
+        if key in self._data:
+            return False
+        self._evict_for_room()
         return await super().put_if_absent(key, value)
 
     async def delete(self, key: str) -> None:
@@ -179,6 +198,8 @@ class ChargeIntent:
             routes with a framework scope, body digest or metadata;
             ``"resource"`` also accepts payments bound by their echoed terms and
             resource URL, which other x402 clients send.
+        max_validity_seconds: Longest an authorization may stay valid from now
+            (default one hour). Longer-lived authorizations are rejected.
         store: Optional store that claims each authorization before
             settlement so concurrent requests can't settle it twice.
             ``Mpp.create(store=...)`` wires it automatically.
@@ -196,6 +217,7 @@ class ChargeIntent:
         max_timeout_seconds: int = 300,
         route_binding: RouteBinding = "required",
         store: Store | None = None,
+        max_validity_seconds: int = 3600,
     ) -> None:
         if facilitator is None and settle is None:
             raise ValueError("EVM charge requires a facilitator or a settle hook")
@@ -203,6 +225,13 @@ class ChargeIntent:
             raise ValueError("max_timeout_seconds must be an integer")
         if max_timeout_seconds <= 0:
             raise ValueError("max_timeout_seconds must be positive")
+        if (
+            isinstance(max_validity_seconds, bool)
+            or not isinstance(max_validity_seconds, int)
+            or max_validity_seconds < max_timeout_seconds
+        ):
+            raise ValueError("max_validity_seconds must be an integer >= max_timeout_seconds")
+        self.max_validity_seconds = max_validity_seconds
         if route_binding not in ("required", "resource"):
             raise ValueError("route_binding must be 'required' or 'resource'")
         self.route_binding: RouteBinding = route_binding
@@ -329,6 +358,10 @@ class ChargeIntent:
             raise VerificationFailedError("EVM authorization is not valid yet")
         if int(payload["validBefore"]) <= now:
             raise VerificationFailedError("EVM authorization has expired")
+        # The payer picks validBefore; cap it so claims (and an authorization a
+        # facilitator holds) can't stay live indefinitely.
+        if int(payload["validBefore"]) > now + self.max_validity_seconds:
+            raise VerificationFailedError("EVM authorization is valid for too long")
 
         try:
             signer = recover_authorizer(
