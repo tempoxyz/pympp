@@ -173,14 +173,14 @@ def _transaction_fee_token(raw_tx: str) -> str | None:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
         fields = rlp.decode(tx_bytes[1:])
     except Exception as err:
-        raise VerificationError("fee-sponsored transaction feeToken is invalid") from err
+        raise RuntimeError("fee-sponsored transaction feeToken is invalid") from err
     if tx_bytes[:1] != b"v" or not isinstance(fields, list) or len(fields) < 11:
-        raise VerificationError("fee-sponsored transaction feeToken is invalid")
+        raise RuntimeError("fee-sponsored transaction feeToken is invalid")
     fee_token = fields[10]
     if fee_token == b"":
         return None
     if not isinstance(fee_token, bytes) or len(fee_token) != 20:
-        raise VerificationError("fee-sponsored transaction feeToken is invalid")
+        raise RuntimeError("fee-sponsored transaction feeToken is invalid")
     return "0x" + fee_token.hex()
 
 
@@ -1571,11 +1571,14 @@ class ChargeIntent:
                 # token choice; without one, the sponsor picks its own token.
                 allowed_fee_tokens = getattr(self._method, "allowed_fee_tokens", None)
                 if allowed_fee_tokens is not None:
-                    sponsored_fee_token = _transaction_fee_token(raw_tx)
-                    if sponsored_fee_token is not None and sponsored_fee_token.lower() not in {
-                        token.lower() for token in allowed_fee_tokens
-                    }:
-                        raise VerificationError("fee-sponsored transaction feeToken is not allowed")
+                    try:
+                        sponsored_fee_token = _transaction_fee_token(raw_tx)
+                        if sponsored_fee_token is None or sponsored_fee_token.lower() not in {
+                            token.lower() for token in allowed_fee_tokens
+                        }:
+                            raise RuntimeError("fee-sponsored transaction feeToken is not allowed")
+                    except RuntimeError as error:
+                        raise InternalPaymentError() from error
 
             # Fee payer signing must not change who the transaction debits.
             if sender is not None and _transaction_sender(raw_tx) != sender:

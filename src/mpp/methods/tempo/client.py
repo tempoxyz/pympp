@@ -670,7 +670,7 @@ def tempo(
             ``fee_payer`` defaults to :func:`fee_tokens_for_chain` (pathUSD,
             then USDC.e on mainnet). An external ``feePayerUrl`` sponsor picks
             its own token unless this is set, in which case its token must be
-            in the list. Must contain at least one token.
+            explicitly set and in the list. Must contain at least one token.
         max_atomic_amount: Client-side cap on a charge's ``amount``, in base
             units of the challenge currency, as an int or a string of digits
             (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,

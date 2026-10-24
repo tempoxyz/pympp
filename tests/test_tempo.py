@@ -6381,7 +6381,9 @@ class TestTransactionCredentialPayer:
             (None, USDC, True),
             ((PATH_USD,), PATH_USD, True),
             ((PATH_USD,), USDC, False),
-            ((PATH_USD,), None, True),
+            ((PATH_USD,), None, False),
+            (None, None, True),
+            ((PATH_USD,), "invalid", False),
         ],
     )
     async def test_external_fee_payer_token_respects_configured_allowlist(
@@ -6392,8 +6394,14 @@ class TestTransactionCredentialPayer:
         from mpp.server.intent import broadcast_credential
 
         sender = Account.from_key(TEST_PRIVATE_KEY).address
-        signed = self._tx(awaiting_fee_payer=True, fee_token=sponsor_token).sign(TEST_PRIVATE_KEY)
+        signed = self._tx(
+            awaiting_fee_payer=True, fee_token=None if sponsor_token == "invalid" else sponsor_token
+        ).sign(TEST_PRIVATE_KEY)
         cosigned = "0x" + signed.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex()
+        if sponsor_token == "invalid":
+            fields = rlp.decode(bytes.fromhex(cosigned[4:]))
+            fields[10] = b"invalid"
+            cosigned = "0x76" + rlp.encode(fields).hex()
         log = {
             "address": self.CURRENCY,
             "topics": [
@@ -6423,10 +6431,12 @@ class TestTransactionCredentialPayer:
             request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
 
             if not accepted:
-                with pytest.raises(VerificationError, match="feeToken is not allowed"):
+                with pytest.raises(InternalPaymentError) as raised:
                     await broadcast_credential(
                         intent=intent, credential=credential, request=request
                     )
+                assert "feeToken is" in str(internal_cause(raised.value))
+                assert raised.value.retry_challenge is None
                 assert methods == ["eth_signRawTransaction"]
                 return
 
