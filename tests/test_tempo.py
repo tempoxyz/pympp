@@ -4131,6 +4131,7 @@ class TestCosignAsFeePayer:
 
         intent = self._make_intent()
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4298,6 +4299,7 @@ class TestCosignAsFeePayer:
         currency = "0x20c0000000000000000000000000000000000000"
         recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4343,6 +4345,7 @@ class TestCosignAsFeePayer:
         intent._store = MemoryStore()
         intent._confirmation_timeout = 0.2
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4442,6 +4445,7 @@ class TestCosignAsFeePayer:
         intent._store = MemoryStore()
         intent._confirmation_timeout = 0.2
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4511,6 +4515,7 @@ class TestCosignAsFeePayer:
         intent._store = store
         intent._confirmation_timeout = 0.2
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4600,6 +4605,7 @@ class TestCosignAsFeePayer:
         store = MemoryStore(max_entries=1)
         intent._store = store
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4661,6 +4667,7 @@ class TestCosignAsFeePayer:
         intent._store = BytesStore()
         intent._confirmation_timeout = 0.2
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
@@ -4722,7 +4729,12 @@ class TestCosignAsFeePayer:
         intent = self._make_intent()
         store = MemoryStore()
         intent._store = store
-        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+        )
         credential = make_credential(
             payload={"type": "transaction", "signature": raw_tx},
             expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
@@ -4749,7 +4761,6 @@ class TestCosignAsFeePayer:
 
         with (
             patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
-            patch.object(intent, "_validate_transaction_payload"),
             patch.object(intent, "_transaction_payer", return_value=None),
             pytest.raises(InternalPaymentError),
         ):
@@ -4767,6 +4778,7 @@ class TestCosignAsFeePayer:
         currency = "0x20c0000000000000000000000000000000000000"
         recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
         raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
             currency=currency,
             recipient=recipient,
             amount=1000000,
