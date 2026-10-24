@@ -4264,6 +4264,120 @@ class TestCosignAsFeePayer:
             assert methods == ["eth_getTransactionReceipt"]
 
     @pytest.mark.asyncio
+    async def test_verify_ambiguous_retry_reuses_fee_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry co-signs with the first attempt's fee token, so it reconciles the same tx."""
+        from mpp.store import MemoryStore
+
+        monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        other_token = "0x20c0000000000000000000000000000000000001"
+        start = float(int(time.time()))
+        clock = [start]
+
+        intent = self._make_intent()
+        intent._store = MemoryStore()
+        intent._confirmation_timeout = 0.2
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(start) + 20,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+        }
+        first_hash = _raw_transaction_hash(
+            intent._cosign_as_fee_payer(raw_tx, PATH_USD, require_remaining_validity=False)[0]
+        )
+        receipt_lookups: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if json["method"] == "eth_sendRawTransactionSync":
+                raise httpx.ReadTimeout("send timed out")
+            assert json["method"] == "eth_getTransactionReceipt"
+            receipt_lookups.append(json["params"][0])
+            return mock_response(200, {"result": None})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+        # The fee token selection flips between attempts.
+        resolve = AsyncMock(side_effect=[PATH_USD, other_token])
+
+        async def simulate(*_args: object) -> None:
+            return None
+
+        with (
+            patch("mpp.methods.tempo.intents.time.time", side_effect=lambda: clock[0]),
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(intent, "_resolve_fee_token", resolve),
+        ):
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+
+            clock[0] = start + 10
+            receipt_lookups.clear()
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+        assert resolve.await_count == 1
+        assert receipt_lookups == [first_hash]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fee_payer", [True, False])
+    async def test_verify_rejected_submission_retains_no_marker(self, fee_payer: bool) -> None:
+        """A definitively rejected submission leaves nothing in the store."""
+        from mpp.store import MemoryStore
+
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        raw_tx = self._build_client_tx(currency=currency, recipient=recipient, amount=1000000)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": fee_payer, "chainId": TESTNET_CHAIN_ID},
+        }
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            assert json["method"] == "eth_sendRawTransactionSync"
+            return mock_response(
+                200, {"error": {"code": -32000, "message": "insufficient funds for transfer"}}
+            )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        async def simulate(*_args: object) -> None:
+            return None
+
+        with (
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(intent, "_validate_transaction_payload"),
+            patch.object(intent, "_transaction_payer", return_value=None),
+            pytest.raises(InternalPaymentError),
+        ):
+            await intent.verify(credential, request)
+        assert store._data == {}
+
+    @pytest.mark.asyncio
     async def test_verify_near_expiry_releases_reservation(self) -> None:
         """A fresh sponsored tx under the floor is refused and its reservation released."""
         from mpp.store import MemoryStore
