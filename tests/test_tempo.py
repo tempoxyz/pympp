@@ -68,7 +68,7 @@ from mpp.methods.tempo.schemas import (
 )
 from mpp.server.compose import ComposedChallenges
 from mpp.server.intent import VerificationError
-from tests import internal_cause, make_credential
+from tests import TEST_REALM, internal_cause, make_credential
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -4001,6 +4001,148 @@ class TestCosignAsFeePayer:
             "0x" + "b2" * 20,
         ]
         assert all("data" in c and "input" not in c for c in tx_request["calls"])
+
+    def _recovery_case(self):
+        from mpp.store import MemoryStore
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        currency = PATH_USD
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        memo = encode_attribution(challenge_id="test", server_id=TEST_REALM)
+        raw = self._build_client_tx(currency=currency, recipient=recipient, with_memo=memo)
+        signed, _ = intent._cosign_as_fee_payer(raw, PATH_USD)
+        tx_hash = _raw_transaction_hash(signed)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+        }
+        receipt = {
+            "transactionHash": tx_hash,
+            "status": "0x1",
+            "logs": [
+                {
+                    "address": currency,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + "00" * 32,
+                        "0x" + "0" * 24 + recipient[2:],
+                        memo,
+                    ],
+                    "data": amount_data(1000000),
+                }
+            ],
+        }
+        return intent, store, raw, signed, credential, request, receipt
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["direct", "rpc_error", "timeout", "reconcile"])
+    @pytest.mark.parametrize("deleted", [False, True])
+    async def test_cleanup_cancellation_preserves_settled_reservation(self, path, deleted):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        if path == "reconcile":
+            await store.put(marker, signed)
+
+        async def post(url, *, json):
+            if json["method"] == "eth_sendRawTransactionSync":
+                if path == "rpc_error":
+                    return mock_response(200, {"error": {"message": "rejected"}})
+                if path == "timeout":
+                    raise httpx.ReadTimeout("unknown")
+            return mock_response(200, {"result": receipt})
+
+        original_delete = store.delete
+
+        async def cancel_cleanup(key):
+            if key == marker:
+                if deleted:
+                    await original_delete(key)
+                raise asyncio.CancelledError()
+            await original_delete(key)
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(store, "delete", side_effect=cancel_cleanup),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await intent.verify(credential, request)
+        assert await store.get(f"mpp:charge:{receipt['transactionHash']}") is not None
+        with pytest.raises(CredentialReplayedError):
+            await intent.verify(credential, request)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_bytes", [False, True])
+    async def test_recovery_uses_original_sponsor_transaction(self, as_bytes):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        await store.put(marker, signed.encode() if as_bytes else signed)
+        assert intent._method is not None
+        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+        lookups = []
+
+        async def post(url, *, json):
+            assert json["method"] == "eth_getTransactionReceipt"
+            lookups.append(json["params"][0])
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        with patch.object(intent, "_cosign_as_fee_payer", side_effect=AssertionError("re-signed")):
+            result = await intent.verify(credential, request)
+        assert result.reference == receipt["transactionHash"]
+        assert lookups == [receipt["transactionHash"]]
+        assert await store.get(marker) is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_sponsors_do_not_overwrite_unknown_submission(self):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        other = self._make_intent()
+        other._store = store
+        assert other._method is not None
+        other._method.fee_token = "0x20c0000000000000000000000000000000000001"
+        other._method.allowed_fee_tokens = (PATH_USD, other._method.fee_token)
+        intent._confirmation_timeout = other._confirmation_timeout = 0.01
+        ready = asyncio.Event()
+        count = 0
+        sends = []
+
+        async def simulate(*args):
+            nonlocal count
+            count += 1
+            if count == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), 2)
+
+        async def post(url, *, json):
+            if json["method"] == "eth_sendRawTransactionSync":
+                sends.append(json["params"][0])
+                raise httpx.ReadTimeout("unknown")
+            assert json["method"] == "eth_getTransactionReceipt"
+            return mock_response(200, {"result": None})
+
+        intent._http_client = other._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        with (
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(other, "_simulate_before_broadcast", side_effect=simulate),
+        ):
+            results = await asyncio.gather(
+                intent.verify(credential, request),
+                other.verify(credential, request),
+                return_exceptions=True,
+            )
+        assert all(isinstance(result, InternalPaymentError) for result in results)
+        assert len(sends) == 1
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        assert await store.get(marker) == sends[0]
+        assert list(store._data) == [marker]
 
     def _cosign_payload(self, intent: ChargeIntent) -> dict:
         currency = "0x20c0000000000000000000000000000000000000"
