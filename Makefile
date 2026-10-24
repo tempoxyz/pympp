@@ -1,4 +1,4 @@
-.PHONY: install lint fix format format-check test test-integration node node-stop check all
+.PHONY: install lint fix format format-check test test-integration test-x402-localnet node node-stop check all
 
 install:
 	uv sync --all-extras --dev
@@ -21,6 +21,10 @@ test:
 
 test-integration:
 	TEMPO_RPC_URL=http://localhost:8545 uv run pytest -m integration -v
+
+# Needs Anvil on port 18546: docker compose up -d anvil
+test-x402-localnet:
+	X402_ANVIL_RPC_URL=http://localhost:18546 uv run pytest -m x402_localnet -v
 
 node:
 	docker compose up -d

@@ -12,8 +12,14 @@ from typing import TYPE_CHECKING, Any, Required, TypeAlias, TypedDict, TypeVar, 
 from mpp import Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode
 from mpp._units import parse_units
-from mpp.errors import InvalidChallengeError, MalformedCredentialError
-from mpp.server.decorator import BodyParamsType, resolve_body_param, wrap_payment_handler
+from mpp.errors import InvalidChallengeError, MalformedCredentialError, VerificationFailedError
+from mpp.events import PAYMENT_FAILED
+from mpp.server.decorator import (
+    BodyParamsType,
+    resolve_body_param,
+    wrap_payment_handler,
+    x402_input,
+)
 from mpp.server.method import Method, _SupportsCanOffer, prepare_intent
 from mpp.server.verify import (
     _application_meta,
@@ -21,6 +27,9 @@ from mpp.server.verify import (
     _extract_payment_scheme,
     verify_or_challenge,
 )
+from mpp.x402._header import InvalidHeaderError, decode_payment_signature
+from mpp.x402._server import X402Input, X402Intent
+from mpp.x402._types import PAYMENT_SIGNATURE_HEADER, PaymentRequirements, requirements_match
 
 if TYPE_CHECKING:
     from mpp.server.intent import Intent, VerifiableIntent
@@ -49,11 +58,23 @@ class ComposeOptions(TypedDict, total=False):
 ComposeEntry: TypeAlias = tuple[Method | str, ComposeOptions]
 
 
+class _Unset:
+    """Marks an argument the caller did not pass."""
+
+
+_UNSET = _Unset()
+
+
 @dataclass
 class ComposedChallenges:
-    """Challenges issued by an unpaid composed handler."""
+    """Challenges issued by an unpaid composed handler.
+
+    ``error`` is set when a submitted credential matched no offer, such as an
+    x402 payment for requirements this route does not offer.
+    """
 
     challenges: tuple[Challenge, ...]
+    error: Exception | None = None
 
 
 ComposedResult: TypeAlias = ComposedChallenges | tuple[Credential, Receipt]
@@ -109,7 +130,9 @@ class _PreparedOffer:
             raise ValueError("can_offer must return bool")
         return available
 
-    async def verify(self, authorization: str | None) -> Challenge | tuple[Credential, Receipt]:
+    async def verify(
+        self, authorization: str | None, x402: X402Input | None = None
+    ) -> Challenge | tuple[Credential, Receipt]:
         """Verify this offer using its originating server."""
         server = self.offer.server
         return await verify_or_challenge(
@@ -126,6 +149,7 @@ class _PreparedOffer:
             events=server._events,
             header=server.credential_header,
             unique_challenges=server.unique_challenges,
+            x402=x402,
         )
 
 
@@ -183,10 +207,27 @@ class ComposedHandler:
         handler._offers = tuple(offers)
         return handler
 
-    async def verify(self, authorization: str | None, request: Any = None) -> ComposedResult:
-        """Verify a matching credential or issue every configured challenge."""
+    async def verify(
+        self,
+        authorization: str | None,
+        request: Any = None,
+        *,
+        x402: X402Input | None | _Unset = _UNSET,
+    ) -> ComposedResult:
+        """Verify a matching credential or issue every configured challenge.
+
+        Without a Payment credential, an x402 ``PAYMENT-SIGNATURE`` (from
+        ``x402``, or read from ``request`` when ``x402`` is not given) pays the
+        offer whose x402 requirements it echoes.
+        """
         body_cache: dict[int, str | bytes | dict[str, Any] | None] = {}
+        if isinstance(x402, _Unset):
+            x402 = x402_input(request)
         credential = _parse_credential(authorization)
+        if credential is None and x402 is not None and x402.payment_signature:
+            x402_result = await self._verify_x402(x402, request, body_cache)
+            if x402_result is not None:
+                return x402_result
         if credential is not None:
             prepared_offers = [
                 await _prepare_offer(offer, request, body_cache)
@@ -223,6 +264,89 @@ class ComposedHandler:
             raise ValueError("No payment offers are available for this request")
         return ComposedChallenges(tuple(challenges))
 
+    async def _verify_x402(
+        self,
+        x402: X402Input,
+        request: Any,
+        body_cache: dict[int, str | bytes | dict[str, Any] | None],
+    ) -> ComposedResult | None:
+        """Pay the offer an x402 payload addresses, or return every challenge."""
+        prepared = [await _prepare_offer(offer, request, body_cache) for offer in self._offers]
+        x402_offers = [offer for offer in prepared if isinstance(offer.intent, X402Intent)]
+        if not x402_offers:
+            return None
+        assert x402.payment_signature is not None
+        error: Exception
+        try:
+            payment = decode_payment_signature(x402.payment_signature)
+        except InvalidHeaderError as decode_error:
+            error = MalformedCredentialError(
+                f"invalid {PAYMENT_SIGNATURE_HEADER} header: {decode_error}"
+            )
+        else:
+            for offer in x402_offers:
+                intent = offer.intent
+                assert isinstance(intent, X402Intent)
+                if not requirements_match(
+                    payment["accepted"], intent.x402_requirements(offer.request)
+                ):
+                    continue
+                # Like a native credential, an x402 payment can only pay an offer
+                # this request would have advertised.
+                if await offer.is_available():
+                    result = await offer.verify(None, x402)
+                    return (
+                        ComposedChallenges((result,)) if isinstance(result, Challenge) else result
+                    )
+            error = VerificationFailedError(
+                "x402 payment payload does not match route requirements"
+            )
+        challenges: list[Challenge] = []
+        for offer in prepared:
+            if not await offer.is_available():
+                continue
+            result = await offer.verify(None)
+            if not isinstance(result, Challenge):
+                raise RuntimeError("offer without a credential returned a receipt")
+            challenges.append(result)
+        if not challenges:
+            raise ValueError("No payment offers are available for this request")
+        # Report the rejected payment like a rejected Payment credential.
+        reporter = x402_offers[0]
+        await reporter.offer.server._events.emit(
+            PAYMENT_FAILED,
+            {
+                "challenge": challenges[0],
+                "credential": None,
+                "error": error,
+                "intent": reporter.intent.name,
+                "method": reporter.offer.method.name,
+                "request": reporter.request,
+            },
+        )
+        return ComposedChallenges(tuple(challenges), error=error)
+
+    def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
+        """Return the x402 requirements that pay one of this handler's challenges."""
+        details = challenge.request.get("methodDetails")
+        chain_id = details.get("chainId") if isinstance(details, Mapping) else None
+        currency = str(challenge.request.get("currency", "")).lower()
+        for offer in self._offers:
+            if (
+                offer.method.name != challenge.method
+                or offer.intent != challenge.intent
+                or offer.server.realm != challenge.realm
+                # Composed servers may share a realm with different tokens: use the
+                # method that issued this challenge, so its EIP-712 domain applies.
+                or str(getattr(offer.method, "currency", "")).lower() != currency
+                or getattr(offer.method, "chain_id", chain_id) != chain_id
+            ):
+                continue
+            intent = offer.method.intents.get(offer.intent)
+            if isinstance(intent, X402Intent):
+                return intent.x402_requirements(challenge.request)
+        return None
+
     def __call__(
         self,
         handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
@@ -234,6 +358,7 @@ class ComposedHandler:
             self.verify,
             lambda: server.realm,
             requires_auth=server.requires_auth,
+            x402_accepts=self._x402_accepts,
         )
 
     @staticmethod

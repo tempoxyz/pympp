@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 import json as _json
-from collections.abc import Awaitable, Callable, Sequence
+import logging
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -13,16 +14,31 @@ from mpp.errors import PaymentError, PaymentRequiredError
 from mpp.events import EventDispatcher
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.verify import verify_or_challenge
+from mpp.x402._server import (
+    X402Input,
+    X402Intent,
+    challenges_payment_required_header,
+    is_x402_credential,
+    payment_response_header,
+)
+from mpp.x402._types import (
+    PAYMENT_REQUIRED_HEADER,
+    PAYMENT_RESPONSE_HEADER,
+    PAYMENT_SIGNATURE_HEADER,
+    PaymentRequirements,
+)
 
 if TYPE_CHECKING:
     from mpp.server.compose import ComposedResult
     from mpp.server.intent import Intent, VerifiableIntent
 
 R = TypeVar("R")
+logger = logging.getLogger(__name__)
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 BodyType = str | bytes | dict[str, Any]
 BodyParamsType = BodyType | Callable[[Any], BodyType | Awaitable[BodyType]] | None
+X402AcceptsFn = Callable[[Challenge], PaymentRequirements | None]
 
 
 def get_authorization(request: Any) -> str | None:
@@ -55,6 +71,41 @@ def get_header(request: Any, name: str) -> str | None:
     if hasattr(request, "META"):
         return request.META.get("HTTP_" + name.upper().replace("-", "_"))
     return None
+
+
+def get_request_url(request: Any) -> str | None:
+    """Return the absolute URL of a framework request, when it exposes one.
+
+    Supports Starlette/FastAPI and Flask (``request.url``) and Django
+    (``request.build_absolute_uri()``).
+    """
+    build_absolute_uri = getattr(request, "build_absolute_uri", None)
+    if callable(build_absolute_uri):
+        try:
+            url = build_absolute_uri()
+        except Exception:
+            url = None
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+    url = getattr(request, "url", None)
+    if url is None:
+        return None
+    text = str(url)
+    return text if text.startswith(("http://", "https://")) else None
+
+
+def x402_input(request: Any) -> X402Input | None:
+    """Return the x402 context of a framework request, or ``None`` without a URL."""
+    if request is None:
+        return None
+    resource_url = get_request_url(request)
+    if resource_url is None:
+        return None
+    return X402Input(
+        resource_url=resource_url,
+        payment_signature=get_header(request, PAYMENT_SIGNATURE_HEADER.lower()),
+        http_method=framework_scope(request).get("http_method", "GET"),
+    )
 
 
 def framework_scope(request: Any) -> dict[str, str]:
@@ -148,20 +199,29 @@ def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> di
 def make_challenge_response(
     challenge: Challenge | Sequence[Challenge],
     realm: str,
-    error: PaymentError | None = None,
+    error: Exception | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
 ) -> Any:
     """Build a 402 response for a payment challenge with RFC 9457 problem details body.
+
+    ``headers`` adds response headers, such as x402's ``PAYMENT-REQUIRED``.
 
     Returns a Starlette ``Response`` when starlette is installed,
     otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
     """
     challenges = (challenge,) if isinstance(challenge, Challenge) else tuple(challenge)
-    error = error or PaymentRequiredError(realm=realm, description=challenges[0].description)
-    body = _json.dumps(error.to_problem_details(challenges[0].id))
+    problem = (
+        error
+        if isinstance(error, PaymentError)
+        else PaymentRequiredError(realm=realm, description=challenges[0].description)
+    )
+    body = _json.dumps(problem.to_problem_details(challenges[0].id))
     values = [item.to_www_authenticate(item.realm or realm) for item in challenges]
-    headers: dict[str, Any] = {
+    base_headers = {
         "Cache-Control": "no-store",
         "Content-Type": "application/problem+json",
+        **(headers or {}),
     }
     try:
         from starlette.responses import Response
@@ -169,18 +229,19 @@ def make_challenge_response(
         response = Response(
             content=body,
             status_code=402,
-            headers=headers,
+            headers=base_headers,
             media_type="application/problem+json",
         )
         for value in values:
             response.headers.append("WWW-Authenticate", value)
         return response
     except ImportError:
-        headers["WWW-Authenticate"] = values[0] if len(values) == 1 else values
+        fallback_headers: dict[str, Any] = dict(base_headers)
+        fallback_headers["WWW-Authenticate"] = values[0] if len(values) == 1 else values
         return {
             "_mpp_challenge": True,
             "status": 402,
-            "headers": headers,
+            "headers": fallback_headers,
             "body": body,
         }
 
@@ -230,6 +291,7 @@ def wrap_payment_handler(
     realm_fn: Callable[[], str],
     *,
     requires_auth: bool = False,
+    x402_accepts: X402AcceptsFn | None = None,
 ) -> Callable[..., Awaitable[R | Any]]:
     """Wrap a handler with the payment challenge/verify flow.
 
@@ -248,6 +310,10 @@ def wrap_payment_handler(
         unique_challenges: Disable only during a verifier-first rolling upgrade.
         requires_auth: When True, read the Payment credential from
             ``Payment-Authorization`` instead of ``Authorization``.
+        x402_accepts: Returns the x402 requirements that pay a challenge, or
+            ``None``. When any challenge has some, 402 responses carry
+            ``PAYMENT-REQUIRED``, and responses to paid x402 requests carry
+            ``PAYMENT-RESPONSE`` when the handler returns a response object.
     """
     sig = inspect.signature(handler)
     params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
@@ -274,29 +340,107 @@ def wrap_payment_handler(
             else get_authorization(request_obj)
         )
 
+        def challenge_response(
+            challenges: Sequence[Challenge], realm: str, error: Exception | None = None
+        ) -> Any:
+            headers: dict[str, str] | None = None
+            resource_url = get_request_url(request_obj) if x402_accepts is not None else None
+            if x402_accepts is not None and resource_url is not None:
+                value = challenges_payment_required_header(
+                    challenges,
+                    x402_accepts,
+                    resource_url,
+                    framework_scope(request_obj).get("http_method", "GET"),
+                    str(error) if error is not None else None,
+                )
+                if value is not None:
+                    headers = {PAYMENT_REQUIRED_HEADER: value}
+            return make_challenge_response(challenges, realm, error, headers=headers)
+
         try:
             result = await verify_fn(authorization, request_obj)
         except PaymentError as error:
             if isinstance(error.retry_challenge, Challenge):
-                return make_challenge_response(error.retry_challenge, realm_fn(), error)
+                return challenge_response((error.retry_challenge,), realm_fn(), error)
             if error.status == 403:
                 return make_error_response(error)
             raise
 
         if isinstance(result, Challenge):
-            return make_challenge_response(result, realm_fn())
+            return challenge_response((result,), realm_fn())
 
         from mpp.server.compose import ComposedChallenges
 
         if isinstance(result, ComposedChallenges):
-            return make_challenge_response(result.challenges, result.challenges[0].realm)
+            return challenge_response(result.challenges, result.challenges[0].realm, result.error)
 
         credential, receipt = result
-        return await handler(request_obj, credential, receipt)
+        response = await handler(request_obj, credential, receipt)
+        if is_x402_credential(credential):
+            _warn_plain_x402_response(response)
+            _set_response_header(
+                response, PAYMENT_RESPONSE_HEADER, payment_response_header(credential, receipt)
+            )
+            _mark_private(response)
+        return response
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
 
     return wrapper
+
+
+def _set_response_header(response: Any, name: str, value: str | None) -> None:
+    """Set a header on a framework response object, if it exposes mutable headers."""
+    headers = getattr(response, "headers", None)
+    if value is None or headers is None:
+        return
+    try:
+        if name not in headers:
+            headers[name] = value
+    except TypeError:
+        return
+
+
+_warned_plain_x402_response = False
+
+
+def _warn_plain_x402_response(response: Any) -> None:
+    """Warn once when a paid x402 response can't carry its headers."""
+    global _warned_plain_x402_response
+    if _warned_plain_x402_response or getattr(response, "headers", None) is not None:
+        return
+    _warned_plain_x402_response = True
+    logger.warning(
+        "A handler paid with x402 returned %s instead of a response object, so "
+        "PAYMENT-RESPONSE and Cache-Control: private could not be added. Return a "
+        "response object from x402-paid handlers so shared caches can't serve the "
+        "paid response to callers who didn't pay.",
+        type(response).__name__,
+    )
+
+
+def _mark_private(response: Any) -> None:
+    """Keep a paid response out of shared caches, like Coinbase's x402 SDK.
+
+    A CDN that stored a paid response could serve it to callers who never paid.
+    """
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return
+    try:
+        current = headers.get("cache-control") or ""
+        directives = [part.strip() for part in current.split(",") if part.strip()]
+        lowered = [part.lower() for part in directives]
+        if "private" in lowered or "no-store" in lowered:
+            return
+        kept = [
+            part
+            for part in directives
+            if part.lower() != "public" and not part.lower().startswith("s-maxage")
+        ]
+        headers["Cache-Control"] = ", ".join(["private", *kept])
+    except (TypeError, AttributeError):
+        return
 
 
 def pay(
@@ -381,10 +525,22 @@ def pay(
                 events=events,
                 header=PAYMENT_AUTHORIZATION_HEADER if requires_auth else None,
                 unique_challenges=unique_challenges,
+                x402=x402_input(request_obj) if isinstance(intent, X402Intent) else None,
             )
 
+        def _x402_accepts(challenge: Challenge) -> PaymentRequirements | None:
+            if not isinstance(intent, X402Intent):
+                return None
+            if challenge.method != (method or "tempo") or challenge.intent != intent.name:
+                return None
+            return intent.x402_requirements(challenge.request)
+
         return wrap_payment_handler(
-            handler, _verify, lambda: resolved_realm, requires_auth=requires_auth
+            handler,
+            _verify,
+            lambda: resolved_realm,
+            requires_auth=requires_auth,
+            x402_accepts=_x402_accepts,
         )
 
     return decorator

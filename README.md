@@ -50,6 +50,52 @@ result = await server.charge(
 )
 ```
 
+### Serve x402 clients
+
+The `evm` method charges with EIP-3009 authorizations (USDC on Base and other
+EVM chains). It serves native MPP clients and x402 v2 `exact` clients from the
+same endpoint: unpaid responses carry `PAYMENT-REQUIRED` next to
+`WWW-Authenticate`, x402 clients pay with `PAYMENT-SIGNATURE`, and paid x402
+responses carry `PAYMENT-RESPONSE`. An x402 facilitator settles payments.
+
+```bash
+pip install "pympp[evm]"
+```
+
+```python
+from mpp.methods.evm import BASE_USDC, evm
+from mpp.server import Mpp
+
+server = Mpp.create(
+    method=evm(
+        currency=BASE_USDC,
+        recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        facilitator="https://facilitator.example.com",
+    ),
+)
+
+
+@app.get("/paid")
+@server.pay(amount="0.01")
+async def handler(request, credential, receipt):
+    return JSONResponse({"data": "..."})
+```
+
+Routes bind x402 payments the way mppx does. Routes wrapped by `server.pay` or
+`compose` are scoped, and with the default `route_binding="required"` they only
+accept clients that sign mppx's `extensions.mppx` route binding. To accept
+standard x402 clients there, such as Coinbase's SDK, pass
+`route_binding="resource"` to `evm()`; they're then bound by the echoed terms and
+resource URL. Unscoped `server.charge()` routes accept both either way.
+
+Return a response object so pympp can add `PAYMENT-RESPONSE`. Pass
+`methods=[tempo(...), evm(...)]` to offer both on one route. Servers that build
+responses themselves pass `payment_signature=` and `resource_url=` to
+`server.charge()` and add `server.x402_payment_required(result, url)` to 402s.
+Send paid x402 responses with `Cache-Control: private` so shared caches can't
+serve them to callers who didn't pay. `server.pay` adds it, and
+`PAYMENT-RESPONSE`, when the handler returns a response object rather than plain data.
+
 ### Client
 
 ```python

@@ -37,6 +37,7 @@ from mpp.server.decorator import (
     bind_framework_scope,
     resolve_body_param,
     wrap_payment_handler,
+    x402_input,
 )
 from mpp.server.intent import Validation
 from mpp.server.intent import broadcast_credential as broadcast_intent_credential
@@ -50,6 +51,8 @@ from mpp.server.verify import (
     verify_or_challenge,
 )
 from mpp.store import Store
+from mpp.x402._server import X402Input, X402Intent, challenges_payment_required_header
+from mpp.x402._types import PaymentRequirements
 
 if TYPE_CHECKING:
     from mpp.events import ServerPaymentSuccessPayload
@@ -507,6 +510,51 @@ class Mpp:
 
         return _configure_entries(self, entries, body)
 
+    def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
+        """Return the x402 requirements that pay one of this server's challenges."""
+        if challenge.realm and challenge.realm != self.realm:
+            return None
+        method = next((m for m in self.methods if m.name == challenge.method), None)
+        intent = method.intents.get(challenge.intent) if method is not None else None
+        if not isinstance(intent, X402Intent):
+            return None
+        return intent.x402_requirements(challenge.request)
+
+    def x402_payment_required(
+        self,
+        challenges: Challenge | ComposedChallenges | Sequence[Challenge],
+        resource_url: str,
+        error: Exception | str | None = None,
+        *,
+        http_method: str = "GET",
+    ) -> str | None:
+        """Build the x402 ``PAYMENT-REQUIRED`` header value for unpaid challenges.
+
+        For servers that build responses themselves from :meth:`charge`.
+        Returns ``None`` when no challenge can be paid with x402.
+
+        Args:
+            challenges: The challenges returned by :meth:`charge`.
+            resource_url: Absolute URL of the protected resource.
+            error: Optional reason the previous payment was rejected.
+            http_method: The request's HTTP method, bound into the route binding.
+                Pass the same value to :meth:`charge`.
+        """
+        if isinstance(challenges, Challenge):
+            items: Sequence[Challenge] = (challenges,)
+        elif isinstance(challenges, ComposedChallenges):
+            items = challenges.challenges
+            error = error if error is not None else challenges.error
+        else:
+            items = challenges
+        return challenges_payment_required_header(
+            items,
+            self._x402_accepts,
+            resource_url,
+            http_method,
+            str(error) if error is not None else None,
+        )
+
     def payment_credential_value(
         self,
         authorization: str | None,
@@ -534,6 +582,9 @@ class Mpp:
         extra: dict[str, str] | None = None,
         body: str | bytes | dict[str, Any] | None = None,
         payment_authorization: str | None = None,
+        payment_signature: str | None = None,
+        resource_url: str | None = None,
+        http_method: str = "GET",
         **method_options: Any,
     ) -> Challenge | ComposedResult:
         """Handle a charge intent.
@@ -558,6 +609,14 @@ class Mpp:
                 digest and submitted credentials must echo a matching digest.
             payment_authorization: The Payment-Authorization header value.
                 Used when the server was created with ``requires_auth=True``.
+            payment_signature: The x402 ``PAYMENT-SIGNATURE`` header value.
+                Paid only by methods that support x402 (``evm``), and only
+                when ``resource_url`` is set and no Payment credential is sent.
+            resource_url: Absolute URL of the protected resource. Enables x402
+                for methods that support it; build the ``PAYMENT-REQUIRED``
+                header for unpaid results with :meth:`x402_payment_required`.
+            http_method: The request's HTTP method, bound into x402 route
+                binding. Pass the same value to :meth:`x402_payment_required`.
 
         Returns:
             Challenge, or ComposedChallenges for multiple offers (methods or
@@ -579,6 +638,17 @@ class Mpp:
             "extra": extra,
             **method_options,
         }
+        if payment_signature is not None and resource_url is None:
+            raise ValueError("payment_signature requires resource_url")
+        x402 = (
+            X402Input(
+                resource_url=resource_url,
+                payment_signature=payment_signature,
+                http_method=http_method,
+            )
+            if resource_url is not None
+            else None
+        )
         composed_methods = self._composed_methods(methods, options)
         if composed_methods:
             handler = self.compose(
@@ -586,7 +656,8 @@ class Mpp:
                 body=body,
             )
             result = await handler.verify(
-                self.payment_credential_value(authorization, payment_authorization)
+                self.payment_credential_value(authorization, payment_authorization),
+                x402=x402,
             )
             if len(handler._offers) == 1 and isinstance(result, ComposedChallenges):
                 return result.challenges[0]
@@ -609,6 +680,7 @@ class Mpp:
             events=self._events,
             header=self.credential_header,
             unique_challenges=self.unique_challenges,
+            x402=x402,
         )
 
     def pay(
@@ -713,10 +785,15 @@ class Mpp:
                     events=self._events,
                     header=self.credential_header,
                     unique_challenges=self.unique_challenges,
+                    x402=x402_input(_request_obj) if isinstance(intent_obj, X402Intent) else None,
                 )
 
             return wrap_payment_handler(
-                handler, _verify, lambda: self.realm, requires_auth=self.requires_auth
+                handler,
+                _verify,
+                lambda: self.realm,
+                requires_auth=self.requires_auth,
+                x402_accepts=self._x402_accepts,
             )
 
         return decorator
