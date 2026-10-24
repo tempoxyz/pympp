@@ -2849,3 +2849,28 @@ class TestRequiresAuth:
         )
         result = await handler(MockRequest(payment_authorization=credential.to_authorization()))
         assert result == {"paid": True}
+
+
+@pytest.mark.parametrize("description", ["x\ry", "x\ny", "x\r\ny"])
+async def test_unsafe_echoed_description_returns_fresh_payment_challenge(description):
+    @intent(name="charge")
+    async def payment_intent(credential: Credential, request: dict) -> Receipt:
+        raise AssertionError("Malformed credentials must not reach settlement")
+
+    @pay(
+        intent=payment_intent,
+        request={"amount": "1000"},
+        realm="api.example.com",
+        secret_key="test-secret",
+    )
+    async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
+        raise AssertionError("Invalid payment must not reach the handler")
+
+    issued = challenge_from_402(await handler(MockRequest()))
+    credential = Credential(
+        challenge=replace(issued.to_echo(), description=description), payload={}
+    )
+    result = await handler(MockRequest(authorization=credential.to_authorization()))
+    replacement = challenge_from_402(result)
+    assert replacement.id != issued.id
+    assert replacement.description is None
