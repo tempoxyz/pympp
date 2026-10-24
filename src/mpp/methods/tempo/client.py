@@ -505,8 +505,9 @@ class TempoMethod:
             transfer_list = get_transfers(int(amount), recipient, memo, parsed_splits)
             call_list = []
             for t in transfer_list:
-                if t.memo is not None:
-                    td = self._encode_transfer_with_memo(t.recipient, t.amount, "0x" + t.memo.hex())
+                transfer_memo = "0x" + t.memo.hex() if t.memo is not None else memo
+                if transfer_memo is not None:
+                    td = self._encode_transfer_with_memo(t.recipient, t.amount, transfer_memo)
                 else:
                     td = self._encode_transfer(t.recipient, t.amount)
                 call_list.append(Call.create(to=currency, value=0, data=td))

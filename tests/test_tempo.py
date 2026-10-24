@@ -949,6 +949,33 @@ class TestExpiringNonce:
         assert method.transaction_hash(credential) == expected_hash
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("fixed_memo", [None, "0x" + "dd" * 32])
+    async def test_split_client_binds_each_unfixed_leg(self, fixed_memo: str | None) -> None:
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = self._challenge("split-charge", fee_payer=False)
+        split = {"amount": "300", "recipient": "0x" + "11" * 20}
+        if fixed_memo is not None:
+            split["memo"] = fixed_memo
+        challenge.request["methodDetails"]["splits"] = [split]
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc([])),
+            patch("mpp.methods.tempo.client.estimate_gas", AsyncMock(return_value=100000)),
+        ):
+            credential = await method.create_credential(challenge)
+        calls = _decode_signed_charge(credential.payload["signature"])[4]
+        bound = encode_attribution(challenge_id=challenge.id, server_id=challenge.realm)
+        assert len(calls) == 2
+        for call, expected in zip(calls, [bound, fixed_memo or bound], strict=True):
+            data = call[2].hex()
+            assert data.startswith(TRANSFER_WITH_MEMO_SELECTOR)
+            assert data[-64:] == expected.removeprefix("0x")
+
+    @pytest.mark.asyncio
     async def test_verify_broadcasts_canonical_recovery_id(self) -> None:
         """Raw 0/1 recovery IDs are canonicalized before hashing and broadcast."""
         from mpp.store import MemoryStore
