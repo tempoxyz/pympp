@@ -27,6 +27,7 @@ from mpp.errors import (
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
+    VerificationFailedError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 from mpp.server.intent import broadcast_credential
@@ -177,6 +178,12 @@ async def verify_or_challenge(
     async def verify_x402(payment_signature: str, resource_url: str) -> tuple[Credential, Receipt]:
         assert isinstance(intent, X402Intent)
         try:
+            if body is not None or meta:
+                # x402 payloads can't carry a body digest or application
+                # metadata, so they would pay this route in any context.
+                raise VerificationFailedError(
+                    "x402 payments cannot pay a route bound to a request body or metadata"
+                )
             credential = x402_credential(
                 payment_signature,
                 intent,

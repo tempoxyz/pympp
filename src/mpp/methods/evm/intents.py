@@ -55,7 +55,8 @@ CREDENTIAL_TYPE = "authorization"
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 _HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 _SIGNATURE_RE = re.compile(r"0x[0-9a-fA-F]{130}")
-_ATOMIC_RE = re.compile(r"[0-9]+")
+# uint256 values have at most 78 digits; longer strings could not be parsed safely.
+_ATOMIC_RE = re.compile(r"[0-9]{1,78}")
 _UINT256_MAX = 2**256 - 1
 
 
@@ -287,6 +288,13 @@ class ChargeIntent:
             ):
                 raise VerificationFailedError("EVM authorization source mismatch")
 
+        # A claimed authorization was settled (or is settling) already. Report it
+        # as a replay (403) before the facilitator calls it unpayable, so clients
+        # aren't offered a fresh challenge and invited to pay twice.
+        claim = self._claim_key(payload, request)
+        if self._store is not None and await self._store.get(claim) is not None:
+            raise CredentialReplayedError("EVM authorization has already been used")
+
         if self.settle is None and self.facilitator is not None:
             payment, requirements = self._facilitator_payment(payload, request)
             try:
@@ -373,6 +381,12 @@ class ChargeIntent:
             # The facilitator may have broadcast the transfer before failing.
             raise InternalPaymentError() from error
         if not settled["success"]:
+            if settled.get("errorReason") == "settlement_pending":
+                # The transfer was broadcast and may still confirm: keep the claim
+                # and answer without a retry challenge so the payer isn't charged twice.
+                raise InternalPaymentError() from FacilitatorError(
+                    "facilitator settlement is pending"
+                )
             reason = (
                 settled.get("errorMessage")
                 or settled.get("errorReason")

@@ -77,6 +77,18 @@ class X402Intent(Protocol):
         ...
 
 
+def x402_bindable(challenge: Any) -> bool:
+    """Return whether x402 payments can pay a challenge without weakening it.
+
+    x402 payloads can't carry a body digest or application metadata, so routes
+    that bind either (``body=`` or ``meta=``) are not offered to x402 clients.
+    """
+    if getattr(challenge, "digest", None):
+        return False
+    opaque = getattr(challenge, "opaque", None)
+    return not (isinstance(opaque, Mapping) and any(key != "_mpp_nonce" for key in opaque))
+
+
 def is_x402_credential(credential: Credential) -> bool:
     """Return whether a credential was converted from an x402 payment payload."""
     return credential.challenge.id.startswith(SYNTHETIC_CHALLENGE_ID_PREFIX)

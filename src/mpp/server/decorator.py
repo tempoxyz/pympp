@@ -19,6 +19,7 @@ from mpp.x402._server import (
     is_x402_credential,
     payment_required_header,
     payment_response_header,
+    x402_bindable,
 )
 from mpp.x402._types import (
     PAYMENT_REQUIRED_HEADER,
@@ -378,6 +379,7 @@ def wrap_payment_handler(
             _set_response_header(
                 response, PAYMENT_RESPONSE_HEADER, payment_response_header(credential, receipt)
             )
+            _mark_private(response)
         return response
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
@@ -394,6 +396,30 @@ def _set_response_header(response: Any, name: str, value: str | None) -> None:
         if name not in headers:
             headers[name] = value
     except TypeError:
+        return
+
+
+def _mark_private(response: Any) -> None:
+    """Keep a paid response out of shared caches, like Coinbase's x402 SDK.
+
+    A CDN that stored a paid response could serve it to callers who never paid.
+    """
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return
+    try:
+        current = headers.get("cache-control") or ""
+        directives = [part.strip() for part in current.split(",") if part.strip()]
+        lowered = [part.lower() for part in directives]
+        if "private" in lowered or "no-store" in lowered:
+            return
+        kept = [
+            part
+            for part in directives
+            if part.lower() != "public" and not part.lower().startswith("s-maxage")
+        ]
+        headers["Cache-Control"] = ", ".join(["private", *kept])
+    except (TypeError, AttributeError):
         return
 
 
@@ -486,6 +512,8 @@ def pay(
             if not isinstance(intent, X402Intent):
                 return None
             if challenge.method != (method or "tempo") or challenge.intent != intent.name:
+                return None
+            if not x402_bindable(challenge):
                 return None
             return intent.x402_requirements(challenge.request)
 

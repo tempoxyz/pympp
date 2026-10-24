@@ -252,6 +252,12 @@ def evm(
         domain = authorization
     if isinstance(resolved_chain_id, bool) or not isinstance(resolved_chain_id, int):
         raise ValueError("chain_id must be an integer")
+    if (
+        isinstance(resolved_decimals, bool)
+        or not isinstance(resolved_decimals, int)
+        or not 0 <= resolved_decimals <= 36
+    ):
+        raise ValueError("decimals must be an integer between 0 and 36")
     if not isinstance(domain.get("name"), str) or not domain.get("name"):
         raise ValueError("authorization name is required")
     if not isinstance(domain.get("version"), str) or not domain.get("version"):

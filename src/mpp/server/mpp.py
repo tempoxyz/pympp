@@ -51,7 +51,7 @@ from mpp.server.verify import (
     verify_or_challenge,
 )
 from mpp.store import Store
-from mpp.x402._server import X402Input, X402Intent, payment_required_header
+from mpp.x402._server import X402Input, X402Intent, payment_required_header, x402_bindable
 from mpp.x402._types import PaymentRequirements
 
 if TYPE_CHECKING:
@@ -512,7 +512,7 @@ class Mpp:
 
     def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
         """Return the x402 requirements that pay one of this server's challenges."""
-        if challenge.realm and challenge.realm != self.realm:
+        if (challenge.realm and challenge.realm != self.realm) or not x402_bindable(challenge):
             return None
         method = next((m for m in self.methods if m.name == challenge.method), None)
         intent = method.intents.get(challenge.intent) if method is not None else None

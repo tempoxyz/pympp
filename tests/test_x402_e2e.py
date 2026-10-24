@@ -34,6 +34,7 @@ from mpp.methods.evm import BASE_SEPOLIA_USDC, evm
 from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
 from mpp.methods.tempo import tempo
 from mpp.server import Mpp, pay
+from mpp.store import MemoryStore
 from mpp.x402 import (
     PAYMENT_REQUIRED_HEADER,
     PAYMENT_RESPONSE_HEADER,
@@ -92,6 +93,16 @@ def build_app(server: Mpp) -> Starlette:
     async def sub_cent(request: Request, credential: Credential, receipt: Receipt):
         return receipt_response("sub-cent", receipt)
 
+    @server.pay(amount="0.01")
+    async def public(request: Request, credential: Credential, receipt: Receipt):
+        return PlainTextResponse(
+            "public", headers={"Cache-Control": "public, max-age=60, s-maxage=600"}
+        )
+
+    @server.pay(amount="0.01", body=lambda request: request.query_params.get("order", ""))
+    async def body_bound(request: Request, credential: Credential, receipt: Receipt):
+        return receipt_response("body", receipt)
+
     two_prices = server.compose(("evm", {"amount": "0.01"}), ("evm", {"amount": "0.02"}))
 
     @two_prices
@@ -116,6 +127,8 @@ def build_app(server: Mpp) -> Starlette:
         routes=[
             Route("/paid", paid),
             Route("/sub-cent", sub_cent),
+            Route("/public", public),
+            Route("/body-bound", body_bound),
             Route("/composed", composed),
             Route("/direct", direct),
         ]
@@ -226,6 +239,27 @@ class TestCoinbaseClient:
         authorization = body["paymentPayload"]["payload"]["authorization"]
         assert authorization["from"] == payer.address
         assert authorization["to"] == recipient.address
+
+    async def test_paid_responses_stay_out_of_shared_caches(self, live: Live) -> None:
+        async with coinbase_client() as client:
+            paid = await client.get(f"{live.url}/paid")
+            public = await client.get(f"{live.url}/public")
+        assert paid.headers["cache-control"] == "private"
+        assert public.headers["cache-control"] == "private, max-age=60"
+
+    async def test_body_bound_routes_are_not_offered_to_x402(self, live: Live) -> None:
+        unpaid = await live.unpaid("/body-bound?order=1")
+        assert unpaid.status_code == 402
+        assert unpaid.headers.get("WWW-Authenticate")
+        assert PAYMENT_REQUIRED_HEADER not in unpaid.headers
+
+        # A payment carried over from an unbound route can't pay it either.
+        accepted = await live.accepted()
+        signature = sign_x402_payment(payer, accepted, f"{live.url}/body-bound?order=1")
+        response = await live.get("/body-bound?order=1", **{PAYMENT_SIGNATURE_HEADER: signature})
+        assert response.status_code == 402
+        assert "bound to a request body" in response.json()["detail"]
+        assert live.facilitator.settle_requests == []
 
     async def test_pays_a_sub_cent_price(self, live: Live) -> None:
         async with coinbase_client() as client:
@@ -418,6 +452,19 @@ class TestRejectedX402Payments:
         error = await self.rejected(response)
         assert "does not match route requirements" in error
         assert len(response.headers.get_list("WWW-Authenticate")) == 2
+        [(name, payload)] = live.events
+        assert name == PAYMENT_FAILED
+        assert "does not match route requirements" in str(payload["error"])
+
+    async def test_value_too_long_to_parse_is_a_402(self, live: Live) -> None:
+        accepted = await live.accepted()
+        payload = json.loads(
+            base64.b64decode(sign_x402_payment(payer, accepted, f"{live.url}/paid"))
+        )
+        payload["payload"]["authorization"]["validBefore"] = "9" * 5000
+        header = base64.b64encode(json.dumps(payload).encode()).decode()
+        error = await self.rejected(await live.get(**{PAYMENT_SIGNATURE_HEADER: header}))
+        assert "malformed" in error
 
     async def test_composed_payment_for_the_second_offer(self, live: Live) -> None:
         response = await live.unpaid("/composed")
@@ -455,6 +502,38 @@ class TestFacilitatorFailures:
         error = decode_payment_required(response.headers[PAYMENT_REQUIRED_HEADER]).get("error")
         assert error == "Payment verification failed: insufficient_funds."
 
+    async def test_pending_settlement_is_a_server_error_without_a_challenge(self) -> None:
+        facilitator = StubFacilitator(
+            settle_result=lambda body: {
+                "success": False,
+                "errorReason": "settlement_pending",
+                "network": body["paymentRequirements"]["network"],
+                "transaction": "0x" + "ee" * 32,
+            }
+        )
+        async with serve(facilitator.app()) as facilitator_url:
+            server = Mpp.create(
+                method=evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=recipient.address,
+                    facilitator=facilitator_url,
+                ),
+                realm=REALM,
+                secret_key=SECRET_KEY,
+            )
+            async with serve(build_app(server)) as url, httpx.AsyncClient() as http:
+                unpaid = await http.get(f"{url}/paid")
+                accepted = dict(
+                    decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"][0]
+                )
+                signature = sign_x402_payment(payer, accepted, f"{url}/paid")
+                response = await http.get(
+                    f"{url}/paid", headers={PAYMENT_SIGNATURE_HEADER: signature}
+                )
+
+        assert response.status_code == 500
+        assert PAYMENT_REQUIRED_HEADER not in response.headers
+
     async def test_unreadable_settlement_is_a_server_error(self) -> None:
         facilitator = StubFacilitator(settle_result=lambda body: {"oops": True})
         async with serve(facilitator.app()) as facilitator_url:
@@ -485,6 +564,41 @@ class TestFacilitatorFailures:
         # The transfer may have landed, so no retryable 402 invites a second payment.
         assert response.status_code == 500
         assert PAYMENT_REQUIRED_HEADER not in response.headers
+
+
+class TestReplayStore:
+    async def test_replay_with_a_store_is_a_403_without_a_challenge(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = Mpp.create(
+                method=evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=recipient.address,
+                    facilitator=facilitator_url,
+                ),
+                realm=REALM,
+                secret_key=SECRET_KEY,
+                store=MemoryStore(),
+            )
+            async with serve(build_app(server)) as url:
+                async with httpx.AsyncClient() as http:
+                    unpaid = await http.get(f"{url}/paid")
+                    accepted = dict(
+                        decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"][
+                            0
+                        ]
+                    )
+                    headers = {
+                        PAYMENT_SIGNATURE_HEADER: sign_x402_payment(payer, accepted, f"{url}/paid")
+                    }
+                    first = await http.get(f"{url}/paid", headers=headers)
+                    second = await http.get(f"{url}/paid", headers=headers)
+
+        assert first.status_code == 200
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
+        assert "WWW-Authenticate" not in second.headers
+        assert len(facilitator.verify_requests) == 1
 
 
 class TestOtherServers:

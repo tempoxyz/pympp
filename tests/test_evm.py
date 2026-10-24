@@ -168,6 +168,20 @@ class TestConfiguration:
         )
         assert (method.chain_id, method.decimals, method.domain_name) == (31337, 18, "Token")
 
+    @pytest.mark.parametrize("decimals", [True, 1.5, -1, 37])
+    def test_rejects_invalid_decimal_overrides(self, decimals: Any) -> None:
+        with pytest.raises(ValueError, match="decimals"):
+            server_method(decimals=decimals)
+        with pytest.raises(ValueError, match="decimals"):
+            evm(
+                currency="0x" + "aa" * 20,
+                recipient=RECIPIENT,
+                settle=lambda a: "0x1",
+                chain_id=31337,
+                decimals=decimals,
+                authorization={"name": "Token", "version": "1"},
+            )
+
     def test_rejects_a_chain_id_the_asset_is_not_on(self) -> None:
         with pytest.raises(ValueError, match="chain ID 84532"):
             server_method(chain_id=8453)
@@ -377,6 +391,13 @@ class TestValidate:
         with pytest.raises(InvalidPayloadError):
             await method.intents["charge"].validate(bad, req)  # type: ignore[union-attr]
 
+    async def test_rejects_values_too_long_to_parse(self) -> None:
+        method = server_method()
+        req = request(method)
+        credential = native_credential(req, value="9" * 5000, signature="0x" + "00" * 65)
+        with pytest.raises(InvalidPayloadError, match="value is malformed"):
+            await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+
     async def test_rejects_out_of_range_values(self) -> None:
         method = server_method()
         req = request(method)
@@ -518,6 +539,42 @@ class TestBroadcast:
             await intent.broadcast(credential, req)  # type: ignore[union-attr]
         with pytest.raises(CredentialReplayedError):
             await intent.broadcast(credential, req)  # type: ignore[union-attr]
+
+    async def test_pending_settlement_keeps_the_claim(self) -> None:
+        store = MemoryStore()
+        method = server_method(
+            FakeFacilitator(
+                settle={
+                    "success": False,
+                    "errorReason": "settlement_pending",
+                    "transaction": "0xpending",
+                    "network": "eip155:84532",
+                }
+            )
+        )
+        intent = method.intents["charge"]
+        intent._store = store  # type: ignore[union-attr]
+        req = request(method)
+        credential = native_credential(req)
+        with pytest.raises(InternalPaymentError):
+            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        assert list(store._data.values()) == ["pending"]
+        with pytest.raises(CredentialReplayedError):
+            await intent.validate(credential, req)  # type: ignore[union-attr]
+
+    async def test_validate_reports_claimed_authorizations_as_replays(self) -> None:
+        facilitator = FakeFacilitator()
+        method = server_method(facilitator)
+        intent = method.intents["charge"]
+        intent._store = MemoryStore()  # type: ignore[union-attr]
+        req = request(method)
+        credential = native_credential(req)
+        await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        facilitator.verified.clear()
+        with pytest.raises(CredentialReplayedError):
+            await intent.validate(credential, req)  # type: ignore[union-attr]
+        # Reported before asking the facilitator.
+        assert facilitator.verified == []
 
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()

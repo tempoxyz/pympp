@@ -13,6 +13,7 @@ from mpp import Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode
 from mpp._units import parse_units
 from mpp.errors import InvalidChallengeError, MalformedCredentialError, VerificationFailedError
+from mpp.events import PAYMENT_FAILED
 from mpp.server.decorator import (
     BodyParamsType,
     resolve_body_param,
@@ -27,7 +28,7 @@ from mpp.server.verify import (
     verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
-from mpp.x402._server import X402Input, X402Intent
+from mpp.x402._server import X402Input, X402Intent, x402_bindable
 from mpp.x402._types import PAYMENT_SIGNATURE_HEADER, PaymentRequirements, requirements_match
 
 if TYPE_CHECKING:
@@ -304,10 +305,25 @@ class ComposedHandler:
             challenges.append(result)
         if not challenges:
             raise ValueError("No payment offers are available for this request")
+        # Report the rejected payment like a rejected Payment credential.
+        reporter = x402_offers[0]
+        await reporter.offer.server._events.emit(
+            PAYMENT_FAILED,
+            {
+                "challenge": challenges[0],
+                "credential": None,
+                "error": error,
+                "intent": reporter.intent.name,
+                "method": reporter.offer.method.name,
+                "request": reporter.request,
+            },
+        )
         return ComposedChallenges(tuple(challenges), error=error)
 
     def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
         """Return the x402 requirements that pay one of this handler's challenges."""
+        if not x402_bindable(challenge):
+            return None
         for offer in self._offers:
             if (
                 offer.method.name != challenge.method

@@ -32,7 +32,8 @@ EIP3009 = "eip3009"
 SYNTHETIC_CHALLENGE_ID_PREFIX = "x402:"
 """Prefix of the local challenge IDs given to credentials converted from x402."""
 
-_ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
+# uint256 values have at most 78 digits.
+_ATOMIC_AMOUNT_RE = re.compile(r"[0-9]{1,78}")
 _EVM_NETWORK_RE = re.compile(r"eip155:[0-9]+")
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 _HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")

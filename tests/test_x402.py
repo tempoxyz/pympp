@@ -123,6 +123,7 @@ class TestHeaders:
             b64(payment(accepted=requirements(network="solana:mainnet"))),
             b64(payment(accepted=requirements(amount="1.5"))),
             b64(payment(accepted=requirements(amount=10000))),
+            b64(payment(accepted=requirements(amount="1" * 79))),
             b64(payment(accepted=requirements(maxTimeoutSeconds=0))),
             b64(payment(accepted=requirements(maxTimeoutSeconds=True))),
             b64(payment(accepted=requirements(extra="eip3009"))),
