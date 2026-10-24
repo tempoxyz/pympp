@@ -324,7 +324,7 @@ async def verify_or_challenge(
         if error.status != 403:
             error.retry_challenge = (
                 await new_challenge()
-                if isinstance(error, InvalidPayloadError)
+                if isinstance(error, (InvalidPayloadError, PaymentExpiredError))
                 else submitted_challenge
             )
         await emit_failure(error, submitted_challenge, credential)

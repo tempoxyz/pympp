@@ -17,6 +17,7 @@ from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
     PaymentError,
+    PaymentExpiredError,
     VerificationFailedError,
 )
 from mpp.events import EventDispatcher
@@ -536,15 +537,18 @@ class TestVerificationError:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("error", "retryable"),
+        ("error", "retryable", "fresh"),
         [
-            (VerificationError("Payment verification failed"), True),
-            (CredentialReplayedError("Transaction hash already used"), False),
-            (InternalPaymentError(), False),
+            (VerificationError("Payment verification failed"), True, False),
+            (PaymentExpiredError("2020-01-01T00:00:00Z"), True, True),
+            (CredentialReplayedError("Transaction hash already used"), False, False),
+            (InternalPaymentError(), False, False),
         ],
-        ids=["verification", "replay", "internal"],
+        ids=["verification", "expired", "replay", "internal"],
     )
-    async def test_intent_error_retry_challenge(self, error: PaymentError, retryable: bool) -> None:
+    async def test_intent_error_retry_challenge(
+        self, error: PaymentError, retryable: bool, fresh: bool
+    ) -> None:
         """Invalid credentials get a fresh challenge; internal failures do not."""
 
         @intent(name="charge")
@@ -569,6 +573,8 @@ class TestVerificationError:
 
         assert raised.value is error
         assert isinstance(raised.value.retry_challenge, Challenge) is retryable
+        if retryable:
+            assert (raised.value.retry_challenge.id != credential.challenge.id) is fresh
 
     @pytest.mark.asyncio
     async def test_emits_payment_failed_when_intent_raises(self) -> None:

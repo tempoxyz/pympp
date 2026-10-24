@@ -27,6 +27,7 @@ from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
+    PaymentExpiredError,
     VerificationError,
 )
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
@@ -1670,7 +1671,7 @@ class ChargeIntent:
             # Authorize before the irreversible send: a challenge that expired
             # during sponsorship or simulation must not be settled.
             if expires is not None and _challenge_expired(expires):
-                raise VerificationError("Request has expired")
+                raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
             try:

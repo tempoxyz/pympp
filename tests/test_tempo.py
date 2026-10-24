@@ -1324,7 +1324,7 @@ class TestChargeIntent:
                 "mpp.methods.tempo.intents._challenge_expired",
                 side_effect=[False, True],
             ),
-            pytest.raises(VerificationError, match="expired"),
+            pytest.raises(PaymentExpiredError),
         ):
             await intent.verify(
                 credential,
