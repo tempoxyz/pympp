@@ -6,6 +6,7 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import re
@@ -1477,18 +1478,30 @@ class ChargeIntent:
                 raise CredentialReplayedError("Transaction hash already used")
 
         broadcast_attempted = False
+        # Recorded when a submitted transaction's attempt fails. Unlike the replay
+        # reservation it survives the failure, so a retry of a submission whose
+        # outcome is unknown is reconciled instead of refused as unpaid.
+        broadcast_key = (
+            f"mpp:charge-broadcast:{reserved_tx_hash.lower()}"
+            if reserved_tx_hash is not None
+            else None
+        )
         try:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
-                valid_before = _transaction_valid_before(raw_tx)
-                if valid_before is not None:
-                    _assert_remaining_validity(valid_before)
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
                 # The store reservation and simulation can take a while: recheck
                 # the sponsored window right before submission.
-                valid_before = _transaction_valid_before(raw_tx)
-                if valid_before is not None:
-                    _assert_remaining_validity(valid_before)
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
 
             # The send and any receipt recovery share one confirmation deadline.
             # The send may use at most two thirds of it, leaving the rest for
@@ -1578,6 +1591,10 @@ class ChargeIntent:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if self._store is not None and store_key is not None:
+                if broadcast_attempted and broadcast_key is not None:
+                    # Best effort: a full store must not mask the original error.
+                    with contextlib.suppress(Exception):
+                        await self._store.put(broadcast_key, reserved_tx_hash)
                 await self._store.delete(store_key)
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
@@ -1588,6 +1605,51 @@ class ChargeIntent:
             ):
                 raise InternalPaymentError() from err
             raise
+
+    async def _check_sponsored_validity(
+        self,
+        client: Any,
+        raw_tx: str,
+        broadcast_key: str | None,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+    ) -> Receipt | None:
+        """Apply the sponsored validity floor before a first submission.
+
+        If this server already submitted the transaction (an earlier attempt
+        whose outcome was unknown), the floor does not apply: the existing
+        transaction is reconciled instead. Returns its receipt if it settled,
+        and raises ``InternalPaymentError`` while its outcome is unknown, so the
+        caller is never asked to pay again for a payment that may still land.
+        """
+        valid_before = _transaction_valid_before(raw_tx)
+        if valid_before is None:
+            return None
+        try:
+            _assert_remaining_validity(valid_before)
+        except VerificationError:
+            if (
+                self._store is None
+                or broadcast_key is None
+                or await self._store.get(broadcast_key) is None
+            ):
+                raise
+        else:
+            return None
+        tx_hash = _raw_transaction_hash(raw_tx)
+        receipt_data = await self._get_transaction_receipt(client, tx_hash)
+        if receipt_data is None:
+            raise InternalPaymentError() from RuntimeError(
+                "Earlier submission of this transaction has an unknown outcome"
+            )
+        receipt_tx_hash = receipt_data.get("transactionHash")
+        if not isinstance(receipt_tx_hash, str) or receipt_tx_hash.lower() != tx_hash.lower():
+            raise VerificationError("Receipt transaction hash does not match submitted transaction")
+        self._verify_receipt_transfers(
+            receipt_data, request, challenge_id=challenge_id, realm=realm
+        )
+        return Receipt.success(tx_hash)
 
     async def _resolve_fee_token(
         self, client: Any, request: ChargeRequest, required_balance: int = 1

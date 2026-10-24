@@ -4010,6 +4010,70 @@ class TestCosignAsFeePayer:
         mock_client.post.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_verify_ambiguous_submission_retry_under_floor_is_not_payable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A retry of a submission with unknown outcome is reconciled, not a payable 402."""
+        from mpp.store import MemoryStore
+
+        monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        start = float(int(time.time()))
+        clock = [start]
+
+        intent = self._make_intent()
+        intent._store = MemoryStore()
+        intent._confirmation_timeout = 0.2
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(start) + 20,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+        }
+        methods: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            methods.append(json["method"])
+            if json["method"] == "eth_sendRawTransactionSync":
+                raise httpx.ReadTimeout("send timed out")
+            assert json["method"] == "eth_getTransactionReceipt"
+            return mock_response(200, {"result": None})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        async def simulate(*_args: object) -> None:
+            return None
+
+        with (
+            patch("mpp.methods.tempo.intents.time.time", side_effect=lambda: clock[0]),
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+        ):
+            # The first submission's outcome is unknown and its reservation is released.
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+            assert methods.count("eth_sendRawTransactionSync") == 1
+
+            # The same credential retried under the floor must not be refused as unpaid.
+            clock[0] = start + 10
+            methods.clear()
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+            assert methods == ["eth_getTransactionReceipt"]
+
+    @pytest.mark.asyncio
     async def test_verify_near_expiry_releases_reservation(self) -> None:
         """A fresh sponsored tx under the floor is refused and its reservation released."""
         from mpp.store import MemoryStore
