@@ -1457,6 +1457,19 @@ class TestMCPCredentialToCoreDigestOpaque:
         decoded = json.loads(base64.urlsafe_b64decode(core.challenge.opaque + "==").decode())
         assert decoded == {"pi": "pi_123"}
 
+    def test_to_core_includes_description(self) -> None:
+        ch = MCPChallenge(
+            id="test",
+            realm="r",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            description="API call fee",
+        )
+        cred = MCPCredential(challenge=ch, payload={"sig": "0x"})
+        core = cred.to_core()
+        assert core.challenge.description == "API call fee"
+
     def test_to_core_opaque_is_sorted(self) -> None:
         ch = MCPChallenge(
             id="test",
@@ -1484,6 +1497,7 @@ class TestMCPCredentialToCoreDigestOpaque:
         core = cred.to_core()
         assert core.challenge.digest is None
         assert core.challenge.opaque is None
+        assert core.challenge.description is None
 
     def test_to_core_roundtrip_hmac_with_opaque(self) -> None:
         opaque = {"\U00010000": "supplementary", "\ue000": "private"}

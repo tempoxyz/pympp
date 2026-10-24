@@ -321,6 +321,11 @@ def parse_authorization(header: str) -> Credential:
         digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
         opaque=str(challenge_data["opaque"]) if challenge_data.get("opaque") else None,
         header=credential_header,
+        description=(
+            str(challenge_data["description"])
+            if challenge_data.get("description") is not None
+            else None
+        ),
     )
 
     return Credential(
@@ -356,6 +361,8 @@ def format_authorization(credential: Credential) -> str:
         challenge_dict["header"] = credential.challenge.header
     if credential.challenge.opaque is not None:
         challenge_dict["opaque"] = credential.challenge.opaque
+    if credential.challenge.description is not None:
+        challenge_dict["description"] = credential.challenge.description
 
     payload: dict[str, Any] = {
         "challenge": challenge_dict,

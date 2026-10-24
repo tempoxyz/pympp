@@ -197,6 +197,7 @@ class MCPCredential:
             expires=self.challenge.expires,
             digest=self.challenge.digest,
             opaque=opaque_b64,
+            description=self.challenge.description,
         )
         return Credential(
             challenge=echo,
