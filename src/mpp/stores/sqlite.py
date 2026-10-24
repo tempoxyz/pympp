@@ -17,6 +17,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from mpp.store import _validate_expiry
+
 NO_TTL_EXPIRES_AT = 253402300799.0
 
 
@@ -117,11 +119,19 @@ class SQLiteStore:
 
         Returns ``True`` if the key was new, ``False`` if it existed.
         """
+        return await self._put_if_absent(key, value, self._expires_at())
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        """Atomically insert with an absolute expiry, overriding the default TTL."""
+        _validate_expiry(expires_at)
+        return await self._put_if_absent(key, value, expires_at)
+
+    async def _put_if_absent(self, key: str, value: Any, expires_at: float) -> bool:
         now = time.time()
         await self._prune_expired(now)
         cursor = await self._db.execute(
             "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
-            (key, value, self._expires_at()),
+            (key, value, expires_at),
         )
         await self._db.commit()
         return cursor.rowcount > 0
