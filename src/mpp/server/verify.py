@@ -421,6 +421,9 @@ def _create_challenge(
         expires_dt = datetime.now(UTC) + timedelta(minutes=DEFAULT_EXPIRES_MINUTES)
         expires = expires_dt.isoformat().replace("+00:00", "Z")
 
+    if method == "tempo" and intent_name == "charge":
+        _assert_sponsored_challenge_lifetime(request, expires)
+
     digest = _body_digest.compute(body) if body is not None else None
     if meta is not None and "_mpp_nonce" in meta:
         raise ValueError("_mpp_nonce is reserved for challenge issuance")
@@ -440,6 +443,32 @@ def _create_challenge(
         meta=issued_meta,
         header=header,
     )
+
+
+def _assert_sponsored_challenge_lifetime(request: dict[str, Any], expires: str) -> None:
+    """Refuse to issue a sponsored Tempo charge that expires too soon to cosign.
+
+    Clients cap the transaction's ``valid_before`` at the challenge expiry and
+    the sponsoring server needs ``MIN_REMAINING_VALIDITY_SECONDS`` of remaining
+    validity, so a shorter-lived sponsored challenge could never be paid.
+    """
+    from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS
+
+    details = request.get("methodDetails")
+    if not isinstance(details, dict) or not details.get("feePayer"):
+        return
+    try:
+        expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    except ValueError:
+        return
+    if expires_dt.tzinfo is None:
+        return
+    if expires_dt - datetime.now(UTC) < timedelta(seconds=MIN_REMAINING_VALIDITY_SECONDS):
+        raise ValueError(
+            "Sponsored (feePayer) charge challenges must expire at least "
+            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds after issuance; "
+            "increase expires or expires_in"
+        )
 
 
 def _body_digest_error(
