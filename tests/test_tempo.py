@@ -4427,7 +4427,9 @@ class TestCosignAsFeePayer:
         intent = self._make_intent()
         store = MemoryStore()
         intent._store = store
-        raw = self._build_client_tx()
+        raw = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM)
+        )
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         await store.put(marker, PATH_USD)
         credential = make_credential(
