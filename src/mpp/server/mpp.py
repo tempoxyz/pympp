@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
-from mpp._units import parse_units, transform_units
+from mpp._units import transform_units
 from mpp.errors import (
     InvalidChallengeError,
     MalformedCredentialError,
@@ -42,7 +42,12 @@ from mpp.server.decorator import (
 from mpp.server.intent import Validation
 from mpp.server.intent import broadcast_credential as broadcast_intent_credential
 from mpp.server.intent import validate_credential as validate_intent_credential
-from mpp.server.method import _SupportsPaymentSuccess, prepare_intent, transform_request
+from mpp.server.method import (
+    _SupportsPaymentSuccess,
+    prepare_intent,
+    request_amount,
+    transform_request,
+)
 from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
@@ -592,8 +597,8 @@ class Mpp:
         Args:
             authorization: The Authorization header value (or None).
             amount: Payment amount in human units (e.g., "0.50" for $0.50).
-                Automatically converted to base units using the method's
-                decimals (6 for Tempo stablecoins).
+                Converted to base units using the method's decimals (6 for
+                Tempo stablecoins), unless the method defines ``parse_amount``.
             currency: Offer only this currency instead of the method's
                 accepted currencies.
             recipient: Override the method's default recipient.
@@ -839,9 +844,7 @@ class Mpp:
             raise ValueError(f"recipient must be set on the method or passed to {api_name}()")
 
         request: dict[str, Any] = {
-            "amount": str(
-                parse_units(options["amount"], getattr(method, "decimals", DEFAULT_DECIMALS))
-            ),
+            "amount": request_amount(method, options["amount"]),
             "currency": currency,
             "recipient": recipient,
         }

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, Required, TypeAlias, TypedDict, TypeVar, 
 
 from mpp import Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode
-from mpp._units import parse_units
 from mpp.errors import InvalidChallengeError, MalformedCredentialError, VerificationFailedError
 from mpp.events import PAYMENT_FAILED
 from mpp.server.decorator import (
@@ -20,7 +19,7 @@ from mpp.server.decorator import (
     wrap_payment_handler,
     x402_input,
 )
-from mpp.server.method import Method, _SupportsCanOffer, prepare_intent
+from mpp.server.method import Method, _SupportsCanOffer, prepare_intent, request_amount
 from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
@@ -471,7 +470,7 @@ def _configure_entries(
             raise ValueError("currency must be set on the method or compose() offer")
         if not (options.get("recipient") or getattr(method, "recipient", None)):
             raise ValueError("recipient must be set on the method or compose() offer")
-        parse_units(options["amount"], getattr(method, "decimals", 6))
+        request_amount(method, options["amount"])
         currencies = _offer_currencies(method, options)
         if currencies is None:
             offers.append(_Offer(server, method, intent, options, body))
