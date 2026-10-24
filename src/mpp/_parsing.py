@@ -319,6 +319,11 @@ def parse_authorization(header: str) -> Credential:
     if description is not None:
         # A retry can reflect this unsigned display field into WWW-Authenticate.
         _escape_quoted(description)
+        if any(
+            (ord(character) < 0x20 and character != "\t") or ord(character) == 0x7F
+            for character in description
+        ):
+            raise ParseError("Header value contains invalid control characters")
 
     echo = ChallengeEcho(
         id=str(challenge_data["id"]),

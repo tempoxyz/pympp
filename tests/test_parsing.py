@@ -330,7 +330,9 @@ class TestCredential:
         encoded = credential.to_authorization().removeprefix("Payment ")
         assert json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))) == data
 
-    @pytest.mark.parametrize("description", ["x\ry", "x\ny", "x\r\ny"])
+    @pytest.mark.parametrize(
+        "description", ["x\ry", "x\ny", "x\r\ny", "x\x00y", "x\x1by", "x\x7fy"]
+    )
     def test_rejects_header_unsafe_description(self, description):
         data = {
             "challenge": {
@@ -340,8 +342,16 @@ class TestCredential:
             },
             "payload": {},
         }
-        with pytest.raises(ParseError, match="invalid CRLF"):
+        with pytest.raises(ParseError, match="invalid (CRLF|control) characters"):
             Credential.from_authorization("Payment " + _b64_json(data))
+
+    def test_accepts_tab_in_description(self) -> None:
+        data = {
+            "challenge": {"id": "test", "method": "tempo", "description": "a\tb"},
+            "payload": {},
+        }
+        credential = Credential.from_authorization("Payment " + _b64_json(data))
+        assert credential.challenge.description == "a\tb"
 
     def test_roundtrip(self) -> None:
         """Credential should survive roundtrip through header format."""

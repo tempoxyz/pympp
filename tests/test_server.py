@@ -2851,7 +2851,7 @@ class TestRequiresAuth:
         assert result == {"paid": True}
 
 
-@pytest.mark.parametrize("description", ["x\ry", "x\ny", "x\r\ny"])
+@pytest.mark.parametrize("description", ["x\ry", "x\ny", "x\r\ny", "x\x00y", "x\x1by", "x\x7fy"])
 async def test_unsafe_echoed_description_returns_fresh_payment_challenge(description):
     @intent(name="charge")
     async def payment_intent(credential: Credential, request: dict) -> Receipt:
