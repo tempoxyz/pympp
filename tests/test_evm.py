@@ -589,6 +589,21 @@ class TestBroadcast:
             await intent.validate(credential, req)  # type: ignore[union-attr]
         assert len(facilitator.settled) == 1
 
+    async def test_fallback_claims_expire_with_their_authorization(self) -> None:
+        from mpp.methods.evm.intents import _ClaimCache
+
+        cache = _ClaimCache()
+        assert await cache.put_if_absent("old", "pending")
+        cache.claim_until("old", int(time.time()) - 120)
+        assert await cache.put_if_absent("new", "pending")
+        cache.claim_until("new", int(time.time()) + 300)
+        # Writing prunes expired claims; live ones still block duplicates.
+        assert await cache.put_if_absent("another", "pending")
+        assert await cache.get("old") is None
+        assert not await cache.put_if_absent("new", "pending")
+        await cache.delete("new")
+        assert await cache.put_if_absent("new", "pending")
+
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)

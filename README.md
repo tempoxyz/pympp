@@ -86,7 +86,8 @@ Return a response object so pympp can add `PAYMENT-RESPONSE`. Pass
 responses themselves pass `payment_signature=` and `resource_url=` to
 `server.charge()` and add `server.x402_payment_required(result, url)` to 402s.
 Send paid x402 responses with `Cache-Control: private` so shared caches can't
-serve them to callers who didn't pay; `server.pay` does this for you.
+serve them to callers who didn't pay. `server.pay` adds it, and
+`PAYMENT-RESPONSE`, when the handler returns a response object rather than plain data.
 
 ### Client
 

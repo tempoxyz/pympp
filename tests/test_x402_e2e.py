@@ -94,10 +94,6 @@ def build_app(server: Mpp) -> Starlette:
         return receipt_response("sub-cent", receipt)
 
     @server.pay(amount="0.01")
-    async def plain(request: Request, credential: Credential, receipt: Receipt):
-        return {"payer": receipt.payer}
-
-    @server.pay(amount="0.01")
     async def public(request: Request, credential: Credential, receipt: Receipt):
         return PlainTextResponse(
             "public", headers={"Cache-Control": "public, max-age=60, s-maxage=600"}
@@ -132,7 +128,6 @@ def build_app(server: Mpp) -> Starlette:
             Route("/paid", paid),
             Route("/sub-cent", sub_cent),
             Route("/public", public),
-            Route("/plain", plain),
             Route("/body-bound", body_bound),
             Route("/composed", composed),
             Route("/direct", direct),
@@ -251,14 +246,6 @@ class TestCoinbaseClient:
             public = await client.get(f"{live.url}/public")
         assert paid.headers["cache-control"] == "private"
         assert public.headers["cache-control"] == "private, max-age=60"
-
-    async def test_plain_data_responses_get_x402_headers(self, live: Live) -> None:
-        async with coinbase_client() as client:
-            response = await client.get(f"{live.url}/plain")
-        assert response.status_code == 200, response.text
-        assert response.json() == {"payer": payer.address}
-        assert response.headers["cache-control"] == "private"
-        assert PAYMENT_RESPONSE_HEADER in response.headers
 
     async def test_body_bound_routes_are_not_offered_to_x402(self, live: Live) -> None:
         unpaid = await live.unpaid("/body-bound?order=1")

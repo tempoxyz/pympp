@@ -49,6 +49,9 @@ def _decode(value: str, parse: Callable[[Any], T]) -> T:
     try:
         raw = base64.b64decode(text + "=" * (-len(text) % 4), validate=True)
         decoded = json.loads(raw.decode("utf-8"))
+        # JSON escapes can smuggle lone UTF-16 surrogates that break any later
+        # UTF-8 encoding of the value, such as echoing it in an error header.
+        json.dumps(decoded, ensure_ascii=False).encode("utf-8")
     except (binascii.Error, ValueError) as error:
         raise InvalidHeaderError() from error
     try:

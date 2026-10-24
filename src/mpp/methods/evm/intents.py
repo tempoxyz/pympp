@@ -55,7 +55,38 @@ logger = logging.getLogger(__name__)
 _warned_fallback_store = False
 
 
-def _fallback_store() -> MemoryStore:
+class _ClaimCache(MemoryStore):
+    """In-process claims that expire with their authorization.
+
+    A claim only has to outlive its authorization's @@validBefore@@: after that
+    the authorization can't settle on-chain. Expired claims are pruned on write,
+    so memory is bounded by the payment rate times the validity window, and the
+    cache never fills up and refuses payments.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._expires: dict[str, float] = {}
+
+    def claim_until(self, key: str, valid_before: int) -> None:
+        self._expires[key] = valid_before + 60
+
+    def _prune(self) -> None:
+        now = time.time()
+        for key in [key for key, expires in self._expires.items() if expires <= now]:
+            self._expires.pop(key, None)
+            self._data.pop(key, None)
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        self._prune()
+        return await super().put_if_absent(key, value)
+
+    async def delete(self, key: str) -> None:
+        self._expires.pop(key, None)
+        await super().delete(key)
+
+
+def _fallback_store() -> _ClaimCache:
     """Create the in-memory claim store used when no store is configured."""
     global _warned_fallback_store
     if not _warned_fallback_store:
@@ -67,7 +98,7 @@ def _fallback_store() -> MemoryStore:
             "store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) when running "
             "more than one instance."
         )
-    return MemoryStore(max_entries=10_000)
+    return _ClaimCache()
 
 
 CREDENTIAL_TYPE = "authorization"
@@ -358,6 +389,8 @@ class ChargeIntent:
             self._store = _fallback_store()
         if not await self._store.put_if_absent(claim_key, "pending"):
             raise CredentialReplayedError("EVM authorization has already been used")
+        if isinstance(self._store, _ClaimCache):
+            self._store.claim_until(claim_key, int(payload["validBefore"]))
 
         try:
             reference = await self._settle(credential, payload, request)

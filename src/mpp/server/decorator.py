@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json as _json
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from mpp.server.intent import Intent, VerifiableIntent
 
 R = TypeVar("R")
+logger = logging.getLogger(__name__)
 
 RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
 BodyType = str | bytes | dict[str, Any]
@@ -376,7 +378,7 @@ def wrap_payment_handler(
         credential, receipt = result
         response = await handler(request_obj, credential, receipt)
         if is_x402_credential(credential):
-            response = _as_response(response)
+            _warn_plain_x402_response(response)
             _set_response_header(
                 response, PAYMENT_RESPONSE_HEADER, payment_response_header(credential, receipt)
             )
@@ -400,29 +402,22 @@ def _set_response_header(response: Any, name: str, value: str | None) -> None:
         return
 
 
-def _as_response(value: Any) -> Any:
-    """Wrap plain JSON data in a response so x402 headers can be added to it.
+_warned_plain_x402_response = False
 
-    Frameworks serialize a returned dict or list after the wrapper runs, which
-    would drop ``PAYMENT-RESPONSE`` and ``Cache-Control: private``. Values that
-    already are responses, and anything when Starlette is not installed, pass
-    through unchanged.
-    """
-    if not isinstance(value, dict | list):
-        return value
-    try:
-        from starlette.responses import JSONResponse
-    except ImportError:
-        return value
-    try:
-        from fastapi.encoders import (  # pyright: ignore[reportMissingImports]
-            jsonable_encoder,
-        )
 
-        value = jsonable_encoder(value)
-    except ImportError:
-        pass
-    return JSONResponse(value)
+def _warn_plain_x402_response(response: Any) -> None:
+    """Warn once when a paid x402 response can't carry its headers."""
+    global _warned_plain_x402_response
+    if _warned_plain_x402_response or getattr(response, "headers", None) is not None:
+        return
+    _warned_plain_x402_response = True
+    logger.warning(
+        "A handler paid with x402 returned %s instead of a response object, so "
+        "PAYMENT-RESPONSE and Cache-Control: private could not be added. Return a "
+        "response object from x402-paid handlers so shared caches can't serve the "
+        "paid response to callers who didn't pay.",
+        type(response).__name__,
+    )
 
 
 def _mark_private(response: Any) -> None:

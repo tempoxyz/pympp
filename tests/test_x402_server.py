@@ -168,3 +168,29 @@ def test_payment_response_needs_a_chain_id() -> None:
     echo = ChallengeEcho(id="x402:1", realm=REALM, method="evm", intent="charge", request="!!")
     credential = Credential(challenge=echo, payload={"from": PAYER.address})
     assert payment_response_header(credential, Receipt.success("0x1", method="evm")) is None
+
+
+async def test_plain_data_is_left_to_the_framework(caplog: pytest.LogCaptureFixture) -> None:
+    """FastAPI applies response_model and status_code to returned data, so keep it."""
+    import mpp.server.decorator as decorator
+    from mpp.server.decorator import wrap_payment_handler
+
+    echo = ChallengeEcho(id="x402:1", realm=REALM, method="evm", intent="charge", request="e30")
+    credential = Credential(challenge=echo, payload={"from": PAYER.address})
+    receipt = Receipt.success("0x1", method="evm")
+
+    async def verify(authorization: Any, request: Any) -> Any:
+        return credential, receipt
+
+    async def handler(request: Any, credential: Any, receipt: Any) -> dict[str, str]:
+        return {"secret": "kept for response_model to filter"}
+
+    wrapped = wrap_payment_handler(handler, verify, lambda: REALM)
+    decorator._warned_plain_x402_response = False
+    with caplog.at_level("WARNING", logger="mpp.server.decorator"):
+        result = await wrapped(object())
+        await wrapped(object())
+
+    assert result == {"secret": "kept for response_model to filter"}
+    warnings = [r for r in caplog.records if "returned dict instead of a response" in r.message]
+    assert len(warnings) == 1
