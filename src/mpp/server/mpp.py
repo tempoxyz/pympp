@@ -234,7 +234,7 @@ class Mpp:
             expires = _parse_timestamp(echo.expires)
         except ParseError as error:
             raise PaymentExpiredError(echo.expires) from error
-        if expires.tzinfo is None or expires < datetime.now(UTC):
+        if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
         if request is not None:

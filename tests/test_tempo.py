@@ -1276,6 +1276,73 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
+    async def test_verify_rejects_request_at_expiry_instant(self) -> None:
+        """Should treat a challenge as expired once its expires instant is reached."""
+        now = datetime(2030, 1, 1, tzinfo=UTC)
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):  # type: ignore[override]
+                return now
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0x123"}, expires="2030-01-01T00:00:00Z"
+        )
+
+        with (
+            patch("mpp.methods.tempo.intents.datetime", FrozenDatetime),
+            pytest.raises(VerificationError, match="expired"),
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x123",
+                    "recipient": "0x456",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_verify_transaction_rechecks_expiry_before_broadcast(self) -> None:
+        """Should not broadcast a transaction whose challenge expired during verification."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(200, {"jsonrpc": "2.0", "result": None, "id": 1})
+        )
+        intent._http_client = mock_client
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
+        )
+
+        # Fresh when the credential is prepared, expired by the time of the send.
+        with (
+            patch(
+                "mpp.methods.tempo.intents._challenge_expired",
+                side_effect=[False, True],
+            ),
+            pytest.raises(PaymentExpiredError),
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert "eth_sendRawTransactionSync" not in methods
+        # The hash claim is released, so a fresh challenge can settle it.
+        assert intent._store is not None
+        tx_hash = _raw_transaction_hash("0xabcdef1234567890")
+        assert await intent._store.get(f"mpp:charge:{tx_hash.lower()}") is None
+
+    @pytest.mark.asyncio
     async def test_verify_missing_expires_rejected(self) -> None:
         """Should reject credentials with no expires (fail-closed)."""
         intent = ChargeIntent(rpc_url="https://rpc.test")
@@ -4262,6 +4329,40 @@ class TestCosignAsFeePayer:
             with pytest.raises(InternalPaymentError):
                 await intent.verify(credential, request)
             assert methods == ["eth_getTransactionReceipt"]
+
+    @pytest.mark.asyncio
+    async def test_expiring_retry_preserves_unknown_sponsored_outcome(self) -> None:
+        from mpp.store import MemoryStore
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        raw = self._build_client_tx()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        await store.put(marker, PATH_USD)
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        client = AsyncMock()
+        intent._http_client = client
+        with (
+            patch("mpp.methods.tempo.intents._challenge_expired", side_effect=[False, True]),
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            pytest.raises(InternalPaymentError) as raised,
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": PATH_USD,
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+        assert raised.value.retry_challenge is None
+        assert await store.get(marker) == PATH_USD
+        client.post.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_reuses_fee_token(

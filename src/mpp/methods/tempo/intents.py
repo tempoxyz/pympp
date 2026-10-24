@@ -27,6 +27,7 @@ from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
+    PaymentExpiredError,
     VerificationError,
 )
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
@@ -49,6 +50,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _warned_fallback_stores: set[str] = set()
+
+
+def _challenge_expired(expires: str) -> bool:
+    """Return whether a challenge ``expires`` timestamp has been reached."""
+    return datetime.fromisoformat(expires.replace("Z", "+00:00")) <= datetime.now(UTC)
 
 
 def _fallback_store(method: str) -> MemoryStore:
@@ -833,8 +839,7 @@ class ChargeIntent:
         challenge_expires = credential.challenge.expires
         if not challenge_expires:
             raise VerificationError("Request has expired (no expires)")
-        expires = datetime.fromisoformat(challenge_expires.replace("Z", "+00:00"))
-        if expires < datetime.now(UTC):
+        if _challenge_expired(challenge_expires):
             raise VerificationError("Request has expired")
 
         payload_data = credential.payload
@@ -959,6 +964,7 @@ class ChargeIntent:
             challenge_id=credential.challenge.id,
             realm=credential.challenge.realm,
             source=credential.source,
+            expires=credential.challenge.expires,
         )
         funding_currency = _funding_currency(payload.signature, req)
         if funding_currency is None:
@@ -1515,6 +1521,7 @@ class ChargeIntent:
         challenge_id: str,
         realm: str,
         source: str | None = None,
+        expires: str | None = None,
     ) -> Receipt:
         """Verify and submit a signed transaction.
 
@@ -1541,6 +1548,7 @@ class ChargeIntent:
         # client-signed envelope so it is stable across retries of a credential.
         broadcast_key: str | None = None
         fee_token_used: str | None = None
+        reconciling = False
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1555,7 +1563,6 @@ class ChargeIntent:
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 prior_fee_token: Any = None
-                reconciling = False
                 if self._store is not None:
                     broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
                     prior_fee_token = await self._store.get(broadcast_key)
@@ -1693,6 +1700,14 @@ class ChargeIntent:
                     await self._store.put(broadcast_key, fee_token_used)
                 except Exception as err:
                     raise InternalPaymentError() from err
+            # Authorize before the irreversible send: a challenge that expired
+            # during sponsorship or simulation must not be settled.
+            if expires is not None and _challenge_expired(expires):
+                if reconciling:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Earlier submission of this transaction has an unknown outcome"
+                    )
+                raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
             try:
