@@ -574,6 +574,7 @@ class TestVerificationError:
         assert raised.value is error
         assert isinstance(raised.value.retry_challenge, Challenge) is retryable
         if retryable:
+            assert raised.value.retry_challenge is not None
             assert (raised.value.retry_challenge.id != credential.challenge.id) is fresh
 
     @pytest.mark.asyncio
