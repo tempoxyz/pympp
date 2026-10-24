@@ -12,6 +12,8 @@ import json
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+import rfc8785
+
 from mpp.x402._types import (
     PaymentPayload,
     PaymentRequired,
@@ -52,7 +54,10 @@ def _decode(value: str, parse: Callable[[Any], T]) -> T:
         # JSON escapes can smuggle lone UTF-16 surrogates that break any later
         # UTF-8 encoding of the value, such as echoing it in an error header.
         json.dumps(decoded, ensure_ascii=False).encode("utf-8")
-    except (binascii.Error, ValueError, RecursionError) as error:
+        # Route binding hashes echoed values as RFC 8785 JSON; reject values it
+        # can't canonicalize (such as integers beyond 2**53) up front.
+        rfc8785.dumps(decoded)
+    except (binascii.Error, ValueError, RecursionError, rfc8785.CanonicalizationError) as error:
         # RecursionError: deeply nested JSON inside the 64 KiB limit.
         raise InvalidHeaderError() from error
     try:

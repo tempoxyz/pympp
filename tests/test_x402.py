@@ -149,6 +149,11 @@ class TestHeaders:
         with pytest.raises(InvalidHeaderError):
             decode_payment_signature(encoded)
 
+    def test_rejects_values_rfc8785_cannot_canonicalize(self) -> None:
+        value = payment(extensions={"extra": {"info": {"value": 2**100}, "schema": {}}})
+        with pytest.raises(InvalidHeaderError):
+            decode_payment_signature(b64(value))
+
     def test_rejects_deeply_nested_json(self) -> None:
         encoded = base64.b64encode(b"[" * 30_000 + b"]" * 30_000).decode()
         with pytest.raises(InvalidHeaderError):

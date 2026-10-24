@@ -706,6 +706,24 @@ class TestRouteBinding:
         assert message in error
         assert facilitator.settle_requests == []
 
+    async def test_uncanonicalizable_extension_is_a_402(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url:
+                accepted, extensions = await self.offer(url, "/paid")
+                signature = sign_x402_payment(payer, accepted, f"{url}/paid", extensions=extensions)
+                payment = json.loads(base64.b64decode(signature))
+                payment["extensions"]["extra"] = {"info": {"value": 2**100}, "schema": {}}
+                header = base64.b64encode(json.dumps(payment).encode()).decode()
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        f"{url}/paid", headers={PAYMENT_SIGNATURE_HEADER: header}
+                    )
+
+        assert response.status_code == 402
+        assert facilitator.settle_requests == []
+
     async def test_native_authorization_wrapped_as_x402_is_refused(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
