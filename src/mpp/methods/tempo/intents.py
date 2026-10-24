@@ -1572,7 +1572,10 @@ class ChargeIntent:
                         raise CredentialReplayedError("Transaction hash already used")
                     prior_transaction = await self._store.get(broadcast_key)
                 if isinstance(prior_transaction, bytes):
-                    prior_transaction = prior_transaction.decode("utf-8")
+                    try:
+                        prior_transaction = prior_transaction.decode("utf-8")
+                    except UnicodeDecodeError as error:
+                        raise InternalPaymentError() from error
                 if prior_transaction is not None:
                     if isinstance(prior_transaction, str) and re.fullmatch(
                         r"0x[0-9a-fA-F]{40}", prior_transaction
@@ -1601,12 +1604,21 @@ class ChargeIntent:
                     fee_token = await self._resolve_fee_token(client, request, required_balance)
                     # Apply the floor after reserving the hash so a settled
                     # replay receives the terminal replay error even near expiry.
-                    raw_tx, simulate_payload = self._cosign_as_fee_payer(
-                        raw_tx,
-                        fee_token,
-                        request=request,
-                        require_remaining_validity=False,
-                    )
+                    try:
+                        raw_tx, simulate_payload = self._cosign_as_fee_payer(
+                            raw_tx,
+                            fee_token,
+                            request=request,
+                            require_remaining_validity=False,
+                        )
+                    except VerificationError as error:
+                        if (
+                            self._store is not None
+                            and broadcast_key is not None
+                            and (await self._store.get(broadcast_key) is not None)
+                        ):
+                            raise InternalPaymentError() from error
+                        raise
 
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
@@ -1733,7 +1745,7 @@ class ChargeIntent:
             deadline = time.monotonic() + self._confirmation_timeout
             send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
             send_timeout = send_timeout_ms / 1000
-            if self._store is not None and broadcast_key is not None:
+            if self._store is not None and broadcast_key is not None and not reconciling:
                 # Persist the marker before sending, and fail closed: a submission
                 # whose outcome could be lost must not be broadcast at all.
                 try:
@@ -1896,13 +1908,31 @@ class ChargeIntent:
         """
         valid_before = _transaction_valid_before(raw_tx)
         if valid_before is None:
+            if reconcile:
+                raise InternalPaymentError() from RuntimeError("Recovery transaction has no expiry")
             return None
         if not reconcile:
-            _assert_remaining_validity(valid_before)
+            try:
+                _assert_remaining_validity(valid_before)
+            except VerificationError as error:
+                if (
+                    self._store is not None
+                    and broadcast_key is not None
+                    and (await self._store.get(broadcast_key) is not None)
+                ):
+                    raise InternalPaymentError() from error
+                raise
             return None
         tx_hash = _raw_transaction_hash(raw_tx)
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
         if receipt_data is None:
+            if (
+                not legacy_record
+                and valid_before >= math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS
+            ):
+                # Re-send only the exact previously simulated, signed envelope.
+                # This cannot authorize a second transaction or a new gas budget.
+                return None
             if (
                 not legacy_record
                 and valid_before + VALID_BEFORE_GRACE < time.time()

@@ -4132,6 +4132,64 @@ class TestCosignAsFeePayer:
                 assert await store.get(marker) == token
 
     @pytest.mark.asyncio
+    async def test_missing_live_recovery_rebroadcasts_original_envelope(self):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        await store.put(marker, signed)
+        assert intent._method is not None
+        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+        sent = []
+
+        async def post(url, *, json):
+            if json["method"] == "eth_getTransactionReceipt":
+                return mock_response(200, {"result": None})
+            assert json["method"] == "eth_sendRawTransactionSync"
+            sent.append(json["params"][0])
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        with patch.object(intent, "_cosign_as_fee_payer", side_effect=AssertionError("re-signed")):
+            result = await intent.verify(credential, request)
+        assert result.reference == receipt["transactionHash"]
+        assert sent == [signed]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("phase", ["signing", "simulation"])
+    async def test_late_recovery_record_prevents_payable_validity_error(self, phase):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
+        clock = [time.time()]
+
+        async def resolve(*args):
+            if phase == "signing":
+                await store.put(marker, signed)
+                clock[0] += 600
+            return PATH_USD
+
+        async def simulate(*args):
+            await store.put(marker, signed)
+            clock[0] += 600
+
+        intent._http_client = AsyncMock()
+        with (
+            patch("mpp.methods.tempo.intents.time.time", side_effect=lambda: clock[0]),
+            patch.object(intent, "_resolve_fee_token", side_effect=resolve),
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            pytest.raises(InternalPaymentError),
+        ):
+            await intent.verify(credential, request)
+        assert await store.get(marker) == signed
+        intent._http_client.post.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_utf8_recovery_record_is_internal(self):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        await store.put(f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}", b"\xff")
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent.verify(credential, request)
+        assert isinstance(raised.value.__cause__, UnicodeDecodeError)
+
+    @pytest.mark.asyncio
     async def test_concurrent_sponsors_do_not_overwrite_unknown_submission(self):
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         other = self._make_intent()
