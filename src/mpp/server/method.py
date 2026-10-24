@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
 
 if TYPE_CHECKING:
@@ -92,6 +93,24 @@ def transform_request(
     if hasattr(method, "transform_request"):
         return method.transform_request(request, credential)  # type: ignore[union-attr]
     return request
+
+
+def request_amount(method: Method, amount: str) -> str:
+    """Convert a route's amount option to the method's wire ``amount``.
+
+    A method that defines ``parse_amount(amount: str) -> str`` owns its wire
+    representation, as a method's request schema does in mppx; a method whose
+    wire format is a decimal string can return ``amount`` unchanged. Otherwise
+    the amount is converted to base units with the method's ``decimals``
+    (default 6).
+    """
+    hook = getattr(method, "parse_amount", None)
+    if hook is None:
+        return str(parse_units(amount, getattr(method, "decimals", 6)))
+    wire_amount = hook(amount)
+    if not isinstance(wire_amount, str) or not wire_amount:
+        raise TypeError("parse_amount must return a non-empty string")
+    return wire_amount
 
 
 def prepare_intent(

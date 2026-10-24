@@ -157,6 +157,55 @@ async def test_explicit_compose_renders_all_offers_and_dispatches_one_payment() 
     assert [event["method"] for event in successes] == ["second"]
 
 
+class DecimalAmountMethod(MockMethod):
+    """A custom method whose wire amount is a decimal string, not base units."""
+
+    def parse_amount(self, amount: str) -> str:
+        return amount
+
+
+@pytest.mark.asyncio
+async def test_method_parse_amount_controls_wire_amount() -> None:
+    decimal = DecimalAmountMethod("decimal")
+    units = MockMethod("units")
+    server = Mpp.create(methods=[decimal, units], realm="api.example.com", secret_key="secret")
+    configured = server.compose((decimal, {"amount": "0.50"}), (units, {"amount": "0.50"}))
+
+    @configured
+    async def endpoint(
+        _request: MockRequest,
+        _credential: Credential,
+        receipt: Receipt,
+    ) -> str:
+        return receipt.reference
+
+    challenges = response_challenges(await endpoint(MockRequest(path="/paid", route="/paid")))
+    assert [item.request["amount"] for item in challenges] == ["0.50", "50"]
+    paid_request = MockRequest(
+        authorization=credential(challenges[0]).to_authorization(),
+        path="/paid",
+        route="/paid",
+    )
+    assert await endpoint(paid_request) == "decimal"
+
+    unpaid = await Mpp.create(method=decimal, realm="api.example.com", secret_key="secret").charge(
+        None, "0.50"
+    )
+    assert isinstance(unpaid, Challenge)
+    assert unpaid.request["amount"] == "0.50"
+
+
+def test_parse_amount_must_return_a_string() -> None:
+    class BadMethod(MockMethod):
+        def parse_amount(self, amount: str) -> Any:
+            return 50
+
+    method = BadMethod("bad")
+    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    with pytest.raises(TypeError, match="parse_amount must return a non-empty string"):
+        server.compose((method, {"amount": "0.50"}))
+
+
 @pytest.mark.asyncio
 async def test_implicit_charge_and_pay_are_composition_conveniences() -> None:
     first = MockMethod("first")
