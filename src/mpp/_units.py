@@ -30,6 +30,20 @@ def parse_units(value: str, decimals: int) -> int:
         ValueError: If value is not a valid decimal string, is negative,
             non-finite, or produces fractional base units.
     """
+    d = _parse_decimal(value)
+
+    result = d * (10**decimals)
+
+    if result != int(result):
+        raise ValueError(
+            f"Amount {value!r} with {decimals} decimals produces fractional base units"
+        )
+
+    return int(result)
+
+
+def _parse_decimal(value: str) -> Decimal:
+    """Validate a non-negative finite amount without imposing token precision."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError("amount is required")
 
@@ -44,14 +58,7 @@ def parse_units(value: str, decimals: int) -> int:
     if d < 0:
         raise ValueError("amount must be non-negative")
 
-    result = d * (10**decimals)
-
-    if result != int(result):
-        raise ValueError(
-            f"Amount {value!r} with {decimals} decimals produces fractional base units"
-        )
-
-    return int(result)
+    return d
 
 
 def transform_units(request: dict[str, Any]) -> dict[str, Any]:

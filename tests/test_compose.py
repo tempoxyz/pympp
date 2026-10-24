@@ -195,6 +195,35 @@ async def test_method_parse_amount_controls_wire_amount() -> None:
     assert unpaid.request["amount"] == "0.50"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("amount", ["", " ", "-1", "NaN", "Infinity", "abc", None, 5])
+@pytest.mark.parametrize("entry", ["compose", "charge", "pay"])
+async def test_parse_amount_validates_route_input(amount: Any, entry: str) -> None:
+    method = DecimalAmountMethod("decimal")
+    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    with pytest.raises(ValueError):
+        if entry == "compose":
+            server.compose((method, {"amount": amount}))
+        elif entry == "charge":
+            await server.charge(None, amount)
+        else:
+
+            @server.pay(amount)
+            async def endpoint(_request: MockRequest, credential: Credential, receipt: Receipt):
+                return receipt.reference
+
+            await endpoint(MockRequest(path="/paid", route="/paid"))
+
+
+@pytest.mark.asyncio
+async def test_parse_amount_strips_whitespace_without_rounding() -> None:
+    method = DecimalAmountMethod("decimal")
+    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    challenge = await server.charge(None, " 0.0000000010 ")
+    assert isinstance(challenge, Challenge)
+    assert challenge.request["amount"] == "0.0000000010"
+
+
 def test_parse_amount_must_return_a_string() -> None:
     class BadMethod(MockMethod):
         def parse_amount(self, amount: str) -> Any:

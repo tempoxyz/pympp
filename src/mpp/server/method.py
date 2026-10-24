@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from mpp._units import parse_units
+from mpp._units import _parse_decimal, parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
 
 if TYPE_CHECKING:
@@ -100,14 +100,16 @@ def request_amount(method: Method, amount: str) -> str:
 
     A method that defines ``parse_amount(amount: str) -> str`` owns its wire
     representation, as a method's request schema does in mppx; a method whose
-    wire format is a decimal string can return ``amount`` unchanged. Otherwise
+    wire format is a decimal string can return ``amount`` unchanged. The hook
+    receives a stripped, finite, non-negative decimal string. Otherwise
     the amount is converted to base units with the method's ``decimals``
     (default 6).
     """
     hook = getattr(method, "parse_amount", None)
     if hook is None:
         return str(parse_units(amount, getattr(method, "decimals", 6)))
-    wire_amount = hook(amount)
+    _parse_decimal(amount)
+    wire_amount = hook(amount.strip())
     if not isinstance(wire_amount, str) or not wire_amount:
         raise TypeError("parse_amount must return a non-empty string")
     return wire_amount
