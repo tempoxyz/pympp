@@ -6544,6 +6544,32 @@ class TestSplitLogMemoStrictness:
                 realm="api.example.com",
             )
 
+    @pytest.mark.parametrize(
+        "order", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]
+    )
+    def test_fixed_memo_exempts_only_its_matched_event(self, order):
+        memo_a = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        memo_b = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        request_a = self._split_request()
+        assert request_a.methodDetails.splits is not None
+        request_a.methodDetails.splits[0].memo = memo_b
+        logs = [
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, memo_b),
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, memo_a),
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, memo_b),
+        ]
+        receipt = {"status": "0x1", "logs": [logs[i] for i in order]}
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        with pytest.raises(CredentialReplayedError, match="Unbound split leg"):
+            intent._verify_receipt_transfers(
+                receipt, request_a, challenge_id="challenge-a", realm="api.example.com"
+            )
+        matches = intent._verify_receipt_transfers(
+            receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+        )
+        assert len(matches) == 2
+        assert all(match.memo == memo_b for match in matches)
+
     def test_split_rejects_conflicting_challenge_memo(self) -> None:
         """A split leg bound to another challenge cannot ride on this payment."""
         bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")

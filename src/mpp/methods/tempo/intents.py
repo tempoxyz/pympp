@@ -425,6 +425,8 @@ class MatchedTransferLog:
     """Lowercase ``from`` address of the transfer."""
     fixed: bool = False
     """Whether the request fixed this leg's memo (e.g. a split ``memo``)."""
+    log_index: int | None = None
+    """Receipt position of a matched fixed-memo event, absent for calldata."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1342,14 +1344,14 @@ class ChargeIntent:
             )
 
         if any(not is_bound(log.memo) for log in matched_logs):
-            fixed_memos = {log.memo for log in matched_logs if log.fixed}
-            for log in receipt_data.get("logs", []):
+            fixed_indices = {log.log_index for log in matched_logs if log.fixed}
+            for index, log in enumerate(receipt_data.get("logs", [])):
                 topics = log.get("topics", [])
                 if (
                     log.get("address", "").lower() == request.currency.lower()
                     and len(topics) == 4
                     and topics[0] == TRANSFER_WITH_MEMO_TOPIC
-                    and topics[3] not in fixed_memos
+                    and index not in fixed_indices
                     and is_mpp_memo(topics[3])
                     and not is_bound(topics[3])
                 ):
@@ -1583,7 +1585,11 @@ class ChargeIntent:
                         used_logs.add(log_idx)
                         all_matches.append(
                             MatchedTransferLog(
-                                kind="memo", memo=memo_topic, sender=from_addr.lower(), fixed=True
+                                kind="memo",
+                                memo=memo_topic,
+                                sender=from_addr.lower(),
+                                fixed=True,
+                                log_index=log_idx,
                             )
                         )
                         found = True
