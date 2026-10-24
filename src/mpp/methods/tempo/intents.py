@@ -6,7 +6,9 @@ Implements the charge intent for Tempo payments.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import math
 import re
 import time
 from collections.abc import Callable
@@ -29,7 +31,7 @@ from mpp.errors import (
 )
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
-from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
@@ -95,6 +97,25 @@ SYNC_CONFIRMATION_TIMEOUT_CODE = 4
 RECEIPT_POLL_INTERVAL = 0.5
 # Seconds past a transaction's ``valid_before`` after which it cannot be included.
 VALID_BEFORE_GRACE = 2.0
+
+
+def _assert_not_expired(valid_before: int) -> None:
+    """Reject a sponsored transaction whose ``valid_before`` has passed."""
+    if valid_before <= int(time.time()):
+        raise VerificationError(
+            f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
+        )
+
+
+def _assert_remaining_validity(valid_before: int) -> None:
+    """Reject a sponsored transaction that could expire before it is included."""
+    _assert_not_expired(valid_before)
+    # Leave time to simulate, broadcast and include the sponsored transaction.
+    if valid_before < math.ceil(time.time()) + MIN_REMAINING_VALIDITY_SECONDS:
+        raise VerificationError(
+            "Invalid transaction: fee-sponsored transaction needs at least "
+            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds of remaining validity"
+        )
 
 
 def _transaction_valid_before(raw_tx: str) -> int | None:
@@ -1389,6 +1410,10 @@ class ChargeIntent:
 
         # Simulation payload for the locally co-signed tx, if we sponsor it.
         simulate_payload: dict[str, Any] | None = None
+        # Outcome marker for a locally sponsored submission, keyed on the
+        # client-signed envelope so it is stable across retries of a credential.
+        broadcast_key: str | None = None
+        fee_token_used: str | None = None
 
         if request.methodDetails.feePayer:
             if self.fee_payer is not None:
@@ -1402,9 +1427,37 @@ class ChargeIntent:
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
-                fee_token = await self._resolve_fee_token(client, request, required_balance)
+                prior_fee_token: Any = None
+                reconciling = False
+                if self._store is not None:
+                    broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
+                    prior_fee_token = await self._store.get(broadcast_key)
+                if isinstance(prior_fee_token, bytes):
+                    # Stores such as RedisStore return the saved token as bytes.
+                    try:
+                        prior_fee_token = prior_fee_token.decode("utf-8")
+                    except UnicodeDecodeError:
+                        prior_fee_token = None
+                if isinstance(prior_fee_token, str) and prior_fee_token:
+                    # An earlier submission of this credential has an unknown
+                    # outcome: co-sign with the same fee token so the retry is the
+                    # same transaction and can be reconciled against it.
+                    fee_token = prior_fee_token
+                    reconciling = True
+                else:
+                    fee_token = await self._resolve_fee_token(client, request, required_balance)
+                fee_token_used = fee_token
+                # The 15s floor is enforced after the replay reservation below,
+                # so a replay near expiry still gets the terminal replay error.
+                # A retry of an earlier submission skips even the expiry check
+                # here: it is reconciled by receipt in _check_sponsored_validity
+                # rather than refused with a payable error.
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
-                    raw_tx, fee_token, request=request
+                    raw_tx,
+                    fee_token,
+                    request=request,
+                    require_remaining_validity=False,
+                    allow_expired=reconciling,
                 )
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
@@ -1455,10 +1508,31 @@ class ChargeIntent:
                 raise CredentialReplayedError("Transaction hash already used")
 
         broadcast_attempted = False
+        # True while a submitted transaction may still be included. The broadcast
+        # marker is then kept: unlike the replay reservation it survives the
+        # failure, so a retry of a locally sponsored submission whose outcome is
+        # unknown is reconciled instead of refused as unpaid. Definitive
+        # rejections and unsponsored submissions retain nothing.
+        outcome_unknown = False
+        # True when this attempt created the broadcast marker, so a definitive
+        # outcome removes it again.
+        marker_created = False
         try:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                # The store reservation and simulation can take a while: recheck
+                # the sponsored window right before submission.
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
 
             # The send and any receipt recovery share one confirmation deadline.
             # The send may use at most two thirds of it, leaving the rest for
@@ -1466,7 +1540,17 @@ class ChargeIntent:
             deadline = time.monotonic() + self._confirmation_timeout
             send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
             send_timeout = send_timeout_ms / 1000
+            if self._store is not None and broadcast_key is not None:
+                # Persist the marker before sending, and fail closed: a submission
+                # whose outcome could be lost must not be broadcast at all.
+                if await self._store.get(broadcast_key) is None:
+                    marker_created = True
+                try:
+                    await self._store.put(broadcast_key, fee_token_used)
+                except Exception as err:
+                    raise InternalPaymentError() from err
             broadcast_attempted = True
+            outcome_unknown = True
             try:
                 response = await asyncio.wait_for(
                     client.post(
@@ -1490,8 +1574,9 @@ class ChargeIntent:
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
                 if not _is_ambiguous_broadcast_error(send_error):
+                    outcome_unknown = False
                     raise
-                return await self._recover_broadcast_receipt(
+                receipt = await self._recover_broadcast_receipt(
                     client,
                     raw_tx,
                     reserved_tx_hash or _raw_transaction_hash(raw_tx),
@@ -1501,14 +1586,17 @@ class ChargeIntent:
                     deadline=deadline,
                     error=send_error,
                 )
+                await self._clear_broadcast_marker(broadcast_key)
+                return receipt
 
             if "error" in result:
                 rpc_error = VerificationError(
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
                 if not _is_ambiguous_broadcast_error(result):
+                    outcome_unknown = False
                     raise rpc_error
-                return await self._recover_broadcast_receipt(
+                receipt = await self._recover_broadcast_receipt(
                     client,
                     raw_tx,
                     reserved_tx_hash or _raw_transaction_hash(raw_tx),
@@ -1518,10 +1606,14 @@ class ChargeIntent:
                     deadline=deadline,
                     error=rpc_error,
                 )
+                await self._clear_broadcast_marker(broadcast_key)
+                return receipt
 
             receipt_data = result.get("result")
             if not receipt_data:
                 raise VerificationError("No transaction receipt returned")
+            # The transaction was included: its outcome is known.
+            outcome_unknown = False
             if not isinstance(receipt_data, dict):
                 raise VerificationError("Invalid transaction receipt")
 
@@ -1543,11 +1635,14 @@ class ChargeIntent:
                     "Receipt transaction hash does not match submitted transaction"
                 )
 
+            await self._clear_broadcast_marker(broadcast_key)
             return Receipt.success(receipt_tx_hash)
         except (Exception, asyncio.CancelledError) as err:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if self._store is not None and store_key is not None:
+                if marker_created and not outcome_unknown:
+                    await self._clear_broadcast_marker(broadcast_key)
                 await self._store.delete(store_key)
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
@@ -1558,6 +1653,87 @@ class ChargeIntent:
             ):
                 raise InternalPaymentError() from err
             raise
+
+    async def _check_sponsored_validity(
+        self,
+        client: Any,
+        raw_tx: str,
+        broadcast_key: str | None,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+    ) -> Receipt | None:
+        """Apply the sponsored validity floor before a first submission.
+
+        If this server already submitted the transaction (an earlier attempt
+        whose outcome was unknown), the floor does not apply: the existing
+        transaction is reconciled instead. Returns its receipt if it settled,
+        and raises ``InternalPaymentError`` while its outcome is unknown, so the
+        caller is never asked to pay again for a payment that may still land.
+        """
+        valid_before = _transaction_valid_before(raw_tx)
+        if valid_before is None:
+            return None
+        try:
+            _assert_remaining_validity(valid_before)
+        except VerificationError:
+            if (
+                self._store is None
+                or broadcast_key is None
+                or await self._store.get(broadcast_key) is None
+            ):
+                raise
+        else:
+            return None
+        tx_hash = _raw_transaction_hash(raw_tx)
+        receipt_data = await self._get_transaction_receipt(client, tx_hash)
+        if receipt_data is None:
+            if valid_before + VALID_BEFORE_GRACE < time.time() and (
+                await self._confirm_not_included(client, tx_hash, valid_before)
+            ):
+                # Chain time is past its inclusion window with no receipt: it
+                # never landed.
+                await self._clear_broadcast_marker(broadcast_key)
+                raise VerificationError(
+                    "Fee payer envelope expired: valid_before "
+                    f"({valid_before}) is not in the future"
+                )
+            raise InternalPaymentError() from RuntimeError(
+                "Earlier submission of this transaction has an unknown outcome"
+            )
+        receipt_tx_hash = receipt_data.get("transactionHash")
+        if not isinstance(receipt_tx_hash, str) or receipt_tx_hash.lower() != tx_hash.lower():
+            raise VerificationError("Receipt transaction hash does not match submitted transaction")
+        self._verify_receipt_transfers(
+            receipt_data, request, challenge_id=challenge_id, realm=realm
+        )
+        await self._clear_broadcast_marker(broadcast_key)
+        return Receipt.success(tx_hash)
+
+    async def _confirm_not_included(self, client: Any, tx_hash: str, valid_before: int) -> bool:
+        """Return whether chain time shows ``tx_hash`` can no longer be included.
+
+        A missing receipt and the local clock alone do not prove that: the
+        latest block must be at or past ``valid_before``, and a receipt lookup
+        made after reading that block must still find nothing.
+        """
+        try:
+            block = await _rpc_call(
+                self._get_rpc_url(), "eth_getBlockByNumber", ["latest", False], client=client
+            )
+            block_timestamp = int(block["timestamp"], 16)
+        except Exception as err:
+            raise InternalPaymentError() from err
+        if block_timestamp < valid_before:
+            return False
+        return await self._get_transaction_receipt(client, tx_hash) is None
+
+    async def _clear_broadcast_marker(self, broadcast_key: str | None) -> None:
+        """Drop a broadcast outcome marker once its transaction has settled."""
+        if self._store is not None and broadcast_key is not None:
+            # Best effort: the payment is confirmed either way.
+            with contextlib.suppress(Exception):
+                await self._store.delete(broadcast_key)
 
     async def _resolve_fee_token(
         self, client: Any, request: ChargeRequest, required_balance: int = 1
@@ -1596,7 +1772,13 @@ class ChargeIntent:
         return allowed[0]
 
     def _cosign_as_fee_payer(
-        self, raw_tx: str, fee_token: str | None = None, request: ChargeRequest | None = None
+        self,
+        raw_tx: str,
+        fee_token: str | None = None,
+        request: ChargeRequest | None = None,
+        *,
+        require_remaining_validity: bool = True,
+        allow_expired: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Co-sign a client-signed transaction as fee payer.
 
@@ -1607,6 +1789,12 @@ class ChargeIntent:
 
         Authorization-bearing envelopes are rejected before signing because
         their authorization fields cannot yet be faithfully simulated.
+
+        With ``require_remaining_validity=False`` only an already expired
+        ``valid_before`` is rejected here; the caller must enforce
+        ``MIN_REMAINING_VALIDITY_SECONDS`` before broadcasting. With
+        ``allow_expired=True`` as well, an expired one is not rejected either,
+        so the caller can reconcile an earlier submission of it.
         """
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature, as_address
@@ -1659,10 +1847,10 @@ class ChargeIntent:
         if not valid_before_raw:
             raise VerificationError("Fee payer envelope must include valid_before")
         valid_before = _int(valid_before_raw)
-        if valid_before <= int(time.time()):
-            raise VerificationError(
-                f"Fee payer envelope expired: valid_before ({valid_before}) is not in the future"
-            )
+        if require_remaining_validity:
+            _assert_remaining_validity(valid_before)
+        elif not allow_expired:
+            _assert_not_expired(valid_before)
 
         chain_id = _int(decoded[0])
         policy = get_policy(chain_id)
