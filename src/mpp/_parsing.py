@@ -151,7 +151,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
     params: dict[str, str] = {}
     for match in _AUTH_PARAM_RE.finditer(params_str):
-        key = match.group(1)
+        # Auth-param names are case-insensitive (RFC 9110 §11.2).
+        key = match.group(1).lower()
         if key in params:
             raise ParseError(f"Duplicate parameter: {key}")
         # Group 2 is quoted value, group 3 is unquoted token
