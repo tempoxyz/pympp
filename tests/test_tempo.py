@@ -4526,7 +4526,7 @@ class TestCosignAsFeePayer:
             payload={"type": "transaction", "signature": raw},
             expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         )
-        client = AsyncMock()
+        client = AsyncMock(post=AsyncMock(return_value=mock_response(200, {"result": None})))
         intent._http_client = client
         with (
             patch("mpp.methods.tempo.intents._challenge_expired", side_effect=[False, True]),
@@ -4544,7 +4544,9 @@ class TestCosignAsFeePayer:
             )
         assert raised.value.retry_challenge is None
         assert await store.get(marker) == PATH_USD
-        client.post.assert_not_awaited()
+        assert [call.kwargs["json"]["method"] for call in client.post.await_args_list] == [
+            "eth_getTransactionReceipt"
+        ]
 
     @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_reuses_fee_token(
