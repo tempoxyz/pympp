@@ -36,7 +36,7 @@ from mpp.methods.evm._eip3009 import (
     to_source,
 )
 from mpp.store import MemoryStore
-from mpp.x402._server import is_x402_credential
+from mpp.x402._server import RouteBinding, is_x402_credential
 from mpp.x402._types import (
     EIP3009,
     EXACT_SCHEME,
@@ -174,6 +174,11 @@ class ChargeIntent:
             and the hook is responsible for chain-state checks and replay
             protection beyond this intent's store claim.
         max_timeout_seconds: x402 ``maxTimeoutSeconds`` advertised to clients.
+        route_binding: How x402 payments bind to scoped routes, as in mppx.
+            ``"required"`` accepts only payments carrying mppx's route binding on
+            routes with a framework scope, body digest or metadata;
+            ``"resource"`` also accepts payments bound by their echoed terms and
+            resource URL, which other x402 clients send.
         store: Optional store that claims each authorization before
             settlement so concurrent requests can't settle it twice.
             ``Mpp.create(store=...)`` wires it automatically.
@@ -189,6 +194,7 @@ class ChargeIntent:
         facilitator: Facilitator | None = None,
         settle: SettleFn | None = None,
         max_timeout_seconds: int = 300,
+        route_binding: RouteBinding = "required",
         store: Store | None = None,
     ) -> None:
         if facilitator is None and settle is None:
@@ -197,6 +203,9 @@ class ChargeIntent:
             raise ValueError("max_timeout_seconds must be an integer")
         if max_timeout_seconds <= 0:
             raise ValueError("max_timeout_seconds must be positive")
+        if route_binding not in ("required", "resource"):
+            raise ValueError("route_binding must be 'required' or 'resource'")
+        self.route_binding: RouteBinding = route_binding
         self.domain_name = name
         self.domain_version = version
         self.facilitator = facilitator

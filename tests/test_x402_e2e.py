@@ -42,6 +42,7 @@ from mpp.x402 import (
     decode_payment_required,
     decode_payment_response,
     is_x402_credential,
+    route_extensions,
 )
 from tests.x402_harness import StubFacilitator, hd_account, serve, sign_x402_payment
 
@@ -151,6 +152,7 @@ async def live() -> AsyncIterator[Live]:
                 currency=BASE_SEPOLIA_USDC,
                 recipient=recipient.address,
                 facilitator=facilitator_url,
+                route_binding="resource",
             ),
             realm=REALM,
             secret_key=SECRET_KEY,
@@ -195,6 +197,9 @@ class TestUnpaid:
             ],
             "resource": {"url": f"{live.url}/paid"},
             "error": "PAYMENT-SIGNATURE header is required",
+            "extensions": route_extensions(
+                http_method="GET", scope=challenge.request["_mppx_scope"]
+            ),
         }
 
     async def test_resource_url_keeps_the_query_string(self, live: Live) -> None:
@@ -247,19 +252,17 @@ class TestCoinbaseClient:
         assert paid.headers["cache-control"] == "private"
         assert public.headers["cache-control"] == "private, max-age=60"
 
-    async def test_body_bound_routes_are_not_offered_to_x402(self, live: Live) -> None:
+    async def test_body_bound_routes_advertise_their_digest(self, live: Live) -> None:
         unpaid = await live.unpaid("/body-bound?order=1")
-        assert unpaid.status_code == 402
-        assert unpaid.headers.get("WWW-Authenticate")
-        assert PAYMENT_REQUIRED_HEADER not in unpaid.headers
+        required = decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])
+        challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+        info = required.get("extensions", {})["mppx"]["info"]
+        assert challenge.digest
+        assert info["digest"] == challenge.digest
 
-        # A payment carried over from an unbound route can't pay it either.
-        accepted = await live.accepted()
-        signature = sign_x402_payment(payer, accepted, f"{live.url}/body-bound?order=1")
-        response = await live.get("/body-bound?order=1", **{PAYMENT_SIGNATURE_HEADER: signature})
-        assert response.status_code == 402
-        assert "bound to a request body" in response.json()["detail"]
-        assert live.facilitator.settle_requests == []
+        async with coinbase_client() as client:
+            response = await client.get(f"{live.url}/body-bound?order=1")
+        assert response.status_code == 200, response.text
 
     async def test_pays_a_sub_cent_price(self, live: Live) -> None:
         async with coinbase_client() as client:
@@ -492,6 +495,7 @@ class TestFacilitatorFailures:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -518,6 +522,7 @@ class TestFacilitatorFailures:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -543,6 +548,7 @@ class TestFacilitatorFailures:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -567,6 +573,194 @@ class TestFacilitatorFailures:
         assert PAYMENT_REQUIRED_HEADER not in response.headers
 
 
+class TestRouteBinding:
+    """mppx's default @@routeBinding: 'required'@@ on scoped routes."""
+
+    @staticmethod
+    async def strict(facilitator_url: str) -> Mpp:
+        return Mpp.create(
+            method=evm(
+                currency=BASE_SEPOLIA_USDC,
+                recipient=recipient.address,
+                facilitator=facilitator_url,
+            ),
+            realm=REALM,
+            secret_key=SECRET_KEY,
+        )
+
+    @staticmethod
+    async def offer(url: str, path: str, method: str = "GET") -> tuple[dict, dict]:
+        async with httpx.AsyncClient() as http:
+            unpaid = await http.request(method, url + path)
+        required = decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])
+        return dict(required["accepts"][0]), dict(required.get("extensions") or {})
+
+    async def test_scoped_routes_refuse_unbound_payments(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url, coinbase_client() as client:
+                response = await client.get(f"{url}/paid")
+
+        assert response.status_code == 402
+        error = decode_payment_required(response.headers[PAYMENT_REQUIRED_HEADER]).get("error")
+        assert error == (
+            "Payment verification failed: x402 payment payload does not bind required "
+            "route metadata."
+        )
+        assert facilitator.settle_requests == []
+
+    async def test_unscoped_routes_stay_payable_by_any_x402_client(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url, coinbase_client() as client:
+                response = await client.get(f"{url}/direct")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["x402"] is True
+
+    async def test_route_bound_payments_pay_scoped_routes(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url:
+                accepted, extensions = await self.offer(url, "/paid")
+                assert extensions["mppx"]["info"]["method"] == "GET"
+                assert "_mppx_scope" in extensions["mppx"]["info"]
+                signature = sign_x402_payment(payer, accepted, f"{url}/paid", extensions=extensions)
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        f"{url}/paid", headers={PAYMENT_SIGNATURE_HEADER: signature}
+                    )
+
+        assert response.status_code == 200, response.text
+        assert PAYMENT_RESPONSE_HEADER in response.headers
+        authorization = facilitator.settle_requests[0]["paymentPayload"]["payload"]["authorization"]
+        bound = json.loads(base64.b64decode(signature))
+        assert authorization["nonce"] == bound["payload"]["authorization"]["nonce"]
+
+    async def test_body_bound_routes_take_route_bound_payments(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url:
+                accepted, extensions = await self.offer(url, "/body-bound?order=1")
+                signature = sign_x402_payment(
+                    payer, accepted, f"{url}/body-bound?order=1", extensions=extensions
+                )
+                async with httpx.AsyncClient() as http:
+                    paid = await http.get(
+                        f"{url}/body-bound?order=1",
+                        headers={PAYMENT_SIGNATURE_HEADER: signature},
+                    )
+                    # The same payment can't pay for another order: its digest differs.
+                    other = await http.get(
+                        f"{url}/body-bound?order=2",
+                        headers={PAYMENT_SIGNATURE_HEADER: signature},
+                    )
+
+        assert paid.status_code == 200, paid.text
+        assert other.status_code == 402
+        assert len(facilitator.settle_requests) == 1
+
+    @pytest.mark.parametrize(
+        ("tamper", "message"),
+        [
+            ("nonce", "nonce does not match route binding"),
+            ("method", "extensions do not match route binding"),
+            ("schema", "extensions do not match route binding"),
+            ("resource", "resource does not match route resource"),
+        ],
+    )
+    async def test_tampered_bindings_are_rejected(self, tamper: str, message: str) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url:
+                accepted, extensions = await self.offer(url, "/paid")
+                resource = f"{url}/paid"
+                if tamper == "method":
+                    info = {**extensions["mppx"]["info"], "method": "POST"}
+                    extensions = {"mppx": {**extensions["mppx"], "info": info}}
+                elif tamper == "schema":
+                    extensions = {"mppx": {**extensions["mppx"], "schema": {"type": "object"}}}
+                signature = sign_x402_payment(
+                    payer,
+                    accepted,
+                    resource,
+                    extensions=extensions,
+                    nonce="0x" + "00" * 32 if tamper == "nonce" else None,
+                )
+                if tamper == "resource":
+                    payment = json.loads(base64.b64decode(signature))
+                    payment["resource"] = {"url": resource, "description": "enriched"}
+                    signature = base64.b64encode(json.dumps(payment).encode()).decode()
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        resource, headers={PAYMENT_SIGNATURE_HEADER: signature}
+                    )
+
+        assert response.status_code == 402
+        error = decode_payment_required(response.headers[PAYMENT_REQUIRED_HEADER]).get("error", "")
+        assert message in error
+        assert facilitator.settle_requests == []
+
+    async def test_native_authorization_wrapped_as_x402_is_refused(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = await self.strict(facilitator_url)
+            async with serve(build_app(server)) as url:
+                async with httpx.AsyncClient() as http:
+                    unpaid = await http.get(f"{url}/paid")
+                challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+                native = await evm(currency=BASE_SEPOLIA_USDC, account=payer).create_credential(
+                    challenge
+                )
+                accepted, extensions = await self.offer(url, "/paid")
+                # Wrap the native authorization (challenge-hash nonce) as an x402 payload.
+                signature = sign_x402_payment(
+                    payer,
+                    accepted,
+                    f"{url}/paid",
+                    extensions=extensions,
+                    nonce=native.payload["nonce"],
+                )
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        f"{url}/paid", headers={PAYMENT_SIGNATURE_HEADER: signature}
+                    )
+
+        assert response.status_code == 402
+        assert facilitator.settle_requests == []
+
+    async def test_resource_mode_still_verifies_bound_payments(self) -> None:
+        facilitator = StubFacilitator()
+        async with serve(facilitator.app()) as facilitator_url:
+            server = Mpp.create(
+                method=evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=recipient.address,
+                    facilitator=facilitator_url,
+                    route_binding="resource",
+                ),
+                realm=REALM,
+                secret_key=SECRET_KEY,
+            )
+            async with serve(build_app(server)) as url:
+                accepted, extensions = await self.offer(url, "/paid")
+                signature = sign_x402_payment(
+                    payer, accepted, f"{url}/paid", extensions=extensions, nonce="0x" + "11" * 32
+                )
+                async with httpx.AsyncClient() as http:
+                    response = await http.get(
+                        f"{url}/paid", headers={PAYMENT_SIGNATURE_HEADER: signature}
+                    )
+
+        assert response.status_code == 402
+        assert facilitator.settle_requests == []
+
+
 class TestReplayStore:
     async def test_replay_with_a_store_is_a_403_without_a_challenge(self) -> None:
         facilitator = StubFacilitator()
@@ -576,6 +770,7 @@ class TestReplayStore:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -611,6 +806,7 @@ class TestComposedServers:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -621,6 +817,7 @@ class TestComposedServers:
                     recipient=recipient.address,
                     facilitator=facilitator_url,
                     can_offer=lambda request: False,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
@@ -659,6 +856,7 @@ class TestComposedServers:
                         currency=asset,
                         recipient=recipient.address,
                         facilitator=facilitator_url,
+                        route_binding="resource",
                     ),
                     realm=REALM,
                     secret_key=SECRET_KEY,
@@ -699,6 +897,7 @@ class TestOtherServers:
                         currency=BASE_SEPOLIA_USDC,
                         recipient=recipient.address,
                         facilitator=facilitator_url,
+                        route_binding="resource",
                     ),
                 ],
                 realm=REALM,
@@ -758,6 +957,7 @@ class TestOtherServers:
                 currency=BASE_SEPOLIA_USDC,
                 recipient=recipient.address,
                 facilitator=facilitator_url,
+                route_binding="resource",
             )
 
             @pay(
@@ -792,6 +992,7 @@ class TestOtherServers:
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
+                    route_binding="resource",
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,

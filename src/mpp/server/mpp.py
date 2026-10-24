@@ -51,7 +51,7 @@ from mpp.server.verify import (
     verify_or_challenge,
 )
 from mpp.store import Store
-from mpp.x402._server import X402Input, X402Intent, payment_required_header, x402_bindable
+from mpp.x402._server import X402Input, X402Intent, challenges_payment_required_header
 from mpp.x402._types import PaymentRequirements
 
 if TYPE_CHECKING:
@@ -512,7 +512,7 @@ class Mpp:
 
     def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
         """Return the x402 requirements that pay one of this server's challenges."""
-        if (challenge.realm and challenge.realm != self.realm) or not x402_bindable(challenge):
+        if challenge.realm and challenge.realm != self.realm:
             return None
         method = next((m for m in self.methods if m.name == challenge.method), None)
         intent = method.intents.get(challenge.intent) if method is not None else None
@@ -525,6 +525,8 @@ class Mpp:
         challenges: Challenge | ComposedChallenges | Sequence[Challenge],
         resource_url: str,
         error: Exception | str | None = None,
+        *,
+        http_method: str = "GET",
     ) -> str | None:
         """Build the x402 ``PAYMENT-REQUIRED`` header value for unpaid challenges.
 
@@ -535,6 +537,8 @@ class Mpp:
             challenges: The challenges returned by :meth:`charge`.
             resource_url: Absolute URL of the protected resource.
             error: Optional reason the previous payment was rejected.
+            http_method: The request's HTTP method, bound into the route binding.
+                Pass the same value to :meth:`charge`.
         """
         if isinstance(challenges, Challenge):
             items: Sequence[Challenge] = (challenges,)
@@ -543,9 +547,12 @@ class Mpp:
             error = error if error is not None else challenges.error
         else:
             items = challenges
-        accepts = [accepted for challenge in items if (accepted := self._x402_accepts(challenge))]
-        return payment_required_header(
-            accepts, resource_url, str(error) if error is not None else None
+        return challenges_payment_required_header(
+            items,
+            self._x402_accepts,
+            resource_url,
+            http_method,
+            str(error) if error is not None else None,
         )
 
     def payment_credential_value(
@@ -577,6 +584,7 @@ class Mpp:
         payment_authorization: str | None = None,
         payment_signature: str | None = None,
         resource_url: str | None = None,
+        http_method: str = "GET",
         **method_options: Any,
     ) -> Challenge | ComposedResult:
         """Handle a charge intent.
@@ -607,6 +615,8 @@ class Mpp:
             resource_url: Absolute URL of the protected resource. Enables x402
                 for methods that support it; build the ``PAYMENT-REQUIRED``
                 header for unpaid results with :meth:`x402_payment_required`.
+            http_method: The request's HTTP method, bound into x402 route
+                binding. Pass the same value to :meth:`x402_payment_required`.
 
         Returns:
             Challenge, or ComposedChallenges for multiple offers (methods or
@@ -631,7 +641,11 @@ class Mpp:
         if payment_signature is not None and resource_url is None:
             raise ValueError("payment_signature requires resource_url")
         x402 = (
-            X402Input(resource_url=resource_url, payment_signature=payment_signature)
+            X402Input(
+                resource_url=resource_url,
+                payment_signature=payment_signature,
+                http_method=http_method,
+            )
             if resource_url is not None
             else None
         )

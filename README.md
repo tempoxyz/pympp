@@ -81,6 +81,13 @@ async def handler(request, credential, receipt):
     return JSONResponse({"data": "..."})
 ```
 
+Routes bind x402 payments the way mppx does. Routes wrapped by `server.pay` or
+`compose` are scoped, and with the default `route_binding="required"` they only
+accept clients that sign mppx's `extensions.mppx` route binding. To accept
+standard x402 clients there, such as Coinbase's SDK, pass
+`route_binding="resource"` to `evm()`; they're then bound by the echoed terms and
+resource URL. Unscoped `server.charge()` routes accept both either way.
+
 Return a response object so pympp can add `PAYMENT-RESPONSE`. Pass
 `methods=[tempo(...), evm(...)]` to offer both on one route. Servers that build
 responses themselves pass `payment_signature=` and `resource_url=` to

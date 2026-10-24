@@ -27,7 +27,6 @@ from mpp.errors import (
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
-    VerificationFailedError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 from mpp.server.intent import broadcast_credential
@@ -175,22 +174,20 @@ async def verify_or_challenge(
                 },
             )
 
-    async def verify_x402(payment_signature: str, resource_url: str) -> tuple[Credential, Receipt]:
+    async def verify_x402(x402_input: X402Input) -> tuple[Credential, Receipt]:
         assert isinstance(intent, X402Intent)
+        assert x402_input.payment_signature is not None
         try:
-            if body is not None or meta:
-                # x402 payloads can't carry a body digest or application
-                # metadata, so they would pay this route in any context.
-                raise VerificationFailedError(
-                    "x402 payments cannot pay a route bound to a request body or metadata"
-                )
             credential = x402_credential(
-                payment_signature,
+                x402_input.payment_signature,
                 intent,
                 method=method_name,
                 request=request,
                 realm=realm,
-                resource_url=resource_url,
+                resource_url=x402_input.resource_url,
+                http_method=x402_input.http_method,
+                digest=_body_digest.compute(body) if body is not None else None,
+                meta=meta,
             )
         except PaymentError as error:
             error.retry_challenge = await new_challenge()
@@ -252,7 +249,7 @@ async def verify_or_challenge(
         # A Payment credential takes precedence; otherwise accept an x402
         # payment for intents that support it, like mppx (MPP, then x402).
         if x402 is not None and x402.payment_signature and isinstance(intent, X402Intent):
-            return await verify_x402(x402.payment_signature, x402.resource_url)
+            return await verify_x402(x402)
         return await new_challenge()
 
     try:

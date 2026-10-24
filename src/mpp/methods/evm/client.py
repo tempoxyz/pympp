@@ -23,6 +23,7 @@ from mpp.methods.evm._eip3009 import (
 )
 from mpp.methods.evm.assets import EvmAsset
 from mpp.methods.evm.intents import CREDENTIAL_TYPE, ChargeIntent, SettleFn
+from mpp.x402._server import RouteBinding
 from mpp.x402.facilitator import Facilitator, resolve_facilitator
 
 if TYPE_CHECKING:
@@ -187,6 +188,7 @@ def evm(
     facilitator: str | Facilitator | None = None,
     settle: SettleFn | None = None,
     max_timeout_seconds: int = 300,
+    route_binding: RouteBinding = "required",
     account: Any = None,
     max_amount: str | Decimal | None = None,
     can_offer: CanOfferFn | None = None,
@@ -224,6 +226,11 @@ def evm(
         settle: Custom settlement hook used instead of a facilitator. It
             receives the verified authorization and returns its reference.
         max_timeout_seconds: x402 ``maxTimeoutSeconds`` offered to clients.
+        route_binding: How x402 payments bind to scoped routes, as mppx's
+            ``routeBinding``. Routes wrapped by ``server.pay`` or ``compose`` are
+            scoped. ``"required"`` (the default) accepts only clients that sign
+            mppx's route binding there; set ``"resource"`` to accept standard
+            x402 clients, which bind by the echoed terms and resource URL.
         account: eth-account ``LocalAccount`` that signs credentials (clients).
         max_amount: Largest display-unit amount the client pays (clients).
         can_offer: Optional callback deciding whether to offer a request.
@@ -279,6 +286,7 @@ def evm(
             facilitator=resolve_facilitator(facilitator) if facilitator is not None else None,
             settle=settle,
             max_timeout_seconds=max_timeout_seconds,
+            route_binding=route_binding,
         )
     elif account is None:
         raise ValueError(

@@ -25,7 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mpp.methods.evm._eip3009 import authorization_domain, recover_authorizer, sign_authorization
-from mpp.x402 import encode_payment_signature
+from mpp.x402 import encode_payment_signature, route_nonce
 
 MNEMONIC = "test test test test test test test test test test test junk"
 Account.enable_unaudited_hdwallet_features()
@@ -173,9 +173,25 @@ def sign_x402_payment(
     valid_before: int | None = None,
     to: str | None = None,
     value: str | None = None,
+    extensions: dict[str, Any] | None = None,
 ) -> str:
-    """Sign an x402 v2 exact EIP-3009 payment like a standard x402 client."""
+    """Sign an x402 v2 exact EIP-3009 payment like a standard x402 client.
+
+    With ``extensions`` carrying ``mppx``, signs like mppx's client instead:
+    adds a random salt to ``extensions.mppx.info.nonce`` and uses the
+    route-bound nonce unless ``nonce`` is given.
+    """
     now = int(time.time())
+    if extensions is not None and "mppx" in extensions:
+        mppx = extensions["mppx"]
+        extensions = {
+            **extensions,
+            "mppx": {**mppx, "info": {**mppx["info"], "nonce": os.urandom(32).hex()}},
+        }
+        if nonce is None and resource_url is not None:
+            nonce = route_nonce(
+                accepted=accepted, resource={"url": resource_url}, extensions=extensions
+            )
     authorization = {
         "from": account.address,
         "to": to or accepted["payTo"],
@@ -203,4 +219,6 @@ def sign_x402_payment(
     }
     if resource_url is not None:
         payment["resource"] = {"url": resource_url}
+    if extensions is not None:
+        payment["extensions"] = extensions
     return encode_payment_signature(payment)  # type: ignore[arg-type]

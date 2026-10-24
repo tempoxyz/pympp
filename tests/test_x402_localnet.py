@@ -190,7 +190,12 @@ async def start(chain: Chain, amount: str = "0.01", store: MemoryStore | None = 
     facilitator_server = serve(facilitator.app())
     facilitator_url = await facilitator_server.__aenter__()
     server = Mpp.create(
-        method=evm(currency=chain.asset, recipient=recipient.address, facilitator=facilitator_url),
+        method=evm(
+            currency=chain.asset,
+            recipient=recipient.address,
+            facilitator=facilitator_url,
+            route_binding="resource",
+        ),
         realm="localnet.test",
         secret_key=SECRET_KEY,
         store=store,

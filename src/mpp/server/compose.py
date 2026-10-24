@@ -28,7 +28,7 @@ from mpp.server.verify import (
     verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
-from mpp.x402._server import X402Input, X402Intent, x402_bindable
+from mpp.x402._server import X402Input, X402Intent
 from mpp.x402._types import PAYMENT_SIGNATURE_HEADER, PaymentRequirements, requirements_match
 
 if TYPE_CHECKING:
@@ -328,8 +328,6 @@ class ComposedHandler:
 
     def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
         """Return the x402 requirements that pay one of this handler's challenges."""
-        if not x402_bindable(challenge):
-            return None
         details = challenge.request.get("methodDetails")
         chain_id = details.get("chainId") if isinstance(details, Mapping) else None
         currency = str(challenge.request.get("currency", "")).lower()

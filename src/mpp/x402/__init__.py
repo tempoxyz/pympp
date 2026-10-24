@@ -34,11 +34,15 @@ from mpp.x402._header import (
     encode_payment_signature,
 )
 from mpp.x402._server import (
+    ROUTE_BINDING_EXTENSION,
+    RouteBinding,
     X402Input,
     X402Intent,
     is_x402_credential,
     payment_required_header,
     payment_response_header,
+    route_extensions,
+    route_nonce,
 )
 from mpp.x402._types import (
     EIP3009,
@@ -68,6 +72,7 @@ __all__ = [
     "PAYMENT_REQUIRED_HEADER",
     "PAYMENT_RESPONSE_HEADER",
     "PAYMENT_SIGNATURE_HEADER",
+    "ROUTE_BINDING_EXTENSION",
     "X402_VERSION",
     "Facilitator",
     "FacilitatorError",
@@ -77,6 +82,7 @@ __all__ = [
     "PaymentRequired",
     "PaymentRequirements",
     "ResourceInfo",
+    "RouteBinding",
     "SettleResponse",
     "VerifyResponse",
     "X402FormatError",
@@ -92,4 +98,6 @@ __all__ = [
     "payment_required_header",
     "payment_response_header",
     "resolve_facilitator",
+    "route_extensions",
+    "route_nonce",
 ]

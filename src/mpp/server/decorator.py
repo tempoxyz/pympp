@@ -17,10 +17,9 @@ from mpp.server.verify import verify_or_challenge
 from mpp.x402._server import (
     X402Input,
     X402Intent,
+    challenges_payment_required_header,
     is_x402_credential,
-    payment_required_header,
     payment_response_header,
-    x402_bindable,
 )
 from mpp.x402._types import (
     PAYMENT_REQUIRED_HEADER,
@@ -105,6 +104,7 @@ def x402_input(request: Any) -> X402Input | None:
     return X402Input(
         resource_url=resource_url,
         payment_signature=get_header(request, PAYMENT_SIGNATURE_HEADER.lower()),
+        http_method=framework_scope(request).get("http_method", "GET"),
     )
 
 
@@ -346,13 +346,12 @@ def wrap_payment_handler(
             headers: dict[str, str] | None = None
             resource_url = get_request_url(request_obj) if x402_accepts is not None else None
             if x402_accepts is not None and resource_url is not None:
-                accepts = [
-                    accepted
-                    for challenge in challenges
-                    if (accepted := x402_accepts(challenge)) is not None
-                ]
-                value = payment_required_header(
-                    accepts, resource_url, str(error) if error is not None else None
+                value = challenges_payment_required_header(
+                    challenges,
+                    x402_accepts,
+                    resource_url,
+                    framework_scope(request_obj).get("http_method", "GET"),
+                    str(error) if error is not None else None,
                 )
                 if value is not None:
                     headers = {PAYMENT_REQUIRED_HEADER: value}
@@ -533,8 +532,6 @@ def pay(
             if not isinstance(intent, X402Intent):
                 return None
             if challenge.method != (method or "tempo") or challenge.intent != intent.name:
-                return None
-            if not x402_bindable(challenge):
                 return None
             return intent.x402_requirements(challenge.request)
 

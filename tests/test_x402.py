@@ -31,6 +31,13 @@ from mpp.x402 import (
     resolve_facilitator,
 )
 from mpp.x402._header import MAX_HEADER_SIZE
+from mpp.x402._server import (
+    ROUTE_BINDING_SCHEMA,
+    challenges_payment_required_header,
+    route_extensions,
+    route_nonce,
+    route_requires_binding,
+)
 from mpp.x402._types import X402FormatError, parse_eip3009_payload, requirements_match
 
 ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
@@ -432,3 +439,63 @@ class TestServerHelpers:
             headers = ("a", "b")
 
         _set_response_header(ReadOnly(), "PAYMENT-RESPONSE", "value")
+
+
+class TestRouteBinding:
+    def test_route_nonce_matches_mppx(self) -> None:
+        # From mppx's RouteBinding.nonce with ox 0.14 (Json.canonicalize, base64url, sha256).
+        extensions = {
+            "mppx": {
+                "info": {"method": "POST", "digest": "sha-256=:abc=:", "nonce": "ab" * 32},
+                "schema": ROUTE_BINDING_SCHEMA,
+            }
+        }
+        assert (
+            route_nonce(
+                accepted=requirements(),
+                resource={"url": "https://api.example.com/paid?q=\u00e9"},
+                extensions=extensions,
+            )
+            == "0x5bbc4bff9a4850f9faf5568b7937943ecf1db1992919cb2786343a0aa89f5f0e"
+        )
+
+    def test_route_extensions(self) -> None:
+        extensions = route_extensions(
+            http_method="post",
+            scope={"route": "/paid", "http_method": "POST"},
+            digest="sha-256=:abc=:",
+            meta={"account": "acct_1", "_mpp_nonce": "issuance"},
+        )
+        info = extensions["mppx"]["info"]
+        assert info == {
+            "method": "POST",
+            "_mppx_scope": canonical_b64url({"route": "/paid", "http_method": "POST"}),
+            "digest": "sha-256=:abc=:",
+            "opaque": canonical_b64url({"account": "acct_1"}),
+        }
+        assert extensions["mppx"]["schema"] == ROUTE_BINDING_SCHEMA
+        assert route_extensions(http_method="GET")["mppx"]["info"] == {"method": "GET"}
+
+    def test_route_requires_binding(self) -> None:
+        assert not route_requires_binding()
+        assert not route_requires_binding(meta={"_mpp_nonce": "issuance"})
+        assert route_requires_binding(scope={"route": "/paid"})
+        assert route_requires_binding(digest="sha-256=:abc=:")
+        assert route_requires_binding(meta={"account": "acct_1"})
+
+    def test_mismatched_route_bindings_keep_the_first(self) -> None:
+        from mpp import Challenge
+
+        first = Challenge(id="a", method="evm", intent="charge", request={"_mppx_scope": {"r": 1}})
+        second = Challenge(id="b", method="evm", intent="charge", request={"_mppx_scope": {"r": 2}})
+        offer: Any = requirements()
+        value = challenges_payment_required_header(
+            [first, second],
+            lambda c: offer,
+            "https://api.example.com/paid",
+            "GET",
+        )
+        assert value is not None
+        decoded = decode_payment_required(value)
+        assert len(decoded["accepts"]) == 1
+        assert "different routes" in decoded.get("error", "")

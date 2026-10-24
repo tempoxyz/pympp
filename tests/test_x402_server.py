@@ -194,3 +194,30 @@ async def test_plain_data_is_left_to_the_framework(caplog: pytest.LogCaptureFixt
     assert result == {"secret": "kept for response_model to filter"}
     warnings = [r for r in caplog.records if "returned dict instead of a response" in r.message]
     assert len(warnings) == 1
+
+
+async def test_unscoped_charge_accepts_a_payment_without_a_resource() -> None:
+    server = Mpp.create(method=evm_method(), realm=REALM, secret_key="k")
+    signature = sign_x402_payment(PAYER, await accepted(server), None)
+    result = await server.charge(None, "0.01", payment_signature=signature, resource_url=URL)
+    assert isinstance(result, tuple)
+
+
+async def test_charge_advertises_the_http_method() -> None:
+    server = Mpp.create(method=evm_method(), realm=REALM, secret_key="k")
+    result = await server.charge(None, "0.01", resource_url=URL, http_method="POST")
+    header = server.x402_payment_required(result, URL, http_method="POST")  # type: ignore[arg-type]
+    assert header is not None
+    extensions = decode_payment_required(header).get("extensions", {})
+    assert extensions["mppx"]["info"] == {"method": "POST"}
+
+    offer = dict(decode_payment_required(header)["accepts"][0])
+    signature = sign_x402_payment(PAYER, offer, URL, extensions=extensions)
+    paid = await server.charge(
+        None, "0.01", payment_signature=signature, resource_url=URL, http_method="POST"
+    )
+    assert isinstance(paid, tuple)
+    with pytest.raises(VerificationFailedError, match="extensions do not match"):
+        await server.charge(
+            None, "0.01", payment_signature=signature, resource_url=URL, http_method="GET"
+        )

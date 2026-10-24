@@ -208,6 +208,8 @@ class TestConfiguration:
     def test_server_needs_a_settlement_path(self) -> None:
         with pytest.raises(ValueError, match="facilitator or a settle hook"):
             ChargeIntent(name="USDC", version="2")
+        with pytest.raises(ValueError, match="route_binding"):
+            ChargeIntent(name="USDC", version="2", settle=lambda a: "0x1", route_binding="none")  # type: ignore[arg-type]
         with pytest.raises(ValueError, match="max_timeout_seconds"):
             ChargeIntent(name="USDC", version="2", settle=lambda a: "0x1", max_timeout_seconds=0)
 
