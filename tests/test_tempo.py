@@ -6492,6 +6492,7 @@ class TestSplitLogMemoStrictness:
         request = self._split_request()
         memo = "0x" + "dd" * 32
         if kind == "fixed":
+            assert request.methodDetails.splits is not None
             request.methodDetails.splits[0].memo = memo
         shared = self._make_log(
             TRANSFER_TOPIC if kind == "plain" else TRANSFER_WITH_MEMO_TOPIC,
