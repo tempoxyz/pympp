@@ -502,6 +502,7 @@ def _challenge_from_echo(
         digest=echo.digest,
         opaque=opaque,
         header=echo.header,
+        description=echo.description,
     )
 
 

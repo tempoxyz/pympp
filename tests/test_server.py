@@ -1,6 +1,7 @@
 """Tests for server-side verification."""
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -576,6 +577,50 @@ class TestVerificationError:
         if retryable:
             assert raised.value.retry_challenge is not None
             assert (raised.value.retry_challenge.id != credential.challenge.id) is fresh
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("description", [None, "", "API call fee", "Payment for café"])
+    async def test_retry_and_failure_event_preserve_description(self, description):
+        descriptions = []
+        dispatcher = EventDispatcher()
+        dispatcher.on(
+            "payment.failed", lambda payload: descriptions.append(payload["challenge"].description)
+        )
+
+        @intent(name="charge")
+        async def failing_intent(credential: Credential, request: dict) -> Receipt:
+            raise VerificationError("Payment verification failed")
+
+        credential = make_bound_credential(
+            payload={},
+            request={"amount": "1000"},
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        credential = replace(
+            credential, challenge=replace(credential.challenge, description=description)
+        )
+        with pytest.raises(VerificationError) as raised:
+            await verify_or_challenge(
+                authorization=credential.to_authorization(),
+                intent=failing_intent,
+                request={"amount": "1000"},
+                realm="api.example.com",
+                secret_key="test-secret",
+                events=dispatcher,
+            )
+        retry = raised.value.retry_challenge
+        assert isinstance(retry, Challenge)
+        assert retry.id == credential.challenge.id
+        assert retry.description == description
+        assert descriptions == [description]
+        if description:
+            assert (
+                Challenge.from_www_authenticate(
+                    retry.to_www_authenticate("api.example.com")
+                ).description
+                == description
+            )
 
     @pytest.mark.asyncio
     async def test_emits_payment_failed_when_intent_raises(self) -> None:
