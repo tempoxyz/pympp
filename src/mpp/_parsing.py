@@ -382,6 +382,7 @@ _RECEIPT_BASE_FIELDS = {
     "method",
     "externalId",
     "subscriptionId",
+    "fundingCurrency",
     "extra",
 }
 
@@ -423,6 +424,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         method=method,
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
+        funding_currency=str(data["fundingCurrency"]) if data.get("fundingCurrency") else None,
         extra=extra if isinstance(extra, dict) else None,
         extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
         or None,
@@ -447,6 +449,11 @@ def format_payment_receipt(receipt: Receipt) -> str:
         payload["externalId"] = receipt.external_id
     if receipt.subscription_id:
         payload["subscriptionId"] = receipt.subscription_id
+    if receipt.funding_currency:
+        payload["fundingCurrency"] = receipt.funding_currency
+    elif receipt.extensions and receipt.extensions.get("fundingCurrency"):
+        # Callers that set it through extensions before the field existed.
+        payload["fundingCurrency"] = receipt.extensions["fundingCurrency"]
     if receipt.extra:
         payload["extra"] = receipt.extra
     if receipt.extensions:

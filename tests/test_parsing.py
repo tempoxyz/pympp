@@ -507,6 +507,48 @@ class TestReceipt:
         roundtripped = Receipt.from_payment_receipt(parsed.to_payment_receipt())
         assert roundtripped.subscription_id == "sub_123"
 
+    def test_roundtrip_preserves_funding_currency(self) -> None:
+        receipt = Receipt.success(
+            "0xabc", funding_currency="0x20c0000000000000000000000000000000000001"
+        )
+        header = receipt.to_payment_receipt()
+        encoded = json.loads(base64.urlsafe_b64decode(header + "==").decode())
+        assert encoded["fundingCurrency"] == "0x20c0000000000000000000000000000000000001"
+
+        parsed = Receipt.from_payment_receipt(header)
+        assert parsed.funding_currency == "0x20c0000000000000000000000000000000000001"
+        assert parsed.extensions is None
+        assert "fundingCurrency" not in json.loads(
+            base64.urlsafe_b64decode(Receipt.success("0xabc").to_payment_receipt() + "==").decode()
+        )
+
+    def test_funding_currency_from_extensions_is_still_emitted(self) -> None:
+        token = "0x20c0000000000000000000000000000000000001"
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime.now(UTC),
+            reference="0xabc",
+            extensions={"fundingCurrency": token},
+        )
+        encoded = json.loads(base64.urlsafe_b64decode(receipt.to_payment_receipt() + "==").decode())
+        assert encoded["fundingCurrency"] == token
+        both = Receipt(
+            status="success",
+            timestamp=datetime.now(UTC),
+            reference="0xabc",
+            extensions={"fundingCurrency": "0xother"},
+            funding_currency=token,
+        )
+        encoded = json.loads(base64.urlsafe_b64decode(both.to_payment_receipt() + "==").decode())
+        assert encoded["fundingCurrency"] == token
+
+    def test_payer_keeps_its_positional_slot(self) -> None:
+        receipt = Receipt(
+            "success", datetime.now(UTC), "0xabc", "tempo", None, None, None, None, "0xpayer"
+        )
+        assert receipt.payer == "0xpayer"
+        assert receipt.funding_currency is None
+
     def test_roundtrip_preserves_method_specific_fields(self) -> None:
         payload = {
             "status": "success",
