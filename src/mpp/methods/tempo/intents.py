@@ -1428,21 +1428,36 @@ class ChargeIntent:
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 prior_fee_token: Any = None
+                reconciling = False
                 if self._store is not None:
                     broadcast_key = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
                     prior_fee_token = await self._store.get(broadcast_key)
+                if isinstance(prior_fee_token, bytes):
+                    # Stores such as RedisStore return the saved token as bytes.
+                    try:
+                        prior_fee_token = prior_fee_token.decode("utf-8")
+                    except UnicodeDecodeError:
+                        prior_fee_token = None
                 if isinstance(prior_fee_token, str) and prior_fee_token:
                     # An earlier submission of this credential has an unknown
                     # outcome: co-sign with the same fee token so the retry is the
                     # same transaction and can be reconciled against it.
                     fee_token = prior_fee_token
+                    reconciling = True
                 else:
                     fee_token = await self._resolve_fee_token(client, request, required_balance)
                 fee_token_used = fee_token
                 # The 15s floor is enforced after the replay reservation below,
                 # so a replay near expiry still gets the terminal replay error.
+                # A retry of an earlier submission skips even the expiry check
+                # here: it is reconciled by receipt in _check_sponsored_validity
+                # rather than refused with a payable error.
                 raw_tx, simulate_payload = self._cosign_as_fee_payer(
-                    raw_tx, fee_token, request=request, require_remaining_validity=False
+                    raw_tx,
+                    fee_token,
+                    request=request,
+                    require_remaining_validity=False,
+                    allow_expired=reconciling,
                 )
             else:
                 fee_payer_url = request.methodDetails.feePayerUrl
@@ -1663,6 +1678,13 @@ class ChargeIntent:
         tx_hash = _raw_transaction_hash(raw_tx)
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
         if receipt_data is None:
+            if valid_before + VALID_BEFORE_GRACE < time.time():
+                # Past its inclusion window with no receipt: it never landed.
+                await self._clear_broadcast_marker(broadcast_key)
+                raise VerificationError(
+                    "Fee payer envelope expired: valid_before "
+                    f"({valid_before}) is not in the future"
+                )
             raise InternalPaymentError() from RuntimeError(
                 "Earlier submission of this transaction has an unknown outcome"
             )
@@ -1725,6 +1747,7 @@ class ChargeIntent:
         request: ChargeRequest | None = None,
         *,
         require_remaining_validity: bool = True,
+        allow_expired: bool = False,
     ) -> tuple[str, dict[str, Any]]:
         """Co-sign a client-signed transaction as fee payer.
 
@@ -1738,7 +1761,9 @@ class ChargeIntent:
 
         With ``require_remaining_validity=False`` only an already expired
         ``valid_before`` is rejected here; the caller must enforce
-        ``MIN_REMAINING_VALIDITY_SECONDS`` before broadcasting.
+        ``MIN_REMAINING_VALIDITY_SECONDS`` before broadcasting. With
+        ``allow_expired=True`` as well, an expired one is not rejected either,
+        so the caller can reconcile an earlier submission of it.
         """
         from pytempo import Call, TempoTransaction
         from pytempo.models import Signature, as_address
@@ -1793,7 +1818,7 @@ class ChargeIntent:
         valid_before = _int(valid_before_raw)
         if require_remaining_validity:
             _assert_remaining_validity(valid_before)
-        else:
+        elif not allow_expired:
             _assert_not_expired(valid_before)
 
         chain_id = _int(decoded[0])
