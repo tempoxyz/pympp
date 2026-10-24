@@ -4366,11 +4366,14 @@ class TestCosignAsFeePayer:
             "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
         }
         methods: list[str] = []
+        block_timestamp = [int(start)]
 
         async def post(url: str, *, json: dict) -> httpx.Response:
             methods.append(json["method"])
             if json["method"] == "eth_sendRawTransactionSync":
                 raise httpx.ReadTimeout("send timed out")
+            if json["method"] == "eth_getBlockByNumber":
+                return mock_response(200, {"result": {"timestamp": hex(block_timestamp[0])}})
             assert json["method"] == "eth_getTransactionReceipt"
             return mock_response(200, {"result": None})
 
@@ -4397,13 +4400,82 @@ class TestCosignAsFeePayer:
                 await intent.verify(credential, request)
             assert methods == ["eth_getTransactionReceipt"]
 
-            # Past the grace with no receipt: it never landed, so reject and clear.
+            # Past the grace by the local clock, but chain time is still before
+            # valid_before: the transaction may yet land, so it stays unknown.
             clock[0] = start + 23
+            block_timestamp[0] = int(start) + 19
+            methods.clear()
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+            assert methods == [
+                "eth_getTransactionReceipt",
+                "eth_getBlockByNumber",
+            ]
+            assert await store.get(broadcast_key) is not None
+
+            # Chain time is past valid_before and a later lookup still finds no
+            # receipt: it never landed, so reject and clear.
+            block_timestamp[0] = int(start) + 20
             methods.clear()
             with pytest.raises(VerificationError, match="expired"):
                 await intent.verify(credential, request)
-            assert methods == ["eth_getTransactionReceipt"]
+            assert methods == [
+                "eth_getTransactionReceipt",
+                "eth_getBlockByNumber",
+                "eth_getTransactionReceipt",
+            ]
             assert await store.get(broadcast_key) is None
+
+    @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_does_not_broadcast_without_marker(self) -> None:
+        """A sponsored submission whose outcome marker cannot be saved is never sent."""
+        from mpp.store import MemoryStore
+
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        # The replay reservation takes the only free entry.
+        store = MemoryStore(max_entries=1)
+        intent._store = store
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(time.time()) + 25,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+        }
+        methods: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            methods.append(json["method"])
+            raise httpx.ReadTimeout("send timed out")
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        async def simulate(*_args: object) -> None:
+            return None
+
+        with (
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(intent, "_resolve_fee_token", AsyncMock(return_value=PATH_USD)),
+        ):
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(credential, request)
+        assert "eth_sendRawTransactionSync" not in methods
+        # The reservation is released, so a retry can verify again.
+        assert len(store._data) == 0
 
     @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_reads_bytes_marker(

@@ -1620,12 +1620,15 @@ class ChargeIntent:
                 raise CredentialReplayedError("Transaction hash already used")
 
         broadcast_attempted = False
-        # True while a submitted transaction may still be included. Only then is
-        # the broadcast marker recorded: unlike the replay reservation it survives
-        # the failure, so a retry of a locally sponsored submission whose outcome
-        # is unknown is reconciled instead of refused as unpaid. Definitive
+        # True while a submitted transaction may still be included. The broadcast
+        # marker is then kept: unlike the replay reservation it survives the
+        # failure, so a retry of a locally sponsored submission whose outcome is
+        # unknown is reconciled instead of refused as unpaid. Definitive
         # rejections and unsponsored submissions retain nothing.
         outcome_unknown = False
+        # True when this attempt created the broadcast marker, so a definitive
+        # outcome removes it again.
+        marker_created = False
         try:
             # Locally sponsored transactions must pass simulation before broadcast.
             if simulate_payload is not None:
@@ -1649,6 +1652,15 @@ class ChargeIntent:
             deadline = time.monotonic() + self._confirmation_timeout
             send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
             send_timeout = send_timeout_ms / 1000
+            if self._store is not None and broadcast_key is not None:
+                # Persist the marker before sending, and fail closed: a submission
+                # whose outcome could be lost must not be broadcast at all.
+                if await self._store.get(broadcast_key) is None:
+                    marker_created = True
+                try:
+                    await self._store.put(broadcast_key, fee_token_used)
+                except Exception as err:
+                    raise InternalPaymentError() from err
             broadcast_attempted = True
             outcome_unknown = True
             try:
@@ -1753,10 +1765,8 @@ class ChargeIntent:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if self._store is not None and store_key is not None:
-                if outcome_unknown and broadcast_key is not None:
-                    # Best effort: a full store must not mask the original error.
-                    with contextlib.suppress(Exception):
-                        await self._store.put(broadcast_key, fee_token_used)
+                if marker_created and not outcome_unknown:
+                    await self._clear_broadcast_marker(broadcast_key)
                 await self._store.delete(store_key)
             # Once broadcast, the transaction may have landed: never report a
             # retryable verification failure that would invite a second payment.
@@ -1802,8 +1812,11 @@ class ChargeIntent:
         tx_hash = _raw_transaction_hash(raw_tx)
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
         if receipt_data is None:
-            if valid_before + VALID_BEFORE_GRACE < time.time():
-                # Past its inclusion window with no receipt: it never landed.
+            if valid_before + VALID_BEFORE_GRACE < time.time() and (
+                await self._confirm_not_included(client, tx_hash, valid_before)
+            ):
+                # Chain time is past its inclusion window with no receipt: it
+                # never landed.
                 await self._clear_broadcast_marker(broadcast_key)
                 raise VerificationError(
                     "Fee payer envelope expired: valid_before "
@@ -1820,6 +1833,24 @@ class ChargeIntent:
         )
         await self._clear_broadcast_marker(broadcast_key)
         return Receipt.success(tx_hash)
+
+    async def _confirm_not_included(self, client: Any, tx_hash: str, valid_before: int) -> bool:
+        """Return whether chain time shows ``tx_hash`` can no longer be included.
+
+        A missing receipt and the local clock alone do not prove that: the
+        latest block must be at or past ``valid_before``, and a receipt lookup
+        made after reading that block must still find nothing.
+        """
+        try:
+            block = await _rpc_call(
+                self._get_rpc_url(), "eth_getBlockByNumber", ["latest", False], client=client
+            )
+            block_timestamp = int(block["timestamp"], 16)
+        except Exception as err:
+            raise InternalPaymentError() from err
+        if block_timestamp < valid_before:
+            return False
+        return await self._get_transaction_receipt(client, tx_hash) is None
 
     async def _clear_broadcast_marker(self, broadcast_key: str | None) -> None:
         """Drop a broadcast outcome marker once its transaction has settled."""
