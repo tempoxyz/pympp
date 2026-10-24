@@ -538,7 +538,10 @@ async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
     build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
 
     assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[1], method)
-    with patch.object(method, "_build_tempo_transfer", build):
+    with (
+        patch.object(method, "_build_tempo_transfer", build),
+        patch.object(method, "_get_chain_id", AsyncMock(return_value=CHAIN_ID)),
+    ):
         with pytest.raises(ValueError, match="not a currency the client pinned"):
             await method.create_credential(challenges[0])
     build.assert_not_awaited()
