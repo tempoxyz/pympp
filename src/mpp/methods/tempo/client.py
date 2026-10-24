@@ -593,6 +593,8 @@ class TempoMethod:
         memo_clean = memo[2:] if memo.startswith("0x") else memo
         if len(memo_clean) != 64:
             raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
+        if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
+            raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
 
 
