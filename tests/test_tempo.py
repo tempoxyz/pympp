@@ -6180,6 +6180,26 @@ class TestParseMemoBytes:
             _parse_memo_bytes("0x")
 
 
+class TestEncodeTransferWithMemo:
+    """transferWithMemo calldata only accepts a 32-byte hex memo."""
+
+    RECIPIENT = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+
+    def test_encodes_hex_memo(self) -> None:
+        data = TempoMethod()._encode_transfer_with_memo(self.RECIPIENT, 500000, "0x" + "AB" * 32)
+        assert data.startswith("0x95777d59")
+        assert data.endswith("ab" * 32)
+        assert len(data) == 2 + 8 + 64 * 3
+
+    @pytest.mark.parametrize(
+        "memo",
+        ["0x" + "zz" * 32, "0x" + " a" * 32, "0x" + "é" * 64, "0x" + "+1" * 32],
+    )
+    def test_rejects_non_hex_memo(self, memo: str) -> None:
+        with pytest.raises(ValueError, match="hex"):
+            TempoMethod()._encode_transfer_with_memo(self.RECIPIENT, 500000, memo)
+
+
 class TestMatchSingleTransferCalldata:
     """Tests for _match_single_transfer_calldata memo strictness."""
 
