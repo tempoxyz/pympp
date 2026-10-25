@@ -423,10 +423,6 @@ class MatchedTransferLog:
     memo: str | None = None
     sender: str | None = None
     """Lowercase ``from`` address of the transfer."""
-    fixed: bool = False
-    """Whether the request fixed this leg's memo (e.g. a split ``memo``)."""
-    log_index: int | None = None
-    """Receipt position of a matched fixed-memo event, absent for calldata."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -695,7 +691,7 @@ def _validate_normalized_calls(
                 call_data, transfer.recipient, transfer.amount, transfer.memo
             ):
                 used_calls.add(call_idx)
-                legs.append(_payment_call_leg(call_data, fixed=transfer.memo is not None))
+                legs.append(_payment_call_leg(call_data))
                 found = True
                 break
         if not found:
@@ -706,7 +702,7 @@ def _validate_normalized_calls(
     return legs
 
 
-def _payment_call_leg(call_data_hex: str, *, fixed: bool) -> MatchedTransferLog:
+def _payment_call_leg(call_data_hex: str) -> MatchedTransferLog:
     """Describe a validated payment call as a transfer leg for memo binding checks."""
     call_data_hex = _strip_0x(call_data_hex)
     if call_data_hex[:SELECTOR_HEX_LEN].lower() == TRANSFER_WITH_MEMO_SELECTOR:
@@ -716,8 +712,8 @@ def _payment_call_leg(call_data_hex: str, *, fixed: bool) -> MatchedTransferLog:
             TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN,
         )
         if decoded is not None:
-            return MatchedTransferLog(kind="memo", memo="0x" + decoded[2].hex(), fixed=fixed)
-    return MatchedTransferLog(kind="transfer", fixed=fixed)
+            return MatchedTransferLog(kind="memo", memo="0x" + decoded[2].hex())
+    return MatchedTransferLog(kind="transfer")
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -1135,8 +1131,8 @@ class ChargeIntent:
         Every matched transfer carrying an MPP attribution memo must be bound to
         this challenge and realm; otherwise one split payment could authorize
         another challenge after this challenge's replay marker expires. Plain
-        transfers, non-MPP memos and memos the request itself fixed (such as a
-        split ``memo``) remain allowed.
+        transfers and non-MPP memos remain allowed. A fixed split memo cannot
+        exempt a transfer that is attributed to another challenge.
         """
         from mpp.methods.tempo._attribution import (
             is_mpp_memo,
@@ -1147,7 +1143,7 @@ class ChargeIntent:
         bound = False
         for matched_log in matched_logs:
             memo = matched_log.memo if matched_log.kind == "memo" else None
-            if memo is None or matched_log.fixed or not is_mpp_memo(memo):
+            if memo is None or not is_mpp_memo(memo):
                 continue
             if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
                 raise CredentialReplayedError("memo is not bound to this challenge")
@@ -1344,14 +1340,12 @@ class ChargeIntent:
             )
 
         if any(not is_bound(log.memo) for log in matched_logs):
-            fixed_indices = {log.log_index for log in matched_logs if log.fixed}
-            for index, log in enumerate(receipt_data.get("logs", [])):
+            for log in receipt_data.get("logs", []):
                 topics = log.get("topics", [])
                 if (
                     log.get("address", "").lower() == request.currency.lower()
                     and len(topics) == 4
                     and topics[0] == TRANSFER_WITH_MEMO_TOPIC
-                    and index not in fixed_indices
                     and is_mpp_memo(topics[3])
                     and not is_bound(topics[3])
                 ):
@@ -1588,8 +1582,6 @@ class ChargeIntent:
                                 kind="memo",
                                 memo=memo_topic,
                                 sender=from_addr.lower(),
-                                fixed=True,
-                                log_index=log_idx,
                             )
                         )
                         found = True

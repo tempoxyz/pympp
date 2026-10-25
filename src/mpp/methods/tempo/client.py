@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import PaymentExpiredError
@@ -141,6 +141,18 @@ class TempoMethod:
             for chain_id in self.allowed_chain_ids:
                 if not isinstance(chain_id, int) or isinstance(chain_id, bool):
                     raise ValueError(f"Invalid Tempo chain ID: {chain_id!r}")
+
+    def transform_request(
+        self, request: dict[str, Any], credential: Credential | None
+    ) -> dict[str, Any]:
+        """Validate fixed split memos before a server advertises a charge."""
+        from mpp.methods.tempo.schemas import Split
+
+        details = request.get("methodDetails")
+        if isinstance(details, dict):
+            for split in details.get("splits") or ():
+                Split.model_validate(split)
+        return request
 
     def _amount_caps(self) -> tuple[int | None, int | None]:
         """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""

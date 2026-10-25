@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Split(BaseModel):
@@ -13,6 +13,21 @@ class Split(BaseModel):
     amount: str
     recipient: str
     memo: str | None = None
+
+    @field_validator("memo")
+    @classmethod
+    def reject_attribution_memo(cls, memo: str | None) -> str | None:
+        """Fixed memos cannot also identify another payable challenge."""
+        from mpp.methods.tempo._attribution import is_mpp_memo
+
+        if memo is not None:
+            try:
+                raw = bytes.fromhex(memo.removeprefix("0x"))
+            except ValueError:
+                return memo  # Existing calldata validation reports malformed hex.
+            if is_mpp_memo("0x" + raw.hex()):
+                raise ValueError("Fixed split memos must not use MPP attribution; omit the memo")
+        return memo
 
 
 class MethodDetails(BaseModel):

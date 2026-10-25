@@ -977,6 +977,26 @@ class TestExpiringNonce:
             assert data[-64:] == expected.removeprefix("0x")
 
     @pytest.mark.asyncio
+    async def test_client_rejects_fixed_attribution_before_payment(self):
+        method = tempo(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            intents={"charge": ChargeIntent()},
+        )
+        challenge = self._challenge("split-charge", fee_payer=False)
+        challenge.request["methodDetails"]["splits"] = [
+            {
+                "amount": "300",
+                "recipient": "0x" + "11" * 20,
+                "memo": encode_attribution(challenge_id="other", server_id=challenge.realm),
+            }
+        ]
+        with patch("mpp.methods.tempo.client._rpc_call", AsyncMock()) as rpc:
+            with pytest.raises(ValueError, match="Fixed split memos"):
+                await method.create_credential(challenge)
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_verify_broadcasts_canonical_recovery_id(self) -> None:
         """Raw 0/1 recovery IDs are canonicalized before hashing and broadcast."""
         from mpp.store import MemoryStore
@@ -6848,7 +6868,7 @@ class TestSplitLogMemoStrictness:
     @pytest.mark.parametrize(
         "order", [(0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0)]
     )
-    def test_fixed_memo_exempts_only_its_matched_event(self, order):
+    def test_fixed_memo_cannot_share_split_between_challenges(self, order):
         memo_a = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
         memo_b = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
         request_a = self._split_request()
@@ -6861,7 +6881,7 @@ class TestSplitLogMemoStrictness:
         ]
         receipt = {"status": "0x1", "logs": [logs[i] for i in order]}
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        with pytest.raises(CredentialReplayedError, match="Unbound split leg"):
+        with pytest.raises(CredentialReplayedError, match="memo is not bound"):
             intent._verify_receipt_transfers(
                 receipt, request_a, challenge_id="challenge-a", realm="api.example.com"
             )
@@ -6945,34 +6965,31 @@ class TestSplitLogMemoStrictness:
         )
         assert [m.memo for m in matches] == [bound, bound]
 
-    def test_split_allows_server_fixed_mpp_memo(self) -> None:
-        """A split memo the server itself set is not checked against this challenge."""
-        bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
-        partner = encode_attribution(challenge_id="partner", server_id="partner.example.com")
-        request = ChargeRequest(
-            amount=str(self.AMOUNT),
-            currency=self.CURRENCY,
-            recipient=self.RECIPIENT,
-            methodDetails=MethodDetails(
-                splits=[Split(amount="300000", recipient=self.SPLIT_RECIPIENT, memo=partner)]
-            ),
-        )
-        receipt = {
-            "status": "0x1",
-            "logs": [
-                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, bound),
-                self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, partner),
-            ],
-        }
-        assert ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
-            receipt, request, challenge_id="challenge-b", realm="api.example.com"
-        )
-        # Still requires a memo bound to this challenge on a payer-chosen leg.
-        receipt["logs"][0] = self._make_log(TRANSFER_TOPIC, self.RECIPIENT, 700000)
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
-            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
-                receipt, request, challenge_id="challenge-b", realm="api.example.com"
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_fixed_memo_split_cannot_also_pay_single_transfer_challenge(self, reverse):
+        memo_a = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
+        memo_b = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
+        request_a = self._split_request()
+        assert request_a.methodDetails.splits is not None
+        # Model an outstanding request issued before fixed attribution was rejected.
+        request_a.methodDetails.splits[0].memo = memo_b
+        logs = [
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, memo_a),
+            self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, memo_b),
+        ]
+        receipt = {"status": "0x1", "logs": logs[::-1] if reverse else logs}
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        with pytest.raises(CredentialReplayedError, match="memo is not bound"):
+            intent._verify_receipt_transfers(
+                receipt, request_a, challenge_id="challenge-a", realm="api.example.com"
             )
+        request_b = ChargeRequest(
+            amount="300000", currency=self.CURRENCY, recipient=self.SPLIT_RECIPIENT
+        )
+        matches = intent._verify_receipt_transfers(
+            receipt, request_b, challenge_id="challenge-b", realm="api.example.com"
+        )
+        assert len(matches) == 1 and matches[0].memo == memo_b
 
     def test_split_allows_plain_and_non_mpp_memo_legs(self) -> None:
         bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
@@ -7872,3 +7889,32 @@ class TestTransactionCredentialPayer:
         assert receipt.payer == sender.lower()
         assert receipt.funding_currency == self.CURRENCY
         assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
+
+
+@pytest.mark.parametrize("encoding", ["prefixed", "bare", "uppercase", "spaced"])
+async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeypatch, encoding):
+    from mpp.server import Mpp
+
+    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+    server = Mpp.create(
+        method=tempo(recipient="0x" + "11" * 20, intents={"charge": ChargeIntent()})
+    )
+    memo = encode_attribution(challenge_id="other", server_id="api.example.com")
+    if encoding == "bare":
+        memo = memo[2:]
+    elif encoding == "uppercase":
+        memo = "0x" + memo[2:].upper()
+    elif encoding == "spaced":
+        memo = "0x" + " ".join(memo[i : i + 2] for i in range(2, len(memo), 2))
+    with pytest.raises(ValueError, match="Fixed split memos"):
+        await server.charge(
+            None,
+            "1.00",
+            splits=[
+                {
+                    "amount": "300000",
+                    "recipient": "0x" + "22" * 20,
+                    "memo": memo,
+                }
+            ],
+        )
