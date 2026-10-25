@@ -1,0 +1,140 @@
+"""SQLite-backed store for single-instance production deployments.
+
+Uses ``aiosqlite`` for async access to Python's built-in ``sqlite3``.
+Install with::
+
+    pip install pympp[sqlite]
+
+Example::
+
+    from mpp.stores import SQLiteStore
+
+    store = await SQLiteStore.create("mpp.db")
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from mpp.store import _validate_expiry
+
+NO_TTL_EXPIRES_AT = 253402300799.0
+
+
+class SQLiteStore:
+    """Async key-value store backed by a local SQLite file.
+
+    Keys are stored in a ``kv`` table. Optional TTL applies to ``put``;
+    expired rows are pruned globally on writes. New ``put_if_absent``
+    claims do not expire, preserving replay protection independently of TTL.
+    Existing rows retain their stored expiry when upgrading.
+
+    ``put_if_absent`` uses ``INSERT OR IGNORE``, a single atomic SQL
+    statement with no TOCTOU race.
+    """
+
+    def __init__(
+        self,
+        db: Any,
+        *,
+        ttl_seconds: int | None = None,
+    ) -> None:
+        self._db = db
+        self._ttl = ttl_seconds
+
+    @classmethod
+    async def create(
+        cls,
+        path: str = "mpp.db",
+        *,
+        ttl_seconds: int | None = None,
+    ) -> SQLiteStore:
+        """Open (or create) a SQLite database and initialize the schema.
+
+        Args:
+            path: Filesystem path for the database file.
+                Use ``":memory:"`` for an ephemeral in-memory database.
+            ttl_seconds: Optional TTL in seconds for ``put`` writes.
+                Defaults to no expiry; ``put_if_absent`` claims never expire.
+        """
+        import aiosqlite
+
+        db = await aiosqlite.connect(path)
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS kv ("
+            "  key TEXT PRIMARY KEY,"
+            "  value TEXT NOT NULL,"
+            "  expires_at REAL NOT NULL"
+            ")"
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_kv_expires_at ON kv(expires_at)")
+        await db.commit()
+        return cls(db, ttl_seconds=ttl_seconds)
+
+    async def close(self) -> None:
+        """Close the underlying database connection."""
+        await self._db.close()
+
+    async def __aenter__(self) -> SQLiteStore:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
+
+    def _expires_at(self) -> float:
+        if self._ttl is None:
+            return NO_TTL_EXPIRES_AT
+        return time.time() + self._ttl
+
+    async def _prune_expired(self, now: float) -> None:
+        await self._db.execute("DELETE FROM kv WHERE expires_at <= ?", (now,))
+
+    async def get(self, key: str) -> Any | None:
+        now = time.time()
+        cursor = await self._db.execute(
+            "SELECT value FROM kv WHERE key = ? AND expires_at > ?",
+            (key, now),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def put(self, key: str, value: Any) -> None:
+        await self._prune_expired(time.time())
+        await self._db.execute(
+            "INSERT INTO kv (key, value, expires_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " expires_at = excluded.expires_at",
+            (key, value, self._expires_at()),
+        )
+        await self._db.commit()
+
+    async def delete(self, key: str) -> None:
+        await self._db.execute("DELETE FROM kv WHERE key = ?", (key,))
+        await self._db.commit()
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        """Atomic conditional insert.
+
+        Prunes expired rows first, then uses ``INSERT OR IGNORE`` so the
+        write only succeeds when the key does not already exist. New claims
+        do not expire, regardless of ``ttl_seconds``.
+
+        Returns ``True`` if the key was new, ``False`` if it existed.
+        """
+        return await self._put_if_absent(key, value, NO_TTL_EXPIRES_AT)
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        """Atomically insert with an absolute expiry, overriding the default TTL."""
+        _validate_expiry(expires_at)
+        return await self._put_if_absent(key, value, expires_at)
+
+    async def _put_if_absent(self, key: str, value: Any, expires_at: float) -> bool:
+        now = time.time()
+        await self._prune_expired(now)
+        cursor = await self._db.execute(
+            "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
+            (key, value, expires_at),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0

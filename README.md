@@ -1,121 +1,295 @@
 # pympp
 
-Python SDK for the [Machine Payments Protocol](https://mpp.dev): the `Payment` HTTP
-authentication scheme for HTTP 402.
+Python SDK for the [**Machine Payments Protocol**](https://mpp.dev)
 
-pympp follows the engine model and behaviour of the TypeScript reference SDK
-[mppx](https://github.com/wevm/mppx).
+[![PyPI](https://img.shields.io/pypi/v/pympp.svg)](https://pypi.org/project/pympp/)
+[![License](https://img.shields.io/pypi/l/pympp.svg)](LICENSE)
 
-- Server: protect any route with one or more payment offers. It works with any framework and
-  ships a Starlette/FastAPI decorator.
-- Client: an `httpx` transport that pays 402 Challenges automatically.
-- Payment methods: Tempo charge, Stripe charge (Shared Payment Tokens, machine payments), and
-  generic EVM charge (EIP-3009) that also serves x402 clients.
-- MCP: paid tools and a paying client on the official MCP Python SDK.
+## Documentation
+
+Full documentation, API reference, and guides are available at **[mpp.dev/sdk/python](https://mpp.dev/sdk/python)**.
 
 ## Install
 
-Requires **Python ≥ 3.12**. The distribution is named `pympp` and the import package is `mpp`.
-
 ```bash
-pip install "pympp[tempo]"          # core + Tempo
-pip install "pympp[tempo,asgi]"     # + Starlette/FastAPI integration
-uv add "pympp[tempo]"
+pip install pympp
 ```
 
-| Extra | Installs | Enables |
-|---|---|---|
-| *(none)* | `httpx`, `pydantic` | `mpp`, `mpp.server`, `mpp.client`, `mpp.store`, `mpp.stripe`, `mpp.x402` wire types and client protocol |
-| `tempo` | `pytempo`, `eth-account`, `eth-abi`, `rlp`, `cryptography` | `mpp.tempo` (charge) |
-| `evm` | `eth-account`, `eth-abi` | `mpp.evm` signing (EIP-3009 charge) |
-| `asgi` | `starlette` | `mpp.server.starlette` (`@paid` for Starlette/FastAPI) |
-| `redis` | `redis` | `mpp.store.redis(...)` (shared replay store) |
-| `mcp` | `mcp>=2.3` | `mpp.mcp_sdk` (official MCP Python SDK integration) |
+## Quick Start
 
-## Quick start: server
-
-This example uses FastAPI with Tempo payments on the Moderato testnet. It needs
-`pip install "pympp[tempo,asgi]" fastapi`.
+### Server
 
 ```python
-import os
+from mpp import Credential, Receipt
+from mpp.server import Mpp, pay
+from mpp.methods.tempo import server as tempo
 
-from fastapi import FastAPI
-
-from mpp.server import Mpp
-from mpp.server.starlette import paid
-from mpp.tempo import server as tempo
-
-mpp = Mpp(
-    methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", testnet=True),
-    secret_key=os.environ["MPP_SECRET_KEY"],  # >= 32 bytes: openssl rand -base64 32
-)
-app = FastAPI()
+server = Mpp(methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"))
 
 
-@app.get("/premium")
-@paid(mpp.charge(amount="0.01"))
-async def premium() -> dict[str, str]:
-    return {"data": "paid content"}
+@app.get("/paid")
+@pay(server.charge(amount="0.50"))
+async def handler(request, credential: Credential, receipt: Receipt):
+    return JSONResponse({"data": "...", "payer": receipt.payer})
 ```
 
-- `tempo.charge(...)` returns one offer per accepted currency (OUSD, then pathUSD on Moderato
-  or USDC.e on mainnet). `mpp.charge(...)` offers all of them on the route.
-- Amounts are decimal strings in display units: `"0.01"` with 6 decimals goes on the wire as
-  `10000`.
-- A request without a Credential gets `402` plus `WWW-Authenticate: Payment …`. A paid request
-  runs the endpoint, and the response carries `Payment-Receipt`.
-- The realm defaults to `MPP_REALM` (or a platform host variable), then the request host.
-- Replay protection uses an in-memory store by default, which only protects a single process.
-  Production deployments with more than one worker need a shared store, for example
-  `tempo.charge(..., store=mpp.store.redis(redis_client))`.
-
-Without Starlette, call the handler with the framework-neutral types:
+Without a framework decorator, call the route handler with the framework-neutral
+`Request`. It returns `PaymentRequired` (a `402` response to send as-is) or
+`PaymentVerified`:
 
 ```python
 from mpp.server import Request, Response
 
 
 async def handle(request: Request) -> Response:
-    result = await mpp.charge(amount="0.01")(request)
-    if result.status == 402:
-        return result.challenge  # 402 with WWW-Authenticate
-    return result.with_receipt(Response.json({"data": "paid content"}))
+    result = await server.charge(amount="0.50")(request)
+    if result.status != 200:
+        return result.challenge
+    return result.with_receipt(Response.json({"data": "..."}))
 ```
 
-## Quick start: client
+If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
 ```python
-import asyncio
-import os
-
-from mpp.client import Mpp
-from mpp.tempo import client as tempo
-from mpp.tempo.client import secp256k1_account
-
-
-async def main() -> None:
-    account = secp256k1_account(os.environ["TEMPO_PRIVATE_KEY"])
-    async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
-        response = await mpp.fetch("https://api.example.com/premium")
-        print(response.status_code, response.json(), response.headers["payment-receipt"])
-
-
-asyncio.run(main())
+server = Mpp(methods=tempo.charge(recipient="0x..."), requires_auth=True)
 ```
 
-`mpp.fetch` retries 402 responses with a Credential. It applies no timeout unless you pass
-`timeout=`, because paid requests may wait for settlement. To use your own client, plug
-`mpp.payment_transport` into `httpx.AsyncClient(transport=...)`, or call `mpp.client()`.
+### Serve x402 clients
 
-## Development
+The `evm` method charges with EIP-3009 authorizations (USDC on Base and other
+EVM chains). It serves native MPP clients and x402 v2 `exact` clients from the
+same endpoint: unpaid responses carry `PAYMENT-REQUIRED` next to
+`WWW-Authenticate`, x402 clients pay with `PAYMENT-SIGNATURE`, and paid x402
+responses carry `PAYMENT-RESPONSE`. An x402 facilitator settles payments.
 
 ```bash
-uv sync --all-extras --dev
-make check          # ruff + pyright + pytest
-make conformance    # mpp-tools vectors, flows and server verification (needs node >= 22.18)
+pip install "pympp[evm]"
 ```
+
+```python
+from mpp.methods.evm import BASE_USDC
+from mpp.methods.evm import server as evm
+from mpp.server import Mpp
+
+server = Mpp(
+    methods=evm.charge(
+        currency=BASE_USDC,
+        recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        facilitator="https://facilitator.example.com",
+    ),
+)
+
+
+@app.get("/paid")
+@pay(server.charge(amount="0.01"))
+async def handler(request, credential, receipt):
+    return JSONResponse({"data": "..."})
+```
+
+Routes bind x402 payments the way mppx does. Routes are scoped to their HTTP
+method, path and query, and with the default `route_binding="required"` they only
+accept clients that sign mppx's `extensions.mppx` route binding. To accept
+standard x402 clients there, such as Coinbase's SDK, pass
+`route_binding="resource"` to `evm.charge()`; they're then bound by the echoed terms and
+resource URL.
+
+Return a response object so pympp can add `PAYMENT-RESPONSE`. Pass
+`methods=[tempo.charge(...), evm.charge(...)]` to offer both on one route. The `402` response of
+a route handler already carries `PAYMENT-REQUIRED`. Send paid responses with
+`Cache-Control: private` so shared caches can't serve them to callers who didn't
+pay. `with_receipt()` adds it, and `PAYMENT-RESPONSE`, when the handler returns a
+response object rather than plain data.
+
+### Client
+
+```python
+from mpp.client import Mpp
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
+
+account = TempoAccount.from_key("0x...")
+
+async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
+    response = await mpp.fetch("https://mpp.dev/api/ping/paid")
+```
+
+To use your own `httpx.AsyncClient`, pass it `transport=mpp.payment_transport`, or
+call `mpp.client()`.
+
+Custom transports can reuse method matching and credential creation without
+depending on HTTPX:
+
+```python
+from mpp.client import PaymentTransport
+from mpp.runtime import PaymentRuntime
+
+payments = PaymentRuntime([method])
+challenge, method = payments.match_challenge(challenges)
+credential = await payments.create_credential(challenge, method)
+
+transport = PaymentTransport(runtime=payments)
+```
+
+## Examples
+
+Stripe charges verify Shared Payment Tokens:
+
+```python
+from mpp.methods.stripe import server as stripe
+
+server = Mpp(methods=stripe.charge(secret_key="sk_...", network_id="bn_...", currency="usd"))
+```
+
+Stripe charge and composed-offer inputs accept `payment_intent_options` as a
+mapping or a sync/async callable receiving `PaymentIntentContext`. The supported
+fields are `customer`, `receipt_email`, `metadata`, and
+`hooks.inputs.tax.calculation`. The input stays out of the signed challenge.
+Resolvers run in the terminal payment operation, after available credential
+validation; `validate_credential()` never invokes them.
+
+```python
+async def options(context):
+    return {"metadata": {"order_id": "order_123"}}
+
+
+handler = server.charge(amount="0.50", payment_intent_options=options)
+# Also supported in compose offer mappings.
+```
+
+Both Stripe rails include SDK/challenge analytics. Existing configured metadata
+retains its precedence, including the forced `machine_payment="true"` flag;
+the new options' metadata overrides all generated/configured metadata. Crypto
+recording retries a definitive optional-field rejection once without optional
+fields, and remains best-effort after settlement.
+
+Custom methods define a `mpp.methods.Method` (wire name, intent and pydantic
+request and payload models) and wrap it in a `mpp.server.ServerMethod` (`verify`,
+or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
+(`create_credential`). A request model may consume private route input, such as
+`payment_intent_options`, by leaving it out of the wire request.
+
+| Example | Description |
+|---------|-------------|
+| [api-server](./examples/api-server/) | Payment-gated API server |
+| [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
+| [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
+
+## Protocol
+
+Built on the ["Payment" HTTP Authentication Scheme](https://datatracker.ietf.org/doc/draft-ryan-httpauth-payment/). See [mpp-specs](https://tempoxyz.github.io/mpp-specs/) for the full specification.
 
 ## License
 
 MIT OR Apache-2.0
+
+### Restrict automatic payment origins
+
+When fetching URLs from untrusted sources, configure exact origins before enabling
+payments. Origins include the scheme and port; paths and credentials are rejected.
+An empty allowlist disables automatic payments. Omitting it preserves the default
+of allowing payments to any directly requested origin.
+
+```python
+async with Mpp(
+    methods=[tempo.charge(account=account)],
+    allowed_origins=["https://api.example.com"],
+) as mpp:
+    response = await mpp.fetch("https://api.example.com/paid")
+```
+
+Use method-level amount, currency, and recipient limits as well. A challenge realm
+is a protection-space name, not an authenticated origin. This policy prevents
+payments to unapproved origins; it cannot identify a relayed challenge served by
+an origin you have already approved.
+
+### External fee-payer services
+
+An external `feePayerUrl` signs sponsored transactions through `eth_signRawTransaction`.
+Treat the returned transaction as a spending capability: callers can broadcast it
+without passing through pympp. Before returning a signature, the service must
+validate the complete transaction and caller authorization, simulate execution,
+and enforce gas-price, gas-limit, per-caller, and aggregate spending budgets.
+Simulation is a point-in-time check; state can change before inclusion, so it does
+not replace hard spending limits.
+
+These requirements apply to any external sponsor. pympp validates the expected
+payment before requesting sponsorship, but its checks cannot protect a sponsor
+that also accepts direct signing requests. Local sponsorship uses pympp's local
+simulation path; externally signed transactions rely on the external service's
+pre-sign controls. Adding a simulation after receiving the signature would not
+prevent a caller from broadcasting that same transaction elsewhere.
+
+### Sponsored recovery records
+
+Sponsored charge recovery records now retain the original signed transaction.
+Legacy records containing only a fee-token address can recover confirmed
+receipts while the original sponsor key is available. A missing receipt for a
+reconstructed transaction is not proof that the original payment failed, so
+these records remain non-payable until reconciled.
+
+Before rotating sponsor keys, drain outstanding sponsored submissions. To
+migrate a remaining legacy record, pause payment traffic and replace its value
+under the existing `mpp:charge-broadcast:<client-envelope-hash>` key with the
+original canonical signed `0x76` transaction from your submission log. Keep the
+key unchanged and use the actual submitted bytes, not a transaction signed with
+a replacement key. Resume traffic after the migration; retries will reconcile
+the stored transaction. If the original bytes or key are unavailable, retain the
+record for operator reconciliation rather than deleting an unknown payment.
+
+Recovery records created by `MemoryStore`, `SQLiteStore`, and `RedisStore` expire
+after both the authenticated challenge's expiry and the signed transaction's
+`valid_before` plus the inclusion grace period. Retries do not extend this deadline, and a store-wide TTL does not shorten it. Replay reservations retain
+their existing retention policy. Memory and SQLite reclaim abandoned expired
+records during subsequent store activity; Redis expires them automatically.
+Redis-backed sponsored recovery requires Redis 6.2 or later for atomic
+[`SET NX PXAT`](https://redis.io/docs/latest/commands/set/) absolute expiry.
+Custom stores can implement `mpp.store.ExpiringStore.put_if_absent_until(key,
+value, expires_at)` with an atomic insert and absolute Unix timestamp to support
+this cleanup. Stores without that method, and challenges without an expiry,
+retain durable recovery records. Existing records keep their original retention.
+
+### Payment request context
+
+Route handlers bind `meta` into their signed challenges:
+
+```python
+handler = server.charge(amount="1.00", meta={"account": authenticated_account_id})
+```
+
+Derive `authenticated_account_id` from trusted session authentication, not an
+unverified request field. Route handlers also bind the HTTP method, path and
+query, and the route template that framework decorators report. Configured `_mppx_scope` is preserved in full
+under the signed scope’s `custom` key, alongside trusted framework fields.
+Custom request objects should expose their HTTP `method`.
+
+Server issuance adds random opaque `_mpp_nonce` metadata; this key is reserved.
+Nonces prevent identical challenges across callers even with fixed expirations,
+but do not authenticate a presenter who stole the entire credential. Low-level
+`Challenge.create()` remains deterministic; custom issuance must provide its own
+unique authenticated context. Nonce-free challenges remain valid when their
+other bindings match. HTTP credentials lacking method scope or using the old custom-scope representation
+will be rejected after upgrading. Keep credentials confidential and share an
+atomic replay store across workers and replicas.
+
+This release changes HTTP method scope, custom scope representation, and direct
+metadata binding as well as nonce issuance. Dict request bodies are now digested
+like mppx (`JSON.stringify` key order) instead of with sorted keys; verifiers
+still accept the old sorted-key digest, but older verifiers reject new ones. Use an atomic rollout with payment
+traffic drained, or pin challenge issuance and all credential retries to the
+same version until outstanding challenges expire. Merely switching all replicas
+at once can still strand payments already issued by the old version.
+
+`unique_challenges=False` (`Mpp`) disables only nonce issuance; it does **not** make this
+release compatible with old verifiers. It cannot disable the new method,
+custom-scope, or metadata bindings. Mixing versions can reject already settled
+hash payments and cause a client to pay again. Nonce-only staging is useful only
+when all other challenge bindings already match; it temporarily retains the
+fixed-expiry collision risk. Shared application authentication is still required.
+
+Fixed Tempo split memos must not use the MPP attribution format: such a transfer
+can otherwise also pay the challenge named by its memo. Omit a split's memo to
+let the client bind it to the current challenge, or use an application memo
+outside the MPP format. Servers reject this configuration before issuing a
+challenge, and clients reject it before signing or broadcasting. Drain or
+replace outstanding challenges with fixed MPP memos before upgrading; their
+transfers cannot safely authorize the enclosing split charge.

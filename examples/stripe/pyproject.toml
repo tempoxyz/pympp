@@ -1,0 +1,14 @@
+[project]
+name = "stripe-example"
+version = "0.1.0"
+description = "Stripe payment example using the Machine Payments Protocol"
+requires-python = ">=3.12"
+dependencies = [
+    "pympp[stripe,server]",
+    "fastapi",
+    "uvicorn",
+    "httpx",
+]
+
+[tool.uv.sources]
+pympp = { path = "../.." }

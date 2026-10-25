@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""MCP client demonstrating automatic payment handling.
+
+Connects to an already-running MCP server via SSE and demonstrates:
+1. Calling a free tool (echo)
+2. Calling a paid tool (premium_echo) with automatic payment
+
+Uses McpClient to handle the payment flow automatically—no manual
+challenge parsing or credential creation needed.
+
+Usage:
+    # Terminal 1: Start the server
+    python server_decorator.py
+
+    # Terminal 2: Run the client
+    python client.py
+
+Environment:
+    TEMPO_PRIVATE_KEY: Private key for signing payment transactions (required)
+    MCP_SERVER_URL: Server SSE endpoint (default: http://127.0.0.1:8000/sse)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+
+from mpp.extensions.mcp import McpClient
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
+
+SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
+
+
+async def run_client() -> None:
+    """Run the MCP client demonstration."""
+    print(f"Connecting to MCP server at {SERVER_URL}")
+    print("=" * 60)
+
+    private_key = os.environ.get("TEMPO_PRIVATE_KEY")
+    if not private_key:
+        print("Error: TEMPO_PRIVATE_KEY environment variable is required")
+        sys.exit(1)
+
+    account = TempoAccount.from_key(private_key)
+    method = tempo.charge(account=account)
+
+    print(f"Client address: {account.address}")
+    print()
+
+    async with sse_client(SERVER_URL) as streams:
+        async with ClientSession(streams[0], streams[1]) as session:
+            await session.initialize()
+
+            # Wrap the session with automatic payment handling
+            client = McpClient(session, methods=[method])
+
+            tools = await client.list_tools()
+            print("Available tools:")
+            for tool in tools.tools:
+                print(f"  - {tool.name}: {tool.description}")
+            print()
+
+            # 1. Free tool — works without payment
+            print("1. Calling free tool (echo)...")
+            result = await client.call_tool("echo", {"message": "Hello, world!"})
+            print(f"   Result: {result.content[0].text}")
+            print()
+
+            # 2. Paid tool — McpClient handles payment automatically
+            print("2. Calling paid tool (premium_echo)...")
+            result = await client.call_tool("premium_echo", {"message": "Hello, premium!"})
+            print(f"   Result: {result.content[0].text}")
+            if result.receipt:
+                print(f"   Receipt: {result.receipt.status}, ref={result.receipt.reference}")
+            print()
+
+
+def main() -> None:
+    """Run the client."""
+    asyncio.run(run_client())
+
+
+if __name__ == "__main__":
+    main()
