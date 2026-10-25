@@ -35,7 +35,9 @@ MAX_AUTHORIZATION_SIZE = 64 * 1024
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
 _AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
-_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
+# Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
+# colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
+_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
 
 
 class ParseError(Exception):
@@ -142,7 +144,7 @@ def _unescape_quoted(s: str) -> str:
 
 
 def _validate_payment_method_id(method: str) -> None:
-    """Validate payment-method-id = 1*LOWERALPHA."""
+    """Validate a payment method id against the grammar mppx accepts."""
     if not _PAYMENT_METHOD_ID_RE.fullmatch(method):
         raise ParseError(f"Invalid payment method id: {method!r}")
 
