@@ -631,6 +631,56 @@ def _funding_currency(raw_tx: str, request: ChargeRequest) -> str | None:
     return request.currency
 
 
+def _rpc_transaction_calls(transaction: dict[str, Any]) -> list[tuple[str, int, str]] | None:
+    """Normalize an RPC transaction's calls, or ``None`` if they are malformed.
+
+    Tempo transactions list their batched ``calls``; any other transaction is
+    treated as its single ``to``/``input`` call.
+    """
+    raw_calls = transaction.get("calls")
+    if raw_calls is None:
+        to = transaction.get("to")
+        raw_calls = (
+            [{"to": to, "value": transaction.get("value"), "input": transaction.get("input")}]
+            if to
+            else []
+        )
+    if not isinstance(raw_calls, list):
+        return None
+    calls: list[tuple[str, int, str]] = []
+    for call in raw_calls:
+        if not isinstance(call, dict):
+            return None
+        to = call.get("to")
+        data = call.get("input", call.get("data"))
+        value = call.get("value") or "0x0"
+        if not isinstance(to, str) or not isinstance(data, str):
+            return None
+        try:
+            value_int = int(value, 16) if isinstance(value, str) else int(value)
+        except (TypeError, ValueError):
+            return None
+        calls.append((to.lower(), value_int, _strip_0x(data)))
+    return calls
+
+
+def _calls_funding_currency(
+    calls: list[tuple[str, int, str]], request: ChargeRequest
+) -> str | None:
+    """Return the token a recognized payment route debits, or ``None``.
+
+    Unrecognized calls leave the funding currency unknown; they do not
+    invalidate a payment already verified from its receipt logs.
+    """
+    try:
+        _validate_normalized_calls(calls, request)
+    except Exception:
+        return None
+    if calls[0][2][:8].lower() == APPROVE_SELECTOR:
+        return calls[0][0]
+    return request.currency
+
+
 def _validate_normalized_calls(
     calls: list[tuple[str, int, str]], request: ChargeRequest
 ) -> list[MatchedTransferLog]:
@@ -973,7 +1023,7 @@ class ChargeIntent:
         if isinstance(payload, HashCredentialPayload):
             store_key = await self._reserve_hash(payload.hash)
             try:
-                return await self._validate_hash(
+                receipt, sender = await self._validate_hash_and_sender(
                     payload,
                     req,
                     challenge_id=credential.challenge.id,
@@ -984,6 +1034,13 @@ class ChargeIntent:
                 if store_key is not None and self._store is not None:
                     await self._store.delete(store_key)
                 raise
+            # Only final hash receipts need this lookup; validation stays receipt-only.
+            if sender is None:
+                return receipt
+            funding_currency = await self._hash_funding_currency(payload.hash, sender, req)
+            if funding_currency is None:
+                return receipt
+            return replace(receipt, funding_currency=funding_currency)
         receipt = await self._broadcast_transaction(
             payload,
             req,
@@ -1008,6 +1065,33 @@ class ChargeIntent:
         non-mutating pre-check and :meth:`broadcast` for settlement.
         """
         return await self.broadcast(credential, request)
+
+    async def _hash_funding_currency(
+        self, tx_hash: str, sender: str, request: ChargeRequest
+    ) -> str | None:
+        """Return the token ``sender`` spent on transaction ``tx_hash``'s payment route.
+
+        Lookup failures, another signer and unrecognized routes leave the
+        already verified payment without a funding currency.
+        """
+        try:
+            transaction = await _rpc_call(
+                self._get_rpc_url(),
+                "eth_getTransactionByHash",
+                [tx_hash],
+                client=await self._get_client(),
+            )
+        except Exception:
+            return None
+        if not isinstance(transaction, dict):
+            return None
+        from_addr = transaction.get("from")
+        if not isinstance(from_addr, str) or from_addr.lower() != sender.lower():
+            return None
+        calls = _rpc_transaction_calls(transaction)
+        if not calls:
+            return None
+        return _calls_funding_currency(calls, request)
 
     async def _reserve_hash(self, tx_hash: str) -> str | None:
         if self._store is None:
@@ -1101,6 +1185,24 @@ class ChargeIntent:
         The receipt's ``payer`` is the account the matched transfers debited,
         or ``None`` if they came from different senders.
         """
+        receipt, _ = await self._validate_hash_and_sender(
+            payload, request, challenge_id=challenge_id, realm=realm, source=source
+        )
+        return receipt
+
+    async def _validate_hash_and_sender(
+        self,
+        payload: HashCredentialPayload,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+        source: str | None = None,
+    ) -> tuple[Receipt, str | None]:
+        """Validate a transaction hash and return its receipt and expected sender.
+
+        The expected sender is the credential source's address, or else the
+        transaction receipt's ``from``, as in mppx.
+        """
         source_address = self._parse_hash_credential_source(source, request.methodDetails.chainId)
 
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
@@ -1118,7 +1220,9 @@ class ChargeIntent:
 
         senders = {matched_log.sender for matched_log in matched_logs}
         payer = senders.pop() if len(senders) == 1 else None
-        return replace(Receipt.success(payload.hash), payer=payer)
+        receipt_from = receipt_data.get("from")
+        sender = source_address or (receipt_from if isinstance(receipt_from, str) else None)
+        return replace(Receipt.success(payload.hash), payer=payer), sender
 
     def _assert_challenge_bound_memo(
         self,
