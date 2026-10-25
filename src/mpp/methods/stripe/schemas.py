@@ -31,4 +31,6 @@ class ChargeRequest(BaseModel):
 class StripeCredentialPayload(BaseModel):
     """Credential payload for Stripe SPT-based payments."""
 
+    externalId: str | None = None
+    """Echo of the challenge request's ``externalId``, required when it has one."""
     spt: str

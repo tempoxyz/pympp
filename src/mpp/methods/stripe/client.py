@@ -186,10 +186,12 @@ class StripeMethod:
             )
         )
 
-        return Credential(
-            challenge=challenge.to_echo(),
-            payload={"spt": spt},
-        )
+        # A request-bound externalId is echoed and takes precedence, as in mppx.
+        payload_external_id = external_id if external_id is not None else self.external_id
+        payload: dict[str, Any] = {"spt": spt}
+        if payload_external_id is not None:
+            payload["externalId"] = payload_external_id
+        return Credential(challenge=challenge.to_echo(), payload=payload)
 
 
 def _parse_iso_timestamp(iso_str: str) -> float:
@@ -228,7 +230,9 @@ def spt(
         payment_method: Default Stripe payment method ID (e.g. ``"pm_card_visa"``).
         external_id: Optional authenticated external reference ID.
             Included in the challenge request as ``externalId`` so token grant
-            code can forward it to Stripe seller scoping.
+            code can forward it to Stripe seller scoping. Clients echo the
+            challenge's ``externalId`` in the credential payload, falling back
+            to this value when the challenge has none.
         currency: Default ISO currency code (e.g. ``"usd"``).
         decimals: Decimal places for the currency (default: 2 for USD cents).
         recipient: Optional default recipient.
