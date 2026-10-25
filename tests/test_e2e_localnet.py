@@ -1,0 +1,418 @@
+"""End-to-end payments over real HTTP against a Tempo localnet (0.15 API).
+
+A Starlette app protected with `@server.pay` runs on uvicorn, and
+`mpp.client.Client` pays it. Every payment settles on chain: pull (signed
+transaction), push (transaction hash), fee-sponsored, splits, a zero-amount
+charge, a two-currency offer paid by a pinned client, requires_auth with
+Payment-Authorization, replay rejection, and replay rejection across two
+servers sharing one Redis store.
+
+These tests pin behaviour that the engine refactor must preserve; port them to
+the new API rather than deleting them.
+
+Run with TEMPO_RPC_URL=http://localhost:8545 and REDIS_URL=redis://localhost:6379:
+    uv run pytest tests/test_e2e_localnet.py -m "integration or redis" -v
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import uuid
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
+
+import httpx
+import pytest
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
+from mpp import Challenge, Credential, Receipt
+from mpp.client import Client
+from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.methods.tempo._attribution import encode as encode_attribution
+from mpp.server import Mpp
+from mpp.store import Store
+from tests import INTEGRATION
+from tests.conftest import _fund_account, _tip20_balance
+from tests.test_tempo_integration import _send_transfer
+
+pytestmark = [pytest.mark.integration, INTEGRATION]
+
+REDIS_URL = os.environ.get("REDIS_URL")
+SECRET_KEY = "e2e-localnet-secret-key"
+REALM = "e2e.test"
+# A second localnet TIP-20 token (AlphaUSD); tempo_fundAddress funds it too.
+ALPHA_USD = "0x20c0000000000000000000000000000000000001"
+
+Decorator = Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]
+
+
+def _new_account(rpc_url: str, currency: str) -> TempoAccount:
+    account = TempoAccount.from_key("0x" + os.urandom(32).hex())
+    _fund_account(rpc_url, account.address, currency)
+    return account
+
+
+def _balance(rpc_url: str, token: str, address: str) -> int:
+    with httpx.Client(timeout=30) as client:
+        return _tip20_balance(rpc_url, token, address, client)
+
+
+@contextlib.asynccontextmanager
+async def _serve(routes: dict[str, Decorator]) -> AsyncIterator[str]:
+    """Serve one paid route per payment decorator with uvicorn; yield the base URL.
+
+    Paid responses carry the Payment-Receipt header and echo the request's
+    credential headers, since the client retries inside its transport.
+    """
+
+    def endpoint(decorate: Decorator) -> Callable[..., Awaitable[Any]]:
+        @decorate
+        async def paid(request: Request, credential: Credential, receipt: Receipt) -> Any:
+            return JSONResponse(
+                {
+                    "authorization": request.headers.get("authorization"),
+                    "payer": credential.source,
+                    "payment_authorization": request.headers.get("payment-authorization"),
+                    "reference": receipt.reference,
+                },
+                headers={"Payment-Receipt": receipt.to_payment_receipt()},
+            )
+
+        return paid
+
+    app = Starlette(routes=[Route(path, endpoint(decorate)) for path, decorate in routes.items()])
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
+    server = uvicorn.Server(config)
+    task = asyncio.create_task(server.serve())
+    try:
+        for _ in range(500):
+            if server.started:
+                break
+            if task.done():
+                task.result()
+            await asyncio.sleep(0.01)
+        else:
+            raise RuntimeError("uvicorn did not start")
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        await task
+
+
+def _server(
+    rpc_url: str,
+    chain_id: int,
+    recipient: str,
+    currencies: list[str],
+    *,
+    fee_payer: TempoAccount | None = None,
+    requires_auth: bool = False,
+    store: Store | None = None,
+) -> Mpp:
+    return Mpp.create(
+        method=tempo(
+            intents={"charge": ChargeIntent(rpc_url=rpc_url)},
+            recipient=recipient,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
+            currencies=currencies,
+            fee_payer=fee_payer,
+        ),
+        realm=REALM,
+        secret_key=SECRET_KEY,
+        store=store,
+        requires_auth=requires_auth,
+    )
+
+
+def _client(account: TempoAccount, rpc_url: str, **options: Any) -> Client:
+    method = tempo(account=account, rpc_url=rpc_url, intents={"charge": ChargeIntent()}, **options)
+    return Client(methods=[method])
+
+
+def _receipt(response: httpx.Response) -> Receipt:
+    assert response.status_code == 200, response.text
+    receipt = Receipt.from_payment_receipt(response.headers["Payment-Receipt"])
+    assert receipt.status == "success"
+    assert receipt.method == "tempo"
+    assert receipt.reference == response.json()["reference"]
+    return receipt
+
+
+async def _push(
+    http: httpx.AsyncClient,
+    url: str,
+    rpc_url: str,
+    chain_id: int,
+    currency: str,
+    payer: TempoAccount,
+    recipient: str,
+) -> tuple[dict[str, str], str]:
+    """Pay the route's challenge by broadcasting a transfer; return the hash credential."""
+    unpaid = await http.get(url)
+    assert unpaid.status_code == 402
+    challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+    memo = encode_attribution(challenge_id=challenge.id, server_id=challenge.realm)
+    tx_hash = await _send_transfer(
+        rpc_url, payer, currency, recipient, int(challenge.request["amount"]), memo=memo
+    )
+    credential = Credential(
+        challenge=challenge.to_echo(),
+        payload={"type": "hash", "hash": tx_hash},
+        source=f"did:pkh:eip155:{chain_id}:{payer.address}",
+    )
+    return {"Authorization": credential.to_authorization()}, tx_hash
+
+
+def _refused(response: httpx.Response) -> None:
+    """A spent credential is refused with 403 and no receipt."""
+    assert response.status_code == 403, response.text
+    assert "Payment-Receipt" not in response.headers
+
+
+class TestE2ECharge:
+    async def test_pull_charge_settles_and_replay_is_refused(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        async with _serve({"/paid": server.pay(amount="0.25")}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            assert unpaid.status_code == 402
+            challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+            assert challenge.realm == REALM
+            assert challenge.request["amount"] == "250000"
+            assert challenge.request["currency"] == currency
+            assert challenge.request["methodDetails"]["chainId"] == chain_id
+
+            before = _balance(rpc_url, currency, funded_recipient.address)
+            async with _client(funded_payer, rpc_url) as client:
+                response = await client.get(f"{url}/paid")
+            _receipt(response)
+            assert response.json()["payer"].endswith(funded_payer.address)
+            assert response.json()["authorization"].startswith("Payment ")
+            assert _balance(rpc_url, currency, funded_recipient.address) == before + 250_000
+
+            # The credential the client sent is spent: replaying it is refused.
+            headers = {"Authorization": response.json()["authorization"]}
+            async with httpx.AsyncClient(timeout=30) as http:
+                _refused(await http.get(f"{url}/paid", headers=headers))
+            assert _balance(rpc_url, currency, funded_recipient.address) == before + 250_000
+
+    async def test_push_hash_credential_settles_once(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        async with _serve({"/paid": server.pay(amount="0.1")}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                before = _balance(rpc_url, currency, funded_recipient.address)
+                headers, tx_hash = await _push(
+                    http,
+                    f"{url}/paid",
+                    rpc_url,
+                    chain_id,
+                    currency,
+                    funded_payer,
+                    funded_recipient.address,
+                )
+                assert _balance(rpc_url, currency, funded_recipient.address) == before + 100_000
+                paid = await http.get(f"{url}/paid", headers=headers)
+                assert _receipt(paid).reference == tx_hash
+                _refused(await http.get(f"{url}/paid", headers=headers))
+
+    async def test_fee_sponsored_charge(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        sponsor = _new_account(rpc_url, currency)
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency], fee_payer=sponsor)
+        async with _serve({"/paid": server.pay(amount="0.5", fee_payer=True)}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+            assert challenge.request["methodDetails"]["feePayer"] is True
+
+            payer_before = _balance(rpc_url, currency, funded_payer.address)
+            recipient_before = _balance(rpc_url, currency, funded_recipient.address)
+            sponsor_before = _balance(rpc_url, currency, sponsor.address)
+            async with _client(funded_payer, rpc_url) as client:
+                _receipt(await client.get(f"{url}/paid"))
+
+        # The payer pays exactly the amount; the sponsor pays the gas.
+        assert _balance(rpc_url, currency, funded_payer.address) == payer_before - 500_000
+        assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 500_000
+        assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
+
+    async def test_split_charge_pays_every_recipient(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        partner = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        splits = [{"amount": "150000", "recipient": partner.address}]
+        async with _serve({"/paid": server.pay(amount="1", splits=splits)}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+            assert challenge.request["amount"] == "1000000"
+            assert challenge.request["methodDetails"]["splits"] == splits
+
+            recipient_before = _balance(rpc_url, currency, funded_recipient.address)
+            async with _client(funded_payer, rpc_url) as client:
+                _receipt(await client.get(f"{url}/paid"))
+
+        assert _balance(rpc_url, currency, partner.address) == 150_000
+        assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 850_000
+
+    async def test_zero_amount_charge_needs_a_trusted_realm(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        async with _serve({"/paid": server.pay(amount="0")}) as url:
+            # The realm differs from the request host, so an unpinned client refuses.
+            async with _client(funded_payer, rpc_url) as client:
+                with pytest.raises(Exception, match="trusted_tempo_realms"):
+                    await client.get(f"{url}/paid")
+
+            recipient_before = _balance(rpc_url, currency, funded_recipient.address)
+            payer_before = _balance(rpc_url, currency, funded_payer.address)
+            method = tempo(
+                account=funded_payer, rpc_url=rpc_url, intents={"charge": ChargeIntent()}
+            )
+            async with Client(methods=[method], trusted_tempo_realms={url: REALM}) as client:
+                response = await client.get(f"{url}/paid")
+            _receipt(response)
+            assert response.json()["payer"].endswith(funded_payer.address)
+        assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before
+        assert _balance(rpc_url, currency, funded_payer.address) <= payer_before
+
+    async def test_two_currency_offer_paid_by_a_pinned_client(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [ALPHA_USD, currency])
+        handler = server.compose(
+            ("tempo/charge", {"amount": "0.2", "currency": ALPHA_USD}),
+            ("tempo/charge", {"amount": "0.3", "currency": currency}),
+        )
+        async with _serve({"/paid": handler}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            assert unpaid.status_code == 402
+            offers = [
+                Challenge.from_www_authenticate(value)
+                for value in unpaid.headers.get_list("WWW-Authenticate")
+            ]
+            assert [(o.request["currency"], o.request["amount"]) for o in offers] == [
+                (ALPHA_USD, "200000"),
+                (currency, "300000"),
+            ]
+
+            alpha_before = _balance(rpc_url, ALPHA_USD, funded_recipient.address)
+            before = _balance(rpc_url, currency, funded_recipient.address)
+            # A client pinned to the second currency skips the first offer.
+            async with _client(funded_payer, rpc_url, currencies=[currency]) as client:
+                _receipt(await client.get(f"{url}/paid"))
+            assert _balance(rpc_url, currency, funded_recipient.address) == before + 300_000
+            assert _balance(rpc_url, ALPHA_USD, funded_recipient.address) == alpha_before
+
+            # An unpinned client takes the first offer.
+            async with _client(funded_payer, rpc_url) as client:
+                _receipt(await client.get(f"{url}/paid"))
+            assert _balance(rpc_url, ALPHA_USD, funded_recipient.address) == alpha_before + 200_000
+
+    async def test_multi_currency_method_offers_every_currency_in_order(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency, ALPHA_USD])
+        async with _serve({"/paid": server.pay(amount="0.01")}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            offers = [
+                Challenge.from_www_authenticate(value)
+                for value in unpaid.headers.get_list("WWW-Authenticate")
+            ]
+            assert [o.request["currency"] for o in offers] == [currency, ALPHA_USD]
+            alpha_before = _balance(rpc_url, ALPHA_USD, funded_recipient.address)
+            async with _client(funded_payer, rpc_url, currencies=[ALPHA_USD]) as client:
+                _receipt(await client.get(f"{url}/paid"))
+            assert _balance(rpc_url, ALPHA_USD, funded_recipient.address) == alpha_before + 10_000
+
+    async def test_requires_auth_reads_payment_authorization(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(
+            rpc_url, chain_id, funded_recipient.address, [currency], requires_auth=True
+        )
+        async with _serve({"/paid": server.pay(amount="0.05")}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+            assert challenge.credential_header == "Payment-Authorization"
+
+            before = _balance(rpc_url, currency, funded_recipient.address)
+            async with _client(funded_payer, rpc_url) as client:
+                response = await client.get(
+                    f"{url}/paid", headers={"Authorization": "Bearer app-token"}
+                )
+            _receipt(response)
+            # The server sees the application token untouched beside the credential.
+            assert response.json()["authorization"] == "Bearer app-token"
+            assert response.json()["payment_authorization"].startswith("Payment ")
+            assert _balance(rpc_url, currency, funded_recipient.address) == before + 50_000
+
+            # The credential in Authorization is not read when requires_auth is set.
+            spent = {"Authorization": response.json()["payment_authorization"]}
+            async with httpx.AsyncClient(timeout=30) as http:
+                assert (await http.get(f"{url}/paid", headers=spent)).status_code == 402
+
+
+@pytest.mark.redis
+@pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL not set (no Redis instance)")
+async def test_shared_redis_store_refuses_replay_across_servers(
+    rpc_url, chain_id, currency, funded_payer, funded_recipient
+):
+    from redis.asyncio import from_url
+
+    from mpp.stores import RedisStore
+
+    assert REDIS_URL is not None
+    redis = from_url(REDIS_URL)
+    prefix = f"test:e2e:{uuid.uuid4().hex[:8]}:"
+
+    def make_server() -> Mpp:
+        store = RedisStore(redis, key_prefix=prefix)
+        return _server(rpc_url, chain_id, funded_recipient.address, [currency], store=store)
+
+    first, second = make_server(), make_server()
+    try:
+        async with (
+            _serve({"/paid": first.pay(amount="0.07")}) as first_url,
+            _serve({"/paid": second.pay(amount="0.07")}) as second_url,
+            httpx.AsyncClient(timeout=30) as http,
+        ):
+            # The first server issues the challenge; the second, sharing its key,
+            # realm and store, accepts the credential once.
+            headers, tx_hash = await _push(
+                http,
+                f"{first_url}/paid",
+                rpc_url,
+                chain_id,
+                currency,
+                funded_payer,
+                funded_recipient.address,
+            )
+            paid = await http.get(f"{second_url}/paid", headers=headers)
+            assert _receipt(paid).reference == tx_hash
+            _refused(await http.get(f"{first_url}/paid", headers=headers))
+            _refused(await http.get(f"{second_url}/paid", headers=headers))
+            assert await redis.keys(f"{prefix}*")
+    finally:
+        keys = await redis.keys(f"{prefix}*")
+        if keys:
+            await redis.delete(*keys)
+        await redis.aclose()
