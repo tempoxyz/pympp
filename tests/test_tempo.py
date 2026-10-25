@@ -7958,3 +7958,21 @@ async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
             secret_key="test-secret-key",
             method="tempo",
         )
+
+
+async def test_mcp_verify_or_challenge_rejects_fixed_attribution():
+    pytest.importorskip("mcp")
+    from mpp.extensions.mcp import verify_or_challenge
+    from mpp.server import Mpp
+
+    server = Mpp(
+        methods=tempo_server.charge(recipient="0x" + "11" * 20),
+        realm="api.example.com",
+        secret_key="test-secret-key",
+    )
+    request = _fixed_attribution_request()
+    with pytest.raises(ValueError, match="Fixed split memos"):
+        await verify_or_challenge(
+            server.charge(amount="1.00", splits=request["methodDetails"]["splits"]),
+            tool="paid-tool",
+        )

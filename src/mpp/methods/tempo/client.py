@@ -843,12 +843,12 @@ def charge(
     challenges during selection and rejects them before signing.
 
     Example:
-        from mpp.client import Client
+        from mpp.client import Mpp
         from mpp.methods.tempo import TempoAccount
         from mpp.methods.tempo import client as tempo
 
         account = TempoAccount.from_key("0x...")
-        async with Client(methods=[tempo.charge(account=account)]) as client:
+        async with Mpp(methods=[tempo.charge(account=account)]) as client:
             response = await client.get("https://api.example.com/resource")
     """
     return _client_method(

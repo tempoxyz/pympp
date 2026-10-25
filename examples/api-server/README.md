@@ -10,7 +10,7 @@ A FastAPI server with payment-protected endpoints using the Machine Payments Pro
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 ## Installation
@@ -22,11 +22,12 @@ uv sync
 
 ## Configuration
 
-Set environment variables (optional - defaults are provided):
+Set the secret that signs challenges, and optionally the recipient and a fee payer:
 
 ```bash
-export TEMPO_RPC_URL="https://rpc.testnet.tempo.xyz/"
+export MPP_SECRET_KEY="$(openssl rand -hex 32)"
 export PAYMENT_DESTINATION="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+export FEE_PAYER_KEY="0x..."  # optional: sponsor clients' gas
 ```
 
 ## Running
@@ -46,10 +47,10 @@ curl http://localhost:8000/free
 # {"message":"This content is free!"}
 ```
 
-**Paid endpoint** (use the pympp client to handle payment automatically):
+**Paid endpoint** (use the [fetch example](../fetch/) to pay automatically):
 
 ```bash
-python -m mpp.fetch http://localhost:8000/paid
+python ../fetch/fetch.py --key 0x... --rpc-url https://rpc.moderato.tempo.xyz http://localhost:8000/paid
 # {"message":"This is paid content!","payer":"0x...","tx":"0x..."}
 ```
 

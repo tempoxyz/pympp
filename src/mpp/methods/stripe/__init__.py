@@ -2,7 +2,7 @@
 
 Example:
     # Client-side
-    from mpp.client import Client
+    from mpp.client import Mpp
     from mpp.methods.stripe import client as stripe
 
     async def create_spt(params):

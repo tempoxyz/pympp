@@ -251,6 +251,23 @@ class TestConfiguration:
         store = MemoryStore()
         assert charge_intent(server_method(store=store))._store is store
 
+    def test_mpp_wires_its_store(self) -> None:
+        store = MemoryStore()
+        method = server_method()
+        Mpp(methods=method, realm=REALM, secret_key="k", store=store)
+        assert charge_intent(method)._store is store
+
+    def test_mpp_store_does_not_replace_its_own(self) -> None:
+        own = MemoryStore()
+        method = server_method(store=own)
+        Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        assert charge_intent(method)._store is own
+
+    def test_without_a_store_claims_stay_in_process(self) -> None:
+        method = server_method()
+        Mpp(methods=method, realm=REALM, secret_key="k")
+        assert charge_intent(method)._store is None
+
 
 class TestRequestShape:
     def test_matches_mppx_evm_charge_requests(self) -> None:
@@ -752,6 +769,10 @@ class TestClient:
             request=req,
             expires=expires,
         )
+
+    def test_requires_an_account(self) -> None:
+        with pytest.raises(ValueError, match="No account"):
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=None)  # type: ignore[arg-type]
 
     async def test_signs_a_credential_the_server_accepts(self) -> None:
         challenge = self.challenge()

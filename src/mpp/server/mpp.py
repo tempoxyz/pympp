@@ -528,6 +528,8 @@ def _expected_request(
     if method.resolve_request is not None:
         resolved = method.resolve_request(RequestContext(request=input, credential=parsed))
         if inspect.isawaitable(resolved):
+            if inspect.iscoroutine(resolved):
+                resolved.close()
             raise TypeError("validate_credential(request=...) needs a synchronous resolve_request")
         input = resolved
     wire = method.method.normalize_request(input)

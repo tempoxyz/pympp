@@ -17,6 +17,7 @@ Usage:
 
 Environment:
     TEMPO_PRIVATE_KEY: Private key for signing payment transactions (required)
+    TEMPO_RPC_URL: Tempo RPC endpoint (default: https://rpc.moderato.tempo.xyz)
     MCP_SERVER_URL: Server SSE endpoint (default: http://127.0.0.1:8000/sse)
 """
 
@@ -32,8 +33,10 @@ from mcp.client.sse import sse_client
 from mpp.extensions.mcp import McpClient
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo
+from mpp.methods.tempo._defaults import TESTNET_CHAIN_ID, TESTNET_RPC_URL
 
 SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8000/sse")
+RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 
 
 async def run_client() -> None:
@@ -47,7 +50,8 @@ async def run_client() -> None:
         sys.exit(1)
 
     account = TempoAccount.from_key(private_key)
-    method = tempo.charge(account=account)
+    # Pay on the same chain the server charges on (Moderato testnet).
+    method = tempo.charge(account=account, chain_id=TESTNET_CHAIN_ID, rpc_url=RPC_URL)
 
     print(f"Client address: {account.address}")
     print()
