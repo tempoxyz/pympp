@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import PaymentExpiredError
@@ -142,18 +142,6 @@ class TempoMethod:
                 if not isinstance(chain_id, int) or isinstance(chain_id, bool):
                     raise ValueError(f"Invalid Tempo chain ID: {chain_id!r}")
 
-    def transform_request(
-        self, request: dict[str, Any], credential: Credential | None
-    ) -> dict[str, Any]:
-        """Validate fixed split memos before a server advertises a charge."""
-        from mpp.methods.tempo.schemas import Split
-
-        details = request.get("methodDetails")
-        if isinstance(details, dict):
-            for split in details.get("splits") or ():
-                Split.model_validate(split)
-        return request
-
     def _amount_caps(self) -> tuple[int | None, int | None]:
         """Return ``(max_atomic_amount, max_amount)`` in base units from the current fields."""
         max_atomic = (
@@ -247,7 +235,7 @@ class TempoMethod:
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
     def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
-        """Reject a challenge whose chain, recipients or amount violate the client policy.
+        """Reject a challenge whose chain, recipients, amount or split memos violate the policy.
 
         Runs during challenge selection and again before signing.
         """
@@ -266,6 +254,9 @@ class TempoMethod:
         )
         self._check_expected_recipients(request)
         self._check_amount_caps(request)
+        from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
+
+        reject_fixed_attribution_memos(request)
 
     def _check_allowed_chain_id(self, chain_id: int | None) -> None:
         """Reject a payment chain outside ``allowed_chain_ids``.

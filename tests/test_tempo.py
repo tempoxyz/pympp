@@ -995,6 +995,8 @@ class TestExpiringNonce:
             with pytest.raises(ValueError, match="Fixed split memos"):
                 await method.create_credential(challenge)
         rpc.assert_not_awaited()
+        # Selection skips the offer so another offered challenge can be paid.
+        assert method.can_handle_challenge(challenge) is False
 
     @pytest.mark.asyncio
     async def test_verify_broadcasts_canonical_recovery_id(self) -> None:
@@ -6969,10 +6971,18 @@ class TestSplitLogMemoStrictness:
     def test_fixed_memo_split_cannot_also_pay_single_transfer_challenge(self, reverse):
         memo_a = encode_attribution(challenge_id="challenge-a", server_id="api.example.com")
         memo_b = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
-        request_a = self._split_request()
-        assert request_a.methodDetails.splits is not None
-        # Model an outstanding request issued before fixed attribution was rejected.
-        request_a.methodDetails.splits[0].memo = memo_b
+        # An outstanding request issued before fixed attribution was rejected
+        # still parses, so verification reaches the memo binding check.
+        request_a = ChargeRequest.model_validate(
+            {
+                **self._split_request().model_dump(exclude_none=True),
+                "methodDetails": {
+                    "splits": [
+                        {"amount": "300000", "recipient": self.SPLIT_RECIPIENT, "memo": memo_b}
+                    ]
+                },
+            }
+        )
         logs = [
             self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.RECIPIENT, 700000, memo_a),
             self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, memo_b),
@@ -7917,4 +7927,44 @@ async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeyp
                     "memo": memo,
                 }
             ],
+        )
+
+
+def _fixed_attribution_request() -> dict:
+    memo = encode_attribution(challenge_id="other", server_id="api.example.com")
+    return {
+        "amount": "1000000",
+        "currency": "0x20c0000000000000000000000000000000000000",
+        "recipient": "0x" + "11" * 20,
+        "methodDetails": {
+            "splits": [{"amount": "300000", "recipient": "0x" + "22" * 20, "memo": memo}]
+        },
+    }
+
+
+async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
+    from mpp.server import verify_or_challenge
+
+    with pytest.raises(ValueError, match="Fixed split memos"):
+        await verify_or_challenge(
+            authorization=None,
+            intent=ChargeIntent(),
+            request=_fixed_attribution_request(),
+            realm="api.example.com",
+            secret_key="test-secret-key",
+            method="tempo",
+        )
+
+
+def test_mcp_create_challenge_rejects_fixed_attribution():
+    from mpp.extensions.mcp import create_challenge
+
+    with pytest.raises(ValueError, match="Fixed split memos"):
+        create_challenge(
+            method="tempo",
+            intent_name="charge",
+            request=_fixed_attribution_request(),
+            realm="api.example.com",
+            secret_key="test-secret-key",
+            tool="paid-tool",
         )

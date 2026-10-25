@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class Split(BaseModel):
@@ -14,20 +15,40 @@ class Split(BaseModel):
     recipient: str
     memo: str | None = None
 
-    @field_validator("memo")
-    @classmethod
-    def reject_attribution_memo(cls, memo: str | None) -> str | None:
-        """Fixed memos cannot also identify another payable challenge."""
-        from mpp.methods.tempo._attribution import is_mpp_memo
 
-        if memo is not None:
-            try:
-                raw = bytes.fromhex(memo.removeprefix("0x"))
-            except ValueError:
-                return memo  # Existing calldata validation reports malformed hex.
-            if is_mpp_memo("0x" + raw.hex()):
-                raise ValueError("Fixed split memos must not use MPP attribution; omit the memo")
-        return memo
+FIXED_ATTRIBUTION_MEMO_ERROR = "Fixed split memos must not use MPP attribution; omit the memo"
+
+
+def is_fixed_attribution_memo(memo: object) -> bool:
+    """Return whether a fixed split ``memo`` uses the MPP attribution format."""
+    from mpp.methods.tempo._attribution import is_mpp_memo
+
+    if not isinstance(memo, str):
+        return False
+    try:
+        raw = bytes.fromhex(memo.removeprefix("0x"))
+    except ValueError:
+        return False  # Calldata encoding reports malformed hex.
+    return is_mpp_memo("0x" + raw.hex())
+
+
+def reject_fixed_attribution_memos(request: Mapping[str, Any]) -> None:
+    """Refuse a charge request whose fixed split memos use MPP attribution.
+
+    Such a split transfer could also pay the challenge its memo names. Checked
+    before a server issues a challenge and before a client pays one. Parsing
+    stays permissive, so credentials for outstanding challenges fail
+    verification with ``CredentialReplayedError``.
+    """
+    details = request.get("methodDetails")
+    if not isinstance(details, Mapping):
+        return
+    splits = details.get("splits")
+    if not isinstance(splits, list):
+        return
+    for split in splits:
+        if isinstance(split, Mapping) and is_fixed_attribution_memo(split.get("memo")):
+            raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
 
 
 class MethodDetails(BaseModel):

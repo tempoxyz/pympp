@@ -422,6 +422,9 @@ def _create_challenge(
         expires = expires_dt.isoformat().replace("+00:00", "Z")
 
     if method == "tempo" and intent_name == "charge":
+        from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
+
+        reject_fixed_attribution_memos(request)
         _assert_sponsored_challenge_lifetime(request, expires)
 
     digest = _body_digest.compute(body) if body is not None else None
