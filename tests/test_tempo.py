@@ -1476,6 +1476,101 @@ class TestChargeIntent:
         assert receipt.reference == "0xabc123"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("route", ["direct", "swap", "other_signer", "unrecognized", "missing"])
+    async def test_verify_hash_reports_funding_currency(self, route: str) -> None:
+        """Final hash receipts report the token the sender's payment route spent."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        realm = "api.example.com"
+        challenge_id = "challenge-123"
+        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
+        sender = "0x1234567890123456789012345678901234567890"
+        currency = "0x20c0000000000000000000000000000000000000"
+        token_in = "0x20c0000000000000000000000000000000000001"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        def word(value: str | int) -> str:
+            return (value[2:].lower() if isinstance(value, str) else hex(value)[2:]).zfill(64)
+
+        transfer = {
+            "to": currency,
+            "value": "0x0",
+            "input": f"0x{TRANSFER_WITH_MEMO_SELECTOR}{word(recipient)}{word(1000)}{memo[2:]}",
+        }
+        calls: list[dict[str, str]] = [transfer]
+        if route == "swap":
+            calls = [
+                {
+                    "to": token_in,
+                    "value": "0x0",
+                    "input": f"0x{APPROVE_SELECTOR}{word(STABLECOIN_DEX)}{word(2000)}",
+                },
+                {
+                    "to": STABLECOIN_DEX,
+                    "value": "0x0",
+                    "input": (
+                        f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
+                        f"{word(token_in)}{word(currency)}{word(1000)}{word(2000)}"
+                    ),
+                },
+                transfer,
+            ]
+        elif route == "unrecognized":
+            calls = [transfer, {"to": currency, "value": "0x0", "input": "0xdeadbeef"}]
+        transaction = {
+            "from": "0x" + "99" * 20 if route == "other_signer" else sender,
+            "calls": calls,
+        }
+        receipt_data = {
+            "status": "0x1",
+            "from": sender,
+            "logs": [
+                {
+                    "address": currency,
+                    "topics": [
+                        TRANSFER_WITH_MEMO_TOPIC,
+                        "0x" + word(sender),
+                        "0x" + word(recipient),
+                        memo,
+                    ],
+                    "data": amount_data(1000),
+                }
+            ],
+        }
+        methods: list[str] = []
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            methods.append(json["method"])
+            if json["method"] == "eth_chainId":
+                return mock_response(200, {"jsonrpc": "2.0", "result": hex(CHAIN_ID), "id": 1})
+            if json["method"] == "eth_getTransactionByHash":
+                if route == "missing":
+                    return mock_response(200, {"jsonrpc": "2.0", "error": {"code": -1}, "id": 1})
+                return mock_response(200, {"jsonrpc": "2.0", "result": transaction, "id": 1})
+            assert json["method"] == "eth_getTransactionReceipt"
+            return mock_response(200, {"jsonrpc": "2.0", "result": receipt_data, "id": 1})
+
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        credential = make_credential(
+            payload={"type": "hash", "hash": "0xabc123"},
+            challenge_id=challenge_id,
+            expires=future,
+            realm=realm,
+        )
+        request = {"amount": "1000", "currency": currency, "recipient": recipient}
+
+        await intent.validate(credential, request)
+        assert "eth_getTransactionByHash" not in methods
+
+        receipt = await intent.verify(credential, request)
+
+        expected = {"direct": currency, "swap": token_in}.get(route)
+        assert receipt.status == "success"
+        assert receipt.payer == sender
+        assert receipt.funding_currency == expected
+        assert methods[-1] == "eth_getTransactionByHash"
+
+    @pytest.mark.asyncio
     async def test_verify_hash_rejects_plain_transfer_without_challenge_bound_memo(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
