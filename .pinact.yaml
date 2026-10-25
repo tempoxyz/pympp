@@ -6,11 +6,11 @@ rules:
     conditions:
       - expr: |
           ActionName matches "tempoxyz/gh-actions/.*"
-  # tempoxyz/changelogs has no release tag with the `auto-merge` input yet.
-  # Allow this exact commit from tempoxyz/changelogs#188 before the 7-day
-  # cooldown; remove once it is tagged. The exception also skips
-  # version-comment verification.
+  # tempoxyz/changelogs v0.10.0 (tempoxyz/changelogs#188, the `auto-merge`
+  # input) is younger than the 7-day cooldown. Allow this exact commit;
+  # remove after 2026-11-01. The exception also skips version-comment
+  # verification.
   - ignore: true
     conditions:
       - expr: |
-          ActionName == "tempoxyz/changelogs" && ActionVersion == "b26936c80a7a2c5e79778d8d2659be178888beb6"
+          ActionName == "tempoxyz/changelogs" && ActionVersion == "7928d3260c48d9dbe72f9fa4d5fca968cbfa020d"
