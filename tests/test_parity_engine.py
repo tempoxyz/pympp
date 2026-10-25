@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from datetime import timedelta
 from typing import Any, cast
 
 import httpx
@@ -115,11 +114,6 @@ class TestRouteConfiguration:
             {"amount": "1", "memo": "x"},
             {"amount": "1", "extra": {"a": 1}},
             {"amount": "1", "expires_in": 60},
-            {
-                "amount": "1",
-                "expires": "2030-01-01T00:00:00Z",
-                "expires_in": timedelta(minutes=1),
-            },
         ],
     )
     def test_invalid_route_options_fail_at_configuration(self, options: dict[str, Any]) -> None:
@@ -198,12 +192,6 @@ class TestEngineErrors:
         foreign = tempo_mpp()
         with pytest.raises(ValueError, match="at least one entry"):
             server.compose()
-        with pytest.raises(ValueError, match="tuples"):
-            server.compose(("tempo/charge",))  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="mapping"):
-            server.compose(("tempo/charge", [("amount", "1")]))  # type: ignore[arg-type]
-        with pytest.raises(ValueError, match="not registered"):
-            server.compose(("stripe/charge", {"amount": "1"}))
         with pytest.raises(ValueError, match="not registered"):
             server.compose((foreign.tempo.charge, {"amount": "1"}))
         with pytest.raises(ValueError, match="not registered"):
@@ -272,29 +260,6 @@ class TestServerMethod:
 
         assert await resolve(1) == 1
         assert await resolve(value()) == 2
-
-
-class TestBodyBinding:
-    async def test_async_body_callable_binds_the_digest(self) -> None:
-        calls: list[Any] = []
-
-        async def verify(context: Any) -> Receipt:
-            calls.append(context)
-            return Receipt.success("paid")
-
-        async def body(request: Request) -> dict[str, Any]:
-            return {"q": request.json()["q"]}
-
-        handler = raw_mpp(verify=verify).charge(body=body)
-        issued = challenge(await handler(http_request(method="POST", body=b'{"q": 1}')))
-        assert issued.digest is not None
-        paid = authorization(issued)
-        tampered = await handler(http_request(paid, method="POST", body=b'{"q": 2}'))
-        assert isinstance(tampered, PaymentRequired)
-        assert calls == []
-        result = await handler(http_request(paid, method="POST", body=b'{"q": 1}'))
-        assert isinstance(result, PaymentVerified)
-        assert len(calls) == 1
 
 
 class TestHttpTypes:

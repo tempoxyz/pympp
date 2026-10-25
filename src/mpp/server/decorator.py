@@ -203,7 +203,9 @@ def to_framework_response(response: Response) -> Any:
         from starlette.responses import Response as StarletteResponse
     except ImportError:
         headers: dict[str, Any] = {}
-        for name, value in response.headers.multi_items():
+        encoding = response.headers.encoding
+        for raw_name, raw_value in response.headers.raw:
+            name, value = raw_name.decode(encoding), raw_value.decode(encoding)
             key = "WWW-Authenticate" if name.lower() == "www-authenticate" else name
             if key in headers:
                 previous = headers[key]
