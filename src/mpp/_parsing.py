@@ -311,6 +311,20 @@ def parse_authorization(header: str) -> Credential:
     except ValueError as error:
         raise ParseError(str(error)) from error
 
+    description = (
+        str(challenge_data["description"])
+        if challenge_data.get("description") is not None
+        else None
+    )
+    if description is not None:
+        # A retry can reflect this unsigned display field into WWW-Authenticate.
+        _escape_quoted(description)
+        if any(
+            (ord(character) < 0x20 and character != "\t") or ord(character) == 0x7F
+            for character in description
+        ):
+            raise ParseError("Header value contains invalid control characters")
+
     echo = ChallengeEcho(
         id=str(challenge_data["id"]),
         realm=str(challenge_data.get("realm", "")),
@@ -321,6 +335,7 @@ def parse_authorization(header: str) -> Credential:
         digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
         opaque=str(challenge_data["opaque"]) if challenge_data.get("opaque") else None,
         header=credential_header,
+        description=description,
     )
 
     return Credential(
@@ -356,6 +371,8 @@ def format_authorization(credential: Credential) -> str:
         challenge_dict["header"] = credential.challenge.header
     if credential.challenge.opaque is not None:
         challenge_dict["opaque"] = credential.challenge.opaque
+    if credential.challenge.description is not None:
+        challenge_dict["description"] = credential.challenge.description
 
     payload: dict[str, Any] = {
         "challenge": challenge_dict,
