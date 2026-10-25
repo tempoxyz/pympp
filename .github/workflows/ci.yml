@@ -332,8 +332,8 @@ jobs:
               recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
               facilitator="https://facilitator.example.com",
           )
-          server = Mpp.create(method=method, realm="api.example.com", secret_key="k")
-          assert server.method.name == "evm"
+          server = Mpp(methods=method, realm="api.example.com", secret_key="k")
+          assert [m.name for m in server.methods] == ["evm"]
 
           print("evm install smoke test passed")
           PY
