@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from mpp import Challenge, ChallengeEcho, Credential
 from mpp.errors import (
     CredentialReplayedError,
+    InvalidChallengeError,
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
@@ -172,8 +173,42 @@ class TestStripeMethod:
         )
         cred = await method.create_credential(challenge)
 
-        assert cred.payload["spt"] == "spt_test_abc"
-        assert "externalId" not in cred.payload
+        assert cred.payload == {"spt": "spt_test_abc", "externalId": "order-42"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("request_external_id", "fallback", "expected"),
+        [
+            (None, None, None),
+            (None, "fallback-7", "fallback-7"),
+            ("order-42", "fallback-7", "order-42"),
+        ],
+    )
+    async def test_create_credential_payload_external_id(
+        self, request_external_id: str | None, fallback: str | None, expected: str | None
+    ):
+        """The request externalId is echoed and takes precedence over the fallback."""
+
+        async def fake_create_token(params: OnChallengeParameters) -> str:
+            return "spt_test_abc"
+
+        method = spt(
+            create_token=fake_create_token,
+            payment_method="pm_card_visa",
+            external_id=fallback,
+            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+        )
+        request: dict[str, Any] = {
+            "amount": "150",
+            "currency": "usd",
+            "methodDetails": {"networkId": "bn_test", "paymentMethodTypes": ["card"]},
+        }
+        if request_external_id is not None:
+            request["externalId"] = request_external_id
+
+        cred = await method.create_credential(_make_challenge(request=request))
+
+        assert cred.payload.get("externalId") == expected
 
     @pytest.mark.asyncio
     async def test_create_credential_no_create_token_raises(self):
@@ -387,9 +422,13 @@ class TestStripeMethod:
 def _make_credential(
     spt: str = "spt_test_abc",
     expires: str | None = None,
+    external_id: str | None = None,
 ) -> Credential:
     if expires is None:
         expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    payload: dict[str, Any] = {"spt": spt}
+    if external_id is not None:
+        payload["externalId"] = external_id
     return Credential(
         challenge=ChallengeEcho(
             id="test-challenge-id",
@@ -399,7 +438,7 @@ def _make_credential(
             request="eyJ0ZXN0IjoidHJ1ZSJ9",
             expires=expires,
         ),
-        payload={"spt": spt},
+        payload=payload,
         source="stripe:test",
     )
 
@@ -515,45 +554,69 @@ class TestChargeIntent:
         assert intent._client is not None
         intent._client.payment_intents.create_async.assert_awaited_once()
 
+    # Scenarios from mpp-tools conformance/vectors/stripe-external-id-binding.json.
     @pytest.mark.asyncio
-    async def test_verify_with_external_id(self):
+    @pytest.mark.parametrize(
+        ("request_external_id", "payload_external_id", "expected"),
+        [
+            ("server-order-123", "server-order-123", "server-order-123"),
+            (None, "attacker-order-999", None),
+        ],
+        ids=["matching_external_id", "payload_only_external_id_not_attributed"],
+    )
+    async def test_verify_external_id_binding(
+        self,
+        request_external_id: str | None,
+        payload_external_id: str,
+        expected: str | None,
+    ):
         intent = ChargeIntent(client=FakeStripeClient())
-        credential = _make_credential()
-        receipt = await intent.verify(
-            credential,
-            {
-                **SAMPLE_REQUEST,
-                "externalId": "order-42",
-            },
-        )
+        request = dict(SAMPLE_REQUEST)
+        if request_external_id is not None:
+            request["externalId"] = request_external_id
 
-        assert receipt.external_id == "order-42"
+        receipt = await intent.verify(_make_credential(external_id=payload_external_id), request)
+
+        assert receipt.status == "success"
+        assert receipt.reference == "pi_test_123"
+        assert receipt.external_id == expected
 
     @pytest.mark.asyncio
-    async def test_verify_ignores_untrusted_credential_external_id(self):
-        intent = ChargeIntent(client=FakeStripeClient())
-        credential = Credential(
-            challenge=ChallengeEcho(
-                id="test-challenge-id",
-                realm="api.example.com",
-                method="stripe",
-                intent="charge",
-                request="eyJ0ZXN0IjoidHJ1ZSJ9",
-                expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-            ),
-            payload={"spt": "spt_test_abc", "externalId": "order-expensive"},
-            source="stripe:test",
-        )
+    @pytest.mark.parametrize(
+        "payload_external_id",
+        ["attacker-order-999", None],
+        ids=["forged_payload_external_id", "missing_payload_external_id"],
+    )
+    async def test_verify_rejects_unbound_external_id_before_stripe(
+        self, payload_external_id: str | None
+    ):
+        client = FakeAsyncStripeClient()
+        intent = ChargeIntent(client=client)
 
-        receipt = await intent.verify(
-            credential,
-            {
-                **SAMPLE_REQUEST,
-                "externalId": "order-cheap",
-            },
-        )
+        with pytest.raises(InvalidChallengeError) as excinfo:
+            await intent.verify(
+                _make_credential(external_id=payload_external_id),
+                {**SAMPLE_REQUEST, "externalId": "server-order-123"},
+            )
 
-        assert receipt.external_id == "order-cheap"
+        assert excinfo.value.type == "https://paymentauth.org/problems/invalid-challenge"
+        assert "credential externalId does not match this route request" in str(excinfo.value)
+        client.payment_intents.create_async.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_verify_rejects_replayed_payment_intent_with_bound_external_id(self):
+        replayed_pi = FakePaymentIntent(
+            last_response=FakeLastResponse(headers={"idempotent-replayed": "true"})
+        )
+        intent = ChargeIntent(client=FakeStripeClient(result=replayed_pi))
+
+        with pytest.raises(CredentialReplayedError) as excinfo:
+            await intent.verify(
+                _make_credential(external_id="server-order-123"),
+                {**SAMPLE_REQUEST, "externalId": "server-order-123"},
+            )
+
+        assert excinfo.value.type == "https://paymentauth.org/problems/verification-failed"
 
     @pytest.mark.asyncio
     async def test_verify_expired_challenge(self):

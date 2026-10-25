@@ -15,6 +15,7 @@ from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import (
     CredentialReplayedError,
+    InvalidChallengeError,
     PaymentActionRequiredError,
     PaymentExpiredError,
     VerificationFailedError,
@@ -183,6 +184,13 @@ class ChargeIntent:
             raise VerificationFailedError(
                 "Invalid charge request: missing or malformed Stripe method details"
             ) from err
+
+        # A request-bound externalId must be echoed unchanged, as in mppx.
+        request_external_id = parsed_request.externalId
+        if request_external_id is not None and parsed.externalId != request_external_id:
+            raise InvalidChallengeError(
+                challenge.id, "credential externalId does not match this route request"
+            )
 
         spt = parsed.spt
         if not spt.strip():
