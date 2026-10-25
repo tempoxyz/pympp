@@ -69,6 +69,27 @@ class TestMppCreate:
             )
             assert srv.realm == "localhost"
 
+    def test_create_auto_realm_ignores_host_env_vars(self) -> None:
+        env = {"HOST": "0.0.0.0", "HOSTNAME": "api-7d9f8c6b5-x2k4p"}
+        with patch.dict(os.environ, env, clear=True):
+            srv = Mpp.create(
+                method=tempo(intents={"charge": ChargeIntent()}),
+                secret_key="test-secret",
+            )
+            assert srv.realm == "localhost"
+
+    def test_create_auto_realm_hostname_does_not_shadow_platform_vars(self) -> None:
+        env = {
+            "HOSTNAME": "srv-abc123-7d9f8",
+            "RENDER_EXTERNAL_HOSTNAME": "api.onrender.com",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            srv = Mpp.create(
+                method=tempo(intents={"charge": ChargeIntent()}),
+                secret_key="test-secret",
+            )
+            assert srv.realm == "api.onrender.com"
+
     def test_create_requires_secret_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(ValueError, match="Missing secret key"):
