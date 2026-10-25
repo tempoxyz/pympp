@@ -94,6 +94,26 @@ class TestRedisStoreIntegration:
         assert 0 < ttl <= 60
 
     @pytest.mark.asyncio
+    async def test_replay_claim_survives_configured_ttl(self, redis_client, store_prefix) -> None:
+        import asyncio
+
+        from mpp.stores.redis import RedisStore
+
+        store = RedisStore(redis_client, key_prefix=store_prefix, ttl_seconds=1)
+        try:
+            await store.put("ordinary", "temporary")
+            assert await store.put_if_absent("paid", "receipt")
+            await asyncio.sleep(1.1)
+
+            assert await store.get("ordinary") is None
+            assert not await store.put_if_absent("paid", "replay")
+            assert await store.get("paid") == b"receipt"
+            assert await redis_client.ttl(f"{store_prefix}paid") == -1
+        finally:
+            await store.delete("ordinary")
+            await store.delete("paid")
+
+    @pytest.mark.asyncio
     async def test_default_store_has_no_ttl(self, redis_client, store_prefix) -> None:
         from mpp.stores.redis import RedisStore
 
