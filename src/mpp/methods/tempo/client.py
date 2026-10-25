@@ -235,7 +235,7 @@ class TempoMethod:
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
     def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
-        """Reject a challenge whose chain, recipients or amount violate the client policy.
+        """Reject a challenge whose chain, recipients, amount or split memos violate the policy.
 
         Runs during challenge selection and again before signing.
         """
@@ -254,6 +254,9 @@ class TempoMethod:
         )
         self._check_expected_recipients(request)
         self._check_amount_caps(request)
+        from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
+
+        reject_fixed_attribution_memos(request)
 
     def _check_allowed_chain_id(self, chain_id: int | None) -> None:
         """Reject a payment chain outside ``allowed_chain_ids``.

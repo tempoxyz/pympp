@@ -275,3 +275,11 @@ custom-scope, or metadata bindings. Mixing versions can reject already settled
 hash payments and cause a client to pay again. Nonce-only staging is useful only
 when all other challenge bindings already match; it temporarily retains the
 fixed-expiry collision risk. Shared application authentication is still required.
+
+Fixed Tempo split memos must not use the MPP attribution format: such a transfer
+can otherwise also pay the challenge named by its memo. Omit a split's memo to
+let the client bind it to the current challenge, or use an application memo
+outside the MPP format. Servers reject this configuration before issuing a
+challenge, and clients reject it before signing or broadcasting. Drain or
+replace outstanding challenges with fixed MPP memos before upgrading; their
+transfers cannot safely authorize the enclosing split charge.

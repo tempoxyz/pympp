@@ -272,6 +272,10 @@ def create_challenge(
     """
     if not tool:
         raise ValueError("tool must be a non-empty stable identifier")
+    if method == "tempo" and intent_name == "charge":
+        from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
+
+        reject_fixed_attribution_memos(request)
     expires = (datetime.now(UTC) + expires_in).isoformat()
     if expires.endswith("+00:00"):
         expires = expires[:-6] + "Z"
