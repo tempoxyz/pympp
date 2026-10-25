@@ -1,103 +1,108 @@
-"""x402 compatibility for MPP servers.
+"""x402 interoperability: wire types, header codecs, assets, client protocol, facilitators.
 
-Lets a server that charges with the ``evm`` method also serve x402 v2
-``exact`` clients (EIP-3009 ``transferWithAuthorization``) from the same
-endpoint, as mppx does. Unpaid responses carry ``PAYMENT-REQUIRED`` next to
-``WWW-Authenticate``, x402 clients pay with ``PAYMENT-SIGNATURE``, and paid
-x402 responses carry ``PAYMENT-RESPONSE``.
-
-Example:
-    from mpp.methods.evm import BASE_USDC, evm
-    from mpp.server import Mpp
-
-    server = Mpp.create(
-        method=evm(
-            currency=BASE_USDC,
-            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            facilitator="https://facilitator.example.com",
-        ),
-    )
-
-    @app.get("/paid")
-    @server.pay(amount="0.01")
-    async def handler(request, credential, receipt):
-        return JSONResponse({"data": "..."})
+Importing this package is cheap (no optional dependencies). Signing and verification live in
+:mod:`mpp.evm` (``evm`` extra).
 """
 
+from mpp.x402 import assets, facilitator
 from mpp.x402._header import (
-    InvalidHeaderError,
+    InvalidJsonHeaderError,
+    PaymentRequiredEnvelope,
     decode_payment_required,
+    decode_payment_required_envelope,
     decode_payment_response,
     decode_payment_signature,
     encode_payment_required,
     encode_payment_response,
     encode_payment_signature,
 )
-from mpp.x402._server import (
-    ROUTE_BINDING_EXTENSION,
-    RouteBinding,
-    X402Input,
-    X402Intent,
-    is_x402_credential,
-    payment_required_header,
-    payment_response_header,
-    route_extensions,
-    route_nonce,
+from mpp.x402._protocol import (
+    PROTOCOL,
+    ProtocolPreference,
+    X402Protocol,
+    challenges_from_response,
+    collect_challenges,
+    is_x402_challenge,
+    protocol,
 )
+from mpp.x402._route_binding import nonce as route_binding_nonce
 from mpp.x402._types import (
-    EIP3009,
-    EXACT_SCHEME,
+    ASSET_TRANSFER_METHODS,
+    EVM_NETWORK_PREFIX,
+    EXACT_INTENT,
+    LEGACY_PAYMENT_SIGNATURE_HEADER,
+    PAYMENT_METHOD,
     PAYMENT_REQUIRED_HEADER,
     PAYMENT_RESPONSE_HEADER,
     PAYMENT_SIGNATURE_HEADER,
-    X402_VERSION,
+    SCHEMES,
+    SYNTHETIC_CHALLENGE_ID_PREFIX,
+    VERSIONS,
+    Eip3009Authorization,
+    ExactEip3009Payload,
+    ExactPayload,
+    ExactPermit2Payload,
+    Extension,
+    Extensions,
+    Facilitator,
     PaymentPayload,
     PaymentRequired,
     PaymentRequirements,
+    Permit2Authorization,
+    Permit2Permitted,
+    Permit2Witness,
     ResourceInfo,
     SettleResponse,
     VerifyResponse,
-    X402FormatError,
-)
-from mpp.x402.facilitator import (
-    Facilitator,
-    FacilitatorError,
-    HttpFacilitator,
-    resolve_facilitator,
+    to_payment_requirements,
 )
 
 __all__ = [
-    "EIP3009",
-    "EXACT_SCHEME",
+    "ASSET_TRANSFER_METHODS",
+    "EVM_NETWORK_PREFIX",
+    "EXACT_INTENT",
+    "LEGACY_PAYMENT_SIGNATURE_HEADER",
+    "PAYMENT_METHOD",
     "PAYMENT_REQUIRED_HEADER",
     "PAYMENT_RESPONSE_HEADER",
     "PAYMENT_SIGNATURE_HEADER",
-    "ROUTE_BINDING_EXTENSION",
-    "X402_VERSION",
+    "PROTOCOL",
+    "SCHEMES",
+    "SYNTHETIC_CHALLENGE_ID_PREFIX",
+    "VERSIONS",
+    "Eip3009Authorization",
+    "ExactEip3009Payload",
+    "ExactPayload",
+    "ExactPermit2Payload",
+    "Extension",
+    "Extensions",
     "Facilitator",
-    "FacilitatorError",
-    "HttpFacilitator",
-    "InvalidHeaderError",
+    "InvalidJsonHeaderError",
     "PaymentPayload",
     "PaymentRequired",
+    "PaymentRequiredEnvelope",
     "PaymentRequirements",
+    "Permit2Authorization",
+    "Permit2Permitted",
+    "Permit2Witness",
+    "ProtocolPreference",
     "ResourceInfo",
-    "RouteBinding",
     "SettleResponse",
     "VerifyResponse",
-    "X402FormatError",
-    "X402Input",
-    "X402Intent",
+    "X402Protocol",
+    "assets",
+    "challenges_from_response",
+    "collect_challenges",
     "decode_payment_required",
+    "decode_payment_required_envelope",
     "decode_payment_response",
     "decode_payment_signature",
     "encode_payment_required",
     "encode_payment_response",
     "encode_payment_signature",
-    "is_x402_credential",
-    "payment_required_header",
-    "payment_response_header",
-    "resolve_facilitator",
-    "route_extensions",
-    "route_nonce",
+    "facilitator",
+    "is_x402_challenge",
+    "protocol",
+    "route_binding_nonce",
+    "to_payment_requirements",
 ]

@@ -1,65 +1,78 @@
-"""Server-side payment verification.
+"""Server-side payment engine: route handlers, transports and framework-neutral HTTP types.
 
-Example:
-    from mpp.server import verify_or_challenge, Intent
-    from mpp.methods.tempo import ChargeIntent
-
-    result = await verify_or_challenge(
-        authorization=request.headers.get("Authorization"),
-        intent=ChargeIntent(client),
-        request={"amount": "1000", "currency": "0x...", ...},
-        realm="api.example.com",
-    )
-
-    if isinstance(result, Challenge):
-        return Response(status=402, headers={"WWW-Authenticate": ...})
-    else:
-        return Response({"data": "..."}, headers={"Payment-Receipt": ...})
+The Starlette / FastAPI integration lives in :mod:`mpp.server.starlette`.
 """
 
-from mpp import _expires as Expires
-from mpp.errors import (
-    BadRequestError,
-    CredentialReplayedError,
-    InternalPaymentError,
-    InvalidChallengeError,
-    InvalidPayloadError,
-    MalformedCredentialError,
-    PaymentActionRequiredError,
-    PaymentError,
-    PaymentExpiredError,
-    PaymentInsufficientError,
-    PaymentMethodUnsupportedError,
-    PaymentRequiredError,
-    VerificationFailedError,
+from mpp.challenge import Challenge
+from mpp.errors import PaymentError
+from mpp.server._compose import compose
+from mpp.server._events import (
+    ChallengeCreated,
+    EventEnvelope,
+    MethodDescriptor,
+    PaymentFailed,
+    PaymentSucceeded,
 )
-from mpp.events import (
-    CHALLENGE_CREATED,
-    PAYMENT_FAILED,
-    PAYMENT_SUCCESS,
-    WILDCARD_EVENT,
-    EventDispatcher,
-    PaymentEvent,
-    PaymentEventName,
-)
-from mpp.server.compose import (
-    ComposedChallenges,
+from mpp.server._http import Request, Response, make_headers
+from mpp.server._mpp import (
     ComposedHandler,
-    ComposedResult,
-    ComposeEntry,
-    ComposeOptions,
-    compose,
+    ConfiguredHandler,
+    HandlerFactory,
+    MissingReceiptResponseError,
+    Mpp,
+    OfferInfo,
+    PaymentRequired,
+    PaymentResult,
+    PaymentVerified,
+    assert_secret_key,
 )
-from mpp.server.decorator import pay
-from mpp.server.intent import (
-    Intent,
-    Validation,
-    VerifiableIntent,
-    VerificationError,
-    broadcast_credential,
-    intent,
-    validate_credential,
+from mpp.server._transport import (
+    HttpTransport,
+    McpTransport,
+    Transport,
+    http,
 )
-from mpp.server.method import Method, transform_request
-from mpp.server.mpp import Mpp
-from mpp.server.verify import verify_or_challenge
+
+
+def require_payment(challenge: Challenge, error: PaymentError | None = None) -> Response:
+    """Creates a 402 response with a ``WWW-Authenticate: Payment`` header.
+
+    Includes RFC 9457 Problem Details in the body when ``error`` is given.
+    """
+    from mpp import _json
+    from mpp.constants import Header
+
+    headers = [(Header.WWW_AUTHENTICATE, challenge.serialize()), ("Cache-Control", "no-store")]
+    body = None
+    if error is not None:
+        headers.append(("Content-Type", "application/problem+json"))
+        body = _json.dumps(error.to_problem_details(challenge.id)).encode()
+    return Response(status=402, headers=headers, body=body)
+
+
+__all__ = [
+    "ChallengeCreated",
+    "ComposedHandler",
+    "ConfiguredHandler",
+    "EventEnvelope",
+    "HandlerFactory",
+    "HttpTransport",
+    "McpTransport",
+    "MethodDescriptor",
+    "MissingReceiptResponseError",
+    "Mpp",
+    "OfferInfo",
+    "PaymentFailed",
+    "PaymentRequired",
+    "PaymentResult",
+    "PaymentSucceeded",
+    "PaymentVerified",
+    "Request",
+    "Response",
+    "Transport",
+    "assert_secret_key",
+    "compose",
+    "http",
+    "make_headers",
+    "require_payment",
+]

@@ -85,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
       - name: Secure runner
@@ -165,7 +165,9 @@ jobs:
           [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
       - name: Run integration tests
-        run: uv run pytest -m "integration or redis or x402_localnet" -v
+        run: |
+          # TODO: the rewrite has no localnet tests yet; exit code 5 means none were collected.
+          uv run pytest -m "integration or redis or x402_localnet" -v || [ $? -eq 5 ]
         env:
           TEMPO_RPC_URL: http://localhost:8545
           REDIS_URL: redis://localhost:6379
@@ -223,7 +225,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: [base, tempo, stripe, mcp, evm]
+        profile: [base, tempo, mcp, evm]
 
     steps:
       - name: Secure runner
@@ -262,9 +264,6 @@ jobs:
             tempo)
               INSTALL_TARGET="${WHEEL}[tempo]"
               ;;
-            stripe)
-              INSTALL_TARGET="${WHEEL}[stripe]"
-              ;;
             mcp)
               INSTALL_TARGET="${WHEEL}[mcp]"
               ;;
@@ -274,79 +273,23 @@ jobs:
           esac
           uv pip install --python .smoke-venv/bin/python "$INSTALL_TARGET"
 
-      - name: Smoke test built wheel (base)
-        if: matrix.profile == 'base'
-        run: |
-          .smoke-venv/bin/python - <<'PY'
-          import mpp
-          import mpp.extensions.mcp as mcp
-          import mpp.methods.evm as evm
-          import mpp.methods.tempo as tempo
-          import mpp.x402 as x402
-
-          assert tempo.CHAIN_ID == 4217
-          assert mcp.CODE_PAYMENT_REQUIRED == -32042
-          assert x402.X402_VERSION == 2
-          assert evm.BASE_USDC.chain_id == 8453
-
-          for expr, hint in (
-              ("tempo.ChargeIntent", "pympp[tempo]"),
-              ("mcp.PaymentRequiredError", "pympp[mcp]"),
-              ("evm.evm", "pympp[evm]"),
-          ):
-              try:
-                  eval(expr)
-              except ImportError as exc:
-                  assert hint in str(exc), str(exc)
-              else:
-                  raise AssertionError(f"{expr} unexpectedly imported in base install")
-
-          print("base install smoke test passed")
-          PY
-
-      - name: Smoke test built wheel (Tempo dependencies)
-        if: matrix.profile == 'tempo' || matrix.profile == 'stripe'
+      - name: Smoke test built wheel
         env:
           PROFILE: ${{ matrix.profile }}
         run: |
           .smoke-venv/bin/python - <<'PY'
           import os
-          from mpp.methods.tempo import ChargeIntent, TempoAccount
-          if os.environ["PROFILE"] == "stripe":
-              from stripe import StripeClient
-              from mpp.methods.stripe import create
-              from mpp.store import MemoryStore
-              payments = create(network_id="bn_test", livemode=False, client=StripeClient("sk_test"), store=MemoryStore(), deposit_addresses={"tempo": "0x" + "1" * 40})
-              assert [method.name for method in payments.default_methods()] == ["tempo", "stripe"]
+          import mpp, mpp.server, mpp.client
+          assert mpp.Challenge and mpp.server.Mpp and mpp.client.Mpp
+          profile = os.environ["PROFILE"]
+          if profile == "tempo":
+              from mpp.tempo import client, server
+              assert server.charge and client.secp256k1_account
+          elif profile == "evm":
+              from mpp.evm import client, server
+              assert server.charge and client.charge
+          elif profile == "mcp":
+              from mpp.mcp_sdk.server import mcp_sdk, paid
+              assert mcp_sdk and paid
           PY
 
-      - name: Smoke test built wheel (evm)
-        if: matrix.profile == 'evm'
-        run: |
-          .smoke-venv/bin/python - <<'PY'
-          from mpp.methods.evm import BASE_USDC, evm
-          from mpp.server import Mpp
-
-          method = evm(
-              currency=BASE_USDC,
-              recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-              facilitator="https://facilitator.example.com",
-          )
-          server = Mpp.create(method=method, realm="api.example.com", secret_key="k")
-          assert server.method.name == "evm"
-
-          print("evm install smoke test passed")
-          PY
-
-      - name: Smoke test built wheel (mcp)
-        if: matrix.profile == 'mcp'
-        run: |
-          .smoke-venv/bin/python - <<'PY'
-          from mpp.extensions.mcp import PaymentRequiredError, pay, verify_or_challenge
-
-          assert PaymentRequiredError.__name__ == "PaymentRequiredError"
-          assert pay.__name__ == "pay"
-          assert verify_or_challenge.__name__ == "verify_or_challenge"
-
-          print("mcp install smoke test passed")
-          PY

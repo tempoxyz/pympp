@@ -1,0 +1,19 @@
+# MCP parity (`mpp.mcp`, `mpp.mcp_sdk`)
+
+Owner: mcp-sdk. References: mppx `src/mcp/**` (+ `server/Transport.ts` `mcpSdk`), spec
+`extensions/transports/draft-payment-transport-mcp-00.md`. Tests: `tests/mcp_sdk/` (55).
+
+## MCP SDK (`mpp.mcp_sdk`)
+
+| mppx feature | Status | Notes |
+|---|---|---|
+| `Transport.mcpSdk()` (synthetic `mcp://request/sdk` capture, `_meta` credential via canonical serializer, `McpError` challenges with `httpStatus`/`challenges`/`problem`, error code mapping, receipts in result `_meta` with `challengeId`, HTTP responses → empty result) | Implemented | `mpp.mcp_sdk.server.mcp_sdk()` / `McpSdkTransport` (`McpTransport[Extra, MCPError, CallToolResult | Mapping | Response, CallToolResult]`). Raises `mcp.shared.exceptions.MCPError`. An explicit `null` credential is malformed (`-32602`); only an absent key means no credential. Inputs: `MCPServer` `Context`, low-level `ServerRequestContext` / `CallToolRequestParams`, or a mapping with `_meta`. |
+| MCP SDK compose (merge challenges into one `McpError("Payment Required")`) | Implemented | Via `payment_required_challenges` / `with_challenges` overrides used by core MCP compose. |
+| Per-tool challenge binding | Intentionally different | mppx leaves MCP SDK challenges unscoped, so a credential paid for one tool is accepted by any tool with identical terms. pympp binds every challenge issued through `mcp_sdk()` (via `@paid` or the explicit handler call) to the called tool, `_mppx_scope = "tool:<name>"`, taken from the request's `params.name` (`McpSdkTransport.route_scope`, `tool_name`). Cross-tool replay fails with `-32043` ("credential opaque does not match …"). An explicit `scope=` or `meta["_mppx_scope"]` wins (tools sharing that scope accept each other's credentials). Inputs without a tool name (a bare `_meta` mapping) stay unscoped. |
+| Payment capability advertisement (draft-payment-transport-mcp `capabilities.experimental.payment`) | Added | `mpp.mcp.payment_capabilities(mpp_or_methods)` returns `{"payment": {"methods": [...], "intents": [...]}}` (configuration order, deduplicated) for `create_initialization_options(experimental_capabilities=...)`. mppx has no helper; ported from pympp. |
+| Tool gating helper | Added | `@paid(handler)` decorator for `MCPServer` tools (pympp's `@pay`) (keeps input/output schemas, injects `Context` when absent, supports sync tools). mppx has no equivalent; it documents the explicit `throw result.challenge` pattern, which also works. |
+| `McpClient.wrap(client, config)` (in-place `callTool` replacement, re-wrap replaces config) | Intentionally different | `McpClient(session, methods=...)` wrapper with `await call_tool(name, arguments, read_timeout_seconds, progress_callback, *, meta, context, on_payment_required, **options)` (other SDK kwargs such as `request_state` / `input_responses` are forwarded on every attempt); no monkeypatching. Returns `PaidCallToolResult` (a `CallToolResult` with `receipt: Receipt | None`). |
+| Payment handling for `-32042`/`-32043` errors and `_meta["org.paymentauth/payment-required"]` tool results, `Accept-Payment` preferences, `orderChallenges`, expiry check, approval hook (`null` bypass), context parsing, 3 attempts max, "No compatible payment method..." message | Implemented | Decline raises `PaymentDeclinedError("Payment declined.")`; no compatible method raises `ValueError` (mppx: `Error`). Per-call `on_payment_required=None` bypasses the configured hook. |
+| `isPaymentRequiredError` | Implemented | `is_payment_required_error`, `payment_required_data`. |
+| `McpClient.integration.test.ts` (Tempo localnet) | Not ported | Needs a Tempo localnet; end-to-end tests run over an in-process `MCPServer` with mock methods. |
+| `mcp` SDK version | Note | Targets the official Python SDK 2.x (`MCPServer`, `MCPError`); the `mcp` extra is now `mcp>=2.3`. |

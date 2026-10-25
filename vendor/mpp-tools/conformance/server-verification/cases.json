@@ -1,0 +1,351 @@
+{
+  "cases": [
+    {
+      "name": "valid_credential_verified",
+      "description": "Server verification accepts a credential echo that matches the route and has a future expires value.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "Ip25HCkqcMaW6FT_ziOG9BT58-7_KEwkzhdUwX8tmI8",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": true,
+        "receipt": {
+          "status": "success",
+          "timestamp": "2026-01-29T12:00:00Z",
+          "reference": "conformance-receipt",
+          "method": "tempo"
+        }
+      }
+    },
+    {
+      "name": "missing_credential_expires_rejected_with_route_expiry",
+      "description": "Server verification rejects a credential challenge echo that omits expires while the route requires an expiry.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "73URalxGl0MMCrlT4Yx32M5SQduyaDXWvs2rINyPPFA",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "expired_credential_rejected",
+      "description": "Server verification rejects a credential with an expired challenge echo.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2020-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "FvOsbLHtxODU_85N-iRtmoHPXtWdslgkA-vT15rLMXo",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2020-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "payment_expired"
+      }
+    },
+    {
+      "name": "tampered_challenge_id_rejected",
+      "description": "Server verification rejects a credential whose challenge ID does not match its echoed fields.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "invalid-challenge-id",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "realm_mismatch_rejected",
+      "description": "Server verification rejects a credential whose echoed realm is not the route realm.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "5bvdhCxnhMgsFeY9fTRAC3VmMt0Ld6DXzxEJJYy3xwA",
+            "realm": "other.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "request_mismatch_rejected",
+      "description": "Server verification rejects a credential whose echoed request does not match the route request.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "7GP4Y_f3WLVmwN1x7chOMK1TfJrwoBRnmKm2k_YpuVM",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "101",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "method_mismatch_rejected",
+      "description": "Server verification rejects a credential whose echoed method does not match the route method.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "jaQHUf0f6kTVjuPg_oD_gSyOv-2krnql3h3Cpfc14xY",
+            "realm": "api.example.com",
+            "method": "other",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "intent_mismatch_rejected",
+      "description": "Server verification rejects a credential whose echoed intent does not match the route intent.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "credential": {
+          "challenge": {
+            "id": "TfIuxbgpmyB4NtsN5A1RfTHjctirfo2oum8Q8gvca2A",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "refund",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "intent_verification_error_reported",
+      "description": "Server verification reports a method-level verification failure after challenge checks pass.",
+      "input": {
+        "realm": "api.example.com",
+        "secretKey": "secret-key",
+        "method": "tempo",
+        "intent": "charge",
+        "request": {
+          "amount": "100",
+          "currency": "0xabc",
+          "recipient": "0xdef"
+        },
+        "expires": "2099-01-01T00:00:00Z",
+        "verificationError": "intent rejected credential",
+        "credential": {
+          "challenge": {
+            "id": "Ip25HCkqcMaW6FT_ziOG9BT58-7_KEwkzhdUwX8tmI8",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {
+              "amount": "100",
+              "currency": "0xabc",
+              "recipient": "0xdef"
+            },
+            "expires": "2099-01-01T00:00:00Z"
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0xabc123"
+          }
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "verification_failed"
+      }
+    }
+  ]
+}

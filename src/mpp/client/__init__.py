@@ -1,30 +1,81 @@
-"""HTTP client with automatic 402 payment handling.
+"""Client-side payment engine: automatic 402 handling for ``httpx``.
 
-Example:
-    from mpp.client import Client, get
-    from mpp.methods.tempo import tempo
+``Mpp(methods=[...])`` exposes :attr:`Mpp.payment_transport` (an ``httpx`` transport) and
+:meth:`Mpp.fetch`. Unlike mppx there is no global ``fetch`` polyfill: nothing is patched on
+import or construction.
 
-    # Simple function API
-    response = await get(
-        "https://api.example.com/resource",
-        methods=[tempo(account=my_account, rpc_url="...")],
-    )
-
-    # Client object for connection pooling
-    async with Client(methods=[tempo(...)]) as client:
-        r1 = await client.get("https://api.example.com/a")
-        r2 = await client.get("https://api.example.com/b")
+Payment protocols are pluggable: implement :class:`Protocol` (see :mod:`mpp.client._protocols`)
+and pass it to :func:`http_transport`.
 """
 
-from mpp import _expires as Expires
-from mpp.client.transport import Client, PaymentTransport, get, post, request
-from mpp.events import (
-    CHALLENGE_RECEIVED,
-    CREDENTIAL_CREATED,
-    PAYMENT_FAILED,
-    PAYMENT_RESPONSE,
-    WILDCARD_EVENT,
-    EventDispatcher,
-    PaymentEvent,
-    PaymentEventName,
+from mpp._accept_payment import ChallengeCandidate
+from mpp._accept_payment import Entry as AcceptPaymentEntry
+from mpp.client._events import (
+    ChallengeReceived,
+    ClientEventEnvelope,
+    ClientPaymentFailed,
+    CredentialCreated,
+    PaymentResponse,
 )
+from mpp.client._mpp import (
+    BODY_TRUNCATED_HEADER,
+    CONTEXT_EXTENSION,
+    ORDER_CHALLENGES_EXTENSION,
+    AcceptPaymentPolicy,
+    Mpp,
+    OnChallenge,
+    OrderChallenges,
+    PaymentTransport,
+    PreparedPayment,
+    PreparedRequest,
+    PreparedRequestPayment,
+    Redirect,
+    validate_credential_header_value,
+)
+from mpp.client._protocols import (
+    MppProtocol,
+    Protocol,
+    mpp,
+    peek_body,
+    rebuild_request,
+    set_credential_header,
+)
+from mpp.client._transport import (
+    ClientTransport,
+    HttpTransport,
+    default_protocols,
+    http_transport,
+)
+
+__all__ = [
+    "BODY_TRUNCATED_HEADER",
+    "CONTEXT_EXTENSION",
+    "ORDER_CHALLENGES_EXTENSION",
+    "AcceptPaymentEntry",
+    "AcceptPaymentPolicy",
+    "ChallengeCandidate",
+    "ChallengeReceived",
+    "ClientEventEnvelope",
+    "ClientPaymentFailed",
+    "ClientTransport",
+    "CredentialCreated",
+    "HttpTransport",
+    "Mpp",
+    "MppProtocol",
+    "OnChallenge",
+    "OrderChallenges",
+    "PaymentResponse",
+    "PaymentTransport",
+    "PreparedPayment",
+    "PreparedRequest",
+    "PreparedRequestPayment",
+    "Protocol",
+    "Redirect",
+    "default_protocols",
+    "http_transport",
+    "mpp",
+    "peek_body",
+    "rebuild_request",
+    "set_credential_header",
+    "validate_credential_header_value",
+]

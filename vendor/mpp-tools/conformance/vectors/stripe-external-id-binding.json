@@ -1,0 +1,160 @@
+{
+  "version": "1.0.0",
+  "spec_ref": "draft-ietf-httpauth-payment challenge-id HMAC binding; draft-stripe-charge externalId receipt attribution",
+  "description": "Stripe charge receipt externalId attribution must come from the server-bound request and cannot be forged from credential payload.",
+  "commands": {
+    "generate": "verify-stripe-external-id-binding"
+  },
+  "scenarios": [
+    {
+      "name": "matching_external_id_returns_bound_receipt",
+      "description": "A credential whose payload externalId matches the server-bound request externalId returns a receipt attributed to that externalId.",
+      "tags": ["happy-path", "stripe", "external-id-binding"],
+      "adapters": ["typescript", "ruby"],
+      "input": {
+        "request": {
+          "amount": "2500",
+          "currency": "USD",
+          "externalId": "server-order-123",
+          "methodDetails": {
+            "paymentMethodTypes": ["card"]
+          }
+        },
+        "payload": {
+          "spt": "spt_conformance_123",
+          "externalId": "server-order-123"
+        },
+        "paymentIntent": {
+          "id": "pi_conformance_123",
+          "status": "succeeded"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "receipt": {
+          "status": "success",
+          "method": "stripe",
+          "timestamp": "2026-01-29T12:00:30Z",
+          "reference": "pi_conformance_123",
+          "externalId": "server-order-123"
+        }
+      }
+    },
+    {
+      "name": "forged_payload_external_id_rejected",
+      "description": "A credential payload cannot replace the externalId that was bound into the server request.",
+      "tags": ["error", "stripe", "external-id-binding"],
+      "adapters": ["typescript", "ruby"],
+      "input": {
+        "request": {
+          "amount": "2500",
+          "currency": "USD",
+          "externalId": "server-order-123",
+          "methodDetails": {
+            "paymentMethodTypes": ["card"]
+          }
+        },
+        "payload": {
+          "spt": "spt_conformance_123",
+          "externalId": "attacker-order-999"
+        },
+        "paymentIntent": {
+          "id": "pi_conformance_123",
+          "status": "succeeded"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "payload_only_external_id_not_attributed",
+      "description": "A payload externalId is ignored when no externalId was bound into the server request.",
+      "tags": ["happy-path", "stripe", "external-id-binding"],
+      "adapters": ["typescript", "ruby"],
+      "input": {
+        "request": {
+          "amount": "2500",
+          "currency": "USD",
+          "methodDetails": {
+            "paymentMethodTypes": ["card"]
+          }
+        },
+        "payload": {
+          "spt": "spt_conformance_123",
+          "externalId": "attacker-order-999"
+        },
+        "paymentIntent": {
+          "id": "pi_conformance_123",
+          "status": "succeeded"
+        }
+      },
+      "expected": {
+        "ok": true,
+        "receipt": {
+          "status": "success",
+          "method": "stripe",
+          "timestamp": "2026-01-29T12:00:30Z",
+          "reference": "pi_conformance_123"
+        }
+      }
+    },
+    {
+      "name": "missing_payload_external_id_rejected_when_request_bound",
+      "description": "A request-bound externalId must be echoed by the credential payload so stripped attribution cannot settle silently.",
+      "tags": ["error", "stripe", "external-id-binding"],
+      "adapters": ["typescript", "ruby"],
+      "input": {
+        "request": {
+          "amount": "2500",
+          "currency": "USD",
+          "externalId": "server-order-123",
+          "methodDetails": {
+            "paymentMethodTypes": ["card"]
+          }
+        },
+        "payload": {
+          "spt": "spt_conformance_123"
+        },
+        "paymentIntent": {
+          "id": "pi_conformance_123",
+          "status": "succeeded"
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "invalid_challenge"
+      }
+    },
+    {
+      "name": "replayed_payment_intent_rejected",
+      "description": "A replayed Stripe PaymentIntent response cannot satisfy a request-bound externalId challenge.",
+      "tags": ["error", "stripe", "external-id-binding"],
+      "adapters": ["typescript", "ruby"],
+      "input": {
+        "request": {
+          "amount": "2500",
+          "currency": "USD",
+          "externalId": "server-order-123",
+          "methodDetails": {
+            "paymentMethodTypes": ["card"]
+          }
+        },
+        "payload": {
+          "spt": "spt_conformance_123",
+          "externalId": "server-order-123"
+        },
+        "paymentIntent": {
+          "id": "pi_conformance_123",
+          "status": "succeeded",
+          "replayed": true
+        }
+      },
+      "expected": {
+        "ok": false,
+        "errorType": "verification_failed"
+      }
+    }
+  ]
+}

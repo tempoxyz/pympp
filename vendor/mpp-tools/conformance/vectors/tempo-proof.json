@@ -1,0 +1,53 @@
+{
+  "version": "2.0.0",
+  "spec_ref": "Tempo zero-amount proof credential",
+  "description": "EIP-712 typed-data shape for zero-amount Tempo proof credentials. The proof binds challengeId + realm using domain MPP v2.",
+  "commands": {
+    "operation": "tempo.proof.typed_data"
+  },
+  "scenarios": [
+    {
+      "name": "zero_amount_proof_shape",
+      "description": "Proof typed data matches mppx: domain MPP v2 and message fields challengeId + realm.",
+      "tags": [
+        "happy-path",
+        "cross-sdk-validated",
+        "tempo",
+        "proof",
+        "zero-amount"
+      ],
+      "input": {
+        "chainId": 42431,
+        "challengeId": "proof-challenge-id",
+        "realm": "api.example.com"
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "domain": {
+            "name": "MPP",
+            "version": "2",
+            "chainId": 42431
+          },
+          "types": {
+            "Proof": [
+              {
+                "name": "challengeId",
+                "type": "string"
+              },
+              {
+                "name": "realm",
+                "type": "string"
+              }
+            ]
+          },
+          "primaryType": "Proof",
+          "message": {
+            "challengeId": "proof-challenge-id",
+            "realm": "api.example.com"
+          }
+        }
+      }
+    }
+  ]
+}

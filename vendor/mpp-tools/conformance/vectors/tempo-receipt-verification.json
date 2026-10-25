@@ -1,0 +1,269 @@
+{
+  "version": "2.0.0",
+  "spec_ref": "MPP Tempo receipt fixture verification",
+  "description": "Server-side Tempo receipt fixture verification must require auto-generated attribution memos to bind to the credential challenge id and realm when no explicit server memo is configured. This staged vector uses a transaction-hash credential and does not exercise signed transaction deserialization.",
+  "commands": {
+    "operation": "tempo.receipt.verify"
+  },
+  "scenarios": [
+    {
+      "name": "matching_challenge_bound_memo",
+      "description": "A transaction receipt with a TransferWithMemo log bound to the credential challenge is accepted.",
+      "tags": [
+        "happy-path",
+        "tempo",
+        "challenge-bound-memo"
+      ],
+      "input": {
+        "credential": {
+          "challenge": {
+            "id": "challenge-123",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "expires": "2030-01-01T00:00:00Z",
+            "request": {
+              "amount": "1000",
+              "currency": "0x1234567890123456789012345678901234567890",
+              "recipient": "0x4567890123456789012345678901234567890123"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "receipt": {
+          "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "status": "0x1",
+          "logs": [
+            {
+              "address": "0x1234567890123456789012345678901234567890",
+              "topics": [
+                "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0",
+                "0x000000000000000000000000abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "0x0000000000000000000000004567890123456789012345678901234567890123",
+                "0xef1ed712011ece072f76bd8b82350e00000000000000000000eb18f2d4402269"
+              ],
+              "data": "0x00000000000000000000000000000000000000000000000000000000000003e8"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": true,
+        "value": {
+          "status": "success",
+          "reference": "0x1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      }
+    },
+    {
+      "name": "plain_transfer_without_challenge_bound_memo",
+      "description": "A matching plain Transfer log is not sufficient for a transaction credential when no explicit server memo is configured.",
+      "tags": [
+        "security",
+        "tempo",
+        "challenge-bound-memo",
+        "oss-302"
+      ],
+      "input": {
+        "credential": {
+          "challenge": {
+            "id": "challenge-123",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "expires": "2030-01-01T00:00:00Z",
+            "request": {
+              "amount": "1000",
+              "currency": "0x1234567890123456789012345678901234567890",
+              "recipient": "0x4567890123456789012345678901234567890123"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "receipt": {
+          "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "status": "0x1",
+          "logs": [
+            {
+              "address": "0x1234567890123456789012345678901234567890",
+              "topics": [
+                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                "0x000000000000000000000000abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "0x0000000000000000000000004567890123456789012345678901234567890123"
+              ],
+              "data": "0x00000000000000000000000000000000000000000000000000000000000003e8"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": false,
+        "error": {
+          "type": "verification_error"
+        }
+      }
+    },
+    {
+      "name": "non_mpp_memo_rejected",
+      "description": "A matching TransferWithMemo log with a non-MPP memo is not accepted as challenge-bound attribution.",
+      "tags": [
+        "security",
+        "tempo",
+        "challenge-bound-memo",
+        "oss-302"
+      ],
+      "input": {
+        "credential": {
+          "challenge": {
+            "id": "challenge-123",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "expires": "2030-01-01T00:00:00Z",
+            "request": {
+              "amount": "1000",
+              "currency": "0x1234567890123456789012345678901234567890",
+              "recipient": "0x4567890123456789012345678901234567890123"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "receipt": {
+          "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "status": "0x1",
+          "logs": [
+            {
+              "address": "0x1234567890123456789012345678901234567890",
+              "topics": [
+                "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0",
+                "0x000000000000000000000000abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "0x0000000000000000000000004567890123456789012345678901234567890123",
+                "0xabababababababababababababababababababababababababababababababab"
+              ],
+              "data": "0x00000000000000000000000000000000000000000000000000000000000003e8"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": false,
+        "error": {
+          "type": "verification_error"
+        }
+      }
+    },
+    {
+      "name": "unrelated_challenge_memo_rejected",
+      "description": "A matching TransferWithMemo log with an MPP memo for another challenge is rejected.",
+      "tags": [
+        "security",
+        "tempo",
+        "challenge-bound-memo",
+        "oss-302"
+      ],
+      "input": {
+        "credential": {
+          "challenge": {
+            "id": "challenge-123",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "expires": "2030-01-01T00:00:00Z",
+            "request": {
+              "amount": "1000",
+              "currency": "0x1234567890123456789012345678901234567890",
+              "recipient": "0x4567890123456789012345678901234567890123"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "receipt": {
+          "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "status": "0x1",
+          "logs": [
+            {
+              "address": "0x1234567890123456789012345678901234567890",
+              "topics": [
+                "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0",
+                "0x000000000000000000000000abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "0x0000000000000000000000004567890123456789012345678901234567890123",
+                "0xef1ed712011ece072f76bd8b82350e000000000000000000000ba7f8d2502b26"
+              ],
+              "data": "0x00000000000000000000000000000000000000000000000000000000000003e8"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": false,
+        "error": {
+          "type": "verification_error"
+        }
+      }
+    },
+    {
+      "name": "unrelated_realm_memo_rejected",
+      "description": "A matching TransferWithMemo log with an MPP memo for another server realm is rejected.",
+      "tags": [
+        "security",
+        "tempo",
+        "challenge-bound-memo",
+        "oss-302"
+      ],
+      "input": {
+        "credential": {
+          "challenge": {
+            "id": "challenge-123",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "expires": "2030-01-01T00:00:00Z",
+            "request": {
+              "amount": "1000",
+              "currency": "0x1234567890123456789012345678901234567890",
+              "recipient": "0x4567890123456789012345678901234567890123"
+            }
+          },
+          "payload": {
+            "type": "hash",
+            "hash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        },
+        "receipt": {
+          "transactionHash": "0x1111111111111111111111111111111111111111111111111111111111111111",
+          "status": "0x1",
+          "logs": [
+            {
+              "address": "0x1234567890123456789012345678901234567890",
+              "topics": [
+                "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0",
+                "0x000000000000000000000000abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+                "0x0000000000000000000000004567890123456789012345678901234567890123",
+                "0xef1ed712019daa026d82c6f784db2b00000000000000000000eb18f2d4402269"
+              ],
+              "data": "0x00000000000000000000000000000000000000000000000000000000000003e8"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "ok": false,
+        "error": {
+          "type": "verification_error"
+        }
+      }
+    }
+  ]
+}

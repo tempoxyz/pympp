@@ -1,89 +1,78 @@
-"""x402 facilitator clients (mppx ``src/x402/server/Facilitator.ts``)."""
-
-from __future__ import annotations
+"""x402 facilitator clients (``POST /verify`` and ``POST /settle`` with v2 envelopes)."""
 
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, Protocol, TypeAlias, runtime_checkable
+from typing import Any
 
 import httpx
+from pydantic import ValidationError
 
+from mpp import _json
 from mpp.x402._types import (
-    X402_VERSION,
+    Facilitator,
     PaymentPayload,
     PaymentRequirements,
     SettleResponse,
     VerifyResponse,
-    X402FormatError,
-    parse_settle_response,
-    parse_verify_response,
 )
 
-HeadersInput: TypeAlias = (
+__all__ = [
+    "FacilitatorError",
+    "HeadersInput",
+    "HttpFacilitator",
+    "http",
+    "resolve",
+    "settle",
+    "verify",
+]
+
+
+type HeadersInput = (
     Mapping[str, str] | Callable[[], Mapping[str, str] | Awaitable[Mapping[str, str]]] | None
 )
+"""Extra facilitator request headers, or a sync or async callable returning them per request."""
 
 
 class FacilitatorError(Exception):
     """A facilitator request failed or returned an unreadable response."""
 
 
-@runtime_checkable
-class Facilitator(Protocol):
-    """An x402 facilitator that verifies and settles payments."""
-
-    async def verify(
-        self,
-        payment_payload: PaymentPayload,
-        payment_requirements: PaymentRequirements,
-    ) -> VerifyResponse: ...
-
-    async def settle(
-        self,
-        payment_payload: PaymentPayload,
-        payment_requirements: PaymentRequirements,
-    ) -> SettleResponse: ...
-
-
 class HttpFacilitator:
-    """Client for an x402 facilitator's HTTP API.
+    """Facilitator client for an HTTP base URL.
 
-    Sends ``POST {url}/verify`` and ``POST {url}/settle`` with
-    ``{"paymentPayload", "paymentRequirements", "x402Version": 2}``.
-
-    Example:
-        facilitator = HttpFacilitator("https://x402.org/facilitator")
+    Error responses with a JSON body are read like successful ones (facilitators report
+    ``isValid: false`` or ``success: false`` with an error status).
 
     Args:
-        url: Facilitator base URL.
-        headers: Extra request headers, or a sync or async callable returning
-            them for each request (for example a short-lived bearer token).
-        timeout: Request timeout in seconds.
-        client: Optional ``httpx.AsyncClient`` to send requests with.
+        url: Facilitator base URL (a trailing slash is ignored).
+        client: Optional ``httpx.AsyncClient`` used for the RPCs (a fresh client per call
+            otherwise). Pass a plain client, not a payment-aware one.
+        headers: Extra request headers, or a sync or async callable returning them for each
+            request (for example a short-lived bearer token).
+
+    Raises:
+        FacilitatorError: From ``verify`` and ``settle`` when the request fails or the response
+            is not JSON of the expected shape.
     """
 
     def __init__(
-        self,
-        url: str,
-        *,
-        headers: HeadersInput = None,
-        timeout: float = 30.0,
-        client: httpx.AsyncClient | None = None,
+        self, url: str, *, client: httpx.AsyncClient | None = None, headers: HeadersInput = None
     ) -> None:
-        if not isinstance(url, str) or not url.strip():
-            raise ValueError("facilitator url must be a non-empty string")
-        self.url = url.rstrip("/")
-        self._headers = headers
-        self._timeout = timeout
+        self.url = url.removesuffix("/")
         self._client = client
+        self._headers = headers
 
-    async def _resolve_headers(self) -> dict[str, str]:
-        headers = self._headers
-        if callable(headers):
-            headers = headers()
-            if inspect.isawaitable(headers):
-                headers = await headers
-        return {"Content-Type": "application/json", **dict(headers or {})}
+    async def verify(
+        self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements, /
+    ) -> VerifyResponse:
+        data = await self._post("verify", payment_payload, payment_requirements)
+        return _as(VerifyResponse, data)
+
+    async def settle(
+        self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements, /
+    ) -> SettleResponse:
+        data = await self._post("settle", payment_payload, payment_requirements)
+        return _as(SettleResponse, data)
 
     async def _post(
         self,
@@ -91,58 +80,92 @@ class HttpFacilitator:
         payment_payload: PaymentPayload,
         payment_requirements: PaymentRequirements,
     ) -> Any:
-        body = {
-            "paymentPayload": payment_payload,
-            "paymentRequirements": payment_requirements,
-            "x402Version": X402_VERSION,
-        }
-        headers = await self._resolve_headers()
+        body = _json.dumps(
+            {
+                "paymentPayload": payment_payload.to_dict(),
+                "paymentRequirements": payment_requirements.to_dict(),
+                "x402Version": 2,
+            }
+        )
+        headers = {"Content-Type": "application/json", **(await self._resolve_headers())}
+        url = f"{self.url}/{path}"
         try:
             if self._client is not None:
-                response = await self._client.post(
-                    f"{self.url}{path}", json=body, headers=headers, timeout=self._timeout
-                )
+                response = await self._client.post(url, content=body, headers=headers)
             else:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.post(f"{self.url}{path}", json=body, headers=headers)
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, content=body, headers=headers)
         except httpx.HTTPError as error:
-            raise FacilitatorError(f"facilitator {path} request failed: {error}") from error
+            raise FacilitatorError(f"facilitator /{path} request failed: {error}") from error
         try:
             return response.json()
         except ValueError as error:
             raise FacilitatorError(
-                f"facilitator {path} returned HTTP {response.status_code} without a JSON body"
+                f"facilitator /{path} returned HTTP {response.status_code} without a JSON body"
             ) from error
 
-    async def verify(
-        self,
-        payment_payload: PaymentPayload,
-        payment_requirements: PaymentRequirements,
-    ) -> VerifyResponse:
-        """Ask the facilitator whether a payment is valid, without settling it."""
-        data = await self._post("/verify", payment_payload, payment_requirements)
-        try:
-            return parse_verify_response(data)
-        except X402FormatError as error:
-            raise FacilitatorError(f"facilitator /verify returned {error}") from error
-
-    async def settle(
-        self,
-        payment_payload: PaymentPayload,
-        payment_requirements: PaymentRequirements,
-    ) -> SettleResponse:
-        """Ask the facilitator to settle a payment on-chain."""
-        data = await self._post("/settle", payment_payload, payment_requirements)
-        try:
-            return parse_settle_response(data)
-        except X402FormatError as error:
-            raise FacilitatorError(f"facilitator /settle returned {error}") from error
+    async def _resolve_headers(self) -> dict[str, str]:
+        headers = self._headers
+        if callable(headers):
+            headers = headers()
+            if inspect.isawaitable(headers):
+                headers = await headers
+        return dict(headers or {})
 
 
-def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator:
-    """Return a facilitator client for a base URL or an existing client."""
+def http(
+    url: str, *, client: httpx.AsyncClient | None = None, headers: HeadersInput = None
+) -> HttpFacilitator:
+    """Creates an x402 facilitator client from an HTTP base URL."""
+    return HttpFacilitator(url, client=client, headers=headers)
+
+
+def resolve(
+    facilitator: str | Facilitator,
+    error_message: str = "x402 exact requires `facilitator`.",
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> Facilitator:
+    """Resolves a facilitator URL or client into a facilitator client."""
     if isinstance(facilitator, str):
-        return HttpFacilitator(facilitator)
-    if isinstance(facilitator, Facilitator):
-        return facilitator
-    raise TypeError("facilitator must be a URL or an object with verify() and settle()")
+        if not facilitator:
+            raise ValueError(error_message)
+        return http(facilitator, client=client)
+    if facilitator is None:
+        raise ValueError(error_message)
+    return facilitator
+
+
+async def verify(
+    facilitator: Facilitator,
+    payment_payload: PaymentPayload,
+    payment_requirements: PaymentRequirements,
+) -> VerifyResponse:
+    """Calls ``facilitator.verify`` and validates the (model or dict) result.
+
+    Raises:
+        FacilitatorError: When the result is not a verify response.
+    """
+    return _as(VerifyResponse, await facilitator.verify(payment_payload, payment_requirements))
+
+
+async def settle(
+    facilitator: Facilitator,
+    payment_payload: PaymentPayload,
+    payment_requirements: PaymentRequirements,
+) -> SettleResponse:
+    """Calls ``facilitator.settle`` and validates the (model or dict) result.
+
+    Raises:
+        FacilitatorError: When the result is not a settle response.
+    """
+    return _as(SettleResponse, await facilitator.settle(payment_payload, payment_requirements))
+
+
+def _as[M: VerifyResponse | SettleResponse](model: type[M], value: Any) -> M:
+    if isinstance(value, model):
+        return value
+    try:
+        return model.model_validate(value)
+    except ValidationError as error:
+        raise FacilitatorError(f"facilitator returned an unreadable {model.__name__}") from error

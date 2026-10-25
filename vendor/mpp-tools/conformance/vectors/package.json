@@ -1,0 +1,23 @@
+{
+  "name": "@tempo/mpp-vectors",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Conformance test vectors for MPP protocol SDK implementations",
+  "exports": {
+    "./www-authenticate.json": "./www-authenticate.json",
+    "./authorization.json": "./authorization.json",
+    "./receipt.json": "./receipt.json",
+    "./base64url.json": "./base64url.json",
+    "./challenge-id.json": "./challenge-id.json",
+    "./tempo-proof.json": "./tempo-proof.json"
+  },
+  "files": [
+    "*.json"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tempoxyz/mpp-tools",
+    "directory": "conformance/vectors"
+  },
+  "license": "MIT"
+}

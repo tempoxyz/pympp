@@ -1,285 +1,230 @@
-"""x402 v2 wire types and validation.
+"""x402 v2 wire types (``PAYMENT-REQUIRED`` / ``PAYMENT-SIGNATURE`` / ``PAYMENT-RESPONSE``).
 
-Mirrors mppx's ``src/x402/Types.ts``: only x402 version 2 and the ``exact``
-scheme on EVM networks are supported. Values are plain JSON dictionaries; the
-``parse_*`` helpers validate untrusted input and raise :class:`X402FormatError`.
+Fields are declared in the same (alphabetical) order as the mppx zod schemas so that encoded
+headers are byte-for-byte identical. Unknown keys are dropped, like zod objects.
 """
 
-from __future__ import annotations
+from collections.abc import Awaitable, Mapping
+from typing import Annotated, Any, Final, Literal, Protocol
 
-import re
-from collections.abc import Mapping
-from typing import Any, Literal, NotRequired, TypedDict
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    model_validator,
+)
 
-X402_VERSION: Literal[2] = 2
-"""x402 protocol version supported by this package."""
+PAYMENT_METHOD: Final = "evm"
+"""mppx method name used for EVM charge challenges backed by x402."""
+EXACT_INTENT: Final = "charge"
+"""mppx intent name used for EVM charge challenges backed by x402 exact."""
+VERSIONS: Final = (2,)
+SCHEMES: Final = ("exact",)
+ASSET_TRANSFER_METHODS: Final = ("eip3009", "permit2")
+EVM_NETWORK_PREFIX: Final = "eip155:"
+SYNTHETIC_CHALLENGE_ID_PREFIX: Final = "x402:"
+"""Prefix for synthetic challenge ids derived from x402 ``accepts`` entries."""
 
-PAYMENT_REQUIRED_HEADER = "PAYMENT-REQUIRED"
-"""HTTP header carrying a base64-encoded x402 payment-required response."""
+PAYMENT_REQUIRED_HEADER: Final = "PAYMENT-REQUIRED"
+"""Header carrying a base64-encoded x402 payment-required response."""
+PAYMENT_SIGNATURE_HEADER: Final = "PAYMENT-SIGNATURE"
+"""Header carrying a base64-encoded x402 payment payload."""
+LEGACY_PAYMENT_SIGNATURE_HEADER: Final = "X-PAYMENT"
+"""Legacy header carrying an x402 v1 payment payload."""
+PAYMENT_RESPONSE_HEADER: Final = "PAYMENT-RESPONSE"
+"""Header carrying a base64-encoded x402 settlement response."""
 
-PAYMENT_SIGNATURE_HEADER = "PAYMENT-SIGNATURE"
-"""HTTP header carrying a base64-encoded x402 payment payload."""
+type Scheme = Literal["exact"]
+type AssetTransferMethod = Literal["eip3009", "permit2"]
 
-PAYMENT_RESPONSE_HEADER = "PAYMENT-RESPONSE"
-"""HTTP header carrying a base64-encoded x402 settlement response."""
+NonEmptyString = Annotated[StrictStr, StringConstraints(min_length=1)]
+AtomicAmount = Annotated[StrictStr, StringConstraints(pattern=r"^[0-9]+$")]
+Address = Annotated[StrictStr, StringConstraints(pattern=r"^0x[0-9a-fA-F]{40}$")]
+Hash = Annotated[StrictStr, StringConstraints(pattern=r"^0x[0-9a-fA-F]{64}$")]
+Signature = Annotated[StrictStr, StringConstraints(pattern=r"^0x[0-9a-fA-F]+$")]
+EvmNetwork = Annotated[StrictStr, StringConstraints(pattern=r"^eip155:[0-9]+$")]
+"""CAIP-2 EVM network identifier (``eip155:<chainId>``)."""
+PositiveNumber = Annotated[StrictInt | StrictFloat, Field(gt=0, allow_inf_nan=False)]
 
-EXACT_SCHEME = "exact"
-"""The only x402 scheme supported by this package."""
-
-EIP3009 = "eip3009"
-"""EIP-3009 ``transferWithAuthorization`` asset transfer method."""
-
-SYNTHETIC_CHALLENGE_ID_PREFIX = "x402:"
-"""Prefix of the local challenge IDs given to credentials converted from x402."""
-
-# uint256 values have at most 78 digits.
-_ATOMIC_AMOUNT_RE = re.compile(r"[0-9]{1,78}")
-_EVM_NETWORK_RE = re.compile(r"eip155:[0-9]+")
-_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
-_HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
-_SIGNATURE_RE = re.compile(r"0x(?:[0-9a-fA-F]{2})+")
-
-
-class X402FormatError(ValueError):
-    """An x402 value is not valid for the supported wire format."""
-
-
-class ResourceInfo(TypedDict):
-    """The protected resource described by an x402 v2 response."""
-
-    url: str
-    description: NotRequired[str]
-    mimeType: NotRequired[str]
+_CONFIG: Final = ConfigDict(populate_by_name=True, frozen=True)
 
 
-class PaymentRequirements(TypedDict):
+class _Model(BaseModel):
+    """Base x402 model: optional fields may be omitted but not ``null`` (zod ``z.optional``)."""
+
+    model_config = _CONFIG
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_null(cls, data: Any) -> Any:
+        if isinstance(data, Mapping):
+            for name, field in cls.model_fields.items():
+                for key in {name, field.alias}:
+                    if key is not None and key in data and data[key] is None:
+                        raise ValueError(f"`{field.alias or name}` must not be null")
+        return data
+
+    def to_dict(self) -> dict[str, Any]:
+        """Returns the wire (camelCase) JSON object."""
+        return self.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+class ResourceInfo(_Model):
+    """Describes the protected resource in x402 v2 payment-required responses."""
+
+    description: StrictStr | None = None
+    icon_url: StrictStr | None = Field(default=None, alias="iconUrl")
+    mime_type: StrictStr | None = Field(default=None, alias="mimeType")
+    service_name: StrictStr | None = Field(default=None, alias="serviceName")
+    tags: list[StrictStr] | None = None
+    url: NonEmptyString
+
+
+class PaymentRequirements(_Model):
     """x402 v2 payment requirements for the ``exact`` scheme."""
 
-    scheme: Literal["exact"]
-    network: str
-    amount: str
-    asset: str
-    payTo: str
-    maxTimeoutSeconds: int
-    extra: NotRequired[dict[str, Any]]
+    amount: AtomicAmount
+    asset: NonEmptyString
+    extra: dict[str, Any] | None = None
+    max_timeout_seconds: PositiveNumber = Field(alias="maxTimeoutSeconds")
+    network: EvmNetwork
+    pay_to: NonEmptyString = Field(alias="payTo")
+    scheme: Scheme
 
 
-class PaymentRequired(TypedDict):
-    """x402 v2 payment-required response carried in ``PAYMENT-REQUIRED``."""
+class Extension(_Model):
+    """x402 v2 protocol extension value."""
 
-    x402Version: Literal[2]
-    accepts: list[PaymentRequirements]
+    info: dict[str, Any]
+    schema_: dict[str, Any] = Field(alias="schema")
+
+
+type Extensions = dict[str, Extension]
+"""x402 v2 protocol extensions map."""
+
+
+class PaymentRequired(_Model):
+    """x402 v2 payment-required response (``PAYMENT-REQUIRED`` header body)."""
+
+    accepts: Annotated[list[PaymentRequirements], Field(min_length=1)]
+    error: StrictStr | None = None
+    extensions: dict[str, Extension] | None = None
     resource: ResourceInfo
-    error: NotRequired[str]
-    extensions: NotRequired[dict[str, Any]]
+    x402_version: Literal[2] = Field(alias="x402Version")
 
 
-class PaymentPayload(TypedDict):
-    """x402 v2 payment payload carried in ``PAYMENT-SIGNATURE``."""
+class Eip3009Authorization(_Model):
+    """EIP-3009 ``transferWithAuthorization`` parameters."""
 
-    x402Version: Literal[2]
+    from_: Address = Field(alias="from")
+    nonce: Hash
+    to: Address
+    valid_after: AtomicAmount = Field(alias="validAfter")
+    valid_before: AtomicAmount = Field(alias="validBefore")
+    value: AtomicAmount
+
+
+class ExactEip3009Payload(_Model):
+    """EIP-3009 transferWithAuthorization payload for exact EVM payments."""
+
+    authorization: Eip3009Authorization
+    signature: Signature
+
+
+class Permit2Permitted(_Model):
+    amount: AtomicAmount
+    token: Address
+
+
+class Permit2Witness(_Model):
+    to: Address
+    valid_after: AtomicAmount = Field(alias="validAfter")
+
+
+class Permit2Authorization(_Model):
+    deadline: AtomicAmount
+    from_: Address = Field(alias="from")
+    nonce: AtomicAmount
+    permitted: Permit2Permitted
+    spender: Address
+    witness: Permit2Witness
+
+
+class ExactPermit2Payload(_Model):
+    """Permit2 payload for exact EVM payments."""
+
+    permit2_authorization: Permit2Authorization = Field(alias="permit2Authorization")
+    signature: Signature
+
+
+type ExactPayload = ExactEip3009Payload | ExactPermit2Payload
+
+
+class PaymentPayload(_Model):
+    """x402 v2 payment payload (``PAYMENT-SIGNATURE`` header body)."""
+
     accepted: PaymentRequirements
-    payload: dict[str, Any]
-    resource: NotRequired[ResourceInfo]
-    extensions: NotRequired[dict[str, Any]]
+    extensions: dict[str, Extension] | None = None
+    payload: Annotated[ExactEip3009Payload | ExactPermit2Payload, Field(union_mode="left_to_right")]
+    resource: ResourceInfo | None = None
+    x402_version: Literal[2] = Field(alias="x402Version")
 
 
-class VerifyResponse(TypedDict):
-    """Facilitator ``/verify`` response."""
+class VerifyResponse(_Model):
+    """Facilitator verification response."""
 
-    isValid: bool
-    invalidReason: NotRequired[str]
-    invalidMessage: NotRequired[str]
-    payer: NotRequired[str]
-
-
-class SettleResponse(TypedDict):
-    """Facilitator ``/settle`` response and ``PAYMENT-RESPONSE`` body."""
-
-    success: bool
-    transaction: str
-    network: str
-    payer: NotRequired[str]
-    amount: NotRequired[str]
-    errorReason: NotRequired[str]
-    errorMessage: NotRequired[str]
+    extensions: dict[str, Extension] | None = None
+    extra: dict[str, Any] | None = None
+    invalid_message: StrictStr | None = Field(default=None, alias="invalidMessage")
+    invalid_reason: StrictStr | None = Field(default=None, alias="invalidReason")
+    is_valid: StrictBool = Field(alias="isValid")
+    payer: StrictStr | None = None
 
 
-def _object(value: Any, name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
-        raise X402FormatError(f"{name} must be an object")
-    if not all(isinstance(key, str) for key in value):
-        raise X402FormatError(f"{name} keys must be strings")
-    return dict(value)
+class SettleResponse(_Model):
+    """Facilitator settlement response and ``PAYMENT-RESPONSE`` header body."""
+
+    amount: AtomicAmount | None = None
+    error_message: StrictStr | None = Field(default=None, alias="errorMessage")
+    error_reason: StrictStr | None = Field(default=None, alias="errorReason")
+    extensions: dict[str, Extension] | None = None
+    extra: dict[str, Any] | None = None
+    network: NonEmptyString
+    payer: StrictStr | None = None
+    success: StrictBool
+    transaction: StrictStr
 
 
-def _string(record: Mapping[str, Any], key: str, name: str, *, non_empty: bool = True) -> str:
-    value = record.get(key)
-    if not isinstance(value, str) or (non_empty and not value):
-        raise X402FormatError(f"{name}.{key} must be a non-empty string")
-    return value
+class Facilitator(Protocol):
+    """x402 facilitator client used for verification and settlement.
 
-
-def _optional_string(record: Mapping[str, Any], key: str, name: str) -> str | None:
-    value = record.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise X402FormatError(f"{name}.{key} must be a string")
-    return value
-
-
-def _pattern(record: Mapping[str, Any], key: str, name: str, pattern: re.Pattern[str]) -> str:
-    value = _string(record, key, name)
-    if not pattern.fullmatch(value):
-        raise X402FormatError(f"{name}.{key} is malformed")
-    return value
-
-
-def _version(record: Mapping[str, Any], name: str) -> None:
-    version = record.get("x402Version")
-    if isinstance(version, bool) or version != X402_VERSION:
-        raise X402FormatError(f"{name}.x402Version must be {X402_VERSION}")
-
-
-def _extensions(record: Mapping[str, Any], name: str) -> None:
-    value = record.get("extensions")
-    if value is None:
-        return
-    for key, extension in _object(value, f"{name}.extensions").items():
-        extension = _object(extension, f"{name}.extensions.{key}")
-        _object(extension.get("info"), f"{name}.extensions.{key}.info")
-        _object(extension.get("schema"), f"{name}.extensions.{key}.schema")
-
-
-def parse_resource(value: Any, name: str = "resource") -> ResourceInfo:
-    """Validate x402 resource information."""
-    record = _object(value, name)
-    _string(record, "url", name)
-    for key in ("description", "mimeType", "serviceName", "iconUrl"):
-        _optional_string(record, key, name)
-    return record  # type: ignore[return-value]
-
-
-def parse_payment_requirements(
-    value: Any, name: str = "paymentRequirements"
-) -> PaymentRequirements:
-    """Validate x402 v2 ``exact`` EVM payment requirements."""
-    record = _object(value, name)
-    if record.get("scheme") != EXACT_SCHEME:
-        raise X402FormatError(f"{name}.scheme must be {EXACT_SCHEME!r}")
-    _pattern(record, "network", name, _EVM_NETWORK_RE)
-    _pattern(record, "amount", name, _ATOMIC_AMOUNT_RE)
-    _string(record, "asset", name)
-    _string(record, "payTo", name)
-    timeout = record.get("maxTimeoutSeconds")
-    if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
-        raise X402FormatError(f"{name}.maxTimeoutSeconds must be a positive number")
-    if record.get("extra") is not None:
-        _object(record["extra"], f"{name}.extra")
-    return record  # type: ignore[return-value]
-
-
-def parse_payment_required(value: Any) -> PaymentRequired:
-    """Validate an x402 v2 payment-required response."""
-    record = _object(value, "paymentRequired")
-    _version(record, "paymentRequired")
-    accepts = record.get("accepts")
-    if not isinstance(accepts, list) or not accepts:
-        raise X402FormatError("paymentRequired.accepts must be a non-empty array")
-    for index, accepted in enumerate(accepts):
-        parse_payment_requirements(accepted, f"paymentRequired.accepts[{index}]")
-    parse_resource(record.get("resource"), "paymentRequired.resource")
-    _optional_string(record, "error", "paymentRequired")
-    _extensions(record, "paymentRequired")
-    return record  # type: ignore[return-value]
-
-
-def parse_eip3009_payload(value: Any, name: str = "payload") -> dict[str, Any]:
-    """Validate an exact EVM EIP-3009 payload body."""
-    record = _object(value, name)
-    auth_name = f"{name}.authorization"
-    authorization = _object(record.get("authorization"), auth_name)
-    _pattern(authorization, "from", auth_name, _ADDRESS_RE)
-    _pattern(authorization, "to", auth_name, _ADDRESS_RE)
-    _pattern(authorization, "nonce", auth_name, _HASH_RE)
-    for key in ("value", "validAfter", "validBefore"):
-        _pattern(authorization, key, auth_name, _ATOMIC_AMOUNT_RE)
-    _pattern(record, "signature", name, _SIGNATURE_RE)
-    return record
-
-
-def parse_payment_payload(value: Any) -> PaymentPayload:
-    """Validate an x402 v2 payment payload.
-
-    The ``payload`` body is only checked to be an object here; the EIP-3009
-    shape is checked by :func:`parse_eip3009_payload` when it is converted,
-    because the x402 ``exact`` scheme also defines Permit2 bodies.
-    """
-    record = _object(value, "paymentPayload")
-    _version(record, "paymentPayload")
-    parse_payment_requirements(record.get("accepted"), "paymentPayload.accepted")
-    _object(record.get("payload"), "paymentPayload.payload")
-    if record.get("resource") is not None:
-        parse_resource(record["resource"], "paymentPayload.resource")
-    _extensions(record, "paymentPayload")
-    return record  # type: ignore[return-value]
-
-
-def parse_verify_response(value: Any) -> VerifyResponse:
-    """Validate a facilitator ``/verify`` response."""
-    record = _object(value, "verifyResponse")
-    if not isinstance(record.get("isValid"), bool):
-        raise X402FormatError("verifyResponse.isValid must be a boolean")
-    for key in ("invalidReason", "invalidMessage", "payer"):
-        _optional_string(record, key, "verifyResponse")
-    return record  # type: ignore[return-value]
-
-
-def parse_settle_response(value: Any) -> SettleResponse:
-    """Validate a facilitator ``/settle`` response or ``PAYMENT-RESPONSE`` body."""
-    record = _object(value, "settleResponse")
-    if not isinstance(record.get("success"), bool):
-        raise X402FormatError("settleResponse.success must be a boolean")
-    _string(record, "transaction", "settleResponse", non_empty=False)
-    _string(record, "network", "settleResponse")
-    for key in ("payer", "errorReason", "errorMessage"):
-        _optional_string(record, key, "settleResponse")
-    if record.get("amount") is not None:
-        _pattern(record, "amount", "settleResponse", _ATOMIC_AMOUNT_RE)
-    return record  # type: ignore[return-value]
-
-
-def requirements_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
-    """Return whether echoed requirements equal the route's requirements.
-
-    Comparison is exact JSON equality (mppx compares with deep equality),
-    except that the ``asset`` and ``payTo`` addresses compare case-insensitively
-    because EIP-55 checksums are presentation only.
+    Implementations may return model instances or plain wire dicts; results are validated.
     """
 
-    def normalized(value: Mapping[str, Any]) -> dict[str, Any]:
-        record = dict(value)
-        for key in ("asset", "payTo"):
-            if isinstance(record.get(key), str):
-                record[key] = record[key].lower()
-        if record.get("extra") is None:
-            record.pop("extra", None)
-        return record
+    def verify(
+        self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements, /
+    ) -> Awaitable[VerifyResponse | Mapping[str, Any]]: ...
 
-    return _json_equal(normalized(actual), normalized(expected))
+    def settle(
+        self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements, /
+    ) -> Awaitable[SettleResponse | Mapping[str, Any]]: ...
 
 
-def _json_equal(left: Any, right: Any) -> bool:
-    """JSON equality that never equates booleans with numbers."""
-    if isinstance(left, bool) or isinstance(right, bool):
-        return type(left) is type(right) and left == right
-    if isinstance(left, Mapping) and isinstance(right, Mapping):
-        return left.keys() == right.keys() and all(_json_equal(left[k], right[k]) for k in left)
-    if isinstance(left, list) and isinstance(right, list):
-        return len(left) == len(right) and all(
-            _json_equal(a, b) for a, b in zip(left, right, strict=True)
-        )
-    if isinstance(left, int | float) and isinstance(right, int | float):
-        return left == right
-    return type(left) is type(right) and left == right
+def to_payment_requirements(request: Mapping[str, Any]) -> PaymentRequirements:
+    """Extracts x402 :class:`PaymentRequirements` from a canonical exact request.
+
+    The exact request is the ``PaymentRequirements`` object plus optional ``extensions`` and
+    ``resource`` (the shape of synthesized x402 challenge requests).
+    """
+    fields = {key: value for key, value in request.items() if key not in ("extensions", "resource")}
+    return PaymentRequirements.model_validate(fields)
+
+
+def chain_id_of(network: str) -> int:
+    """Converts a CAIP-2 EVM network identifier to its chain id."""
+    return int(network[len(EVM_NETWORK_PREFIX) :])
