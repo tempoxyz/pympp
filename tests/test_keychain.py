@@ -54,9 +54,22 @@ class TestBuildKeychainSignature:
         access_key = TempoAccount.from_key(TEST_KEY)
         msg_hash = b"\x00" * 32
 
-        # Production code uses `assert` for length validation after building the signature
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="20-byte"):
             build_keychain_signature(msg_hash, access_key, "0xdead")
+
+    def test_root_address_without_prefix(self) -> None:
+        """Should raise on a root address without the 0x prefix."""
+        access_key = TempoAccount.from_key(TEST_KEY)
+
+        with pytest.raises(ValueError, match="0x-prefixed"):
+            build_keychain_signature(b"\x00" * 32, access_key, "aa" * 21)
+
+    def test_invalid_msg_hash_length(self) -> None:
+        """Should raise on a message hash that is not 32 bytes."""
+        access_key = TempoAccount.from_key(TEST_KEY)
+
+        with pytest.raises(ValueError, match="32 bytes"):
+            build_keychain_signature(b"\x00" * 31, access_key, "0x" + "aa" * 20)
 
     def test_invalid_root_address_not_hex(self) -> None:
         """Should raise on root address with invalid hex."""
