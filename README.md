@@ -3,12 +3,8 @@
 Python SDK for the [Machine Payments Protocol](https://mpp.dev): the `Payment` HTTP
 authentication scheme for HTTP 402.
 
-pympp rewrites [pympp](https://github.com/tempoxyz/pympp) onto the engine model of the
-TypeScript reference SDK [mppx](https://github.com/wevm/mppx) and matches mppx's behaviour. It
-covers what pympp 0.15 offers and passes the `mpp-tools` conformance suite with its vectors and
-flows unchanged; the Python adapter bridges three fixture assumptions (see the
-[disclosure](docs/coverage.md#conformance)). The [migration guide](docs/migration-from-pympp.md)
-lists every interface change from pympp 0.15.
+pympp follows the engine model and behaviour of the TypeScript reference SDK
+[mppx](https://github.com/wevm/mppx).
 
 - Server: protect any route with one or more payment offers. It works with any framework and
   ships a Starlette/FastAPI decorator.
@@ -72,8 +68,7 @@ async def premium() -> dict[str, str]:
 - The realm defaults to `MPP_REALM` (or a platform host variable), then the request host.
 - Replay protection uses an in-memory store by default, which only protects a single process.
   Production deployments with more than one worker need a shared store, for example
-  `tempo.charge(..., store=mpp.store.redis(redis_client))`. See
-  [security considerations](docs/public-sdk-considerations.md#security-considerations-for-operators).
+  `tempo.charge(..., store=mpp.store.redis(redis_client))`.
 
 Without Starlette, call the handler with the framework-neutral types:
 
@@ -112,16 +107,6 @@ asyncio.run(main())
 `mpp.fetch` retries 402 responses with a Credential. It applies no timeout unless you pass
 `timeout=`, because paid requests may wait for settlement. To use your own client, plug
 `mpp.payment_transport` into `httpx.AsyncClient(transport=...)`, or call `mpp.client()`.
-
-## Documentation
-
-| Document | Contents |
-|---|---|
-| [docs/migration-from-pympp.md](docs/migration-from-pympp.md) | Interface changes from pympp 0.15, with before/after code |
-| [docs/architecture.md](docs/architecture.md) | Package structure, core abstractions, mppx → Python mapping, writing a custom payment method |
-| [docs/public-sdk-considerations.md](docs/public-sdk-considerations.md) | API surface and versioning policy, typing, optional deps, security notes for operators, error model, release checklist |
-| [docs/coverage.md](docs/coverage.md) | Scope, key differences from mppx, test and conformance results, planned feature PRs |
-| [docs/parity/](docs/parity/) | Per-area mppx feature tables (evidence for the coverage report) |
 
 ## Development
 

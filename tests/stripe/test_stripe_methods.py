@@ -1,5 +1,3 @@
-"""Port of mppx ``stripe/Methods.test.ts`` and ``stripe/internal/parse-units.test.ts``."""
-
 from decimal import ROUND_HALF_UP, Decimal, localcontext
 
 import pytest

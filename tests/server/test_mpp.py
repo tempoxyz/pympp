@@ -1,5 +1,3 @@
-"""Ported from mppx src/server/Mpp.test.ts (generic engine behavior)."""
-
 import json
 from typing import Any
 

@@ -1,5 +1,4 @@
-"""Port of mppx ``src/tempo/Proof.test.ts``, ``Proof.conformance.test.ts`` and
-``src/tempo/internal/proof.test.ts``, plus ``recoverAuthorizedProofSigner``
+"""``src/tempo/internal/proof.test.ts``, plus ``recoverAuthorizedProofSigner``
 (``src/tempo/server/Charge.ts``) coverage."""
 
 from __future__ import annotations

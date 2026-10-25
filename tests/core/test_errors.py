@@ -1,5 +1,3 @@
-"""Ported from mppx src/Errors.test.ts."""
-
 import json
 
 import pytest

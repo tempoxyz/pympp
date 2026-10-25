@@ -1,5 +1,3 @@
-"""Ported from mppx src/Expires.test.ts."""
-
 from datetime import UTC, datetime
 
 import pytest

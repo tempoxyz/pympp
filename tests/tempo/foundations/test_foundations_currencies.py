@@ -1,5 +1,3 @@
-"""Port of mppx ``src/tempo/internal/currencies.test.ts``."""
-
 from __future__ import annotations
 
 from typing import Any

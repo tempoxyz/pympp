@@ -1,5 +1,3 @@
-"""Ported from mppx src/server/Mpp.test.ts: withReceipt, realm, challenge(), verifyCredential."""
-
 import json
 from dataclasses import replace
 from typing import Any, Literal

@@ -1,5 +1,3 @@
-"""Port of mppx ``stripe/server/Methods.test.ts`` (``stripe.create()`` machine payments)."""
-
 import logging
 from typing import Any
 

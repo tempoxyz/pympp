@@ -1,5 +1,3 @@
-"""Port of mppx ``tempo/server/Charge.recovery.test.ts`` (ambiguous broadcast recovery)."""
-
 from __future__ import annotations
 
 import asyncio

@@ -1,5 +1,3 @@
-"""Port of mppx ``tempo/server/Methods.test.ts`` (ordered currency offers and the ``tempo`` group)."""
-
 from __future__ import annotations
 
 import json

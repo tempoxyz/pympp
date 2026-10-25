@@ -1,5 +1,3 @@
-"""Ported from mppx src/Credential.test.ts."""
-
 import base64
 import json
 

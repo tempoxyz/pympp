@@ -1,5 +1,3 @@
-"""Ported from mppx src/client/internal/Fetch.test.ts (transport-level payment flow)."""
-
 import asyncio
 import base64
 import json

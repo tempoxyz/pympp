@@ -1,5 +1,3 @@
-"""Ported from mppx src/PaymentRequest.test.ts (+ JCS/JSON helpers)."""
-
 import pytest
 from pydantic import ValidationError
 

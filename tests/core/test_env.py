@@ -1,5 +1,3 @@
-"""Ported from mppx src/internal/env.test.ts."""
-
 import pytest
 
 from mpp import _env

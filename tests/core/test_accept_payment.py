@@ -1,5 +1,3 @@
-"""Ported from mppx src/internal/AcceptPayment.test.ts."""
-
 from dataclasses import dataclass, replace
 
 import pytest

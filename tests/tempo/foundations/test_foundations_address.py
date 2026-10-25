@@ -1,5 +1,3 @@
-"""Port of mppx ``src/tempo/internal/address.test.ts``."""
-
 from __future__ import annotations
 
 import pytest

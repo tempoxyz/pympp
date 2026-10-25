@@ -1,5 +1,3 @@
-"""Ported from mppx src/BodyDigest.test.ts."""
-
 from mpp import body_digest
 
 

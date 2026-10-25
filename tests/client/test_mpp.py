@@ -1,5 +1,3 @@
-"""Ported from mppx src/client/Mpp.test.ts (prepare_payment, prepare_request, create_credential)."""
-
 import asyncio
 from typing import Any
 

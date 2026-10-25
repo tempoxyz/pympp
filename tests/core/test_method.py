@@ -1,5 +1,3 @@
-"""Ported from mppx src/Method.test.ts."""
-
 from typing import Any
 
 import pytest

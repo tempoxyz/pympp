@@ -1,5 +1,3 @@
-"""Port of mppx ``tempo/server/internal/fallback-store.test.ts``."""
-
 from __future__ import annotations
 
 import warnings

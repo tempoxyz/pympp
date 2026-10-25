@@ -1,5 +1,3 @@
-"""Port of mppx ``stripe/client/Charge.test.ts`` plus an end-to-end client/server round trip."""
-
 from typing import Any
 
 import httpx

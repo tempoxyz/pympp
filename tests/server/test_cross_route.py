@@ -1,5 +1,3 @@
-"""Ported from mppx src/server/Mpp.test.ts: cross-route credential replay via scope binding."""
-
 from typing import Any
 
 import pytest

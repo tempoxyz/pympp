@@ -1,5 +1,3 @@
-"""Ported from mppx src/Receipt.test.ts."""
-
 import httpx
 import pytest
 

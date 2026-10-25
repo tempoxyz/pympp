@@ -1,5 +1,3 @@
-"""Port of mppx ``src/tempo/Methods.test.ts``."""
-
 from __future__ import annotations
 
 from typing import Any

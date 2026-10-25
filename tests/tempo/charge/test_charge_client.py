@@ -1,5 +1,3 @@
-"""Port of mppx ``tempo/client/Charge.test.ts`` plus client-side mode behavior."""
-
 from __future__ import annotations
 
 import asyncio

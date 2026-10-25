@@ -1,5 +1,3 @@
-"""Port of mppx ``tempo/server/Relay.test.ts`` (Tempo API relay delegation)."""
-
 from __future__ import annotations
 
 import asyncio

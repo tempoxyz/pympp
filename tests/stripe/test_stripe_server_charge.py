@@ -1,5 +1,3 @@
-"""Port of mppx ``stripe/server/Charge.test.ts`` (server ``Mpp`` + Stripe charge)."""
-
 import json
 from typing import Any, cast
 

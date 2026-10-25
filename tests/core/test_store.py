@@ -1,5 +1,3 @@
-"""Ported from mppx src/Store.test.ts."""
-
 import time
 from typing import Any
 

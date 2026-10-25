@@ -1,5 +1,3 @@
-"""Ported from mppx src/server/Mpp.test.ts (``compose`` and nested accessors)."""
-
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta

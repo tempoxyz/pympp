@@ -1,5 +1,3 @@
-"""Port of mppx ``src/tempo/internal/fee-payer.test.ts``."""
-
 from __future__ import annotations
 
 import json

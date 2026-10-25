@@ -1,5 +1,3 @@
-"""Port of mppx ``src/tempo/internal/defaults.test.ts`` (``mpp.tempo.chains`` + ``mpp.tempo.assets``)."""
-
 from __future__ import annotations
 
 from mpp.tempo.assets import (

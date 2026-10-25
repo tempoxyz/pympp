@@ -1,5 +1,3 @@
-"""Ported from mppx src/Challenge.test.ts."""
-
 import re
 from datetime import UTC, datetime
 from typing import Any, ClassVar

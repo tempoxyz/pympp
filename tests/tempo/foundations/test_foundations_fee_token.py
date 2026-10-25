@@ -1,6 +1,4 @@
-"""Port of mppx ``src/tempo/internal/fee-token.test.ts``.
-
-mppx runs these scenarios only against a localnet; here the node is faked
+"""mppx runs these scenarios only against a localnet; here the node is faked
 over ``httpx.MockTransport`` (balances + fee-manager ``userTokens``).
 """
 

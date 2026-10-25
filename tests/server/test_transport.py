@@ -1,5 +1,3 @@
-"""Ported from mppx src/server/Transport.test.ts, Response.test.ts, Mpp.nonce/authorize/identity/compose.mcp tests."""
-
 import asyncio
 import json
 from typing import Any, Literal
