@@ -107,6 +107,10 @@ def charge(
     )
     verifier: Any = intent if relay is None else relay.configure(intent)
 
+    def use_store(store: Store) -> None:
+        if intent._store is None:
+            intent._store = store
+
     def resolve_request(context: RequestContext) -> dict[str, Any]:
         input = {key: value for key, value in context.request.items() if value is not None}
         input.setdefault("recipient", config.recipient)
@@ -133,6 +137,7 @@ def charge(
             can_offer=can_offer,
             on_payment_success=on_payment_success,
             defaults={"currency": accepted},
+            use_store=use_store,
         )
         for accepted in config.currencies
     ]

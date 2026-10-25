@@ -104,6 +104,10 @@ def charge(
         max_validity_seconds=max_validity_seconds,
     )
 
+    def use_store(store: Store) -> None:
+        if intent._store is None:
+            intent._store = store
+
     async def validate(context: ValidateContext) -> Validation:
         return await intent.validate(_native(context.credential), context.challenge.request)
 
@@ -118,6 +122,7 @@ def charge(
         can_offer=can_offer,
         on_payment_success=on_payment_success,
         x402=intent,
+        use_store=use_store,
     )
 
 

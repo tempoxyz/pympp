@@ -13,6 +13,7 @@ from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
     from mpp.server.http import Request
+    from mpp.store import Store
     from mpp.x402._server import X402Intent
 
 T = TypeVar("T")
@@ -79,6 +80,8 @@ class ServerMethod:
         on_payment_success: Called with the `payment.success` event of this method.
         defaults: Route input merged under every route's options.
         x402: Lets x402 `exact` clients pay this method's offers.
+        use_store: Adopts the `Mpp(store=...)` replay store when the method was
+            configured without one of its own.
     """
 
     method: Method[Any, Any]
@@ -92,6 +95,7 @@ class ServerMethod:
     on_payment_success: PaymentSuccessHandler | None = None
     defaults: Mapping[str, Any] | None = None
     x402: X402Intent | None = None
+    use_store: Callable[[Store], None] | None = None
 
     def __post_init__(self) -> None:
         if self.verify is None and self.broadcast is None:

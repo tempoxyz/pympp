@@ -54,6 +54,48 @@ class TestMppStoreWiring:
         assert isinstance(challenge(result), Challenge)
 
 
+class TestMppSharedStore:
+    def _methods(self, **kwargs):
+        return tempo_server.charge(
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_mpp_store_used_by_methods_without_one(self) -> None:
+        """Mpp(store=...) protects methods configured without their own store."""
+        store = MemoryStore()
+        tx_hash = "0x" + "cd" * 32
+        await store.put(f"mpp:charge:{tx_hash}", tx_hash)
+        srv = Mpp(methods=self._methods(), realm="test.com", secret_key="test-secret", store=store)
+        issued = challenge(await srv.charge(amount="0.50")(http_request()))
+        credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        )
+        with pytest.raises(CredentialReplayedError):
+            await srv.validate_credential(credential)
+
+    @pytest.mark.asyncio
+    async def test_method_store_takes_precedence(self) -> None:
+        """A method's own store is not replaced by Mpp(store=...)."""
+        own, shared = MemoryStore(), MemoryStore()
+        tx_hash = "0x" + "ef" * 32
+        await own.put(f"mpp:charge:{tx_hash}", tx_hash)
+        srv = Mpp(
+            methods=self._methods(store=own),
+            realm="test.com",
+            secret_key="test-secret",
+            store=shared,
+        )
+        issued = challenge(await srv.charge(amount="0.50")(http_request()))
+        credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        )
+        with pytest.raises(CredentialReplayedError):
+            await srv.validate_credential(credential)
+
+
 class TestStoreProtocolConformance:
     """Verify MemoryStore conforms to the Store protocol."""
 

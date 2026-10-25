@@ -43,6 +43,7 @@ from mpp.server.verify import (
     _body_digest_error,
     _challenge_from_echo,
 )
+from mpp.store import Store
 
 if TYPE_CHECKING:
     from mpp.events import ServerPaymentSuccessPayload
@@ -160,6 +161,7 @@ class Mpp:
         *,
         realm: str | None = None,
         secret_key: str | None = None,
+        store: Store | None = None,
         requires_auth: bool = False,
         unique_challenges: bool = True,
     ) -> None:
@@ -172,6 +174,8 @@ class Mpp:
                 directly.
             realm: Server realm. Auto-detected from the environment if omitted.
             secret_key: HMAC secret. Required unless ``MPP_SECRET_KEY`` is set.
+            store: Replay store shared by every method configured without its own, such
+                as a Tempo or EVM charge built without ``store=``.
             requires_auth: Read Payment credentials from ``Payment-Authorization`` so
                 ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
@@ -181,6 +185,10 @@ class Mpp:
         self._compose_implicit = isinstance(methods, Sequence)
         if not self.methods:
             raise ValueError("methods is required")
+        if store is not None:
+            for method in self.methods:
+                if method.use_store is not None:
+                    method.use_store(store)
         self.realm = detect_realm() if realm is None else realm
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges
