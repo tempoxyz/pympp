@@ -161,6 +161,72 @@ async def test_machine_payments_route_spt_and_recorded_payments() -> None:
     assert "customer" not in recorder.calls[1][0]
 
 
+async def test_secret_key_path_hides_stripe_error_with_settlement() -> None:
+    http_client = AsyncMock(spec=httpx.AsyncClient)
+    http_client.post.return_value = httpx.Response(
+        400,
+        json={"error": {"message": "No such destination: 'acct_seller'"}},
+        request=httpx.Request("POST", "https://api.stripe.com/v1/payment_intents"),
+    )
+    intent = ChargeIntent(secret_key="sk_test", http_client=http_client)
+    with pytest.raises(VerificationFailedError) as error:
+        await intent.verify(_make_credential(), SAMPLE_REQUEST, connect=SETTLEMENT)
+    assert "acct_seller" not in str(error.value)
+    assert "HTTP 400" in str(error.value)
+
+
+def test_tempo_is_not_offered_when_connect_cannot_record_the_amount() -> None:
+    connect = ConnectSettlement(application_fee_amount=50)
+    _, payments = make_payments(deposit_addresses={"tempo": "0x" + "1" * 40}, connect=connect)
+    can_offer = payments.tempo.charge().can_offer
+    assert can_offer is not None
+    assert can_offer({"amount": "250000"}) is False  # 25 cents < 50-cent fee
+    assert can_offer({"amount": "500000"}) is True
+    assert can_offer({"amount": "9999"}) is False  # under one cent
+
+    _, payments = make_payments(
+        deposit_addresses={"tempo": "0x" + "1" * 40}, connect=ConnectSettlement(stripe_account="")
+    )
+    can_offer = payments.tempo.charge().can_offer
+    assert can_offer is not None
+    assert can_offer({"amount": "1000000"}) is False
+
+
+async def test_recorded_tempo_hash_payment_is_accepted_after_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mpp.methods.stripe.payment_intent_method as payment_intent_method
+
+    settled: list[VerifyContext] = []
+
+    async def terminal(context: VerifyContext) -> Receipt:
+        settled.append(context)
+        return Receipt.success("0xtest", method="tempo")
+
+    monkeypatch.setattr(
+        payment_intent_method,
+        "with_payment_intent_input",
+        lambda method, *_args, **_kwargs: replace(method, broadcast=terminal),
+    )
+    _, payments = make_payments(
+        deposit_addresses={"tempo": "0x" + "1" * 40},
+        connect=ConnectSettlement(application_fee_amount=101),
+    )
+    method = payments.tempo.charge()
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+    payload = method.method.parse_payload({"type": "hash", "hash": "0x" + "ab" * 32})
+    context = VerifyContext(
+        credential=Credential(challenge=issued.to_echo(), payload=payload),
+        request={},
+        challenge=issued,
+    )
+
+    assert method.broadcast is not None
+    await method.broadcast(context)
+    assert len(settled) == 1
+
+
 @pytest.mark.parametrize(
     "settlement",
     [

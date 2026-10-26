@@ -331,7 +331,8 @@ class ChargeIntent:
         )
 
         if not response.is_success:
-            if not payment_options:
+            # Stripe's text can echo server-only options and Connect accounts.
+            if not payment_options and settlement is None:
                 try:
                     error = response.json().get("error", {})
                     detail = error.get("message") or error.get("code")

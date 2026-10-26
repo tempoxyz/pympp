@@ -97,7 +97,7 @@ class TempoPayments:
             # Keep Stripe's Tempo rail on one currency: USDC.e live, pathUSD test.
             currencies=[default_currency_for_chain(chain_id)],
             recipient=self._recipient,
-            can_offer=_minimum_amount(_RAW_UNITS_PER_CENT),
+            can_offer=_tempo_can_offer(self._connect),
         )
         method = with_payment_intent_input(
             method, self._record_payment, configured_metadata=self._metadata
@@ -188,11 +188,35 @@ def create(
     )
 
 
+def _tempo_can_offer(connect: ConnectSettlement | None) -> CanOfferFn:
+    """Offer Tempo only for amounts whose Stripe recording can carry ``connect``."""
+    minimum = _minimum_amount(_RAW_UNITS_PER_CENT)
+    if connect is None:
+        return minimum
+
+    from mpp.errors import VerificationFailedError
+    from mpp.methods.stripe.connect import validate_settlement
+    from mpp.methods.stripe.crypto_payment_recorder import recorded_cents
+
+    def can_offer(request: dict[str, Any]) -> bool:
+        if not minimum(request):
+            return False
+        try:
+            validate_settlement(connect, recorded_cents("tempo", request))
+        except VerificationFailedError:
+            return False
+        return True
+
+    return can_offer
+
+
 def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) -> ServerMethod:
     """Reject a Tempo payment whose recording would fail Stripe Connect validation.
 
     Recording happens after on-chain settlement, so check the settlement against
-    the cents-denominated recording PaymentIntent before settling.
+    the cents-denominated recording PaymentIntent before settling. A ``hash``
+    credential's transfer is already on-chain, so it is accepted and only its
+    recording can fail.
     """
     from dataclasses import replace
 
@@ -202,7 +226,7 @@ def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) ->
     def guard(terminal: Any) -> Any:
         async def run(context: Any) -> Any:
             cents = recorded_cents("tempo", context.challenge.request)
-            if cents >= 1:
+            if cents >= 1 and _payload_type(context.credential.payload) != "hash":
                 validate_settlement(connect, cents)
             return await terminal(context)
 
@@ -213,3 +237,9 @@ def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) ->
         verify=guard(method.verify) if method.verify is not None else None,
         broadcast=guard(method.broadcast) if method.broadcast is not None else None,
     )
+
+
+def _payload_type(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return payload.get("type")
+    return getattr(getattr(payload, "root", payload), "type", None)
