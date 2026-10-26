@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 import time
+import weakref
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -207,12 +208,16 @@ async def verify(
     except Exception:
         return Invalid("The HTTP message signature is invalid.")
     key_name = f"{nonce_namespace}:{signature_input.key_id}:{signature_input.nonce}"
-    try:
-        claimed = await _try_claim(nonce_store, key_name, signature_input.expires)
-    except Exception:
-        return Unverified("Replay protection is unavailable.")
-    if not claimed:
-        return Invalid("The signature nonce has already been used.")
+    claims = _request_claims(request)
+    claim = (id(nonce_store), key_name)
+    if claim not in claims:
+        try:
+            claimed = await _try_claim(nonce_store, key_name, signature_input.expires)
+        except Exception:
+            return Unverified("Replay protection is unavailable.")
+        if not claimed:
+            return Invalid("The signature nonce has already been used.")
+        claims.add(claim)
     if signature_input.expires <= int(time.time()):
         return Invalid("The signature has expired.")
     return Verified(signature_input)
@@ -248,10 +253,22 @@ def require_expiring_store(store: Store) -> None:
         )
 
 
+_claims: dict[int, set[tuple[int, str]]] = {}
+
+
+def _request_claims(request: Request) -> set[tuple[int, str]]:
+    """Nonces this request object already claimed, so other verifiers sharing a store accept it."""
+    key = id(request)
+    if (claims := _claims.get(key)) is None:
+        claims = _claims[key] = set()
+        weakref.finalize(request, _claims.pop, key, None)
+    return claims
+
+
 async def _try_claim(store: ExpiringStore, key: str, expires: int) -> bool:
     if expires <= time.time():
         return False
-    return await store.put_if_absent_until(key, True, expires)
+    return await store.put_if_absent_until(key, "1", expires)
 
 
 def _parse(

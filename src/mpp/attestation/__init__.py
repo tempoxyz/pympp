@@ -219,7 +219,14 @@ class Guard:
         task = asyncio.ensure_future(self._check(request))
         self._cache[key] = task
         weakref.finalize(request, self._cache.pop, key, None)
+        task.add_done_callback(lambda done: self._forget_failure(key, done))
         return await asyncio.shield(task)
+
+    def _forget_failure(self, key: int, task: asyncio.Future[tuple[int, str] | None]) -> None:
+        # A failed task's traceback references the request, so caching it would keep the
+        # request alive and its finalizer would never evict the entry.
+        if (task.cancelled() or task.exception() is not None) and self._cache.get(key) is task:
+            del self._cache[key]
 
     async def _check(self, request: Request) -> tuple[int, str] | None:
         outcomes = await verify(request, self._verifiers)

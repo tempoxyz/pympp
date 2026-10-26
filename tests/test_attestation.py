@@ -1,7 +1,10 @@
 """Tests for request attestation (TAP and Web Bot Auth)."""
 
+import asyncio
 import base64
+import gc
 import time
+import weakref
 from typing import Any
 
 import httpx
@@ -12,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from mpp import Challenge
 from mpp.attestation import (
     Absent,
+    Guard,
     Invalid,
     KeyLookup,
     SigningContext,
@@ -39,6 +43,10 @@ def _server_request(signed: httpx.Request) -> Request:
 
 async def _signed(signer: Any, url: str = URL, **kwargs: Any) -> Request:
     return _server_request(await signer.sign(httpx.Request("GET", url), **kwargs))
+
+
+def _copy(request: Request) -> Request:
+    return Request(request.method, request.url, headers=request.headers)
 
 
 def _resolver(key: Any, lookups: list[KeyLookup] | None = None) -> Any:
@@ -70,7 +78,7 @@ class TestTap:
         assert result.value.intent == "payment"
         assert result.value.key_id == "agent-1"
         assert lookups[0].key_id == "agent-1"
-        assert await verifier.verify(request) == Invalid(
+        assert await verifier.verify(_copy(request)) == Invalid(
             "The signature nonce has already been used."
         )
 
@@ -157,6 +165,31 @@ class TestTap:
         ]:
             verifier = tap.verifier(key_resolver=resolver, nonce_store=MemoryStore())
             assert await verifier.verify(request) == Unverified(reason)
+
+    async def test_claims_nonce_in_redis_store(self) -> None:
+        redis = pytest.importorskip("redis")
+        from mpp.stores import RedisStore
+
+        class Client:
+            def __init__(self) -> None:
+                self.encoder = redis.connection.Encoder("utf-8", "strict", False)
+                self.data: dict[str, bytes] = {}
+
+            async def set(self, name: str, value: Any, nx: bool = False, pxat: int = 0) -> Any:
+                encoded = self.encoder.encode(value)  # Rejects bool, as redis-py does.
+                if nx and name in self.data:
+                    return None
+                self.data[name] = encoded
+                return True
+
+        key = Ed25519PrivateKey.generate()
+        verifier = tap.verifier(key_resolver=_resolver(key), nonce_store=RedisStore(Client()))
+        request = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
+
+        assert isinstance(await verifier.verify(request), Verified)
+        assert await verifier.verify(_copy(request)) == Invalid(
+            "The signature nonce has already been used."
+        )
 
     def test_rejects_lifetime_beyond_eight_minutes(self) -> None:
         with pytest.raises(ValueError, match="from 1 to 480"):
@@ -363,6 +396,40 @@ class TestServer:
         handler = compose(plain.charge(), self._server(Ed25519PrivateKey.generate()).charge())
 
         assert (await handler(Request("GET", URL))).status == 403
+
+    async def test_composed_servers_sharing_a_nonce_store_claim_once(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        store = MemoryStore()
+        servers = [
+            Mpp(
+                methods=server_method(request={"amount": "1000"}, verify=_unreachable),
+                realm="api.example.com",
+                secret_key="test-secret",
+                attestation={"tap": tap.verifier(key_resolver=_resolver(key), nonce_store=store)},
+            )
+            for _ in range(2)
+        ]
+        handler = compose(servers[0].charge(), servers[1].charge())
+        signed = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
+
+        assert (await handler(signed)).status == 402
+        assert (await handler(_copy(signed))).status == 401
+
+    async def test_guard_releases_request_when_verifier_raises(self) -> None:
+        class Failing:
+            async def verify(self, request: Request) -> Any:
+                raise RuntimeError("boom")
+
+        guard = Guard({"failing": Failing()})
+        request = Request("GET", URL)
+        alive = weakref.ref(request)
+        with pytest.raises(RuntimeError, match="boom"):
+            await guard(request)
+        del request
+        await asyncio.sleep(0)  # Let the loop drop its references to the finished task.
+        gc.collect()
+
+        assert alive() is None
 
     async def test_skips_mcp_requests_and_rejects_empty_config(self) -> None:
         mpp = self._server(Ed25519PrivateKey.generate())
