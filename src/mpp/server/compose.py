@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 from pydantic import ValidationError
@@ -122,13 +123,43 @@ class _X402MethodIntent(_MethodIntent):
         return self._method.x402.x402_credential_payload(payment, request)
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class ServerOffer:
+    """An eligible offer passed to ``Mpp(select_offers=...)``, selected by identity.
+
+    ``request`` is the offer's read-only wire request for this call.
+    """
+
+    key: str
+    method: ServerMethod
+    request: Mapping[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class OfferSelectionContext:
+    """Context passed to ``select_offers``."""
+
+    request: Request
+
+
+SelectOffers: TypeAlias = Callable[
+    [tuple[ServerOffer, ...], OfferSelectionContext],
+    Sequence[ServerOffer] | Awaitable[Sequence[ServerOffer]],
+]
+
+
 @dataclass
 class _Offer:
-    """One payment offer configured on a particular Mpp server."""
+    """One payment offer configured on a particular Mpp server.
+
+    Offers sharing a ``selection`` token pass through their server's ``select_offers``
+    together; offers without one are never selected.
+    """
 
     server: Mpp
     method: ServerMethod
     options: dict[str, Any]
+    selection: object | None = None
 
     def owns(self, credential: Credential) -> bool:
         """Return whether this offer's server authenticated the credential."""
@@ -454,18 +485,31 @@ class ComposedHandler:
                 result = await selected_offer.verify(authorization)
                 return ComposedChallenges((result,)) if isinstance(result, Challenge) else result
 
+        prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
         challenges: list[Challenge] = []
-        for offer in self._offers:
-            prepared_offer = await _prepare_offer(offer, request, None, call)
-            if not await self._available(prepared_offer):
-                continue
+        for prepared_offer in await self._advertised(prepared, request):
             result = await prepared_offer.verify(authorization)
             if not isinstance(result, Challenge):
                 return result
             challenges.append(result)
-        if not challenges:
-            raise ValueError("No payment offers are available for this request")
         return ComposedChallenges(tuple(challenges))
+
+    async def _advertised(
+        self, prepared: Sequence[_PreparedOffer], request: Request
+    ) -> list[_PreparedOffer]:
+        """The prepared offers to advertise: available ones, then server offer selection."""
+        eligible = [offer for offer in prepared if await self._available(offer)]
+        if not eligible:
+            raise ValueError("No payment offers are available for this request")
+        groups: dict[int, list[_PreparedOffer]] = {}
+        for offer in eligible:
+            if offer.offer.selection is not None:
+                groups.setdefault(id(offer.offer.selection), []).append(offer)
+        dropped: set[int] = set()
+        for group in groups.values():
+            kept = {id(offer) for offer in await _select_offers(group, request)}
+            dropped.update(id(offer) for offer in group if id(offer) not in kept)
+        return [offer for offer in eligible if id(offer) not in dropped]
 
     async def _verify_x402(
         self,
@@ -479,6 +523,7 @@ class ComposedHandler:
         if not x402_offers:
             return None
         assert x402.payment_signature is not None
+        advertised = await self._advertised(prepared, request)
         error: Exception
         try:
             payment = decode_payment_signature(x402.payment_signature)
@@ -496,7 +541,7 @@ class ComposedHandler:
                     continue
                 # Like a native credential, an x402 payment can only pay an offer
                 # this request would have advertised.
-                if await self._available(offer):
+                if any(offer is candidate for candidate in advertised):
                     result = await offer.verify(None, x402)
                     return (
                         ComposedChallenges((result,)) if isinstance(result, Challenge) else result
@@ -505,15 +550,11 @@ class ComposedHandler:
                 "x402 payment payload does not match route requirements"
             )
         challenges: list[Challenge] = []
-        for offer in prepared:
-            if not await self._available(offer):
-                continue
+        for offer in advertised:
             result = await offer.verify(None)
             if not isinstance(result, Challenge):
                 raise RuntimeError("offer without a credential returned a receipt")
             challenges.append(result)
-        if not challenges:
-            raise ValueError("No payment offers are available for this request")
         # Report the rejected payment like a rejected Payment credential.
         reporter = x402_offers[0]
         await reporter.offer.server._events.emit(
@@ -573,6 +614,43 @@ class ComposedHandler:
         if request_matches:
             return request_matches[0]
         return offers[0] if offers else None
+
+
+async def _select_offers(group: Sequence[_PreparedOffer], request: Request) -> list[_PreparedOffer]:
+    """Apply the server's ``select_offers`` to offers of one selection group."""
+    select = group[0].offer.server.select_offers
+    assert select is not None
+    offers = tuple(
+        ServerOffer(
+            key=offer.offer.method.key, method=offer.offer.method, request=_freeze(offer.request)
+        )
+        for offer in group
+    )
+    selected = await resolve(select(offers, OfferSelectionContext(request)))
+    if not isinstance(selected, list | tuple):
+        raise TypeError("select_offers must return a sequence of offers")
+    if not selected:
+        raise ValueError("select_offers must select at least one offer")
+    kept: list[_PreparedOffer] = []
+    previous = -1
+    for offer in selected:
+        index = next((i for i, candidate in enumerate(offers) if candidate is offer), -1)
+        if index == -1:
+            raise ValueError("select_offers must return only offers from its input")
+        if index <= previous:
+            raise ValueError("select_offers must preserve offer order and not repeat offers")
+        previous = index
+        kept.append(group[index])
+    return kept
+
+
+def _freeze(value: Any) -> Any:
+    """Return a read-only deep copy of a JSON-like value."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze(item) for item in value)
+    return value
 
 
 def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | None:

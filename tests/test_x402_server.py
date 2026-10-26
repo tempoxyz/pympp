@@ -116,6 +116,33 @@ class TestCharge:
         assert isinstance(result, PaymentVerified)
         assert result.credential.challenge.method == "evm"
 
+    async def test_x402_payment_must_pay_a_selected_offer(self) -> None:
+        allow_evm = True
+        server = Mpp(
+            methods=[tempo_method(), evm_method()],
+            realm=REALM,
+            secret_key="k",
+            select_offers=lambda offers, _context: [
+                offer for offer in offers if allow_evm or offer.method.name != "evm"
+            ],
+        )
+        handler = server.charge(amount="0.01")
+        header = payment_required(await handler(x402_request()))
+        assert header is not None
+        required = decode_payment_required(header)
+        signature = sign_x402_payment(
+            PAYER,
+            dict(required["accepts"][0]),
+            URL,
+            extensions=dict(required.get("extensions", {})),
+        )
+
+        allow_evm = False
+        result = await handler(x402_request(signature))
+
+        assert {c.method for c in challenges(result)} == {"tempo"}
+        assert "does not match" in (result.challenge.body or b"").decode()
+
     async def test_composed_server_reports_a_malformed_payment(self) -> None:
         server = Mpp(methods=[tempo_method(), evm_method()], realm=REALM, secret_key="k")
         handler = server.charge(amount="0.01")
