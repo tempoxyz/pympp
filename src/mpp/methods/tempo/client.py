@@ -306,6 +306,17 @@ class TempoMethod:
         held = 0 if isinstance(target, BaseException) else target
         if held >= amount_out + fee_headroom:
             return [], {}
+        if self.expected_recipients is not None:
+            # A recipient allowlist does not protect funds swapped into a token
+            # the challenge names: only buy currencies the client chose.
+            trusted = {
+                t.lower() for t in (*self._pinned_currencies(), *self.auto_swap.currencies())
+            }
+            if token_out.lower() not in trusted:
+                raise TransactionError(
+                    f"Auto-swap with expected_recipients only buys a pinned or fallback "
+                    f"currency, not {token_out}"
+                )
         # Buy only the shortfall; the payer's existing balance covers the rest.
         deficit = amount_out + fee_headroom - held
         slippage_bps = math.floor(self.auto_swap.slippage * 100 + 0.5)
@@ -929,6 +940,8 @@ def _tempo_method(
             USDC.e) in the same transaction. ``True`` uses 1% slippage; pass
             :class:`AutoSwap` to prepend currencies or change the slippage.
             Raises :class:`InsufficientFundsError` when no currency can fund it.
+            With ``expected_recipients``, it only buys a currency the client
+            pinned or swaps from.
 
     Returns:
         A configured TempoMethod instance.

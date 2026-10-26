@@ -49,10 +49,15 @@ async def sign(
     gas_estimates: list[list[dict[str, str]]] | None = None,
     batch_gas: int = 200_000,
     signed_fields: list[Any] | None = None,
+    **method_options: Any,
 ) -> tuple[list[tuple[str, int, str]], str]:
     """Sign a charge and return its calls as (to, value, data) and its fee token."""
     method = _tempo_method(
-        account=ACCOUNT, chain_id=chain_id, rpc_url="https://rpc.test", auto_swap=auto_swap
+        account=ACCOUNT,
+        chain_id=chain_id,
+        rpc_url="https://rpc.test",
+        auto_swap=auto_swap,
+        **method_options,
     )
     lowered = {token.lower(): value for token, value in balances.items()}
     quoted_amounts: list[int] = []
@@ -258,3 +263,29 @@ async def test_buys_the_fee_when_the_held_currency_is_the_only_fee_token() -> No
     assert calls[0][0] == USDC.lower()
     assert word(calls[1][2], 2) == AMOUNT - held + FEE
     assert fee_token == PATH_USD.lower()
+
+
+@pytest.mark.asyncio
+async def test_expected_recipients_only_swap_into_currencies_the_client_chose() -> None:
+    # The recipient is allowed, but the challenge names a token the client never chose:
+    # buying it would hand the payer's pathUSD to whoever sells that token on the DEX.
+    with pytest.raises(TransactionError, match="expected_recipients"):
+        await sign(True, {PATH_USD: 2_000_000}, {PATH_USD: AMOUNT}, expected_recipients=[RECIPIENT])
+
+    # A pinned currency, or one the client swaps from, is still bought.
+    calls, _ = await sign(
+        True,
+        {PATH_USD: 2_000_000},
+        {PATH_USD: AMOUNT},
+        currencies=[CURRENCY],
+        expected_recipients=[RECIPIENT],
+    )
+    assert calls[1][0] == STABLECOIN_DEX
+    calls, _ = await sign(
+        True,
+        {PATH_USD: 2_000_000},
+        {PATH_USD: AMOUNT},
+        currency=USDC,
+        expected_recipients=[RECIPIENT],
+    )
+    assert calls[1][0] == STABLECOIN_DEX
