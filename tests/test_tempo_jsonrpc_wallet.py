@@ -159,21 +159,48 @@ async def test_send_calls_sync_waits_for_pending_bundle() -> None:
     assert status["receipts"] == [{"transactionHash": TX_HASH}]
 
 
+def _signed_transaction(*, sponsored: bool) -> Any:
+    from pytempo import Call, TempoTransaction
+
+    from mpp.methods.tempo import TempoAccount
+
+    tx = TempoTransaction.create(
+        chain_id=4217,
+        gas_limit=0x186A0,
+        max_fee_per_gas=1,
+        max_priority_fee_per_gas=1,
+        nonce=0,
+        nonce_key=(1 << 256) - 1,
+        fee_token=None if sponsored else CURRENCY,
+        awaiting_fee_payer=sponsored,
+        valid_before=2_000_000_000,
+        calls=(Call.create(to=CURRENCY, value=0, data="0x"),),
+    )
+    return tx.sign(TempoAccount.from_key("0x" + "11" * 32).private_key)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sponsored", [False, True])
 async def test_wallet_signs_pull_only_challenge_with_eth_sign_transaction(
     sponsored: bool,
 ) -> None:
-    wallet = FakeWallet(eth_signTransaction="0x76c0ffee")
+    from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+    signed = _signed_transaction(sponsored=sponsored)
+    raw_tx = "0x" + signed.encode().hex()
+    address = "0x" + bytes(signed.sender_address).hex()
+    wallet = FakeWallet(eth_signTransaction=raw_tx)
     challenge = _challenge(supportedModes=["pull"], feePayer=sponsored)
 
-    credential = await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    credential = await _pay(JsonRpcAccount(address, request=wallet), challenge)
 
-    assert credential.payload == {"type": "transaction", "signature": "0x76c0ffee"}
+    # A fee-paying server takes the sponsored transaction as a 0x78 envelope.
+    expected = "0x" + encode_fee_payer_envelope(signed).hex() if sponsored else raw_tx
+    assert credential.payload == {"type": "transaction", "signature": expected}
     assert wallet.methods() == ["eth_signTransaction"]
     request = wallet.requests[0][1][0]
     assert request["type"] == "0x76"
-    assert request["from"] == WALLET
+    assert request["from"] == address
     assert request["chainId"] == hex(4217)
     assert request["nonceKey"] == hex((1 << 256) - 1)
     assert [call["to"] for call in request["calls"]] == [CURRENCY]
@@ -211,3 +238,130 @@ async def test_address_account_sends_wallet_requests_to_rpc_url() -> None:
 def test_root_account_requires_local_account() -> None:
     with pytest.raises(ValueError, match="root_account"):
         tempo.charge(account=JsonRpcAccount(WALLET), root_account=WALLET)
+
+
+def test_wallet_account_rejects_a_private_key() -> None:
+    with pytest.raises(ValueError, match="not a private key"):
+        tempo.charge(account="0x" + "11" * 32)
+    with pytest.raises(ValueError, match="40 hex"):
+        JsonRpcAccount("wallet")
+
+
+@pytest.mark.asyncio
+async def test_sponsored_wallet_signature_must_await_fee_payer() -> None:
+    wallet = FakeWallet(eth_signTransaction="0x76c0ffee")
+
+    with pytest.raises(tempo.TransactionError, match="awaiting a fee payer"):
+        await _pay(
+            JsonRpcAccount(WALLET, request=wallet),
+            _challenge(supportedModes=["pull"], feePayer=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_fallback_carries_fee_token() -> None:
+    from mpp.methods.tempo._defaults import OUSD
+
+    wallet = FakeWallet(
+        wallet_sendCalls=RpcError({"code": -32601, "message": "Method not found"}),
+        eth_sendTransaction=TX_HASH,
+        eth_getTransactionReceipt={"status": "0x1", "transactionHash": TX_HASH},
+    )
+    challenge = _challenge()
+    challenge.request["currency"] = OUSD
+
+    with patch("mpp.methods.tempo.client._tip20_balance", new=AsyncMock(return_value=10**6)):
+        credential = await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+
+    assert credential.payload == {"type": "hash", "hash": TX_HASH}
+    assert (
+        wallet.requests[1][1][0]["feeToken"] == wallet.requests[0][1][0]["capabilities"]["feeToken"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"status": 500, "receipts": [{"transactionHash": TX_HASH}]},
+        {"status": 600, "receipts": [{"transactionHash": TX_HASH}]},
+        {
+            "status": 200,
+            "receipts": [{"transactionHash": TX_HASH}, {"transactionHash": "0x" + "cd" * 32}],
+        },
+    ],
+)
+async def test_wallet_payment_without_one_confirmed_transaction_fails(
+    status: dict[str, Any],
+) -> None:
+    wallet = FakeWallet(wallet_sendCalls="bundle-5", wallet_getCallsStatus=status)
+    challenge = _challenge(splits=[{"amount": "100000", "recipient": WALLET}])
+
+    with pytest.raises(tempo.TransactionError):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+
+
+@pytest.mark.asyncio
+async def test_reverted_fallback_transaction_fails() -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls=RpcError({"code": -32601, "message": "Method not found"}),
+        eth_sendTransaction=TX_HASH,
+        eth_getTransactionReceipt={"status": "0x0", "transactionHash": TX_HASH},
+    )
+
+    with pytest.raises(tempo.TransactionError, match="status 500"):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+
+
+@pytest.mark.asyncio
+async def test_push_refuses_a_challenge_about_to_expire() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from mpp.errors import PaymentExpiredError
+
+    wallet = FakeWallet()
+    challenge = _challenge()
+    expires = (datetime.now(UTC) + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    challenge = Challenge(
+        id=challenge.id,
+        method=challenge.method,
+        intent=challenge.intent,
+        request=challenge.request,
+        realm=challenge.realm,
+        request_b64=challenge.request_b64,
+        expires=expires,
+    )
+
+    with pytest.raises(PaymentExpiredError):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+async def test_send_calls_timeout_keeps_the_bundle_id() -> None:
+    from pytempo import Call
+
+    from mpp.methods.tempo._wallet import WaitForCallsStatusTimeoutError
+
+    wallet = FakeWallet(wallet_sendCalls="bundle-6", wallet_getCallsStatus={"status": 100})
+
+    with pytest.raises(WaitForCallsStatusTimeoutError) as error:
+        await send_calls_sync(
+            wallet,
+            address=WALLET,
+            chain_id=4217,
+            calls=[Call.create(to=CURRENCY, value=0, data="0x")],
+            polling_interval=0,
+            timeout=0.01,
+        )
+    assert error.value.id == "bundle-6"
+
+
+def test_transaction_hash_reads_push_credential() -> None:
+    from mpp import Credential
+
+    credential = Credential(
+        challenge=_challenge().to_echo(), payload={"type": "hash", "hash": TX_HASH}
+    )
+
+    assert _tempo_method(account=JsonRpcAccount(WALLET)).transaction_hash(credential) == TX_HASH

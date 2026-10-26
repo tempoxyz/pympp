@@ -6,6 +6,7 @@ Wraps eth-account for key management and signing operations.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -124,3 +125,13 @@ class JsonRpcAccount:
 
     address: str
     request: WalletRequest | None = None
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"0x[0-9a-fA-F]{40}", self.address):
+            return
+        if re.fullmatch(r"(0x)?[0-9a-fA-F]{64}", self.address):
+            raise ValueError(
+                "JsonRpcAccount takes a wallet address, not a private key; "
+                "use TempoAccount.from_key() for a local key"
+            )
+        raise ValueError("JsonRpcAccount address must be 0x followed by 40 hex characters")

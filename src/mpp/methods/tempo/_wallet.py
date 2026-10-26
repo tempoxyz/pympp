@@ -42,6 +42,9 @@ class WaitForCallsStatusTimeoutError(TimeoutError):
         super().__init__(
             f'Timed out while waiting for call bundle with id "{bundle_id}" to be confirmed.'
         )
+        # The wallet already sent the calls: the bundle ID (or transaction hash
+        # on the `eth_sendTransaction` fallback) lets the caller find the payment.
+        self.id = bundle_id
 
 
 def rpc_calls(calls: Sequence[Call]) -> list[dict[str, str]]:
@@ -88,15 +91,19 @@ async def send_calls_sync(
     except Exception as error:
         if not (experimental_fallback and len(calls) == 1 and _supports_fallback(error)):
             raise
-        if capabilities and any(
+        # A Tempo transaction carries the fee token itself, so it survives the fallback.
+        fallback_capabilities = dict(capabilities or {})
+        fee_token = fallback_capabilities.pop("feeToken", None)
+        if any(
             not (isinstance(value, dict) and value.get("optional"))
-            for value in capabilities.values()
+            for value in fallback_capabilities.values()
         ):
             raise ValueError(
                 "non-optional `capabilities` are not supported on fallback to "
                 "`eth_sendTransaction`."
             ) from error
-        tx_hash = await _send_transaction(request, address, chain_id, params["calls"][0])
+        call = {**params["calls"][0], **({"feeToken": fee_token} if fee_token else {})}
+        tx_hash = await _send_transaction(request, address, chain_id, call)
         return await _wait(
             lambda: _transaction_status(request, tx_hash), tx_hash, polling_interval, timeout
         )

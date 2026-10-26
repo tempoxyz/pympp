@@ -58,6 +58,7 @@ FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated ali
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
 _CHAIN_ID_UNSET = object()
 _ADDRESS_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+_TX_HASH_RE = re.compile(r"0x[a-fA-F0-9]{64}")
 _ATOMIC_AMOUNT_RE = re.compile(r"[0-9]+")
 _CAPS_REQUIRE_CURRENCY_PIN = (
     "Tempo charge max_amount and max_atomic_amount require a currency pin "
@@ -424,6 +425,8 @@ class TempoMethod:
         """Pay in push mode: the wallet sends the transfer calls and returns their hash."""
         from mpp.methods.tempo._wallet import send_calls_sync
 
+        # A sent transfer cannot be recalled, so leave time to confirm it and present it.
+        _assert_challenge_time_left(challenge.expires, "Push-mode")
         request = challenge.request
         chain_id = await self._get_chain_id(self.rpc_url)
         if expected_chain_id is not None and chain_id != expected_chain_id:
@@ -450,6 +453,14 @@ class TempoMethod:
             force_atomic=len(calls) > 1,
         )
         receipts = status["receipts"]
+        hashes = list(dict.fromkeys(str(r.get("transactionHash") or "").lower() for r in receipts))
+        if status["statusCode"] != 200:
+            raise TransactionError(
+                f"Wallet payment failed with status {status['statusCode']}: {hashes}"
+            )
+        if len(hashes) > 1:
+            # A hash credential proves one transaction, which must carry every transfer.
+            raise TransactionError(f"Wallet split the payment across transactions: {hashes}")
         tx_hash = receipts[0].get("transactionHash") if receipts else None
         if not tx_hash:
             raise TransactionError("No transaction receipt returned.")
@@ -470,16 +481,20 @@ class TempoMethod:
         return request
 
     def transaction_hash(self, credential: Credential) -> str | None:
-        """Return the on-chain hash of a credential's signed 0x76 transaction.
+        """Return the on-chain hash of a credential's push or signed 0x76 transaction.
 
-        Returns ``None`` unless the payload decodes as a sender-signed 0x76
-        transaction. Sponsored (0x78 fee payer envelope) transactions return
+        Returns a push credential's hash, else ``None`` unless the payload decodes
+        as a sender-signed 0x76 transaction. Sponsored (0x78 fee payer envelope) transactions return
         ``None`` because their final hash depends on the fee payer's co-signature.
         """
         import rlp
         from eth_hash.auto import keccak
 
         payload = credential.payload
+        if payload.get("type") == "hash":
+            # A push credential carries the hash of the transaction the client sent.
+            tx_hash = payload.get("hash")
+            return tx_hash if isinstance(tx_hash, str) and _TX_HASH_RE.fullmatch(tx_hash) else None
         raw_tx = payload.get("signature")
         if payload.get("type") != "transaction" or not isinstance(raw_tx, str):
             return None
@@ -619,6 +634,8 @@ class TempoMethod:
             raw_tx = await self._wallet_request(self.account)(
                 "eth_signTransaction", [_transaction_request(tx, sender)]
             )
+            if awaiting_fee_payer:
+                raw_tx = _fee_payer_envelope(raw_tx, sender)
             return raw_tx, chain_id
 
         if self.root_account:
@@ -718,6 +735,51 @@ def _transaction_request(tx: TempoTransaction, sender: str) -> dict[str, object]
         # The fee payer picks the fee token, so the sender does not commit to one.
         request["feePayer"] = True
     return request
+
+
+def _fee_payer_envelope(raw_tx: str, sender: str) -> str:
+    """Return a wallet-signed sponsored transaction as a 0x78 fee payer envelope.
+
+    A wallet serializes a transaction awaiting its fee payer as 0x76 with an empty
+    fee payer signature; fee-paying servers take the 0x78 envelope, which carries
+    the sender's address in that slot.
+    """
+    import rlp
+
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        if tx_bytes[:1] == b"\x78":
+            return raw_tx
+        fields = rlp.decode(tx_bytes[1:]) if tx_bytes[:1] == b"\x76" else None
+    except (AttributeError, ValueError, rlp.DecodingError):
+        fields = None
+    if (
+        not isinstance(fields, list)
+        or len(fields) not in (14, 15)
+        or fields[11] not in (b"", b"\x00")
+    ):
+        raise TransactionError("Wallet did not return a transaction awaiting a fee payer")
+    fields[11] = bytes.fromhex(sender.removeprefix("0x"))
+    return "0x78" + rlp.encode(fields).hex()
+
+
+def _assert_challenge_time_left(expires: str | None, kind: str) -> None:
+    """Refuse a challenge too close to expiry to pay before the server rejects it.
+
+    Raises ``PaymentExpiredError`` before paying, so the HTTP transport returns the
+    402 for the caller to retry.
+    """
+    if not expires:
+        return
+    try:
+        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return
+    if challenge_expiry - time.time() < MIN_REMAINING_VALIDITY_SECONDS:
+        raise PaymentExpiredError(expires) from ValueError(
+            f"{kind} challenge expires in less than "
+            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds; request a new challenge"
+        )
 
 
 def _assert_sponsored_challenge_time_left(expires: str | None) -> None:
