@@ -32,8 +32,6 @@ Example:
 from mpp.methods.stripe import client as client
 from mpp.methods.stripe import server as server
 from mpp.methods.stripe.client import StripeMethod as StripeMethod
-from mpp.methods.stripe.connect import ConnectSettlement as ConnectSettlement
-from mpp.methods.stripe.connect import TransferData as TransferData
 from mpp.methods.stripe.intents import ChargeIntent as ChargeIntent
 from mpp.methods.stripe.machine_payments import DepositAddresses as DepositAddresses
 from mpp.methods.stripe.machine_payments import MachinePayments as MachinePayments

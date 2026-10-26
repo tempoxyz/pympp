@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import mpp.methods.stripe.intents as stripe_intents
 from mpp.methods import CanOfferFn
 from mpp.methods.stripe import server as stripe
-from mpp.methods.stripe.connect import ConnectSettlement
 from mpp.methods.tempo._defaults import CHAIN_ID, TESTNET_CHAIN_ID, default_currency_for_chain
 
 if TYPE_CHECKING:
@@ -41,16 +40,11 @@ class SptPayments:
     """Build configured Stripe SPT charge methods."""
 
     def __init__(
-        self,
-        network_id: str,
-        client: StripeClient,
-        metadata: dict[str, str] | None,
-        connect: ConnectSettlement | None = None,
+        self, network_id: str, client: StripeClient, metadata: dict[str, str] | None
     ) -> None:
         self._network_id = network_id
         self._client = client
         self._metadata = metadata
-        self._connect = connect
 
     def charge(self) -> ServerMethod:
         return stripe.charge(
@@ -61,7 +55,6 @@ class SptPayments:
             payment_method_types=["card", "link"],
             can_offer=_minimum_amount(_SPT_MINIMUM),
             metadata=self._metadata,
-            connect=self._connect,
         )
 
 
@@ -75,14 +68,12 @@ class TempoPayments:
         recipient: str | None,
         metadata: dict[str, str] | None,
         store: Store,
-        connect: ConnectSettlement | None = None,
     ) -> None:
         self._livemode = livemode
         self._client = client
         self._recipient = recipient
         self._metadata = metadata
         self._store = store
-        self._connect = connect
 
     def charge(self) -> ServerMethod:
         if self._recipient is None:
@@ -123,7 +114,6 @@ class TempoPayments:
             receipt=receipt,
             payment_intent_options=payment_intent_options,
             resolved_metadata=resolved_metadata,
-            connect=self._connect,
         )
 
 
@@ -139,7 +129,6 @@ class MachinePayments:
         store: Store,
         deposit_addresses: DepositAddresses | None = None,
         metadata: Mapping[str, str] | None = None,
-        connect: ConnectSettlement | None = None,
     ) -> None:
         stripe_intents._resolve_payment_intents(client)
         if not callable(getattr(store, "put_if_absent", None)):
@@ -148,10 +137,8 @@ class MachinePayments:
 
         resolved_metadata = dict(metadata) if metadata is not None else None
         self._tempo_address = tempo_address
-        self.spt = SptPayments(network_id, client, resolved_metadata, connect)
-        self.tempo = TempoPayments(
-            livemode, client, tempo_address, resolved_metadata, store, connect
-        )
+        self.spt = SptPayments(network_id, client, resolved_metadata)
+        self.tempo = TempoPayments(livemode, client, tempo_address, resolved_metadata, store)
 
     def default_methods(self) -> list[ServerMethod]:
         """Return configured methods in preferred negotiation order."""
@@ -167,14 +154,11 @@ def create(
     store: Store,
     deposit_addresses: DepositAddresses | None = None,
     metadata: Mapping[str, str] | None = None,
-    connect: ConnectSettlement | None = None,
 ) -> MachinePayments:
     """Create machine payments from an initialized StripeClient.
 
     ``store`` is the atomic replay store shared by every server instance; Tempo
     charges use it to reject replayed transaction hashes across replicas.
-    ``connect`` routes SPT charges and recorded Tempo payments to a Stripe
-    Connect account.
     """
     return MachinePayments(
         network_id=network_id,
@@ -183,5 +167,4 @@ def create(
         store=store,
         deposit_addresses=deposit_addresses,
         metadata=metadata,
-        connect=connect,
     )

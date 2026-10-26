@@ -79,8 +79,7 @@ def _fallback_store(method: str) -> MemoryStore:
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 APPROVE_SELECTOR = "095ea7b3"
-# swapExactAmountOut(address,address,uint128,uint128)
-SWAP_EXACT_AMOUNT_OUT_SELECTOR = "f0122b75"
+SWAP_EXACT_AMOUNT_OUT_SELECTOR = "b30d91d5"
 
 SELECTOR_HEX_LEN = 8
 ABI_WORD_HEX_LEN = 64

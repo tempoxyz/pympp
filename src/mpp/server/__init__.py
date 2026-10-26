@@ -41,13 +41,7 @@ from mpp.events import (
     PaymentEventName,
 )
 from mpp.methods import Method
-from mpp.server.compose import (
-    ComposedHandler,
-    OfferSelectionContext,
-    SelectOffers,
-    ServerOffer,
-    compose,
-)
+from mpp.server.compose import ComposedHandler, compose
 from mpp.server.decorator import pay
 from mpp.server.http import (
     PaymentRequired,

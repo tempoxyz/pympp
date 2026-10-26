@@ -15,7 +15,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from mpp._defaults import DEFAULT_TIMEOUT
-from mpp.methods.stripe.connect import ConnectInput
 from mpp.methods.stripe.intents import ChargeIntent
 from mpp.methods.stripe.schemas import charge as definition
 from mpp.server.method import RequestContext, ServerMethod, VerifyContext
@@ -38,7 +37,6 @@ def charge(
     recipient: str | None = None,
     external_id: str | None = None,
     metadata: dict[str, str] | None = None,
-    connect: ConnectInput = None,
     http_client: Any | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     can_offer: CanOfferFn | None = None,
@@ -64,10 +62,6 @@ def charge(
         external_id: Default authenticated external reference, sent as
             ``externalId``; clients echo it in their credential.
         metadata: Stripe metadata sent in the challenge and on the PaymentIntent.
-        connect: Stripe Connect settlement for the PaymentIntent, or a sync or
-            async callable receiving a
-            :class:`~mpp.methods.stripe.PaymentIntentContext` that returns it.
-            Server-only: never included in the challenge.
         http_client: httpx client for ``secret_key`` requests, owned by the caller.
         timeout: Stripe request timeout in seconds.
         can_offer: Decides whether to advertise an offer for a wire request.
@@ -102,7 +96,7 @@ def charge(
         payload: Any = context.credential.payload
         credential = replace(context.credential, payload=payload.model_dump(exclude_none=True))
         options = context.request.get("payment_intent_options")
-        return await intent.verify(credential, context.challenge.request, options, connect)
+        return await intent.verify(credential, context.challenge.request, options)
 
     return ServerMethod(
         method=definition,
