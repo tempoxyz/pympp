@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import re
+import secrets
 import time
 import weakref
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
@@ -208,15 +209,14 @@ async def verify(
     except Exception:
         return Invalid("The HTTP message signature is invalid.")
     key_name = f"{nonce_namespace}:{signature_input.key_id}:{signature_input.nonce}"
-    claims = _request_claims(request)
-    if key_name not in claims:
-        try:
-            claimed = await _try_claim(nonce_store, key_name, signature_input.expires)
-        except Exception:
-            return Unverified("Replay protection is unavailable.")
-        if not claimed:
-            return Invalid("The signature nonce has already been used.")
-        claims.add(key_name)
+    try:
+        claimed = await _try_claim(
+            nonce_store, key_name, _request_token(request), signature_input.expires
+        )
+    except Exception:
+        return Unverified("Replay protection is unavailable.")
+    if not claimed:
+        return Invalid("The signature nonce has already been used.")
     if signature_input.expires <= int(time.time()):
         return Invalid("The signature has expired.")
     return Verified(signature_input)
@@ -252,26 +252,30 @@ def require_expiring_store(store: Store) -> None:
         )
 
 
-_claims: dict[int, set[str]] = {}
+_tokens: dict[int, str] = {}
 
 
-def _request_claims(request: Request) -> set[str]:
-    """Nonces this request object already claimed, so other verifiers checking it accept them.
+def _request_token(request: Request) -> str:
+    """A random token identifying this request object in the nonce claims it makes.
 
-    Keyed by nonce alone: stores may be distinct objects over one backend, and every
-    verifier checking a request must pass, so one claim covers them all.
+    Composed servers verify one request against each of their stores. Each claims the
+    nonce in its own store; a store that already holds this token, because it shares a
+    backend with an earlier verifier, accepts it, while another request's claim rejects.
     """
     key = id(request)
-    if (claims := _claims.get(key)) is None:
-        claims = _claims[key] = set()
-        weakref.finalize(request, _claims.pop, key, None)
-    return claims
+    if (token := _tokens.get(key)) is None:
+        token = _tokens[key] = secrets.token_hex(16)
+        weakref.finalize(request, _tokens.pop, key, None)
+    return token
 
 
-async def _try_claim(store: ExpiringStore, key: str, expires: int) -> bool:
+async def _try_claim(store: ExpiringStore, key: str, token: str, expires: int) -> bool:
     if expires <= time.time():
         return False
-    return await store.put_if_absent_until(key, "1", expires)
+    if await store.put_if_absent_until(key, token, expires):
+        return True
+    stored = await store.get(key)
+    return stored == token or stored == token.encode()
 
 
 def _parse(

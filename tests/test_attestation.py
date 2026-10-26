@@ -182,6 +182,9 @@ class TestTap:
                 self.data[name] = encoded
                 return True
 
+            async def get(self, name: str) -> bytes | None:
+                return self.data.get(name)
+
         key = Ed25519PrivateKey.generate()
         verifier = tap.verifier(key_resolver=_resolver(key), nonce_store=RedisStore(Client()))
         request = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
@@ -414,6 +417,25 @@ class TestServer:
 
         assert (await handler(signed)).status == 402
         assert (await handler(_copy(signed))).status == 401
+
+    async def test_composed_servers_with_separate_nonce_stores_each_claim(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        servers = [
+            Mpp(
+                methods=server_method(request={"amount": "1000"}, verify=_unreachable),
+                realm="api.example.com",
+                secret_key="test-secret",
+                attestation={
+                    "tap": tap.verifier(key_resolver=_resolver(key), nonce_store=MemoryStore())
+                },
+            )
+            for _ in range(2)
+        ]
+        handler = compose(servers[0].charge(), servers[1].charge())
+        signed = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
+
+        assert (await handler(signed)).status == 402
+        assert (await servers[1].charge()(_copy(signed))).status == 401
 
     async def test_composed_servers_with_stores_over_one_backend_claim_once(self) -> None:
         key = Ed25519PrivateKey.generate()
