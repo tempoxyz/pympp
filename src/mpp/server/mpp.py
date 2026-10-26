@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._validation import Validation
+from mpp.attestation import Guard, Verifier
 from mpp.errors import (
     InvalidChallengeError,
     InvalidPayloadError,
@@ -177,6 +178,7 @@ class Mpp:
         store: Store | None = None,
         requires_auth: bool = False,
         unique_challenges: bool = True,
+        attestation: Mapping[str, Verifier[Any]] | None = None,
     ) -> None:
         """Initialize the payment engine.
 
@@ -193,6 +195,9 @@ class Mpp:
                 ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
                 to all replicas; enable afterward to prevent fixed-expiry collisions.
+            attestation: Request-attestation verifiers (see :mod:`mpp.attestation`) every
+                HTTP payment request must pass. An invalid signature gets a ``401``; a
+                missing or unverifiable one a ``403``.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
@@ -207,6 +212,7 @@ class Mpp:
         self.unique_challenges = unique_challenges
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
+        self.attestation = Guard(attestation) if attestation is not None else None
         self._events = EventDispatcher()
         self._payment_success_hooks: set[tuple[str, str, int]] = set()
         for method in self.methods:

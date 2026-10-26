@@ -34,7 +34,7 @@ def make_headers(headers: HeadersInput = None) -> httpx.Headers:
     return httpx.Headers(list(headers or ()), encoding="latin-1")
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class Request:
     """An incoming HTTP request as seen by the payment engine.
 

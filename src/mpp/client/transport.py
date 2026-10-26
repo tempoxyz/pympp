@@ -18,6 +18,7 @@ import httpx
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import ParseError
+from mpp.attestation import AttestedTransport, Signer, signer_from
 from mpp.errors import (
     InvalidChallengeError,
     PaymentError,
@@ -237,6 +238,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+        attestation: Mapping[str, Signer] | None = None,
     ) -> None:
         """Initialize the transport.
 
@@ -252,6 +254,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
                 at least 35s (``DEFAULT_PAID_RETRY_TIMEOUT``).
+            attestation: Request-attestation signers (see :mod:`mpp.attestation`) applied
+                to every outbound attempt, including the paid retry, with a fresh nonce each.
         """
         if (methods is None) == (runtime is None):
             raise TypeError("Provide exactly one of methods or runtime")
@@ -266,6 +270,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             _payment_origins([origin], parameter="trusted_tempo_realms")
             self._trusted_tempo_realms[_origin(httpx.URL(origin))] = realm
         self._inner = inner or httpx.AsyncHTTPTransport()
+        if attestation is not None:
+            self._inner = AttestedTransport(self._inner, signer_from(attestation))
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
         self._paid_retry_timeout = paid_retry_timeout
@@ -595,6 +601,7 @@ class Mpp:
         trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+        attestation: Mapping[str, Signer] | None = None,
     ) -> None:
         self.payment_transport = PaymentTransport(
             methods,
@@ -603,6 +610,7 @@ class Mpp:
             trusted_tempo_realms=trusted_tempo_realms,
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
+            attestation=attestation,
         )
         self._client: httpx.AsyncClient | None = None
 

@@ -340,6 +340,17 @@ class ComposedHandler:
     async def __call__(self, request: Request) -> PaymentResult:
         """Verify the request's credential, or return the challenges to pay."""
         server = self._offers[0].server
+        is_http = request.url.startswith(("http://", "https://"))
+        if server.attestation is not None and is_http:
+            if rejection := await server.attestation(request):
+                status, message = rejection
+                return PaymentRequired(
+                    Response(
+                        status=status,
+                        headers={"Content-Type": "text/plain;charset=UTF-8"},
+                        body=message,
+                    )
+                )
         authorization = request.headers.get(
             PAYMENT_AUTHORIZATION_HEADER if server.requires_auth else "Authorization"
         )
@@ -349,7 +360,7 @@ class ComposedHandler:
                 payment_signature=request.headers.get(PAYMENT_SIGNATURE_HEADER),
                 http_method=request.method,
             )
-            if request.url.startswith(("http://", "https://"))
+            if is_http
             else None
         )
         call = _Call()
