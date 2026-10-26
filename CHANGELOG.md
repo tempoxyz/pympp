@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.1 (2026-10-26)
+
+### Patch Changes
+
+- Added behavior contract tests that pin observable server and client behavior (status codes, problem types, headers, event names, challenge bindings, and offer ordering) before the engine refactor. (by @BrendanRyan, [#340](https://github.com/tempoxyz/pympp/pull/340))
+
 ## 0.15.0 (2026-10-25)
 
 ### Minor Changes
