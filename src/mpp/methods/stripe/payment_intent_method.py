@@ -81,6 +81,14 @@ def _without_options(
         extra = {key: request.pop(key)} if key in request else {}
         return replace(context, request=request), extra
 
+    if inspect.iscoroutinefunction(resolve):
+        # Stay a coroutine function, so route-input probes skip it rather than start it.
+        async def resolve_async(context: RequestContext) -> dict[str, Any]:
+            inner, extra = split(context)
+            return {**await resolve(inner), **extra}
+
+        return resolve_async
+
     def resolve_request(context: RequestContext) -> dict[str, Any] | Awaitable[dict[str, Any]]:
         inner, extra = split(context)
         resolved = resolve(inner)

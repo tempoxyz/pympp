@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import mpp.methods.stripe.intents as stripe_intents
@@ -14,8 +14,9 @@ if TYPE_CHECKING:
     from stripe import StripeClient
 
     from mpp import Credential, Receipt
+    from mpp._validation import Validation
     from mpp.methods.stripe.payment_intent_method import RecordPayment
-    from mpp.server.method import ServerMethod
+    from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
     from mpp.store import Store
 
 _SPT_MINIMUM, _RAW_UNITS_PER_CENT = 50, 10_000
@@ -120,8 +121,10 @@ class BasePayments:
         """Return an ``evm/charge`` method paying the Base deposit address.
 
         ``options`` are passed to :func:`mpp.methods.evm.server.charge` (such as
-        ``facilitator``) and override the Stripe defaults. ``metadata`` is merged
-        over the configured metadata for this method's PaymentIntents.
+        ``facilitator``). The asset, recipient and shared store are pinned, and a
+        ``can_offer`` applies on top of the one-cent minimum, which is also enforced
+        before settlement. ``metadata`` is merged over the configured metadata for
+        this method's PaymentIntents.
         """
         if self._recipient is None:
             raise ValueError("deposit_addresses['base'] is required for Base payments")
@@ -129,21 +132,63 @@ class BasePayments:
         from mpp.methods.evm import server as evm
         from mpp.methods.stripe.payment_intent_method import with_payment_intent_input
 
+        for key in ("currency", "chain_id", "decimals", "authorization", "recipient"):
+            if key in options:
+                raise ValueError(f"Stripe Base charges cannot override `{key}`")
+        if options.pop("store", self._store) is not self._store:
+            raise ValueError("Stripe Base charges must use the factory-level shared atomic `store`")
+        minimum = _minimum_amount(_RAW_UNITS_PER_CENT)
+        extra: CanOfferFn | None = options.pop("can_offer", None)
+
+        def can_offer(request: dict[str, Any]) -> bool | Awaitable[bool]:
+            return minimum(request) and (extra is None or extra(request))
+
         resolved = {**(self._metadata or {}), **metadata} if metadata else self._metadata
         method = evm.charge(
-            **{
-                "currency": assets.BASE_USDC if self._livemode else assets.BASE_SEPOLIA_USDC,
-                "recipient": self._recipient,
-                "can_offer": _minimum_amount(_RAW_UNITS_PER_CENT),
-                "store": self._store,
-                **options,
-            }
+            **options,
+            currency=assets.BASE_USDC if self._livemode else assets.BASE_SEPOLIA_USDC,
+            recipient=self._recipient,
+            can_offer=can_offer,
+            store=self._store,
         )
         return with_payment_intent_input(
-            method,
+            _require_minimum(method, minimum),
             _crypto_recorder(self._client, "base", resolved),
             configured_metadata=resolved,
         )
+
+
+def _require_minimum(method: ServerMethod, minimum: CanOfferFn) -> ServerMethod:
+    """Refuse credentials below ``minimum`` before settlement.
+
+    A single-method handler offers it without ``can_offer``, and Stripe can't
+    record a payment under one cent after it settles.
+    """
+    from dataclasses import replace
+
+    from mpp.errors import VerificationFailedError
+
+    def check(context: VerifyContext) -> None:
+        if not minimum(dict(context.challenge.request)):
+            raise VerificationFailedError("amount is below the one-cent Stripe minimum")
+
+    validate, broadcast = method.validate, method.broadcast
+    assert broadcast is not None
+
+    async def guarded_validate(context: ValidateContext) -> Validation:
+        check(context)
+        assert validate is not None
+        return await validate(context)
+
+    async def guarded_broadcast(context: VerifyContext) -> Receipt:
+        check(context)
+        return await broadcast(context)
+
+    return replace(
+        method,
+        validate=guarded_validate if validate is not None else None,
+        broadcast=guarded_broadcast,
+    )
 
 
 def _crypto_recorder(

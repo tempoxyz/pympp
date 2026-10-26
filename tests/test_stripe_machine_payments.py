@@ -258,3 +258,80 @@ async def test_base_charge_records_payment_in_stripe() -> None:
     assert params["customer"] == "cus_test"
     assert params["metadata"]["order"] == "123"
     assert params["metadata"]["call"] == "yes"
+
+
+def test_base_charge_pins_rail_configuration() -> None:
+    _, payments = make_payments(deposit_addresses={"base": BASE_ADDRESS})
+    facilitator = "https://facilitator.example"
+
+    overrides: list[dict[str, Any]] = [
+        {"store": None},
+        {"store": MemoryStore()},
+        {"currency": "0x" + "3" * 40},
+    ]
+    for override in overrides:
+        with pytest.raises(ValueError, match="Stripe Base charges"):
+            payments.base.charge(facilitator=facilitator, **override)
+    with pytest.raises(ValueError, match="recipient"):
+        payments.base.charge(facilitator=facilitator, recipient="0x" + "4" * 40)
+
+    can_offer = payments.base.charge(facilitator=facilitator, can_offer=lambda _: True).can_offer
+    refuse = payments.base.charge(facilitator=facilitator, can_offer=lambda _: False).can_offer
+    assert can_offer is not None and refuse is not None
+    assert can_offer({"amount": "9999"}) is False
+    assert can_offer({"amount": "10000"}) is True
+    assert refuse({"amount": "10000"}) is False
+
+
+@pytest.mark.asyncio
+async def test_single_base_method_refuses_sub_cent_payment_before_settling() -> None:
+    from eth_account import Account
+
+    from mpp.methods.evm import BASE_SEPOLIA_USDC
+    from mpp.methods.evm import client as evm_client
+    from mpp.runtime import CredentialParams
+
+    client, payments = make_payments(deposit_addresses={"base": BASE_ADDRESS})
+    settled: list[Any] = []
+    method = payments.base.charge(settle=lambda auth: settled.append(auth) or "0x" + "cd" * 32)
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    handler = server.charge(amount="0.001")
+    issued = challenge(await handler(http_request()))
+    payer = evm_client.charge(
+        currency=BASE_SEPOLIA_USDC, account=Account.from_key("0x" + "11" * 32)
+    )
+    authorization = await payer.create_credential(CredentialParams(challenge=issued))
+
+    await handler(http_request(authorization))
+
+    assert settled == []
+    assert client.payment_intents.calls == []
+
+
+@pytest.mark.asyncio
+async def test_payment_intent_input_keeps_async_resolvers_coroutine_functions() -> None:
+    import inspect
+    from dataclasses import replace
+
+    from mpp.methods.stripe.payment_intent_method import with_payment_intent_input
+    from mpp.server.method import RequestContext
+
+    _, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
+    inner = payments.tempo.charge()
+
+    async def resolve_request(context: RequestContext) -> dict[str, Any]:
+        assert "payment_intent_options" not in context.request
+        return {**context.request, "resolved": True}
+
+    async def record(*_: Any) -> None:
+        return None
+
+    method = with_payment_intent_input(replace(inner, resolve_request=resolve_request), record)
+
+    assert method.resolve_request is not None
+    assert inspect.iscoroutinefunction(method.resolve_request)
+    options = {"customer": "cus_test"}
+    resolved = await method.resolve_request(
+        RequestContext(request={"amount": "1", "payment_intent_options": options})
+    )
+    assert resolved == {"amount": "1", "resolved": True, "payment_intent_options": options}
