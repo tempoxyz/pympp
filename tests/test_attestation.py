@@ -25,7 +25,7 @@ from mpp.attestation._signature import _parse, _signature_base
 from mpp.client import Mpp as Client
 from mpp.client import PaymentTransport
 from mpp.extensions.mcp.verify import _TOOL_CALL_URL
-from mpp.server import Mpp, PaymentRequired, Request
+from mpp.server import Mpp, PaymentRequired, Request, compose
 from mpp.store import MemoryStore
 from tests import server_method
 
@@ -109,6 +109,37 @@ class TestTap:
             "The signature is expired or has an invalid lifetime."
         )
         assert await verifier.verify(Request("GET", URL)) == Absent()
+
+    async def test_accepts_created_slightly_ahead_of_server_clock(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        verifier = tap.verifier(key_resolver=_resolver(key), nonce_store=MemoryStore())
+        signer = tap.signer(intent="browse", key=key, key_id="k")
+        ahead = await _signed(
+            signer, context=SigningContext(created=int(time.time()) + 2, nonce="a")
+        )
+        far = await _signed(
+            signer, context=SigningContext(created=int(time.time()) + 60, nonce="b")
+        )
+
+        assert isinstance(await verifier.verify(ahead), Verified)
+        assert await verifier.verify(far) == Invalid(
+            "The signature is expired or has an invalid lifetime."
+        )
+
+    def test_verifiers_require_expiring_nonce_store(self) -> None:
+        class PermanentStore:
+            async def get(self, key: str) -> Any: ...
+            async def put(self, key: str, value: Any) -> None: ...
+            async def delete(self, key: str) -> None: ...
+            async def put_if_absent(self, key: str, value: Any) -> bool:
+                return True
+
+        store: Any = PermanentStore()
+        resolver = _resolver(Ed25519PrivateKey.generate())
+        with pytest.raises(TypeError, match="put_if_absent_until"):
+            tap.verifier(key_resolver=resolver, nonce_store=store)
+        with pytest.raises(TypeError, match="put_if_absent_until"):
+            web_bot_auth.verifier(key_resolver=resolver, nonce_store=store)
 
     async def test_key_resolution_failures_are_unverified(self) -> None:
         key = Ed25519PrivateKey.generate()
@@ -316,6 +347,22 @@ class TestServer:
         )
         assert (await handler(signed)).status == 402
         assert (await handler(signed)).status == 402  # Verified once per request object.
+
+    @pytest.mark.parametrize("url", ["/v1/items", "HTTPS://api.example.com/v1/items"])
+    async def test_guards_non_mcp_requests_without_http_scheme(self, url: str) -> None:
+        result = await self._server(Ed25519PrivateKey.generate()).charge()(Request("GET", url))
+
+        assert result.status == 403
+
+    async def test_composed_handlers_require_every_servers_attestation(self) -> None:
+        plain = Mpp(
+            methods=server_method(request={"amount": "1000"}, verify=_unreachable),
+            realm="api.example.com",
+            secret_key="test-secret",
+        )
+        handler = compose(plain.charge(), self._server(Ed25519PrivateKey.generate()).charge())
+
+        assert (await handler(Request("GET", URL))).status == 403
 
     async def test_skips_mcp_requests_and_rejects_empty_config(self) -> None:
         mpp = self._server(Ed25519PrivateKey.generate())

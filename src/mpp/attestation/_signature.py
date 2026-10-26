@@ -58,6 +58,9 @@ SIGNATURE_PARAMS = "@signature-params"
 PrivateKey = Ed25519PrivateKey | RSAPrivateKey
 """An Ed25519 private key, or an RSA one signing with RSASSA-PSS SHA-512."""
 
+CLOCK_SKEW = 5
+"""Seconds a signature's ``created`` may run ahead of this server's clock."""
+
 _PSS = padding.PSS(mgf=padding.MGF1(hashes.SHA512()), salt_length=64)
 _ASCII = re.compile(r"[\x20-\x7e]*")
 
@@ -153,7 +156,7 @@ async def verify(
     key_resolver: KeyResolver,
     max_age: int,
     nonce_namespace: str,
-    nonce_store: Store,
+    nonce_store: ExpiringStore,
     required_components: Collection[str],
     tag: Collection[str],
     validate: Validate | None = None,
@@ -172,7 +175,7 @@ async def verify(
         return Invalid("The signature does not cover the required request components.")
     now = int(time.time())
     if (
-        signature_input.created > now
+        signature_input.created > now + CLOCK_SKEW
         or signature_input.expires <= now
         or signature_input.expires - signature_input.created > max_age
     ):
@@ -237,12 +240,18 @@ def with_headers(request: httpx.Request, headers: httpx.Headers) -> httpx.Reques
     )
 
 
-async def _try_claim(store: Store, key: str, expires: int) -> bool:
+def require_expiring_store(store: Store) -> None:
+    """Raise unless ``store`` can claim nonces only until their signature expires."""
+    if not isinstance(store, ExpiringStore):
+        raise TypeError(
+            "Request attestation requires a nonce_store implementing put_if_absent_until."
+        )
+
+
+async def _try_claim(store: ExpiringStore, key: str, expires: int) -> bool:
     if expires <= time.time():
         return False
-    if isinstance(store, ExpiringStore):
-        return await store.put_if_absent_until(key, True, expires)
-    return await store.put_if_absent(key, True)
+    return await store.put_if_absent_until(key, True, expires)
 
 
 def _parse(

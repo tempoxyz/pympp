@@ -33,7 +33,7 @@ from mpp.attestation import (
 )
 from mpp.attestation import _signature as signature
 from mpp.attestation._signature import PrivateKey, SignatureInput
-from mpp.store import Store
+from mpp.store import ExpiringStore
 
 if TYPE_CHECKING:
     from mpp.server.http import Request
@@ -129,8 +129,11 @@ class WebBotAuthVerifier:
     """Verifies Web Bot Auth directory-profile signatures and consumes their nonces."""
 
     key_resolver: KeyResolver
-    nonce_store: Store
+    nonce_store: ExpiringStore
     max_age: int
+
+    def __post_init__(self) -> None:
+        signature.require_expiring_store(self.nonce_store)
 
     async def verify(
         self, request: Request
@@ -206,7 +209,7 @@ def signer(
 def verifier(
     *,
     key_resolver: KeyResolver,
-    nonce_store: Store,
+    nonce_store: ExpiringStore,
     max_age: int = DEFAULT_MAXIMUM_SIGNATURE_LIFETIME,
 ) -> WebBotAuthVerifier:
     """Create a Web Bot Auth directory-profile verifier.
@@ -215,7 +218,8 @@ def verifier(
         key_resolver: Resolves a public key for the advertised directory, given as
             ``KeyLookup.signature_agent``. Apply your trust policy before any network
             lookup; never fetch an arbitrary caller-provided origin.
-        nonce_store: Consumes each nonce atomically; share it across instances.
+        nonce_store: Consumes each nonce atomically until its signature expires; share it
+            across instances.
         max_age: Maximum accepted signature lifetime in seconds.
     """
     if isinstance(max_age, bool) or not isinstance(max_age, int) or max_age <= 0:

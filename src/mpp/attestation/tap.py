@@ -21,7 +21,7 @@ from mpp.attestation import (
 )
 from mpp.attestation import _signature as signature
 from mpp.attestation._signature import PrivateKey
-from mpp.store import Store
+from mpp.store import ExpiringStore
 
 if TYPE_CHECKING:
     from mpp.server.http import Request
@@ -85,7 +85,10 @@ class TapVerifier:
     """Verifies TAP agent-recognition signatures and consumes their nonces."""
 
     key_resolver: KeyResolver
-    nonce_store: Store
+    nonce_store: ExpiringStore
+
+    def __post_init__(self) -> None:
+        signature.require_expiring_store(self.nonce_store)
 
     async def verify(
         self, request: Request
@@ -139,11 +142,12 @@ def signer(
     return TapSigner(key=key, key_id=key_id, tag=tag, expires_in=expires_in, label=label)
 
 
-def verifier(*, key_resolver: KeyResolver, nonce_store: Store) -> TapVerifier:
+def verifier(*, key_resolver: KeyResolver, nonce_store: ExpiringStore) -> TapVerifier:
     """Create a TAP signature verifier.
 
     Args:
         key_resolver: Resolves a TAP-approved public key by its ``keyid`` and algorithm.
-        nonce_store: Consumes each nonce atomically; share it across instances.
+        nonce_store: Consumes each nonce atomically until its signature expires; share it
+            across instances.
     """
     return TapVerifier(key_resolver=key_resolver, nonce_store=nonce_store)

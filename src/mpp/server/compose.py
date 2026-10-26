@@ -341,8 +341,17 @@ class ComposedHandler:
         """Verify the request's credential, or return the challenges to pay."""
         server = self._offers[0].server
         is_http = request.url.startswith(("http://", "https://"))
-        if server.attestation is not None and is_http:
-            if rejection := await server.attestation(request):
+        guards = (
+            {}
+            if request.url.startswith(MCP_URL_PREFIX)
+            else {
+                id(offer.server.attestation): offer.server.attestation
+                for offer in self._offers
+                if offer.server.attestation is not None
+            }
+        )
+        for guard in guards.values():
+            if rejection := await guard(request):
                 status, message = rejection
                 return PaymentRequired(
                     Response(
