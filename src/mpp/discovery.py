@@ -20,7 +20,7 @@ Example:
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, Literal
@@ -218,10 +218,10 @@ def generate(
     Raises:
         ValueError: When a route has no payment offers or names an unknown intent.
     """
-    by_key: dict[str, ServerMethod] = {}
+    by_key: dict[str, list[ServerMethod]] = {}
     intent_keys: dict[str, set[str]] = {}
     for method in mpp.methods:
-        by_key.setdefault(method.key, method)
+        by_key.setdefault(method.key, []).append(method)
         intent_keys.setdefault(method.intent, set()).add(method.key)
     for intent, keys in intent_keys.items():
         if len(keys) == 1:
@@ -320,7 +320,9 @@ def validate(document: Any) -> list[ValidationIssue]:
     return issues
 
 
-def _resolve(route: HandlerRoute | IntentRoute, by_key: Mapping[str, ServerMethod]) -> ProxyRoute:
+def _resolve(
+    route: HandlerRoute | IntentRoute, by_key: Mapping[str, Sequence[ServerMethod]]
+) -> ProxyRoute:
     label = f"{route.method.upper()} {route.path}"
     if isinstance(route, HandlerRoute):
         if not isinstance(route.handler, ComposedHandler):
@@ -332,13 +334,21 @@ def _resolve(route: HandlerRoute | IntentRoute, by_key: Mapping[str, ServerMetho
             ]
         }
     else:
-        method = by_key.get(route.intent)
-        if method is None:
+        from mpp.server.mpp import _select
+
+        group = by_key.get(route.intent)
+        if not group:
             raise ValueError(
                 f'Unknown intent "{route.intent}" for route {label}. Available: {", ".join(by_key)}'
             )
         options = dict(route.options)
-        payment = _payment_offer(method, options, options.pop("description", None))
+        description = options.pop("description", None)
+        # The runtime challenge carries one offer per selected method, such as one per
+        # accepted currency.
+        offers = [
+            _payment_offer(method, options, description) for method in _select(group, options)
+        ]
+        payment = offers[0] if len(offers) == 1 else {"offers": offers}
     return ProxyRoute(
         method=route.method,
         path=route.path,

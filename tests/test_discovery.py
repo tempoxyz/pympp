@@ -147,7 +147,25 @@ def test_bare_intent_with_multi_currency_tempo_charge() -> None:
         [IntentRoute(method="GET", path="/a", intent="charge", options={"amount": "1"})],
     )
 
-    assert _offers(document, "/a", "get")[0]["currency"] == OUSD
+    assert [offer["currency"] for offer in _offers(document, "/a", "get")] == [OUSD, PATH_USD]
+
+
+def test_multi_currency_intent_route_names_one_currency() -> None:
+    mpp = _mpp(tempo.charge(recipient=RECIPIENT, currencies=[OUSD, PATH_USD]))
+    document = generate(
+        mpp,
+        [
+            IntentRoute(
+                method="GET",
+                path="/a",
+                intent="tempo/charge",
+                options={"amount": "1", "currency": PATH_USD.lower()},
+            )
+        ],
+    )
+
+    offers = _offers(document, "/a", "get")
+    assert [offer["currency"].lower() for offer in offers] == [PATH_USD.lower()]
 
 
 def test_generate_proxy() -> None:
