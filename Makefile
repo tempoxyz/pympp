@@ -1,4 +1,4 @@
-.PHONY: install lint fix format format-check test test-integration test-x402-localnet node node-stop check all
+.PHONY: install lint fix format format-check test test-integration test-x402-localnet node node-stop check all coverage coverage-baseline diff-cover api api-check
 
 install:
 	uv sync --all-extras --dev
@@ -19,8 +19,34 @@ format-check:
 test:
 	uv run pytest -v
 
+# Needs the Tempo localnet: make node. TEMPO_RPC_URL overrides its URL.
 test-integration:
-	TEMPO_RPC_URL=http://localhost:8545 uv run pytest -m integration -v
+	TEMPO_NETWORK=localnet uv run pytest -m integration -v
+
+# The full suite against the localnet, Redis and Anvil (docker compose up -d
+# --wait), as CI's coverage run; fails if branch coverage drops below
+# .coverage-baseline.
+coverage:
+	TEMPO_NETWORK=localnet REDIS_URL=redis://localhost:6379 \
+		X402_ANVIL_RPC_URL=http://localhost:18546 \
+		uv run pytest --cov=mpp --cov-report=term-missing \
+		--cov-report=xml:coverage.xml --cov-report=json:coverage.json
+	uv run python scripts/coverage_ratchet.py coverage.json
+
+# Raise .coverage-baseline to the last coverage run's branch coverage.
+coverage-baseline:
+	uv run python scripts/coverage_ratchet.py coverage.json --update
+
+# Changed lines since origin/main need 90% coverage (run make coverage first).
+diff-cover:
+	uv run diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
+
+# Regenerate the public API snapshot after an intended API change.
+api:
+	uv run python scripts/public_api.py
+
+api-check:
+	uv run python scripts/public_api.py --check
 
 # Needs Anvil on port 18546: docker compose up -d anvil
 test-x402-localnet:
@@ -42,6 +68,6 @@ node:
 node-stop:
 	docker compose down
 
-check: lint format-check test
+check: lint format-check api-check test
 
 all: install check

@@ -1,8 +1,10 @@
+# Host ports can be overridden (REDIS_PORT, TEMPO_LOCALNET_PORT, X402_ANVIL_PORT)
+# to run several stacks side by side with `docker compose -p <name>`.
 services:
   redis:
     image: redis:7.4.8-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
@@ -13,7 +15,7 @@ services:
     image: ${TEMPO_LOCALNET_IMAGE:-ghcr.io/tempoxyz/tempo-localnet@sha256:86f199f161be85d3610d990e5bc2653ece29de3ee9c91e8c8e768cf2b8c05c3b}
     command: ["--block-time", "1ms"]
     ports:
-      - "127.0.0.1:8545:8545"
+      - "127.0.0.1:${TEMPO_LOCALNET_PORT:-8545}:8545"
     stop_grace_period: 10s
 
   # Anvil for the x402 localnet tests (tests/test_x402_localnet.py).
@@ -26,7 +28,7 @@ services:
       - --chain-id=31337
       - --mnemonic=test test test test test test test test test test test junk
     ports:
-      - "127.0.0.1:18546:8545"
+      - "127.0.0.1:${X402_ANVIL_PORT:-18546}:8545"
     healthcheck:
       test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
       interval: 2s

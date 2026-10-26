@@ -1,6 +1,5 @@
 """mpp test suite."""
 
-import os
 from typing import Any
 
 import pytest
@@ -8,14 +7,15 @@ import pytest
 from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode
 from mpp.errors import InternalPaymentError
 from mpp.server import PaymentRequired, Request
+from tests.network import TEMPO
 
 # Default secret used by tests when calling verify_or_challenge
 TEST_SECRET = "test-secret"
 TEST_REALM = "test.example.com"
 
 INTEGRATION = pytest.mark.skipif(
-    not os.environ.get("TEMPO_RPC_URL"),
-    reason="TEMPO_RPC_URL not set (no local node)",
+    not TEMPO.enabled,
+    reason="TEMPO_NETWORK not set (localnet or moderato; see tests/network.py)",
 )
 
 

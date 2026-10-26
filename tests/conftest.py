@@ -9,16 +9,43 @@ import pytest
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo._defaults import PATH_USD
 from mpp.methods.tempo.intents import ChargeIntent
+from tests.network import TEMPO
+
+# How long the first integration test waits for the node to answer, like
+# mppx's test/setup.global.ts. A fresh localnet container takes a few seconds.
+NODE_READY_TIMEOUT = 60.0
+
+
+def _wait_for_node(rpc_url: str, timeout: float = NODE_READY_TIMEOUT) -> None:
+    """Wait until the node answers `eth_blockNumber` with a produced block."""
+    deadline = time.monotonic() + timeout
+    error: object = None
+    with httpx.Client(timeout=10) as client:
+        while True:
+            try:
+                resp = client.post(
+                    rpc_url,
+                    json={"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1},
+                )
+                if int(resp.json()["result"], 16) > 0:
+                    return
+                error = "no block produced yet"
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+                error = exc
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"Tempo {TEMPO.network} node at {rpc_url} not ready after {timeout:.0f}s "
+                    f"({error}). Start the localnet with `make node`."
+                )
+            time.sleep(0.5)
 
 
 @pytest.fixture(scope="session")
 def rpc_url():
-    return os.environ["TEMPO_RPC_URL"]
-
-
-@pytest.fixture(scope="session")
-def is_local_node(rpc_url):
-    return "localhost" in rpc_url or "127.0.0.1" in rpc_url
+    if not TEMPO.enabled:
+        pytest.skip("TEMPO_NETWORK not set (localnet or moderato)")
+    _wait_for_node(TEMPO.rpc_url)
+    return TEMPO.rpc_url
 
 
 @pytest.fixture(scope="session")
@@ -58,7 +85,7 @@ def _tip20_balance(rpc_url: str, token: str, address: str, client: httpx.Client)
 
 
 def _fund_account(rpc_url: str, address: str, currency: str) -> None:
-    """Fund an account using the localnet faucet."""
+    """Fund an account with the node's `tempo_fundAddress` faucet (localnet or Moderato)."""
     with httpx.Client(timeout=30) as client:
         resp = client.post(
             rpc_url,
@@ -81,21 +108,20 @@ def _fund_account(rpc_url: str, address: str, currency: str) -> None:
     raise RuntimeError(f"Account {address} not funded after tempo_fundAddress")
 
 
-@pytest.fixture(scope="session")
-def funded_payer(rpc_url, is_local_node, currency):
-    if is_local_node:
-        key = "0x" + os.urandom(32).hex()
-        account = TempoAccount.from_key(key)
-        _fund_account(rpc_url, account.address, currency)
-        return account
-    return TempoAccount.from_env("TEMPO_TEST_PRIVATE_KEY")
+def _funded_account(rpc_url: str, currency: str, key_var: str) -> TempoAccount:
+    """A pre-funded account from `key_var` when set, else a fresh one from the faucet."""
+    if os.environ.get(key_var):
+        return TempoAccount.from_env(key_var)
+    account = TempoAccount.from_key("0x" + os.urandom(32).hex())
+    _fund_account(rpc_url, account.address, currency)
+    return account
 
 
 @pytest.fixture(scope="session")
-def funded_recipient(rpc_url, is_local_node, currency):
-    if is_local_node:
-        key = "0x" + os.urandom(32).hex()
-        account = TempoAccount.from_key(key)
-        _fund_account(rpc_url, account.address, currency)
-        return account
-    return TempoAccount.from_env("TEMPO_TEST_RECIPIENT_KEY")
+def funded_payer(rpc_url, currency):
+    return _funded_account(rpc_url, currency, "TEMPO_TEST_PRIVATE_KEY")
+
+
+@pytest.fixture(scope="session")
+def funded_recipient(rpc_url, currency):
+    return _funded_account(rpc_url, currency, "TEMPO_TEST_RECIPIENT_KEY")

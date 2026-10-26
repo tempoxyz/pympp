@@ -1,0 +1,1177 @@
+module mpp
+    def canonical_b64url(data: Any) -> str
+    class ParseError(Exception)
+    def format_authorization(credential: Credential) -> str
+    def format_payment_receipt(receipt: Receipt) -> str
+    def format_www_authenticate(challenge: Challenge, realm: str) -> str
+    def parse_authorization(header: str) -> Credential
+    def parse_payment_receipt(header: str) -> Receipt
+    def parse_www_authenticate(header: str) -> Challenge
+    BadRequestError -> mpp.errors.BadRequestError
+    CredentialReplayedError -> mpp.errors.CredentialReplayedError
+    InternalPaymentError -> mpp.errors.InternalPaymentError
+    InvalidChallengeError -> mpp.errors.InvalidChallengeError
+    InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    MalformedCredentialError -> mpp.errors.MalformedCredentialError
+    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
+    PaymentError -> mpp.errors.PaymentError
+    PaymentExpiredError -> mpp.errors.PaymentExpiredError
+    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
+    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
+    PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
+    PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    VerificationFailedError -> mpp.errors.VerificationFailedError
+    CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
+    CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
+    CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
+    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
+    EventDispatcher -> mpp.events.EventDispatcher
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
+    AUTHORIZATION_HEADER = 'Authorization'
+    PAYMENT_AUTHORIZATION_HEADER = 'Payment-Authorization'
+    def is_default_credential_header(header: str | None) -> bool
+    def advertised_credential_header(header: str | None) -> str | None
+    def generate_challenge_id(*, secret_key: str, realm: str, method: str, intent: str, request: dict[str, Any], expires: str | None = None, digest: str | None = None, opaque: dict[str, str] | None = None, header: str | None = None) -> str
+    class Challenge
+        @dataclass(frozen=True, slots=True)
+        field id: str
+        field method: str
+        field intent: str
+        field request: dict[str, Any]
+        field realm: str = ''
+        field request_b64: str = ''
+        field digest: str | None = None
+        field expires: str | None = None
+        field description: str | None = None
+        field opaque: dict[str, str] | None = None
+        field header: str | None = None
+        @classmethod def create(cls, *, secret_key: str, realm: str, method: str, intent: str, request: dict[str, Any], expires: str | None = None, digest: str | None = None, description: str | None = None, meta: dict[str, str] | None = None, header: str | None = None) -> Challenge
+        property credential_header: str
+        @classmethod def from_www_authenticate(cls, header: str) -> Challenge
+        def to_echo(self) -> ChallengeEcho
+        def to_www_authenticate(self, realm: str) -> str
+        def verify(self, secret_key: str, realm: str) -> bool
+    class ChallengeEcho
+        @dataclass(frozen=True, slots=True)
+        field id: str
+        field realm: str
+        field method: str
+        field intent: str
+        field request: str
+        field expires: str | None = None
+        field digest: str | None = None
+        field opaque: str | None = None
+        field header: str | None = None
+        field description: str | None = None
+    class Credential
+        @dataclass(frozen=True, slots=True)
+        field challenge: ChallengeEcho
+        field payload: dict[str, Any]
+        field source: str | None = None
+        @classmethod def from_authorization(cls, header: str) -> Credential
+        def to_authorization(self) -> str
+    class Receipt
+        @dataclass(frozen=True, slots=True)
+        field status: Literal['success']
+        field timestamp: datetime
+        field reference: str
+        field method: str = 'tempo'
+        field external_id: str | None = None
+        field subscription_id: str | None = None
+        field extra: dict[str, Any] | None = None
+        field extensions: dict[str, Any] | None = None
+        field payer: str | None = None
+        field funding_currency: str | None = None
+        @classmethod def from_payment_receipt(cls, header: str) -> Receipt
+        @classmethod def success(cls, reference: str, timestamp: datetime | None = None, method: str = 'tempo', external_id: str | None = None, subscription_id: str | None = None, funding_currency: str | None = None) -> Receipt
+        def to_payment_receipt(self) -> str
+    Method -> mpp.methods.Method
+    ClientMethod -> mpp.runtime.ClientMethod
+    CredentialParams -> mpp.runtime.CredentialParams
+    MemoryStore -> mpp.store.MemoryStore
+    Store -> mpp.store.Store
+
+module mpp.client
+    Mpp -> mpp.client.transport.Mpp
+    PaymentTransport -> mpp.client.transport.PaymentTransport
+    CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
+    CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
+    EventDispatcher -> mpp.events.EventDispatcher
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
+    Method -> mpp.methods.Method
+    ClientMethod -> mpp.runtime.ClientMethod
+    CredentialParams -> mpp.runtime.CredentialParams
+    PaymentRuntime -> mpp.runtime.PaymentRuntime
+
+module mpp.client.transport
+    class PaymentTransport(httpx.AsyncBaseTransport)
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>) -> None
+        async def aclose(self) -> None
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response
+        def on(self, name: str, handler: EventHandler) -> Unsubscribe
+        def on_challenge_received(self, handler: EventHandler) -> Unsubscribe
+        def on_credential_created(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_response(self, handler: EventHandler) -> Unsubscribe
+    class Mpp
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>) -> None
+        async def aclose(self) -> None
+        def client(self, **kwargs: Any) -> httpx.AsyncClient
+        async def fetch(self, url: str | httpx.URL, *, method: str = 'GET', **kwargs: Any) -> httpx.Response
+        property methods: tuple[ClientMethod, ...]
+        def on(self, name: str, handler: EventHandler) -> Unsubscribe
+        def on_challenge_received(self, handler: EventHandler) -> Unsubscribe
+        def on_credential_created(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_response(self, handler: EventHandler) -> Unsubscribe
+
+module mpp.errors
+    class Hints
+        malformed_credential = 'Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+        method_unsupported = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+        payment_required = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+    class PaymentError(Exception)
+        status: int = 402
+        title: str = 'Payment Error'
+        hint: str | None = None
+        details: dict[str, Any] | None = None
+        retry_challenge: Any | None = None
+        type: str = 'https://paymentauth.org/problems/payment-error'
+        def to_problem_details(self, challenge_id: str | None = None) -> dict[str, Any]
+    class PaymentOutcomeUnknownError(mpp.errors.PaymentError, RuntimeError)
+        def __init__(self, challenge: Any, cause: BaseException, *, credential: Any = None, request: Any = None, transaction_hash: str | None = None) -> None
+        title = 'Payment Outcome Unknown'
+        type = 'https://paymentauth.org/problems/payment-outcome-unknown'
+    class PaymentRequiredError(mpp.errors.PaymentError)
+        def __init__(self, realm: str | None = None, description: str | None = None) -> None
+        hint = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+        title = 'Payment Required'
+        type = 'https://paymentauth.org/problems/payment-required'
+    class MalformedCredentialError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        hint = 'Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+        title = 'Malformed Credential'
+        type = 'https://paymentauth.org/problems/malformed-credential'
+    class InvalidChallengeError(mpp.errors.PaymentError)
+        def __init__(self, challenge_id: str | None = None, reason: str | None = None) -> None
+        title = 'Invalid Challenge'
+        type = 'https://paymentauth.org/problems/invalid-challenge'
+    class VerificationFailedError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None, *, details: dict[str, Any] | None = None) -> None
+        title = 'Verification Failed'
+        type = 'https://paymentauth.org/problems/verification-failed'
+    class InternalPaymentError(mpp.errors.PaymentError)
+        def __init__(self) -> None
+        status = 500
+        title = 'Internal Payment Error'
+        type = 'https://paymentauth.org/problems/internal-payment-error'
+    class PaymentExpiredError(mpp.errors.PaymentError)
+        def __init__(self, expires: str | None = None) -> None
+        title = 'Payment Expired'
+        type = 'https://paymentauth.org/problems/payment-expired'
+    class InvalidPayloadError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        title = 'Invalid Payload'
+        type = 'https://paymentauth.org/problems/invalid-payload'
+    class BadRequestError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        status = 400
+        title = 'Bad Request'
+        type = 'https://paymentauth.org/problems/bad-request'
+    class PaymentInsufficientError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        title = 'Payment Insufficient'
+        type = 'https://paymentauth.org/problems/payment-insufficient'
+    class PaymentMethodUnsupportedError(mpp.errors.PaymentError)
+        def __init__(self, method: str | None = None) -> None
+        hint = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
+        status = 400
+        title = 'Method Unsupported'
+        type = 'https://paymentauth.org/problems/method-unsupported'
+    class PaymentActionRequiredError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        title = 'Payment Action Required'
+        type = 'https://paymentauth.org/problems/payment-action-required'
+    class VerificationError(mpp.errors.VerificationFailedError)
+        def __init__(self, message: str = 'Payment verification failed.', *, details: dict[str, Any] | None = None) -> None
+        title = 'Verification Failed'
+        type = 'https://paymentauth.org/problems/verification-failed'
+    class CredentialReplayedError(mpp.errors.VerificationError)
+        def __init__(self, reason: str = 'Credential has already been used', *, details: dict[str, Any] | None = None) -> None
+        status = 403
+        title = 'Verification Failed'
+        type = 'https://paymentauth.org/problems/verification-failed'
+
+module mpp.events
+    logger: logging.Logger
+    class PaymentEventName(enum.StrEnum)
+        CHALLENGE_RECEIVED = 'challenge.received'
+        CREDENTIAL_CREATED = 'credential.created'
+        PAYMENT_RESPONSE = 'payment.response'
+        CHALLENGE_CREATED = 'challenge.created'
+        PAYMENT_SUCCESS = 'payment.success'
+        PAYMENT_FAILED = 'payment.failed'
+        WILDCARD = '*'
+    CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
+    CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
+    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
+    CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
+    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
+    ClientEventName = typing.Literal[<PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>, <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>, <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>]
+    ServerEventName = typing.Literal[<PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>, <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>]
+    KnownEventName = typing.Union[typing.Literal[<PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>, <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>, <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>], typing.Literal[<PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>, <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>]]
+    EventName = typing.Union[typing.Literal[<PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>, <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>, <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>], typing.Literal[<PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>, <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>, <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>], typing.Literal[<PaymentEventName.WILDCARD: '*'>]]
+    class ClientChallengeReceivedPayload(TypedDict)
+        challenge: Challenge
+        challenges: list[Challenge]
+        method: Any
+        request: httpx.Request
+        response: httpx.Response
+    class ClientCredentialCreatedPayload(mpp.events.ClientChallengeReceivedPayload)
+        challenge: Challenge
+        challenges: list[Challenge]
+        method: Any
+        request: httpx.Request
+        response: httpx.Response
+        credential: Credential
+    class ClientPaymentResponsePayload(mpp.events.ClientCredentialCreatedPayload)
+        challenge: Challenge
+        challenges: list[Challenge]
+        method: Any
+        request: httpx.Request
+        response: httpx.Response
+        credential: Credential
+    class ClientPaymentFailedPayload(TypedDict)
+        challenge: Challenge | None
+        challenges: list[Challenge]
+        credential: Credential | None
+        error: Exception
+        method: Any | None
+        request: httpx.Request
+        response: httpx.Response
+    class ServerChallengeCreatedPayload(TypedDict)
+        challenge: Challenge
+        intent: str
+        method: str
+        request: dict[str, Any]
+    class ServerPaymentFailedPayload(mpp.events.ServerChallengeCreatedPayload)
+        challenge: Challenge
+        intent: str
+        method: str
+        request: dict[str, Any]
+        credential: Credential | None
+        error: Exception
+    class ServerPaymentSuccessPayload(mpp.events.ServerChallengeCreatedPayload)
+        challenge: Challenge
+        intent: str
+        method: str
+        request: dict[str, Any]
+        credential: Credential
+        receipt: Receipt
+    EventPayload = mpp.events.ClientChallengeReceivedPayload | mpp.events.ClientCredentialCreatedPayload | mpp.events.ClientPaymentResponsePayload | mpp.events.ClientPaymentFailedPayload | mpp.events.ServerChallengeCreatedPayload | mpp.events.ServerPaymentFailedPayload | mpp.events.ServerPaymentSuccessPayload | dict[str, typing.Any]
+    EventHandler: collections.abc._CallableGenericAlias
+    WildcardEventHandler: collections.abc._CallableGenericAlias
+    AnyEventHandler: collections.abc._CallableGenericAlias
+    Unsubscribe: collections.abc._CallableGenericAlias
+    class PaymentEvent
+        @dataclass(frozen=True, slots=True)
+        field name: str
+        field payload: EventPayload
+    class EventDispatcher
+        def __init__(self) -> None
+        async def emit(self, name: str, payload: EventPayload, *, first_result: bool = False) -> Any
+        def on(self, name: str, handler: AnyEventHandler) -> Unsubscribe
+
+module mpp.extensions
+
+module mpp.extensions.mcp
+    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
+    CODE_MALFORMED_CREDENTIAL = -32602
+    CODE_PAYMENT_REQUIRED = -32042
+    CODE_PAYMENT_VERIFICATION_FAILED = -32043
+    META_CREDENTIAL = 'org.paymentauth/credential'
+    META_RECEIPT = 'org.paymentauth/receipt'
+    payment_capabilities -> mpp.extensions.mcp.capabilities.payment_capabilities
+    McpClient -> mpp.extensions.mcp.client.McpClient
+    McpToolResult -> mpp.extensions.mcp.client.McpToolResult
+    PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
+    pay -> mpp.extensions.mcp.decorator.pay
+    MalformedCredentialError -> mpp.extensions.mcp.errors.MalformedCredentialError
+    PaymentRequiredError -> mpp.extensions.mcp.errors.PaymentRequiredError
+    PaymentVerificationError -> mpp.extensions.mcp.errors.PaymentVerificationError
+    MCPChallenge -> mpp.extensions.mcp.types.MCPChallenge
+    MCPCredential -> mpp.extensions.mcp.types.MCPCredential
+    MCPReceipt -> mpp.extensions.mcp.types.MCPReceipt
+    verify_or_challenge -> mpp.extensions.mcp.verify.verify_or_challenge
+
+module mpp.extensions.mcp.capabilities
+    def payment_capabilities(methods: Mpp | Iterable[ServerMethod]) -> dict[str, Any]
+
+module mpp.extensions.mcp.client
+    logger: logging.Logger
+    class McpToolResult
+        @dataclass(frozen=True, slots=True)
+        field result: Any
+        field receipt: MCPReceipt | None = None
+    class McpClient
+        def __init__(self, session: Any, methods: Sequence[ClientMethod | Any], *, trusted_tempo_realms: Sequence[str] = ()) -> None
+        async def call_tool(self, name: str, arguments: dict[str, Any] | None = None, *, timeout: float | None = None, meta: dict[str, Any] | None = None) -> McpToolResult
+
+module mpp.extensions.mcp.constants
+    META_CREDENTIAL = 'org.paymentauth/credential'
+    META_RECEIPT = 'org.paymentauth/receipt'
+    CODE_PAYMENT_REQUIRED = -32042
+    CODE_PAYMENT_VERIFICATION_FAILED = -32043
+    CODE_MALFORMED_CREDENTIAL = -32602
+    HTTP_STATUS_PAYMENT_REQUIRED = 402
+
+module mpp.extensions.mcp.decorator
+    P = ~P
+    R = ~R
+    HandlerType = mpp.server.compose.ComposedHandler | collections.abc.Callable[..., mpp.server.compose.ComposedHandler]
+    def pay(handler: HandlerType, *, tool: str) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]
+
+module mpp.extensions.mcp.errors
+    class PaymentRequiredError(mcp.shared.exceptions.McpError)
+        def __init__(self, challenges: list[MCPChallenge], message: str = 'Payment Required') -> None
+        def to_jsonrpc_error(self) -> dict[str, Any]
+    class PaymentVerificationError(mcp.shared.exceptions.McpError)
+        def __init__(self, challenges: list[MCPChallenge], reason: str | None = None, detail: str | None = None, details: dict[str, Any] | None = None, message: str = 'Payment Verification Failed', http_status: int = 402) -> None
+        def to_jsonrpc_error(self) -> dict[str, Any]
+    class MalformedCredentialError(mcp.shared.exceptions.McpError)
+        def __init__(self, detail: str, message: str = 'Invalid params') -> None
+        def to_jsonrpc_error(self) -> dict[str, Any]
+
+module mpp.extensions.mcp.types
+    class MCPChallenge
+        @dataclass(frozen=True, slots=True)
+        field id: str
+        field realm: str
+        field method: str
+        field intent: str
+        field request: dict[str, Any]
+        field expires: str | None = None
+        field description: str | None = None
+        field digest: str | None = None
+        field opaque: dict[str, str] | None = None
+        @classmethod def from_core(cls, challenge: Challenge, realm: str, expires: str | None = None, description: str | None = None) -> MCPChallenge
+        @classmethod def from_dict(cls, data: dict[str, Any]) -> MCPChallenge
+        def to_core(self) -> Challenge
+        def to_dict(self) -> dict[str, Any]
+    class MCPCredential
+        @dataclass(frozen=True, slots=True)
+        field challenge: MCPChallenge
+        field payload: dict[str, Any]
+        field source: str | None = None
+        @classmethod def from_core(cls, credential: Credential, challenge: MCPChallenge) -> MCPCredential
+        @classmethod def from_dict(cls, data: dict[str, Any]) -> MCPCredential
+        @classmethod def from_meta(cls, meta: dict[str, Any]) -> MCPCredential | None
+        def to_core(self) -> Credential
+        def to_dict(self) -> dict[str, Any]
+        def to_meta(self) -> dict[str, Any]
+    class MCPReceipt
+        @dataclass(frozen=True, slots=True)
+        field status: Literal['success']
+        field challenge_id: str
+        field method: str
+        field timestamp: str
+        field reference: str | None = None
+        field settlement: dict[str, Any] | None = None
+        field external_id: str | None = None
+        field subscription_id: str | None = None
+        field funding_currency: str | None = None
+        field extra: dict[str, Any] | None = None
+        field extensions: dict[str, Any] | None = None
+        @classmethod def from_core(cls, receipt: Receipt, challenge_id: str, method: str, settlement: dict[str, Any] | None = None) -> MCPReceipt
+        @classmethod def from_dict(cls, data: dict[str, Any]) -> MCPReceipt
+        @classmethod def from_meta(cls, meta: dict[str, Any]) -> MCPReceipt | None
+        def to_core(self) -> Receipt
+        def to_dict(self) -> dict[str, Any]
+        def to_meta(self) -> dict[str, Any]
+
+module mpp.extensions.mcp.verify
+    TOOL_ROUTE_PREFIX = 'tool:'
+    async def verify_or_challenge(handler: ComposedHandler, *, tool: str, meta: dict[str, Any] | None = None) -> list[MCPChallenge] | tuple[MCPCredential, MCPReceipt]
+
+module mpp.methods
+    CanOfferFn: collections.abc._CallableGenericAlias
+    PaymentSuccessHandler: collections.abc._CallableGenericAlias
+    RequestT = ~RequestT
+    PayloadT = ~PayloadT
+    class Method(typing.Generic[~RequestT, ~PayloadT])
+        @dataclass(frozen=True, slots=True)
+        field kw_only name: str
+        field kw_only intent: str
+        field kw_only request_model: type[~RequestT]
+        field kw_only payload_model: type[~PayloadT]
+        property key: str
+        def normalize_request(self, request: collections.abc.Mapping[str, typing.Any]) -> dict[str, typing.Any]
+        def parse_payload(self, payload: Any) -> ~PayloadT
+
+module mpp.methods.evm
+    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
+    BASE = 8453
+    BASE_SEPOLIA = 84532
+    BASE_SEPOLIA_USDC: mpp.methods.evm.assets.EvmAsset
+    BASE_USDC: mpp.methods.evm.assets.EvmAsset
+    CELO = 42220
+    CELO_SEPOLIA = 11142220
+    CELO_SEPOLIA_USDC: mpp.methods.evm.assets.EvmAsset
+    CELO_USDC: mpp.methods.evm.assets.EvmAsset
+    CELO_USDT: mpp.methods.evm.assets.EvmAsset
+    EvmAsset -> mpp.methods.evm.assets.EvmAsset
+    AuthorizationConfig -> mpp.methods.evm.client.AuthorizationConfig
+    evm -> mpp.methods.evm.client.evm
+    Authorization -> mpp.methods.evm.intents.Authorization
+    AuthorizationPayload -> mpp.methods.evm.intents.AuthorizationPayload
+    ChargeIntent -> mpp.methods.evm.intents.ChargeIntent
+    ChargeRequest -> mpp.methods.evm.intents.ChargeRequest
+    SettleFn: collections.abc._CallableGenericAlias
+    charge: mpp.methods.Method
+    def challenge_hash(challenge_id: str, realm: str) -> str
+
+module mpp.methods.evm.assets
+    BASE = 8453
+    BASE_SEPOLIA = 84532
+    CELO = 42220
+    CELO_SEPOLIA = 11142220
+    class EvmAsset
+        @dataclass(frozen=True, slots=True)
+        field address: str
+        field decimals: int
+        field chain_id: int
+        field name: str
+        field version: str
+        property network: str
+    BASE_USDC: mpp.methods.evm.assets.EvmAsset
+    BASE_SEPOLIA_USDC: mpp.methods.evm.assets.EvmAsset
+    CELO_USDC: mpp.methods.evm.assets.EvmAsset
+    CELO_USDT: mpp.methods.evm.assets.EvmAsset
+    CELO_SEPOLIA_USDC: mpp.methods.evm.assets.EvmAsset
+
+module mpp.methods.evm.client
+    DEFAULT_VALIDITY_SECONDS = 300
+    class AuthorizationConfig(TypedDict)
+        name: str
+        version: str
+    def charge(*, currency: EvmAsset | str, account: Any, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, max_amount: str | Decimal | None = None) -> ClientMethod
+    def evm(*, currency: EvmAsset | str, recipient: str | None = None, account: Any = None, max_amount: str | Decimal | None = None, **options: Any) -> ServerMethod | ClientMethod
+
+module mpp.methods.evm.intents
+    logger: logging.Logger
+    CREDENTIAL_TYPE = 'authorization'
+    class Authorization
+        @dataclass(frozen=True, slots=True)
+        field credential: Credential
+        field payload: dict[str, Any]
+        field request: dict[str, Any]
+        field source: str
+    SettleFn: collections.abc._CallableGenericAlias
+    class AuthorizationPayload(pydantic.main.BaseModel)
+        field type: Literal['authorization']
+        field from_: str (alias 'from')
+        field to: str
+        field value: str
+        field valid_after: str (alias 'validAfter')
+        field valid_before: str (alias 'validBefore')
+        field nonce: str
+        field signature: str
+        model_config = {'frozen': True, 'populate_by_name': True}
+    class MethodDetails(pydantic.main.BaseModel)
+        field chain_id: int (alias 'chainId')
+        field credential_types: list[typing.Annotated[str, Strict(strict=True)]] (alias 'credentialTypes')
+        field decimals: int
+        model_config = {'populate_by_name': True}
+    class ChargeRequest(pydantic.main.BaseModel)
+        field amount: str
+        field currency: str
+        field recipient: str
+        field method_details: mpp.methods.evm.intents.MethodDetails (alias 'methodDetails')
+        field extra: dict[str, str] | None = None
+        model_config = {'populate_by_name': True, 'extra': 'forbid'}
+    charge: mpp.methods.Method
+    class ChargeIntent
+        def __init__(self, *, name: str, version: str, facilitator: Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', store: Store | None = None, max_validity_seconds: int = 3600) -> None
+        async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
+        name = 'charge'
+        async def validate(self, credential: Credential, request: dict[str, Any]) -> Validation
+        def x402_credential_payload(self, payment: PaymentPayload, request: dict[str, Any]) -> tuple[dict[str, Any], str | None]
+        def x402_requirements(self, request: dict[str, Any]) -> PaymentRequirements
+
+module mpp.methods.evm.server
+    def charge(*, currency: EvmAsset | str, recipient: str, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+
+module mpp.methods.stripe
+    StripeMethod -> mpp.methods.stripe.client.StripeMethod
+    ChargeIntent -> mpp.methods.stripe.intents.ChargeIntent
+    DepositAddresses -> mpp.methods.stripe.machine_payments.DepositAddresses
+    MachinePayments -> mpp.methods.stripe.machine_payments.MachinePayments
+    create -> mpp.methods.stripe.machine_payments.create
+    PaymentIntentContext -> mpp.methods.stripe.payment_intent_options.PaymentIntentContext
+    PaymentIntentInput = collections.abc.Mapping[str, typing.Any] | collections.abc.Callable[[mpp.methods.stripe.payment_intent_options.PaymentIntentContext], collections.abc.Mapping[str, typing.Any] | None | collections.abc.Awaitable[collections.abc.Mapping[str, typing.Any] | None]] | None
+    PaymentIntentOptions -> mpp.methods.stripe.payment_intent_options.PaymentIntentOptions
+    ChargeInput -> mpp.methods.stripe.schemas.ChargeInput
+    ChargeRequest -> mpp.methods.stripe.schemas.ChargeRequest
+    StripeCredentialPayload -> mpp.methods.stripe.schemas.StripeCredentialPayload
+
+module mpp.methods.stripe.analytics
+    def build_analytics(credential: mpp.Credential) -> dict[str, str]
+    def merge_metadata(credential: mpp.Credential, configured: collections.abc.Mapping[str, str] | None, options: dict) -> dict[str, str]
+
+module mpp.methods.stripe.client
+    class OnChallengeParameters
+        @dataclass(frozen=True, slots=False)
+        field amount: str
+        field challenge: Challenge
+        field currency: str
+        field external_id: str | None
+        field expires_at: int
+        field metadata: dict[str, str] | None
+        field network_id: str
+        field payment_method_types: list[str]
+        field payment_method: str
+    CreateTokenFn: collections.abc._CallableGenericAlias
+    class StripeMethod
+        @dataclass(frozen=False, slots=False)
+        field name: str = 'stripe'
+        field create_token: CreateTokenFn | None = None
+        field payment_method: str | None = None
+        field external_id: str | None = None
+        async def create_credential(self, challenge: Challenge) -> Credential
+    def charge(*, create_token: CreateTokenFn, payment_method: str, external_id: str | None = None) -> ClientMethod
+
+module mpp.methods.stripe.crypto_payment_recorder
+    logger: logging.Logger
+    async def record_crypto_payment(*, client: Any, network: str, metadata: dict[str, str] | None, credential: Credential | None, request: dict[str, Any], receipt: Receipt, payment_intent_options: dict[str, Any] | None = None, resolved_metadata: dict[str, str] | None = None) -> None
+
+module mpp.methods.stripe.intents
+    class ChargeIntent
+        def __init__(self, client: Any | None = None, secret_key: str | None = None, http_client: Any | None = None, timeout: float = 30.0) -> None
+        async def aclose(self) -> None
+        name = 'charge'
+        async def verify(self, credential: Credential, request: dict[str, Any], payment_intent_options: PaymentIntentInput = None) -> Receipt
+
+module mpp.methods.stripe.machine_payments
+    class DepositAddresses(TypedDict)
+        tempo: str
+    class SptPayments
+        def __init__(self, network_id: str, client: StripeClient, metadata: dict[str, str] | None) -> None
+        def charge(self) -> ServerMethod
+    class TempoPayments
+        def __init__(self, livemode: bool, client: StripeClient, recipient: str | None, metadata: dict[str, str] | None, store: Store) -> None
+        def charge(self) -> ServerMethod
+    class MachinePayments
+        def __init__(self, *, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None) -> None
+        def default_methods(self) -> list[ServerMethod]
+    def create(*, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None) -> MachinePayments
+
+module mpp.methods.stripe.payment_intent_method
+    RecordPayment: collections.abc._CallableGenericAlias
+    def with_payment_intent_input(method: ServerMethod, record_payment: RecordPayment, configured_metadata: Mapping[str, str] | None = None) -> ServerMethod
+
+module mpp.methods.stripe.payment_intent_options
+    class TaxInput(TypedDict)
+        calculation: str
+    class HookInputs(TypedDict)
+        tax: TaxInput
+    class Hooks(TypedDict)
+        inputs: HookInputs
+    class PaymentIntentOptions(TypedDict)
+        customer: str
+        receipt_email: str
+        metadata: dict[str, str]
+        hooks: Hooks
+    class PaymentIntentContext
+        @dataclass(frozen=True, slots=False)
+        field challenge: ChallengeEcho
+        field credential: Credential
+        field request: dict[str, Any]
+    PaymentIntentInput = collections.abc.Mapping[str, typing.Any] | collections.abc.Callable[[mpp.methods.stripe.payment_intent_options.PaymentIntentContext], collections.abc.Mapping[str, typing.Any] | None | collections.abc.Awaitable[collections.abc.Mapping[str, typing.Any] | None]] | None
+    def validate_options(value: Any) -> dict[str, Any]
+    def validate_metadata(value: Any) -> dict[str, str]
+    def prepare_options(value: PaymentIntentInput) -> PaymentIntentInput
+    async def resolve_options(value: PaymentIntentInput, credential: Credential, request: dict[str, Any]) -> dict[str, Any]
+
+module mpp.methods.stripe.schemas
+    class StripeMethodDetails(pydantic.main.BaseModel)
+        field metadata: dict[str, str] | None = None
+        field networkId: str
+        field paymentMethodTypes: list[str]
+        model_config = {}
+    class ChargeRequest(pydantic.main.BaseModel)
+        field amount: str
+        field currency: str
+        field description: str | None = None
+        field externalId: str | None = None
+        field methodDetails: mpp.methods.stripe.schemas.StripeMethodDetails
+        field recipient: str | None = None
+        model_config = {}
+    class StripeCredentialPayload(pydantic.main.BaseModel)
+        field externalId: str | None = None
+        field spt: str
+        model_config = {}
+    class ChargeInput(pydantic.main.BaseModel)
+        field amount: str
+        field currency: str
+        field decimals: int = 2
+        field network_id: str (alias 'networkId')
+        field payment_method_types: list[str] (alias 'paymentMethodTypes')
+        field metadata: dict[str, str] | None = None
+        field recipient: str | None = None
+        field external_id: str | None = None (alias 'externalId')
+        field extra: dict[str, str] | None = None
+        field payment_intent_options: Any = None
+        model_config = {'populate_by_name': True, 'extra': 'forbid'}
+    charge: mpp.methods.Method
+
+module mpp.methods.stripe.server
+    def charge(*, network_id: str, client: Any | None = None, secret_key: str | None = None, payment_method_types: list[str] | None = None, currency: str | None = None, decimals: int = 2, recipient: str | None = None, external_id: str | None = None, metadata: dict[str, str] | None = None, http_client: Any | None = None, timeout: float = 30.0, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+
+module mpp.methods.tempo
+    class PkhSource(NamedTuple)
+        address: str
+        chain_id: int
+    def parse_pkh_source(source: str) -> PkhSource | None
+    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
+    CHAIN_ID = 4217
+    ESCROW_CONTRACTS: mappingproxy
+    MACH = '0x20c000000000000000000000f37de3740ADec032'
+    OUSD = '0x20c0000000000000000000006a37DA5C996874BE'
+    PATH_USD = '0x20c0000000000000000000000000000000000000'
+    TESTNET_CHAIN_ID = 42431
+    USDC = '0x20C000000000000000000000b9537d11c60E8b50'
+    def default_currencies_for_chain(chain_id: int | None) -> tuple[str, ...]
+    def default_currency_for_chain(chain_id: int | None) -> str
+    def escrow_contract_for_chain(chain_id: int) -> str
+    def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]
+    TempoAccount -> mpp.methods.tempo.account.TempoAccount
+    TempoMethod -> mpp.methods.tempo.client.TempoMethod
+    TransactionError -> mpp.methods.tempo.client.TransactionError
+    ChargeIntent -> mpp.methods.tempo.intents.ChargeIntent
+    Transfer -> mpp.methods.tempo.intents.Transfer
+    SenderValidation -> mpp.methods.tempo.intents.SenderValidation
+    ValidateSender: collections.abc._CallableGenericAlias
+    get_transfers -> mpp.methods.tempo.intents.get_transfers
+    Relay -> mpp.methods.tempo.relay.Relay
+    RelayErrorCode = typing.Literal['already_used', 'broadcast_failed', 'expired', 'invalid_payment', 'insufficient_funds', 'policy_denied', 'screen_rejected', 'simulation_failed', 'temporarily_unavailable', 'unsupported', 'unknown']
+    ChargeInput -> mpp.methods.tempo.schemas.ChargeInput
+    ChargePayload -> mpp.methods.tempo.schemas.ChargePayload
+    Split -> mpp.methods.tempo.schemas.Split
+
+module mpp.methods.tempo.account
+    class TempoAccount
+        @dataclass(frozen=True, slots=False)
+        property address: str
+        @classmethod def from_env(cls, var: str = 'TEMPO_PRIVATE_KEY') -> TempoAccount
+        @classmethod def from_key(cls, private_key: str) -> TempoAccount
+        property private_key: str
+        def sign_hash(self, msg_hash: bytes) -> bytes
+
+module mpp.methods.tempo.attribution
+    ANONYMOUS = '0x00000000000000000000'
+    TAG = '0xef1ed712'
+    class DecodedMemo
+        @dataclass(frozen=True, slots=True)
+        field version: int
+        field server_fingerprint: str
+        field client_fingerprint: str | None
+        field nonce: str
+    def decode(memo: str) -> DecodedMemo | None
+    def encode(challenge_id: str, server_id: str, client_id: str | None = None) -> str
+    def is_mpp_memo(memo: str) -> bool
+    def verify_challenge_binding(memo: str, challenge_id: str) -> bool
+    def verify_server(memo: str, server_id: str) -> bool
+
+module mpp.methods.tempo.client
+    DEFAULT_GAS_LIMIT = 1000000
+    EXPIRING_NONCE_KEY = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+    EXPIRING_NONCE_VALID_BEFORE_SECS = 60
+    FEE_PAYER_VALID_BEFORE_SECS = 60
+    ATTODOLLARS_PER_MICRODOLLAR = 1000000000000
+    class TransactionError(Exception)
+    class TempoMethod
+        @dataclass(frozen=False, slots=False)
+        field name: str = 'tempo'
+        field account: TempoAccount | None = None
+        field fee_payer: TempoAccount | None = None
+        field root_account: str | None = None
+        field rpc_url: str = 'https://rpc.tempo.xyz'
+        field chain_id: int | None = None
+        field currency: str | None = None
+        field recipient: str | None = None
+        field decimals: int = 6
+        field client_id: str | None = None
+        field kw_only currencies: tuple[str, ...] = ()
+        field kw_only fee_token: str | None = None
+        field kw_only allowed_fee_tokens: tuple[str, ...] | None = None
+        field kw_only max_atomic_amount: int | str | None = None
+        field kw_only max_amount: str | Decimal | None = None
+        field kw_only max_amount_decimals: int | None = None
+        field kw_only expected_recipients: tuple[str, ...] | None = None
+        field kw_only allowed_chain_ids: Sequence[int] | None = None
+        def can_handle_challenge(self, challenge: Challenge) -> bool
+        async def create_credential(self, challenge: Challenge) -> Credential
+        def transaction_hash(self, credential: Credential) -> str | None
+    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None) -> ClientMethod
+
+module mpp.methods.tempo.fee_payer_envelope
+    FEE_PAYER_ENVELOPE_TYPE_ID = 120
+    def encode_fee_payer_envelope(signed_tx: TempoTransaction) -> bytes
+    def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, _RawSignedKeyAuthorization | None]
+
+module mpp.methods.tempo.fee_payer_policy
+    class Policy
+        @dataclass(frozen=True, slots=True)
+        field max_gas: int
+        field max_fee_per_gas: int
+        field max_priority_fee_per_gas: int
+        field max_total_fee: int
+        field max_validity_window_seconds: int
+    MIN_REMAINING_VALIDITY_SECONDS = 15
+    DEFAULT_POLICY: mpp.methods.tempo.fee_payer_policy.Policy
+    POLICY_BY_CHAIN_ID: dict
+    def get_policy(chain_id: int, overrides: Mapping[str, int] | None = None) -> Policy
+
+module mpp.methods.tempo.intents
+    logger: logging.Logger
+    TRANSFER_SELECTOR = 'a9059cbb'
+    TRANSFER_WITH_MEMO_SELECTOR = '95777d59'
+    APPROVE_SELECTOR = '095ea7b3'
+    SWAP_EXACT_AMOUNT_OUT_SELECTOR = 'b30d91d5'
+    SELECTOR_HEX_LEN = 8
+    ABI_WORD_HEX_LEN = 64
+    TRANSFER_CALL_DATA_HEX_LEN = 136
+    TRANSFER_WITH_MEMO_CALL_DATA_HEX_LEN = 200
+    APPROVE_CALL_DATA_HEX_LEN = 136
+    SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN = 264
+    TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'
+    TRANSFER_WITH_MEMO_TOPIC = '0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0'
+    ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+    STABLECOIN_DEX = '0xdec0000000000000000000000000000000000000'
+    MAX_SPLITS = 10
+    MAX_TRANSFERS = 11
+    ALREADY_KNOWN_TRANSACTION_RE: re.Pattern
+    SYNC_CONFIRMATION_TIMEOUT_CODE = 4
+    RECEIPT_POLL_INTERVAL = 0.5
+    VALID_BEFORE_GRACE = 2.0
+    class Transfer
+        @dataclass(frozen=False, slots=False)
+        field amount: int
+        field recipient: str
+        field memo: bytes | None = None
+    def get_transfers(total_amount: int, primary_recipient: str, primary_memo: str | None, splits: list[Split] | None) -> list[Transfer]
+    class MatchedTransferLog
+        @dataclass(frozen=True, slots=True)
+        field kind: Literal['memo', 'transfer']
+        field memo: str | None = None
+        field sender: str | None = None
+    class SenderValidation
+        @dataclass(frozen=True, slots=True)
+        field expected_sender: str
+        field sender: str
+        field source: str | None
+    ValidateSender: collections.abc._CallableGenericAlias
+    class ChargeIntent
+        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None) -> None
+        async def aclose(self) -> None
+        async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
+        name = 'charge'
+        async def validate(self, credential: Credential, request: dict[str, Any]) -> Validation
+        async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt
+
+module mpp.methods.tempo.keychain
+    KEYCHAIN_SIGNATURE_TYPE = 3
+    KEYCHAIN_SIGNATURE_LENGTH = 86
+    def build_keychain_signature(msg_hash: bytes, access_key: TempoAccount, root_account: str) -> bytes
+
+module mpp.methods.tempo.relay
+    logger: logging.Logger
+    DEFAULT_API_BASE_URL = 'https://api.tempo.xyz'
+    RelayErrorCode = typing.Literal['already_used', 'broadcast_failed', 'expired', 'invalid_payment', 'insufficient_funds', 'policy_denied', 'screen_rejected', 'simulation_failed', 'temporarily_unavailable', 'unsupported', 'unknown']
+    class Relay
+        def __init__(self, api_key: str, api_base_url: str = 'https://api.tempo.xyz', http_client: httpx.AsyncClient | None = None, timeout: float = 30.0) -> None
+        async def aclose(self) -> None
+        def configure(self, intent: ChargeIntent) -> _RelayIntent
+
+module mpp.methods.tempo.schemas
+    class Split(pydantic.main.BaseModel)
+        field amount: str
+        field recipient: str
+        field memo: str | None = None
+        model_config = {}
+    FIXED_ATTRIBUTION_MEMO_ERROR = 'Fixed split memos must not use MPP attribution; omit the memo'
+    def is_fixed_attribution_memo(memo: object) -> bool
+    def reject_fixed_attribution_memos(request: Mapping[str, Any]) -> None
+    class MethodDetails(pydantic.main.BaseModel)
+        field chainId: int = 4217
+        field feePayer: bool = False
+        field feePayerUrl: str | None = None
+        field splits: list[mpp.methods.tempo.schemas.Split] | None = None
+        model_config = {}
+    class ChargeRequest(pydantic.main.BaseModel)
+        field amount: str
+        field currency: str
+        field recipient: str
+        field description: str | None = None
+        field externalId: str | None = None
+        field methodDetails: mpp.methods.tempo.schemas.MethodDetails = PydanticUndefined
+        model_config = {}
+    class HashCredentialPayload(pydantic.main.BaseModel)
+        field type: Literal['hash']
+        field hash: str
+        model_config = {}
+    class TransactionCredentialPayload(pydantic.main.BaseModel)
+        field type: Literal['transaction']
+        field signature: str
+        model_config = {}
+    CredentialPayload = mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload
+    class ChargeInput(pydantic.main.BaseModel)
+        field amount: str
+        field currency: str
+        field recipient: str
+        field decimals: int = 6
+        field chain_id: int | None = None (alias 'chainId')
+        field fee_payer: bool = False (alias 'feePayer')
+        field splits: list[mpp.methods.tempo.schemas.Split] | None = None
+        field external_id: str | None = None (alias 'externalId')
+        field extra: dict[str, str] | None = None
+        model_config = {'populate_by_name': True, 'extra': 'forbid'}
+    class ChargePayload(pydantic.main.BaseModel, typing.Generic[~RootModelRootType])
+        field root: mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload
+        model_config = {}
+    charge: mpp.methods.Method
+
+module mpp.methods.tempo.server
+    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
+
+module mpp.runtime
+    class CredentialParams
+        @dataclass(frozen=True, slots=True)
+        field kw_only challenge: Challenge
+        field kw_only context: Any = None
+    class ClientMethod
+        @dataclass(frozen=True, slots=True)
+        field kw_only method: MethodDefinition[Any, Any]
+        field kw_only create_credential: Callable[[CredentialParams], Awaitable[str]]
+        field kw_only can_handle_challenge: Callable[[Challenge], bool] | None = None
+        field kw_only transaction_hash: Callable[[Credential], str | None] | None = None
+        property intent: str
+        property key: str
+        property name: str
+    class PaymentRuntime
+        def __init__(self, methods: Sequence[ClientMethod | Sequence[ClientMethod]] = (), *, events: EventDispatcher | None = None) -> None
+        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None) -> Credential
+        def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
+
+module mpp.server
+    class Validation
+        @dataclass(frozen=True, slots=True)
+        field credential: Credential
+        field details: Any
+        field intent: str
+        field request: dict[str, Any]
+        field payer: str | None = None
+        property challenge: ChallengeEcho
+        property method: str
+        property source: str | None
+    BadRequestError -> mpp.errors.BadRequestError
+    CredentialReplayedError -> mpp.errors.CredentialReplayedError
+    InternalPaymentError -> mpp.errors.InternalPaymentError
+    InvalidChallengeError -> mpp.errors.InvalidChallengeError
+    InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    MalformedCredentialError -> mpp.errors.MalformedCredentialError
+    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
+    PaymentError -> mpp.errors.PaymentError
+    PaymentExpiredError -> mpp.errors.PaymentExpiredError
+    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
+    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
+    PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    VerificationError -> mpp.errors.VerificationError
+    VerificationFailedError -> mpp.errors.VerificationFailedError
+    CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
+    EventDispatcher -> mpp.events.EventDispatcher
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
+    Method -> mpp.methods.Method
+    ComposedHandler -> mpp.server.compose.ComposedHandler
+    compose -> mpp.server.compose.compose
+    pay -> mpp.server.decorator.pay
+    PaymentRequired -> mpp.server.http.PaymentRequired
+    PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
+    PaymentVerified -> mpp.server.http.PaymentVerified
+    Request -> mpp.server.http.Request
+    Response -> mpp.server.http.Response
+    RequestContext -> mpp.server.method.RequestContext
+    ServerMethod -> mpp.server.method.ServerMethod
+    ValidateContext -> mpp.server.method.ValidateContext
+    VerifyContext -> mpp.server.method.VerifyContext
+    HandlerFactory -> mpp.server.mpp.HandlerFactory
+    Mpp -> mpp.server.mpp.Mpp
+
+module mpp.server.compose
+    BodyType = str | bytes | dict[str, typing.Any]
+    BodyParamsType = str | bytes | dict[str, typing.Any] | collections.abc.Callable[[mpp.server.http.Request], str | bytes | dict[str, typing.Any] | collections.abc.Awaitable[str | bytes | dict[str, typing.Any]]] | None
+    ROUTE_OPTION_KEYS = frozenset({'body', 'description', 'expires', 'expires_in', 'meta'})
+    MCP_URL_PREFIX = 'mcp:'
+    class ComposedChallenges
+        @dataclass(frozen=False, slots=False)
+        field challenges: tuple[Challenge, ...]
+        field error: Exception | None = None
+    ComposedResult = mpp.server.compose.ComposedChallenges | tuple[mpp.Credential, mpp.Receipt]
+    class ComposedHandler
+        async def __call__(self, request: Request) -> PaymentResult
+        def __init__(self, *handlers: ComposedHandler) -> None
+        property methods: tuple[ServerMethod, ...]
+        property needs_request_body: bool
+    def compose(*handlers: ComposedHandler) -> ComposedHandler
+
+module mpp.server.decorator
+    R = ~R
+    def get_header(request: Any, name: str) -> str | None
+    def get_request_url(request: Any) -> str | None
+    def x402_input(request: Any) -> X402Input | None
+    def framework_scope(request: Any) -> dict[str, str]
+    async def to_request(request: Any, *, read_body: bool = True) -> Request
+    def to_framework_response(response: Response) -> Any
+    def pay(handler: ComposedHandler) -> Callable[[Callable[..., Awaitable[R]]], Callable[..., Awaitable[R | Any]]]
+
+module mpp.server.http
+    logger: logging.Logger
+    HeadersInput = httpx.Headers | collections.abc.Mapping[str, str] | collections.abc.Sequence[tuple[str, str]] | None
+    def make_headers(headers: HeadersInput = None) -> httpx.Headers
+    class Request
+        @dataclass(frozen=True, slots=True)
+        field method: str
+        field url: str
+        field headers: httpx.Headers
+        field body: bytes | None
+        field route: str | None
+        def __init__(self, method: str, url: str, headers: HeadersInput = None, body: bytes | str | None = None, route: str | None = None) -> None
+        def json(self) -> Any
+        def scope(self) -> dict[str, str]
+    class Response
+        @dataclass(frozen=True, slots=True)
+        field status: int
+        field headers: httpx.Headers
+        field body: bytes | None
+        def __init__(self, status: int = 200, headers: HeadersInput = None, body: bytes | str | None = None) -> None
+        def copy(self, **changes: Any) -> Self
+        @classmethod def json(cls, data: Any, *, status: int = 200, headers: HeadersInput = None) -> Self
+    class PaymentRequired
+        @dataclass(frozen=True, slots=True)
+        field challenge: Response
+        property status: int
+    class PaymentVerified
+        @dataclass(frozen=True, slots=True)
+        field credential: Credential
+        field receipt: Receipt
+        field status: Literal[200] = 200
+        def with_receipt(self, response: Any) -> Any
+    PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
+
+module mpp.server.method
+    T = ~T
+    SETTLING_METHOD: _contextvars.ContextVar
+    async def resolve(value: T | Awaitable[T]) -> T
+    class RequestContext
+        @dataclass(frozen=True, slots=True)
+        field kw_only request: dict[str, Any]
+        field kw_only credential: Credential | None = None
+        field kw_only input: Request | None = None
+    class VerifyContext
+        @dataclass(frozen=True, slots=True)
+        field kw_only credential: Credential
+        field kw_only request: dict[str, Any]
+        field kw_only challenge: Challenge
+    class ValidateContext(mpp.server.method.VerifyContext)
+        @dataclass(frozen=True, slots=True)
+        field kw_only credential: Credential
+        field kw_only request: dict[str, Any]
+        field kw_only challenge: Challenge
+        field kw_only operation: Literal['broadcast', 'validate'] = 'validate'
+    VerifyFn: collections.abc._CallableGenericAlias
+    ValidateFn: collections.abc._CallableGenericAlias
+    class ServerMethod
+        @dataclass(frozen=True, slots=True)
+        field kw_only method: Method[Any, Any]
+        field kw_only verify: VerifyFn | None = None
+        field kw_only validate: ValidateFn | None = None
+        field kw_only broadcast: VerifyFn | None = None
+        field kw_only resolve_request: Callable[[RequestContext], dict[str, Any] | Awaitable[dict[str, Any]]] | None = None
+        field kw_only can_offer: CanOfferFn | None = None
+        field kw_only on_payment_success: PaymentSuccessHandler | None = None
+        field kw_only defaults: Mapping[str, Any] | None = None
+        field kw_only x402: X402Intent | None = None
+        field kw_only use_store: Callable[[Store], None] | None = None
+        field kw_only credential_options: tuple[str, ...] = ()
+        field kw_only needs_request_body: bool = False
+        property intent: str
+        property key: str
+        property name: str
+        async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]
+
+module mpp.server.mpp
+    class HandlerFactory
+        def __call__(self, **options: Any) -> ComposedHandler
+        def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None
+    class Mpp
+        def __init__(self, methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]], *, realm: str | None = None, secret_key: str | None = None, store: Store | None = None, requires_auth: bool = False, unique_challenges: bool = True) -> None
+        async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Receipt
+        def compose(self, *entries: tuple[Any, Mapping[str, Any]]) -> ComposedHandler
+        def on(self, name: str, handler: EventHandler) -> Unsubscribe
+        def on_challenge_created(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
+        def on_payment_success(self, handler: EventHandler) -> Unsubscribe
+        async def validate_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Validation
+
+module mpp.server.verify
+    DEFAULT_EXPIRES_MINUTES = 5
+    class Intent(typing.Protocol)
+        name: str
+        def __init__(self, *args, **kwargs)
+    async def verify_or_challenge(*, authorization: str | None, intent: Intent, request: dict[str, Any], realm: str, secret_key: str, method: str | None = None, description: str | None = None, meta: dict[str, str] | None = None, expires: str | None = None, body: str | bytes | dict[str, Any] | None = None, events: EventDispatcher | None = None, header: str | None = None, unique_challenges: bool = True, x402: X402Input | None = None) -> Challenge | tuple[Credential, Receipt]
+
+module mpp.store
+    class Store(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+    class ExpiringStore(mpp.store.Store, typing.Protocol)
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+    class MemoryStore
+        def __init__(self, *, max_entries: int | None = None) -> None
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+
+module mpp.stores
+    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
+    MemoryStore -> mpp.store.MemoryStore
+    RedisStore -> mpp.stores.redis.RedisStore
+    SQLiteStore -> mpp.stores.sqlite.SQLiteStore
+
+module mpp.stores.redis
+    class RedisStore
+        def __init__(self, client: Any, *, key_prefix: str = 'mpp:', ttl_seconds: int | None = None) -> None
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+
+module mpp.stores.sqlite
+    NO_TTL_EXPIRES_AT = 253402300799.0
+    class SQLiteStore
+        def __init__(self, db: Any, *, ttl_seconds: int | None = None) -> None
+        async def close(self) -> None
+        @classmethod async def create(cls, path: str = 'mpp.db', *, ttl_seconds: int | None = None) -> SQLiteStore
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+
+module mpp.x402
+    EIP3009 = 'eip3009'
+    EXACT_SCHEME = 'exact'
+    PAYMENT_REQUIRED_HEADER = 'PAYMENT-REQUIRED'
+    PAYMENT_RESPONSE_HEADER = 'PAYMENT-RESPONSE'
+    PAYMENT_SIGNATURE_HEADER = 'PAYMENT-SIGNATURE'
+    ROUTE_BINDING_EXTENSION = 'mppx'
+    X402_VERSION = 2
+    Facilitator -> mpp.x402.facilitator.Facilitator
+    FacilitatorError -> mpp.x402.facilitator.FacilitatorError
+    HttpFacilitator -> mpp.x402.facilitator.HttpFacilitator
+    class InvalidHeaderError(mpp.x402._types.X402FormatError)
+        def __init__(self, reason: str | None = None) -> None
+    class PaymentPayload(TypedDict)
+        x402Version: Literal[2]
+        accepted: PaymentRequirements
+        payload: dict[str, Any]
+        resource: NotRequired[ResourceInfo]
+        extensions: NotRequired[dict[str, Any]]
+    class PaymentRequired(TypedDict)
+        x402Version: Literal[2]
+        accepts: list[PaymentRequirements]
+        resource: ResourceInfo
+        error: NotRequired[str]
+        extensions: NotRequired[dict[str, Any]]
+    class PaymentRequirements(TypedDict)
+        scheme: Literal['exact']
+        network: str
+        amount: str
+        asset: str
+        payTo: str
+        maxTimeoutSeconds: int
+        extra: NotRequired[dict[str, Any]]
+    class ResourceInfo(TypedDict)
+        url: str
+        description: NotRequired[str]
+        mimeType: NotRequired[str]
+    RouteBinding = typing.Literal['required', 'resource']
+    class SettleResponse(TypedDict)
+        success: bool
+        transaction: str
+        network: str
+        payer: NotRequired[str]
+        amount: NotRequired[str]
+        errorReason: NotRequired[str]
+        errorMessage: NotRequired[str]
+    class VerifyResponse(TypedDict)
+        isValid: bool
+        invalidReason: NotRequired[str]
+        invalidMessage: NotRequired[str]
+        payer: NotRequired[str]
+    class X402FormatError(ValueError)
+    class X402Input
+        @dataclass(frozen=True, slots=True)
+        field resource_url: str
+        field payment_signature: str | None = None
+        field http_method: str = 'GET'
+    class X402Intent(typing.Protocol)
+        name: str
+        def __init__(self, *args, **kwargs)
+        def x402_credential_payload(self, payment: PaymentPayload, request: dict[str, Any]) -> tuple[dict[str, Any], str | None]
+        def x402_requirements(self, request: dict[str, Any]) -> PaymentRequirements
+    def decode_payment_required(value: str) -> PaymentRequired
+    def decode_payment_response(value: str) -> SettleResponse
+    def decode_payment_signature(value: str) -> PaymentPayload
+    def encode_payment_required(value: PaymentRequired) -> str
+    def encode_payment_response(value: SettleResponse) -> str
+    def encode_payment_signature(value: PaymentPayload) -> str
+    def is_x402_credential(credential: Credential) -> bool
+    def payment_required_header(accepts: Iterable[PaymentRequirements], resource_url: str, error: str | None = None, extensions: Mapping[str, Any] | None = None) -> str | None
+    def payment_response_header(credential: Credential, receipt: Receipt) -> str | None
+    resolve_facilitator -> mpp.x402.facilitator.resolve_facilitator
+    def route_extensions(*, http_method: str, scope: Any = None, digest: str | None = None, meta: Mapping[str, Any] | None = None) -> dict[str, Any]
+    def route_nonce(*, accepted: Mapping[str, Any], resource: Mapping[str, Any], extensions: Mapping[str, Any]) -> str
+
+module mpp.x402.facilitator
+    HeadersInput = collections.abc.Mapping[str, str] | collections.abc.Callable[[], collections.abc.Mapping[str, str] | collections.abc.Awaitable[collections.abc.Mapping[str, str]]] | None
+    class FacilitatorError(Exception)
+    class Facilitator(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
+        async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
+    class HttpFacilitator
+        def __init__(self, url: str, *, headers: HeadersInput = None, timeout: float = 30.0, client: httpx.AsyncClient | None = None) -> None
+        async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
+        async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
+    def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
