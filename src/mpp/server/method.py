@@ -89,9 +89,6 @@ class ServerMethod:
             configured without one of its own.
         credential_options: Keyword options `Mpp.validate_credential` and
             `Mpp.broadcast_credential` accept for this method; others are rejected.
-        group: Shared by the copies one factory call returns (such as one per
-            currency), which settle through the same configuration and replay store.
-            Out-of-band settlement treats only copies of one group as interchangeable.
         needs_request_body: Set when `resolve_request` reads `RequestContext.input.body`,
             so framework decorators such as `pay()` read the request body for it.
     """
@@ -109,7 +106,6 @@ class ServerMethod:
     x402: X402Intent | None = None
     use_store: Callable[[Store], None] | None = None
     credential_options: tuple[str, ...] = ()
-    group: object | None = None
     needs_request_body: bool = False
 
     def __post_init__(self) -> None:

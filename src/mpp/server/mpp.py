@@ -44,6 +44,7 @@ from mpp.server.verify import (
     _authenticate_echo,
     _body_digest_error,
     _challenge_from_echo,
+    _offer_tag,
 )
 from mpp.store import Store
 
@@ -217,6 +218,14 @@ class Mpp:
         for method in self.methods:
             keys.setdefault(method.key, []).append(method)
             intents.setdefault(method.intent, []).append(method)
+        # Methods sharing a name and intent may settle through different replay stores:
+        # their challenges carry the issuing method's index, so out-of-band settlement
+        # uses exactly the method that issued them. A lone method issues no tag.
+        self._offer_tags: dict[int, str] = {
+            id(method): str(index)
+            for index, method in enumerate(self.methods)
+            if len(keys[method.key]) > 1
+        }
         self._handlers: dict[str, Any] = {
             key: HandlerFactory(self, group) for key, group in keys.items()
         }
@@ -282,13 +291,35 @@ class Mpp:
             elif isinstance(target, HandlerFactory):
                 factory = target if target._server is self else None
             elif isinstance(target, ServerMethod) and target in self.methods:
-                factory = HandlerFactory(self, [target])
+                configured = next(
+                    (method for method in self.methods if method is target),
+                    next(method for method in self.methods if method == target),
+                )
+                factory = HandlerFactory(self, [configured])
             else:
                 factory = None
             if not isinstance(factory, HandlerFactory):
                 raise ValueError(f"payment method is not registered: {target!r}")
             handlers.append(factory(**options))
         return ComposedHandler(*handlers)
+
+    def _offer_tag(self, method: ServerMethod) -> str | None:
+        """The issuing-offer tag of a configured method's challenges, if it needs one."""
+        return self._offer_tags.get(id(method))
+
+    def _tagged_method(self, tag: str, echo: Any) -> ServerMethod:
+        """The configured method an echoed issuing-offer tag names."""
+        method = None
+        if tag.isdigit() and str(int(tag)) == tag and int(tag) < len(self.methods):
+            method = self.methods[int(tag)]
+        if (
+            method is None
+            or self._offer_tag(method) != tag
+            or method.name != echo.method
+            or method.intent != echo.intent
+        ):
+            raise InvalidChallengeError(echo.id, "credential was not issued by a configured method")
+        return method
 
     def _register_payment_success_handler(self, method: ServerMethod) -> None:
         """Forward successful payments to a method's optional callback."""
@@ -354,15 +385,23 @@ class Mpp:
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
+        tag = _offer_tag(echoed_opaque)
+        if tag is not None:
+            # Several configured methods share this name and intent, and may settle
+            # through different replay stores: settle through exactly the one that
+            # issued the challenge.
+            candidates = [self._tagged_method(tag, echo)]
+
         echoed = _comparable(echoed_request)
         if request is None:
-            method = _select_echoed(candidates, echoed_request, echo.id)
+            method = _select_echoed(candidates, echoed_request)
         else:
             # Read `request` as route input first. Only when no method accepts it as
             # route input is it compared as the echoed wire request (the 0.15 form), so an
             # input that reads both ways, such as `amount` in display or base units, is
             # always checked in its stricter route-input reading.
             matching: list[ServerMethod] = []
+            scopes: dict[int, Any] = {}
             normalized = False
             for candidate in candidates:
                 try:
@@ -373,19 +412,22 @@ class Mpp:
                     # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True
-                if expected == echoed:
+                if _comparable(expected) == echoed:
                     matching.append(candidate)
+                    scopes[id(candidate)] = expected.get("_mppx_scope")
             if normalized:
                 if not matching:
                     raise InvalidChallengeError(echo.id, "credential request does not match")
-                method = _select_echoed(matching, echoed_request, echo.id)
+                method = _select_echoed(matching, echoed_request)
+                # Route issuance binds the normalized input's scope, including one the
+                # method's resolve_request derives.
+                expected_scope = scopes[id(method)]
             elif _comparable(request) == echoed:
-                method = _select_echoed(candidates, echoed_request, echo.id)
+                method = _select_echoed(candidates, echoed_request)
+                expected_scope = request.get("_mppx_scope")
             else:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
-            if not _custom_scope_matches(
-                request.get("_mppx_scope"), echoed_request.get("_mppx_scope")
-            ):
+            if not _custom_scope_matches(expected_scope, echoed_request.get("_mppx_scope")):
                 raise InvalidChallengeError(echo.id, "credential scope does not match")
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
@@ -446,7 +488,8 @@ class Mpp:
                 request to match. Accepts either the route input (such as
                 ``{"amount": "0.50"}``, normalized like a route's options) or
                 the echoed wire request itself (base-unit ``amount``,
-                ``methodDetails``; ``_mppx_scope`` is ignored).
+                ``methodDetails``). Its ``_mppx_scope``, when given or derived
+                by the method, must match the challenge's custom scope.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -510,7 +553,8 @@ class Mpp:
                 request to match. Accepts either the route input (such as
                 ``{"amount": "0.50"}``, normalized like a route's options) or
                 the echoed wire request itself (base-unit ``amount``,
-                ``methodDetails``; ``_mppx_scope`` is ignored).
+                ``methodDetails``). Its ``_mppx_scope``, when given or derived
+                by the method, must match the challenge's custom scope.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -599,7 +643,7 @@ def _expected_request(
                 "validate_credential(request=...) needs a synchronous resolve_request"
             )
         input = resolved
-    return _comparable(method.method.normalize_request(input))
+    return method.method.normalize_request(input)
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -610,32 +654,20 @@ def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
 _IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
 
 
-def _select_echoed(
-    candidates: Sequence[ServerMethod], echoed: Mapping[str, Any], challenge_id: str
-) -> ServerMethod:
-    """Choose the configured method copy whose configuration issued an echoed request.
+def _select_echoed(candidates: Sequence[ServerMethod], echoed: Mapping[str, Any]) -> ServerMethod:
+    """Choose the configured method copy whose configuration matches an untagged echo.
 
-    Copies of one method (such as one per currency, or per chain) must agree with
-    the echo's currency and chain; among those left, the copy whose configuration
-    agrees with the rest of the echo wins. Copies left with different
-    configurations are ambiguous.
+    Only a lone method or a challenge issued without an issuing-offer tag (before
+    tags, or outside this engine) gets here. Copies must agree with the echo's
+    currency and chain; among those left, the copy whose configuration agrees with
+    the rest of the echo wins. A route may override the currency or chain: like route
+    selection, fall back to the copies agreeing on the rest, then to the first copy.
     """
     if len(candidates) == 1:
         return candidates[0]
     probes = {id(candidate): _probe(candidate) for candidate in candidates}
-    # A route may override the currency or chain, so any group that accepts the echoed
-    # currency and chain and agrees on the rest could have issued it. Settling through
-    # another group's replay store would let the issuing group accept the payment again.
-    issuers = [candidate for candidate in candidates if _could_issue(candidate, echoed)]
-    if not _one_group(issuers or candidates):
-        raise InvalidChallengeError(
-            challenge_id,
-            "credential matches several configured methods; pass request= to select one",
-        )
     matching: list[ServerMethod] = []
-    # A route may override the currency or chain: like route selection, fall back to
-    # the copies agreeing on the rest, then to the first copy. Overridden fields no
-    # longer tell copies apart.
+    use_defaults = True
     for paths, use_defaults in (
         (_IDENTITY_PATHS, True),
         (_IDENTITY_PATHS[:1], True),
@@ -651,75 +683,14 @@ def _select_echoed(
             probes = {key: _without(probe, overridden) for key, probe in probes.items()}
             break
     if not matching:
-        # Settle with the first copy only when every copy shares its configuration and
-        # replay store: another group's store would accept the same payment again.
-        if not _one_group(candidates):
-            raise InvalidChallengeError(
-                challenge_id,
-                "credential matches several configured methods; pass request= to select one",
-            )
         return candidates[0]
-    if len(matching) > 1:
-        narrowed = [
-            candidate
-            for candidate in matching
-            if (probe := probes[id(candidate)]) is not None
-            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
-        ]
-        matching = narrowed or matching
-    if len(matching) > 1:
-        configs = [probes[id(candidate)] for candidate in matching]
-        if (
-            configs[0] is None
-            or any(config != configs[0] for config in configs)
-            or not _one_group(matching)
-        ):
-            raise InvalidChallengeError(
-                challenge_id,
-                "credential matches several configured methods; pass request= to select one",
-            )
-    return matching[0]
-
-
-def _could_issue(method: ServerMethod, echoed: Mapping[str, Any]) -> bool:
-    """Whether a route of this method could have issued the echo, overriding currency or chain."""
-    base: dict[str, Any] = {
-        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
-        "amount": "1",
-    }
-    currency = echoed.get("currency")
-    chain = _at(echoed, ("methodDetails", "chainId"))
-    overrides: list[dict[str, Any]] = []
-    if currency is not None and chain is not _MISSING:
-        overrides.append({"currency": currency, "chain_id": chain})
-    if currency is not None:
-        overrides.append({"currency": currency})
-    if chain is not _MISSING:
-        overrides.append({"chain_id": chain})
-    overrides.append({})
-    for override in overrides:
-        input = {**base, **override}
-        try:
-            if method.resolve_request is not None:
-                resolved = method.resolve_request(RequestContext(request=input))
-                if inspect.isawaitable(resolved):
-                    if inspect.iscoroutine(resolved):
-                        resolved.close()
-                    return True
-                input = resolved
-            wire = method.method.normalize_request(input)
-        except Exception:
-            continue
-        wire = {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
-        if _agrees(method, wire, echoed, tuple(_leaves(wire)), defaults=False):
-            return True
-    return False
-
-
-def _one_group(methods: Sequence[ServerMethod]) -> bool:
-    """Whether the methods are copies from one factory call, sharing a replay store."""
-    groups = {id(method.group if method.group is not None else method) for method in methods}
-    return len(groups) == 1
+    narrowed = [
+        candidate
+        for candidate in matching
+        if (probe := probes[id(candidate)]) is not None
+        and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
+    ]
+    return (narrowed or matching)[0]
 
 
 _ENGINE_SCOPE_KEYS = frozenset({"custom", "http_method", "query", "resource", "route"})

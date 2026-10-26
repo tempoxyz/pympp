@@ -32,10 +32,12 @@ from mpp.server.method import (
     resolve,
 )
 from mpp.server.verify import (
+    OFFER_META_KEY,
     _application_meta,
     _authenticate_echo,
     _challenge_from_echo,
     _extract_payment_scheme,
+    _offer_tag,
     verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
@@ -144,6 +146,19 @@ class _Offer:
     def meta(self) -> dict[str, str] | None:
         return self.options.get("meta")
 
+    @property
+    def tag(self) -> str | None:
+        """The issuing-offer tag its challenges carry, when the method needs one."""
+        return self.server._offer_tag(self.method)
+
+    @property
+    def issued_meta(self) -> dict[str, str] | None:
+        """The opaque metadata its challenges bind: the route's meta and the offer tag."""
+        tag = self.tag
+        if tag is None:
+            return self.meta
+        return {**(self.meta or {}), OFFER_META_KEY: tag}
+
 
 @dataclass
 class _PreparedOffer:
@@ -190,7 +205,7 @@ class _PreparedOffer:
             secret_key=server.secret_key,
             method=self.offer.method.name,
             description=self.offer.options.get("description"),
-            meta=self.offer.meta,
+            meta=self.offer.issued_meta,
             expires=self.expires,
             body=self.body,
             events=server._events,
@@ -293,6 +308,8 @@ def _validate_options(options: Mapping[str, Any]) -> dict[str, Any]:
         )
     ):
         raise ValueError("meta must be a dict[str, str]")
+    if meta is not None and OFFER_META_KEY in meta:
+        raise ValueError(f"{OFFER_META_KEY} is reserved for challenge issuance")
     return dict(options)
 
 
@@ -558,6 +575,7 @@ class ComposedHandler:
                 else digest is not None and _body_digest.verify(digest, offer.body)
             )
             and _application_meta(echoed_meta) == (offer.offer.meta or None)
+            and _offer_tag(echoed_meta) in (None, offer.offer.tag)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:

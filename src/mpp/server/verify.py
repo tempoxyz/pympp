@@ -299,7 +299,7 @@ async def verify_or_challenge(
             credential,
         )
 
-    if _application_meta(echo_opaque) != (meta or None):
+    if _application_meta(echo_opaque) != _route_meta(meta) or not _same_offer(echo_opaque, meta):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -441,10 +441,10 @@ def _create_challenge(
         _assert_sponsored_challenge_lifetime(request, expires)
 
     digest = _body_digest.compute(body) if body is not None else None
-    if meta is not None and "_mpp_nonce" in meta:
-        raise ValueError("_mpp_nonce is reserved for challenge issuance")
+    if meta is not None and NONCE_META_KEY in meta:
+        raise ValueError(f"{NONCE_META_KEY} is reserved for challenge issuance")
     issued_meta = (
-        {**(meta or {}), "_mpp_nonce": secrets.token_hex(32)} if unique_challenges else meta
+        {**(meta or {}), NONCE_META_KEY: secrets.token_hex(32)} if unique_challenges else meta
     )
 
     return Challenge.create(
@@ -541,8 +541,43 @@ def _extract_payment_scheme(header: str) -> str | None:
     return None
 
 
+NONCE_META_KEY = "_mpp_nonce"
+"""Reserved opaque key: a random issuance nonce, so identical challenges never collide."""
+
+OFFER_META_KEY = "_mpp_offer"
+"""Reserved opaque key: the index in Mpp.methods of the configured method that issued
+a challenge, set when several configured methods share its name and intent."""
+
+RESERVED_META_KEYS = frozenset({NONCE_META_KEY, OFFER_META_KEY})
+
+
 def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
-    """Remove the HMAC-authenticated issuance nonce for route comparison."""
+    """Remove the HMAC-authenticated issuance keys (nonce, issuing offer) for comparison."""
     if not isinstance(meta, dict):
         return None
-    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
+    return {key: value for key, value in meta.items() if key not in RESERVED_META_KEYS} or None
+
+
+def _route_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
+    """A route's metadata without the issuing-offer tag the engine adds to it."""
+    if not meta:
+        return None
+    return {key: value for key, value in meta.items() if key != OFFER_META_KEY} or None
+
+
+def _offer_tag(meta: Any) -> str | None:
+    """The issuing-offer tag of opaque metadata, if any."""
+    if not isinstance(meta, dict):
+        return None
+    tag = meta.get(OFFER_META_KEY)
+    return tag if isinstance(tag, str) else None
+
+
+def _same_offer(echoed: Any, meta: Any) -> bool:
+    """Whether an echoed challenge may have been issued by the offer whose metadata is meta.
+
+    A tagged echo must carry the offer's tag; an untagged one (issued before tags, or
+    by a single configured method) is accepted.
+    """
+    tag = _offer_tag(echoed)
+    return tag is None or tag == _offer_tag(meta)

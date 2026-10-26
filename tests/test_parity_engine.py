@@ -526,28 +526,28 @@ class TestReviewFixes:
         await server.validate_credential(authorization(issued, {"type": "hash", "hash": "0x12"}))
         assert seen == [USDC]
 
-    async def test_validate_credential_rejects_ambiguous_or_unknown_copies(self) -> None:
-        from mpp.errors import InvalidChallengeError
-
+    async def test_validate_credential_settles_through_the_issuing_copy(self) -> None:
         seen: list[str] = []
         first, second = (
-            self._faked(tempo_server.charge(recipient=recipient, currency=CURRENCY), seen)[0]
-            for recipient in (RECIPIENT, OTHER)
+            replace(
+                self._faked(tempo_server.charge(recipient=recipient, currency=CURRENCY), [])[0],
+                validate=self._recording(label, seen),
+            )
+            for label, recipient in (("first", RECIPIENT), ("second", OTHER))
         )
         server = Mpp(methods=[first, second], realm=REALM, secret_key=SECRET)
         payload = {"type": "hash", "hash": "0x12"}
-        # A route recipient matching neither configuration leaves both copies.
-        issued = challenge(
-            await server.compose((first, {"amount": "1", "recipient": "0x" + "33" * 20}))(
-                http_request()
+        # A route recipient matching neither configuration still settles with its issuer.
+        for method, label in ((first, "first"), (second, "second")):
+            issued = challenge(
+                await server.compose((method, {"amount": "1", "recipient": "0x" + "33" * 20}))(
+                    http_request()
+                )
             )
-        )
-        with pytest.raises(InvalidChallengeError, match="several configured methods"):
             await server.validate_credential(authorization(issued, payload))
-        # The configured recipient selects its copy.
-        issued = challenge(await server.compose((second, {"amount": "1"}))(http_request()))
-        await server.validate_credential(authorization(issued, payload))
-        assert seen == [CURRENCY]
+            assert seen[-1] == label
+        # An untagged challenge (issued before tags) falls back to the copy matching its
+        # currency, then to the first copy.
         foreign = Challenge.create(
             secret_key=SECRET,
             realm=REALM,
@@ -556,29 +556,23 @@ class TestReviewFixes:
             request={**issued.request, "currency": "0x" + "55" * 20},
             expires=issued.expires,
         )
-        # A currency no copy is configured with (a route override) falls back to the
-        # first copy of one tempo.charge() call, which share one replay store.
-        other = Mpp(
-            methods=self._faked(
-                tempo_server.charge(recipient=RECIPIENT, currencies=["0x" + "44" * 20, CURRENCY]),
-                seen,
-            ),
-            realm=REALM,
-            secret_key=SECRET,
-        )
-        await other.validate_credential(authorization(foreign, payload))
-        assert seen[-1] == "0x" + "44" * 20
-        # Copies of separate calls may settle through other stores: no fallback.
-        mixed = Mpp(
-            methods=self._faked(
-                tempo_server.charge(recipient=RECIPIENT, currency="0x" + "44" * 20), seen
+        await server.validate_credential(authorization(foreign, payload))
+        assert seen[-1] == "first"
+
+    @staticmethod
+    def _recording(label: str, seen: list[str]) -> Any:
+        from mpp._validation import Validation
+
+        async def validate(context: Any) -> Validation:
+            seen.append(label)
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
             )
-            + [first],
-            realm=REALM,
-            secret_key=SECRET,
-        )
-        with pytest.raises(InvalidChallengeError, match="several configured methods"):
-            await mixed.validate_credential(authorization(foreign, payload))
+
+        return validate
 
     async def test_unknown_credential_options_are_rejected(self) -> None:
         from mpp.errors import VerificationFailedError
@@ -854,66 +848,6 @@ class TestReviewFixesRound2:
 
         return [replace(method, validate=validate, broadcast=broadcast) for method in methods]
 
-    async def test_broadcast_credential_settles_only_through_the_issuing_group(self) -> None:
-        from mpp.errors import InvalidChallengeError
-        from mpp.methods.tempo import PATH_USD, USDC
-
-        seen: list[str] = []
-        first_store, second_store = MemoryStore(), MemoryStore()
-        first = self._stored(
-            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD], store=first_store),
-            first_store,
-            seen,
-        )
-        second = self._stored(
-            tempo_server.charge(recipient=RECIPIENT, currencies=[USDC], store=second_store),
-            second_store,
-            seen,
-        )
-        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
-        payload = {"type": "hash", "hash": "0x12"}
-        options = {"amount": "1", "currency": "0x" + "33" * 20, "chain_id": 42431}
-        route = server.compose((second[0], options))
-        issued = challenge(await route(http_request()))
-        credential = authorization(issued, payload)
-        # Neither group's configuration tells which issued it: settling through the first
-        # group's store would let the issuing group's route accept the same hash again.
-        with pytest.raises(InvalidChallengeError, match="several configured methods"):
-            await server.broadcast_credential(credential)
-        with pytest.raises(InvalidChallengeError, match="several configured methods"):
-            await server.broadcast_credential(credential, request=options)
-        assert seen == []
-        assert isinstance(await route(http_request(credential)), PaymentVerified)
-        assert isinstance(await route(http_request(credential)), PaymentRequired)
-        assert seen == ["0x12"]
-
-    async def test_currency_override_into_another_group_is_ambiguous(self) -> None:
-        from mpp.errors import InvalidChallengeError
-        from mpp.methods.tempo import PATH_USD, USDC
-
-        seen: list[str] = []
-        first_store, second_store = MemoryStore(), MemoryStore()
-        first = self._stored(
-            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD], store=first_store),
-            first_store,
-            seen,
-        )
-        second = self._stored(
-            tempo_server.charge(recipient=RECIPIENT, currencies=[USDC], store=second_store),
-            second_store,
-            seen,
-        )
-        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
-        # The second group's route takes the first group's currency: the echo matches the
-        # first group exactly, but either group could have issued it.
-        route = server.compose((second[0], {"amount": "1", "currency": PATH_USD}))
-        issued = challenge(await route(http_request()))
-        credential = authorization(issued, {"type": "hash", "hash": "0x56"})
-        with pytest.raises(InvalidChallengeError, match="several configured methods"):
-            await server.broadcast_credential(credential)
-        assert seen == []
-        assert isinstance(await route(http_request(credential)), PaymentVerified)
-
     def test_only_currency_defaults_compare_case_insensitively(self) -> None:
         upper = server_method(name="plan", request={"amount": "1"}, verify=_verified)
         upper = replace(upper, defaults={"sku": "PlanA"})
@@ -1084,3 +1018,256 @@ class TestReviewFixesRound2:
         assert handler.needs_request_body
         await pay(handler)(endpoint)(StarletteRequest())
         assert bodies[-1] == b"{}"
+
+
+class TestIssuingOfferTag:
+    """Out-of-band settlement uses exactly the configured method that issued a challenge."""
+
+    _stored = staticmethod(TestReviewFixesRound2._stored)
+
+    @staticmethod
+    def _groups(
+        first: dict[str, Any], second: dict[str, Any], seen: list[str]
+    ) -> tuple[list[ServerMethod], list[ServerMethod], MemoryStore, MemoryStore]:
+        stores = MemoryStore(), MemoryStore()
+        groups = [
+            TestIssuingOfferTag._stored(tempo_server.charge(store=store, **options), store, seen)
+            for options, store in zip((first, second), stores, strict=True)
+        ]
+        return groups[0], groups[1], stores[0], stores[1]
+
+    async def test_groups_sharing_a_recipient_settle_through_the_issuing_group(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        first, second, first_store, second_store = self._groups(
+            {"recipient": RECIPIENT, "currencies": [PATH_USD]},
+            {"recipient": RECIPIENT, "currencies": [USDC]},
+            seen,
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+        for currency, store, other, tx_hash in (
+            (PATH_USD, first_store, second_store, "0x12"),
+            (USDC, second_store, first_store, "0x34"),
+        ):
+            route = server.tempo.charge(amount="1", currency=currency)
+            issued = challenge(await route(http_request()))
+            credential = authorization(issued, {"type": "hash", "hash": tx_hash})
+            receipt = await server.broadcast_credential(credential)
+            assert receipt.reference == tx_hash
+            assert await store.get(f"tempo:charge:{tx_hash}") is True
+            assert await other.get(f"tempo:charge:{tx_hash}") is None
+            # The issuing route's store already holds the hash: no second payment.
+            assert isinstance(await route(http_request(credential)), PaymentRequired)
+        assert seen == ["0x12", "0x34"]
+
+    async def test_route_overriding_into_another_group_settles_through_its_own(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        for second_recipient, overrides in (
+            (OTHER, {"recipient": RECIPIENT, "currency": PATH_USD}),
+            (OTHER, {"recipient": RECIPIENT}),
+            (RECIPIENT, {"currency": PATH_USD}),
+        ):
+            seen: list[str] = []
+            first, second, first_store, second_store = self._groups(
+                {"recipient": RECIPIENT, "currencies": [PATH_USD]},
+                {"recipient": second_recipient, "currencies": [USDC]},
+                seen,
+            )
+            server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+            route = server.compose((second[0], {"amount": "1", **overrides}))
+            issued = challenge(await route(http_request()))
+            credential = authorization(issued, {"type": "hash", "hash": "0x56"})
+            await server.broadcast_credential(credential)
+            assert await second_store.get("tempo:charge:0x56") is True
+            assert await first_store.get("tempo:charge:0x56") is None
+            assert isinstance(await route(http_request(credential)), PaymentRequired)
+            assert seen == ["0x56"]
+
+    async def test_tagged_credential_cannot_pay_another_groups_identical_route(self) -> None:
+        seen: list[str] = []
+        first, second, first_store, second_store = self._groups(
+            {"recipient": RECIPIENT, "currency": CURRENCY},
+            {"recipient": RECIPIENT, "currency": CURRENCY},
+            seen,
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+        first_route = server.compose((first[0], {"amount": "1"}))
+        second_route = server.compose((second[0], {"amount": "1"}))
+        issued = challenge(await first_route(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0x78"})
+        assert isinstance(await second_route(http_request(credential)), PaymentRequired)
+        assert seen == []
+        assert isinstance(await first_route(http_request(credential)), PaymentVerified)
+        assert await first_store.get("tempo:charge:0x78") is True
+        assert await second_store.get("tempo:charge:0x78") is None
+
+    async def test_several_single_currency_stripe_charges(self) -> None:
+        from mpp.methods.stripe import server as stripe_server
+
+        seen: list[str] = []
+
+        def recording(currency: str) -> Any:
+            async def verify(context: Any) -> Receipt:
+                seen.append(currency)
+                return Receipt.success("pi_" + currency)
+
+            return verify
+
+        methods = [
+            replace(
+                stripe_server.charge(secret_key="sk_test", network_id="bn_1", currency=currency),
+                verify=recording(currency),
+            )
+            for currency in ("usd", "eur")
+        ]
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        for currency in ("eur", "usd"):
+            issued = challenge(
+                await server.stripe.charge(amount="0.50", currency=currency)(http_request())
+            )
+            receipt = await server.broadcast_credential(authorization(issued, {"spt": "spt_1"}))
+            assert receipt.reference == "pi_" + currency
+        assert seen == ["eur", "usd"]
+
+    async def test_groups_adopting_one_mpp_store(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        shared = MemoryStore()
+        first, second = (
+            self._stored(tempo_server.charge(recipient=RECIPIENT, currency=currency), shared, seen)
+            for currency in (PATH_USD, USDC)
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET, store=shared)
+        route = server.tempo.charge(amount="1", currency=USDC)
+        issued = challenge(await route(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0x9a"})
+        await server.broadcast_credential(credential)
+        assert isinstance(await route(http_request(credential)), PaymentRequired)
+        assert seen == ["0x9a"]
+
+    async def test_a_lone_method_issues_no_offer_tag(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        server = Mpp(
+            methods=tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        issued = challenge(await server.charge(amount="1")(http_request()))
+        assert set(issued.opaque or {}) == {"_mpp_nonce"}
+        issued = challenge(await server.charge(amount="1", meta={"order": "1"})(http_request()))
+        assert set(issued.opaque or {}) == {"_mpp_nonce", "order"}
+        plain = Mpp(
+            methods=tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY),
+            realm=REALM,
+            secret_key=SECRET,
+            unique_challenges=False,
+        )
+        assert challenge(await plain.charge(amount="1")(http_request())).opaque is None
+        # Copies sharing a name and intent tag their index; application meta is unchanged.
+        seen: list[str] = []
+        methods = TestReviewFixes._faked(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD, USDC]), seen
+        )
+        tagged = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        route = tagged.tempo.charge(amount="1", currency=USDC, meta={"order": "1"})
+        issued = challenge(await route(http_request()))
+        assert issued.opaque is not None
+        assert issued.opaque["_mpp_offer"] == "1"
+        assert set(issued.opaque) == {"_mpp_nonce", "_mpp_offer", "order"}
+        credential = authorization(issued, {"type": "hash", "hash": "0x12"})
+        await tagged.validate_credential(
+            credential, request={"amount": "1", "currency": USDC}, meta={"order": "1"}
+        )
+        assert seen == [USDC]
+        with pytest.raises(ValueError, match="reserved"):
+            tagged.tempo.charge(amount="1", meta={"_mpp_offer": "0"})
+
+    async def test_tampered_or_unknown_offer_tag_is_rejected(self) -> None:
+        import json
+
+        from mpp import _b64url_encode
+        from mpp.errors import InvalidChallengeError
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        first, second, *_ = self._groups(
+            {"recipient": RECIPIENT, "currencies": [PATH_USD]},
+            {"recipient": RECIPIENT, "currencies": [USDC]},
+            seen,
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+        route = server.tempo.charge(amount="1", currency=USDC)
+        issued = challenge(await route(http_request()))
+        assert issued.opaque is not None and issued.opaque["_mpp_offer"] == "1"
+        credential = Credential(challenge=issued.to_echo(), payload={"type": "hash", "hash": "0x1"})
+        tampered = dict(issued.opaque, _mpp_offer="0")
+        forged = replace(
+            credential,
+            challenge=replace(credential.challenge, opaque=_b64url_encode(json.dumps(tampered))),
+        )
+        with pytest.raises(InvalidChallengeError, match="not issued by this server"):
+            await server.broadcast_credential(forged)
+        assert isinstance(await route(http_request(forged.to_authorization())), PaymentRequired)
+        # A tag this configuration does not have (such as after reordering methods).
+        for tag in ("7", "01", "x"):
+            unknown = Challenge.create(
+                secret_key=SECRET,
+                realm=REALM,
+                method="tempo",
+                intent="charge",
+                request=issued.request,
+                expires=issued.expires,
+                meta={"_mpp_offer": tag},
+            )
+            with pytest.raises(InvalidChallengeError, match="not issued by a configured method"):
+                await server.broadcast_credential(authorization(unknown, {"type": "hash"}))
+        assert seen == []
+
+    async def test_route_input_scope_is_compared_normalized(self) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        server = raw_mpp()
+        issued = challenge(await server.charge(_mppx_scope={"ids": ("a", "b")})(http_request()))
+        assert issued.request["_mppx_scope"]["custom"] == {"ids": ["a", "b"]}
+        credential = authorization(issued)
+        receipt = await server.broadcast_credential(
+            credential, request={"amount": "1", "_mppx_scope": {"ids": ("a", "b")}}
+        )
+        assert receipt.status == "success"
+        with pytest.raises(InvalidChallengeError, match="scope does not match"):
+            await server.broadcast_credential(
+                credential, request={"amount": "1", "_mppx_scope": {"ids": ("a", "c")}}
+            )
+
+    async def test_scope_derived_by_resolve_request_is_enforced(self) -> None:
+        from mpp.errors import InvalidChallengeError
+        from mpp.server import RequestContext
+
+        def resolve_request(context: RequestContext) -> dict[str, Any]:
+            input = dict(context.request)
+            account = input.pop("account", None)
+            if account is not None:
+                input["_mppx_scope"] = {"account": account}
+            return input
+
+        server = Mpp(
+            methods=server_method(
+                request={"amount": "1"}, verify=_verified, resolve_request=resolve_request
+            ),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        issued = challenge(await server.charge(account="acct_1")(http_request()))
+        assert issued.request["_mppx_scope"]["custom"] == {"account": "acct_1"}
+        assert "account" not in issued.request
+        credential = authorization(issued)
+        with pytest.raises(InvalidChallengeError, match="scope does not match"):
+            await server.validate_credential(credential, request={"account": "acct_2"})
+        with pytest.raises(InvalidChallengeError, match="scope does not match"):
+            await server.broadcast_credential(credential, request={"account": "acct_2"})
+        receipt = await server.broadcast_credential(credential, request={"account": "acct_1"})
+        assert receipt.status == "success"
