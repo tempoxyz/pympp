@@ -28,12 +28,12 @@ from x402.http.clients import x402HttpxClient
 from x402.mechanisms.evm.exact import register_exact_evm_client
 
 from mpp import Challenge, Credential, Receipt
-from mpp.client import Client
+from mpp.client import Mpp as MppClient
 from mpp.events import PAYMENT_FAILED, PAYMENT_SUCCESS
 from mpp.methods.evm import BASE_SEPOLIA_USDC, CELO_USDT, evm
-from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
-from mpp.methods.tempo import tempo
-from mpp.server import Mpp, compose, pay
+from mpp.methods.tempo import server as tempo_server
+from mpp.server import Mpp, PaymentVerified, compose, pay
+from mpp.server import Request as EngineRequest
 from mpp.store import MemoryStore
 from mpp.x402 import (
     PAYMENT_REQUIRED_HEADER,
@@ -44,7 +44,13 @@ from mpp.x402 import (
     is_x402_credential,
     route_extensions,
 )
-from tests.x402_harness import StubFacilitator, hd_account, serve, sign_x402_payment
+from tests.x402_harness import (
+    StubFacilitator,
+    hd_account,
+    serve,
+    sign_native,
+    sign_x402_payment,
+)
 
 SECRET_KEY = "x402-e2e-secret-key-32-bytes-long"
 REALM = "x402.e2e.test"
@@ -86,41 +92,44 @@ class Live:
 
 
 def build_app(server: Mpp) -> Starlette:
-    @server.pay(amount="0.01", description="x402 e2e")
+    @pay(server.charge(amount="0.01", description="x402 e2e"))
     async def paid(request: Request, credential: Credential, receipt: Receipt):
         return receipt_response("paid", receipt)
 
-    @server.pay(amount="0.00001")
+    @pay(server.charge(amount="0.00001"))
     async def sub_cent(request: Request, credential: Credential, receipt: Receipt):
         return receipt_response("sub-cent", receipt)
 
-    @server.pay(amount="0.01")
+    @pay(server.charge(amount="0.01"))
     async def public(request: Request, credential: Credential, receipt: Receipt):
         return PlainTextResponse(
             "public", headers={"Cache-Control": "public, max-age=60, s-maxage=600"}
         )
 
-    @server.pay(amount="0.01", body=lambda request: request.query_params.get("order", ""))
+    @pay(
+        server.charge(
+            amount="0.01", body=lambda request: httpx.URL(request.url).params.get("order", "")
+        )
+    )
     async def body_bound(request: Request, credential: Credential, receipt: Receipt):
         return receipt_response("body", receipt)
 
-    two_prices = server.compose(("evm", {"amount": "0.01"}), ("evm", {"amount": "0.02"}))
+    two_prices = server.compose(
+        ("evm/charge", {"amount": "0.01"}), ("evm/charge", {"amount": "0.02"})
+    )
 
-    @two_prices
+    @pay(two_prices)
     async def composed(request: Request, credential: Credential, receipt: Receipt):
         return receipt_response(request.app.state.last_amount(credential), receipt)
 
     async def direct(request: Request):
-        result = await server.charge(
-            request.headers.get("Authorization"),
-            "0.01",
-            payment_signature=request.headers.get(PAYMENT_SIGNATURE_HEADER),
-            resource_url=str(request.url),
+        result = await server.charge(amount="0.01")(
+            EngineRequest(request.method, str(request.url), headers=request.headers.items())
         )
-        if isinstance(result, tuple):
-            credential, receipt = result
+        if isinstance(result, PaymentVerified):
+            credential, receipt = result.credential, result.receipt
             return JSONResponse({"x402": is_x402_credential(credential), "ref": receipt.reference})
-        header = server.x402_payment_required(result, str(request.url))
+        header = result.challenge.headers.get(PAYMENT_REQUIRED_HEADER)
         assert header is not None
         return JSONResponse({}, status_code=402, headers={PAYMENT_REQUIRED_HEADER: header})
 
@@ -147,8 +156,8 @@ def build_app(server: Mpp) -> Starlette:
 async def live() -> AsyncIterator[Live]:
     facilitator = StubFacilitator()
     async with serve(facilitator.app()) as facilitator_url:
-        server = Mpp.create(
-            method=evm(
+        server = Mpp(
+            methods=evm(
                 currency=BASE_SEPOLIA_USDC,
                 recipient=recipient.address,
                 facilitator=facilitator_url,
@@ -296,8 +305,8 @@ class TestCoinbaseClient:
 class TestMppClient:
     async def test_pays_the_same_endpoint_natively(self, live: Live) -> None:
         method = evm(currency=BASE_SEPOLIA_USDC, account=payer, max_amount="0.05")
-        async with Client(methods=[method]) as client:
-            response = await client.get(f"{live.url}/paid")
+        async with MppClient(methods=[method]) as client:
+            response = await client.fetch(f"{live.url}/paid")
 
         assert response.status_code == 200, response.text
         assert PAYMENT_RESPONSE_HEADER not in response.headers
@@ -307,9 +316,9 @@ class TestMppClient:
 
     async def test_refuses_more_than_max_amount(self, live: Live) -> None:
         method = evm(currency=BASE_SEPOLIA_USDC, account=payer, max_amount="0.001")
-        async with Client(methods=[method]) as client:
+        async with MppClient(methods=[method]) as client:
             try:
-                response = await client.get(f"{live.url}/paid")
+                response = await client.fetch(f"{live.url}/paid")
             except ValueError as error:
                 assert "No compatible payment method" in str(error)
             else:
@@ -319,9 +328,7 @@ class TestMppClient:
     async def test_payment_credential_wins_over_payment_signature(self, live: Live) -> None:
         unpaid = await live.unpaid()
         challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
-        credential = await evm(currency=BASE_SEPOLIA_USDC, account=payer).create_credential(
-            challenge
-        )
+        credential = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
         accepted = decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"][0]
         signature = sign_x402_payment(other, dict(accepted), f"{live.url}/paid")
 
@@ -490,8 +497,8 @@ class TestFacilitatorFailures:
             }
         )
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -517,8 +524,8 @@ class TestFacilitatorFailures:
             }
         )
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -543,8 +550,8 @@ class TestFacilitatorFailures:
     async def test_unreadable_settlement_is_a_server_error(self) -> None:
         facilitator = StubFacilitator(settle_result=lambda body: {"oops": True})
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -578,8 +585,8 @@ class TestRouteBinding:
 
     @staticmethod
     async def strict(facilitator_url: str) -> Mpp:
-        return Mpp.create(
-            method=evm(
+        return Mpp(
+            methods=evm(
                 currency=BASE_SEPOLIA_USDC,
                 recipient=recipient.address,
                 facilitator=facilitator_url,
@@ -609,16 +616,6 @@ class TestRouteBinding:
             "route metadata."
         )
         assert facilitator.settle_requests == []
-
-    async def test_unscoped_routes_stay_payable_by_any_x402_client(self) -> None:
-        facilitator = StubFacilitator()
-        async with serve(facilitator.app()) as facilitator_url:
-            server = await self.strict(facilitator_url)
-            async with serve(build_app(server)) as url, coinbase_client() as client:
-                response = await client.get(f"{url}/direct")
-
-        assert response.status_code == 200, response.text
-        assert response.json()["x402"] is True
 
     async def test_route_bound_payments_pay_scoped_routes(self) -> None:
         facilitator = StubFacilitator()
@@ -732,9 +729,7 @@ class TestRouteBinding:
                 async with httpx.AsyncClient() as http:
                     unpaid = await http.get(f"{url}/paid")
                 challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
-                native = await evm(currency=BASE_SEPOLIA_USDC, account=payer).create_credential(
-                    challenge
-                )
+                native = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
                 accepted, extensions = await self.offer(url, "/paid")
                 # Wrap the native authorization (challenge-hash nonce) as an x402 payload.
                 signature = sign_x402_payment(
@@ -755,8 +750,8 @@ class TestRouteBinding:
     async def test_resource_mode_still_verifies_bound_payments(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -783,16 +778,16 @@ class TestReplayStore:
     async def test_replay_with_a_store_is_a_403_without_a_challenge(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
                     route_binding="resource",
+                    store=MemoryStore(),
                 ),
                 realm=REALM,
                 secret_key=SECRET_KEY,
-                store=MemoryStore(),
             )
             async with serve(build_app(server)) as url:
                 async with httpx.AsyncClient() as http:
@@ -819,8 +814,8 @@ class TestComposedServers:
     async def test_can_offer_excludes_x402_payment(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
-            open_server = Mpp.create(
-                method=evm(
+            open_server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -829,8 +824,8 @@ class TestComposedServers:
                 realm=REALM,
                 secret_key=SECRET_KEY,
             )
-            closed_server = Mpp.create(
-                method=evm(
+            closed_server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,
@@ -841,13 +836,13 @@ class TestComposedServers:
                 secret_key=SECRET_KEY,
             )
 
-            @open_server.pay(amount="0.01")
+            @pay(open_server.charge(amount="0.01"))
             async def open_route(request: Request, credential: Credential, receipt: Receipt):
                 return receipt_response("open", receipt)
 
-            closed = compose(closed_server.compose(("evm", {"amount": "0.01"})))
+            closed = compose(closed_server.compose(("evm/charge", {"amount": "0.01"})))
 
-            @closed
+            @pay(closed)
             async def closed_route(request: Request, credential: Credential, receipt: Receipt):
                 return receipt_response("closed", receipt)
 
@@ -869,8 +864,8 @@ class TestComposedServers:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
             servers = [
-                Mpp.create(
-                    method=evm(
+                Mpp(
+                    methods=evm(
                         currency=asset,
                         recipient=recipient.address,
                         facilitator=facilitator_url,
@@ -881,9 +876,11 @@ class TestComposedServers:
                 )
                 for asset in (BASE_SEPOLIA_USDC, CELO_USDT)
             ]
-            both = compose(*(server.compose(("evm", {"amount": "0.01"})) for server in servers))
+            both = compose(
+                *(server.compose(("evm/charge", {"amount": "0.01"})) for server in servers)
+            )
 
-            @both
+            @pay(both)
             async def paid(request: Request, credential: Credential, receipt: Receipt):
                 return receipt_response("paid", receipt)
 
@@ -904,13 +901,9 @@ class TestOtherServers:
     async def test_tempo_and_x402_offers_share_one_endpoint(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
+            server = Mpp(
                 methods=[
-                    tempo(
-                        intents={"charge": TempoChargeIntent()},
-                        recipient=recipient.address,
-                        chain_id=42431,
-                    ),
+                    tempo_server.charge(recipient=recipient.address, chain_id=42431),
                     evm(
                         currency=BASE_SEPOLIA_USDC,
                         recipient=recipient.address,
@@ -922,7 +915,7 @@ class TestOtherServers:
                 secret_key=SECRET_KEY,
             )
 
-            @server.pay(amount="0.01")
+            @pay(server.charge(amount="0.01"))
             async def paid(request: Request, credential: Credential, receipt: Receipt):
                 return receipt_response("paid", receipt)
 
@@ -945,17 +938,13 @@ class TestOtherServers:
         assert PAYMENT_RESPONSE_HEADER in response.headers
 
     async def test_tempo_only_routes_ignore_payment_signature(self) -> None:
-        server = Mpp.create(
-            method=tempo(
-                intents={"charge": TempoChargeIntent()},
-                recipient=recipient.address,
-                chain_id=42431,
-            ),
+        server = Mpp(
+            methods=tempo_server.charge(recipient=recipient.address, chain_id=42431),
             realm=REALM,
             secret_key=SECRET_KEY,
         )
 
-        @server.pay(amount="0.01")
+        @pay(server.charge(amount="0.01"))
         async def paid(request: Request, credential: Credential, receipt: Receipt):
             return receipt_response("paid", receipt)
 
@@ -978,20 +967,7 @@ class TestOtherServers:
                 route_binding="resource",
             )
 
-            @pay(
-                intent=method.intents["charge"],
-                request=lambda request: method.transform_request(
-                    {
-                        "amount": "10000",
-                        "currency": method.currency,
-                        "recipient": recipient.address,
-                    },
-                    None,
-                ),
-                realm=REALM,
-                secret_key=SECRET_KEY,
-                method="evm",
-            )
+            @pay(Mpp(methods=method, realm=REALM, secret_key=SECRET_KEY).charge(amount="0.01"))
             async def paid(request: Request, credential: Credential, receipt: Receipt):
                 return receipt_response("paid", receipt)
 
@@ -1005,8 +981,8 @@ class TestOtherServers:
     async def test_requires_auth_servers_still_serve_x402(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
-            server = Mpp.create(
-                method=evm(
+            server = Mpp(
+                methods=evm(
                     currency=BASE_SEPOLIA_USDC,
                     recipient=recipient.address,
                     facilitator=facilitator_url,

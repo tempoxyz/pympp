@@ -3,6 +3,7 @@
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -17,10 +18,16 @@ from mpp.errors import (
     VerificationError,
     VerificationFailedError,
 )
-from mpp.methods.tempo import ChargeIntent, Relay, TempoMethod, tempo
-from mpp.server import broadcast_credential, pay
+from mpp.methods.tempo import ChargeIntent, Relay
+from mpp.methods.tempo import server as tempo_server
+from mpp.server import Mpp, pay
 from mpp.store import MemoryStore
-from tests import MockRequest, challenge_from_402, make_bound_credential, make_credential
+from tests import (
+    MockRequest,
+    challenge_from_402,
+    make_bound_credential,
+    make_credential,
+)
 
 
 def credential(payload: dict | None = None) -> Credential:
@@ -31,25 +38,31 @@ def credential(payload: dict | None = None) -> Credential:
     )
 
 
+async def _broadcast(*, intent: Any, credential: Credential, request: dict) -> Receipt:
+    """Validate then broadcast, copying the validated payer onto the receipt."""
+    validation = await intent.validate(credential, request)
+    receipt = await intent.broadcast(credential, request)
+    if validation.payer is not None and receipt.payer is None:
+        receipt = replace(receipt, payer=validation.payer)
+    return receipt
+
+
 def response(body: dict, status: int = 200) -> httpx.Response:
     return httpx.Response(status, json=body)
 
 
 @asynccontextmanager
-async def relay_method(
+async def mock_relay(
     handler: Callable[[httpx.Request], httpx.Response],
     client_headers: dict[str, str] | None = None,
     **relay_kwargs: Any,
-) -> AsyncIterator[TempoMethod]:
-    """Yield a tempo method whose charge intent is served by a mock relay."""
+) -> AsyncIterator[Relay]:
+    """Yield a relay served by a mock Tempo API."""
     relay_kwargs.setdefault("api_key", "key")
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(handler), headers=client_headers
     ) as client:
-        yield tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(http_client=client, **relay_kwargs),
-        )
+        yield Relay(http_client=client, **relay_kwargs)
 
 
 @pytest.mark.asyncio
@@ -71,14 +84,14 @@ async def test_relay_validates_then_broadcasts_without_receipt_caching() -> None
             }
         )
 
-    async with relay_method(
+    async with mock_relay(
         handler,
         client_headers={"Idempotency-Key": "inherited-key"},
         api_key="tempo:sk:test",
         api_base_url="https://relay.example/mpp",
-    ) as method:
-        result = await broadcast_credential(
-            intent=method.intents["charge"],
+    ) as relay:
+        result = await _broadcast(
+            intent=relay.configure(ChargeIntent()),
             credential=credential(),
             request={"amount": "1000"},
         )
@@ -115,9 +128,9 @@ async def test_relay_finalizes_pushed_hash_credential() -> None:
             }
         )
 
-    async with relay_method(handler) as method:
-        result = await broadcast_credential(
-            intent=method.intents["charge"],
+    async with mock_relay(handler) as relay:
+        result = await _broadcast(
+            intent=relay.configure(ChargeIntent()),
             credential=credential({"type": "hash", "hash": "0xpushed"}),
             request={"amount": "1000"},
         )
@@ -138,8 +151,8 @@ async def test_relay_validate_posts_to_validate_endpoint() -> None:
         paths.append(request.url.path)
         return response({"success": True})
 
-    async with relay_method(handler) as method:
-        validation = await method.intents["charge"].validate(  # type: ignore[attr-defined]
+    async with mock_relay(handler) as relay:
+        validation = await relay.configure(ChargeIntent()).validate(  # type: ignore[attr-defined]
             credential(), {"amount": "1000"}
         )
 
@@ -156,8 +169,8 @@ async def test_relay_rejects_mismatched_request(hook_name: str) -> None:
         calls.append(request)
         return response({"success": True})
 
-    async with relay_method(handler) as method:
-        hook = getattr(method.intents["charge"], hook_name)
+    async with mock_relay(handler) as relay:
+        hook = getattr(relay.configure(ChargeIntent()), hook_name)
         with pytest.raises(VerificationFailedError):
             await hook(credential(), {"amount": "2000"})
 
@@ -179,9 +192,9 @@ async def test_relay_exposes_only_safe_error_details(code: str, details: dict) -
     def handler(request: httpx.Request) -> httpx.Response:
         return response({"success": False, "error": {"code": code, "message": "private"}})
 
-    async with relay_method(handler) as method:
+    async with mock_relay(handler) as relay:
         with pytest.raises(VerificationFailedError) as raised:
-            await method.intents["charge"].validate(credential(), {"amount": "1000"})  # type: ignore[attr-defined]
+            await relay.configure(ChargeIntent()).validate(credential(), {"amount": "1000"})  # type: ignore[attr-defined]
 
     assert raised.value.details == details
     assert raised.value.to_problem_details()["details"] == details
@@ -198,9 +211,9 @@ async def test_relay_hides_policy_errors() -> None:
             }
         )
 
-    async with relay_method(handler) as method:
+    async with mock_relay(handler) as relay:
         with pytest.raises(VerificationFailedError) as raised:
-            await method.intents["charge"].validate(  # type: ignore[attr-defined]
+            await relay.configure(ChargeIntent()).validate(  # type: ignore[attr-defined]
                 credential(), {"amount": "1000"}
             )
 
@@ -218,13 +231,14 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
             }
         )
 
-    async with relay_method(relay_handler) as method:
+    async with mock_relay(relay_handler) as relay:
 
         @pay(
-            intent=method.intents["charge"],
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
+            Mpp(
+                methods=tempo_server.charge(relay=relay, recipient="0x" + "11" * 20),
+                realm="api.example.com",
+                secret_key="test-secret",
+            ).charge(amount="0.001")
         )
         async def handler(
             request: MockRequest,
@@ -277,13 +291,14 @@ async def test_ambiguous_broadcast_does_not_issue_fresh_challenge(failure: str) 
             raise httpx.ReadError("response lost", request=request)
         return httpx.Response(200, content=b"not-json")
 
-    async with relay_method(relay_handler) as method:
+    async with mock_relay(relay_handler) as relay:
 
         @pay(
-            intent=method.intents["charge"],
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
+            Mpp(
+                methods=tempo_server.charge(relay=relay, recipient="0x" + "11" * 20),
+                realm="api.example.com",
+                secret_key="test-secret",
+            ).charge(amount="0.001")
         )
         async def handler(
             request: MockRequest,
@@ -304,7 +319,7 @@ async def test_ambiguous_broadcast_does_not_issue_fresh_challenge(failure: str) 
     assert paths == ["/v1/mpp/validate", "/v1/mpp/broadcast"]
     assert raised.value.challenge.id == challenge.id
     assert raised.value.credential == payment
-    assert raised.value.request == {"amount": "1000"}
+    assert raised.value.request == challenge.request
     assert raised.value.retry_challenge is None
 
 
@@ -313,9 +328,9 @@ async def test_relay_maps_expired_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return response({"success": False, "error": {"code": "expired"}})
 
-    async with relay_method(handler) as method:
+    async with mock_relay(handler) as relay:
         with pytest.raises(PaymentExpiredError):
-            await method.intents["charge"].validate(  # type: ignore[attr-defined]
+            await relay.configure(ChargeIntent()).validate(  # type: ignore[attr-defined]
                 credential(), {"amount": "1000"}
             )
 
@@ -327,18 +342,13 @@ async def test_relay_rejects_invalid_receipt() -> None:
             return response({"success": True})
         return response({"success": True, "receipt": {"method": "stripe"}})
 
-    async with relay_method(handler) as method:
+    async with mock_relay(handler) as relay:
         with pytest.raises(VerificationFailedError):
-            await broadcast_credential(
-                intent=method.intents["charge"],
+            await _broadcast(
+                intent=relay.configure(ChargeIntent()),
                 credential=credential(),
                 request={"amount": "1000"},
             )
-
-
-def test_relay_requires_charge_intent() -> None:
-    with pytest.raises(ValueError, match="charge intent"):
-        tempo(intents={}, relay=Relay(api_key="key"))
 
 
 @pytest.mark.asyncio
@@ -458,11 +468,11 @@ async def test_relay_does_not_authorize_cached_receipts_for_concurrent_credentia
         consumed = True
         return response(receipt)
 
-    async with relay_method(handler, client_headers={"Idempotency-Key": "inherited-key"}) as method:
+    async with mock_relay(handler, client_headers={"Idempotency-Key": "inherited-key"}) as relay:
         results = await asyncio.gather(
             *(
-                broadcast_credential(
-                    intent=method.intents["charge"],
+                _broadcast(
+                    intent=relay.configure(ChargeIntent()),
                     credential=credential(),
                     request={"amount": "1000"},
                 )
@@ -493,9 +503,9 @@ async def test_relay_receipt_preserves_funding_currency() -> None:
             }
         )
 
-    async with relay_method(handler) as method:
-        result = await broadcast_credential(
-            intent=method.intents["charge"],
+    async with mock_relay(handler) as relay:
+        result = await _broadcast(
+            intent=relay.configure(ChargeIntent()),
             credential=credential(),
             request={"amount": "1000"},
         )

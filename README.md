@@ -21,33 +21,37 @@ pip install pympp
 
 ```python
 from mpp import Credential, Receipt
-from mpp.server import Mpp
-from mpp.methods.tempo import tempo, ChargeIntent
+from mpp.server import Mpp, pay
+from mpp.methods.tempo import server as tempo
 
-server = Mpp.create(
-    method=tempo(
-        intents={"charge": ChargeIntent()},
-        recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-    ),
-)
+server = Mpp(methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"))
 
 
 @app.get("/paid")
-@server.pay(amount="0.50")
+@pay(server.charge(amount="0.50"))
 async def handler(request, credential: Credential, receipt: Receipt):
-    return {"data": "...", "payer": receipt.payer}
+    return JSONResponse({"data": "...", "payer": receipt.payer})
+```
+
+Without a framework decorator, call the route handler with the framework-neutral
+`Request`. It returns `PaymentRequired` (a `402` response to send as-is) or
+`PaymentVerified`:
+
+```python
+from mpp.server import Request, Response
+
+
+async def handle(request: Request) -> Response:
+    result = await server.charge(amount="0.50")(request)
+    if result.status != 200:
+        return result.challenge
+    return result.with_receipt(Response.json({"data": "..."}))
 ```
 
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
 ```python
-server = Mpp.create(method=tempo(...), requires_auth=True)
-
-result = await server.charge(
-    authorization=request.headers.get("Authorization"),
-    amount="0.50",
-    payment_authorization=request.headers.get("Payment-Authorization"),
-)
+server = Mpp(methods=tempo.charge(recipient="0x..."), requires_auth=True)
 ```
 
 ### Serve x402 clients
@@ -63,11 +67,12 @@ pip install "pympp[evm]"
 ```
 
 ```python
-from mpp.methods.evm import BASE_USDC, evm
+from mpp.methods.evm import BASE_USDC
+from mpp.methods.evm import server as evm
 from mpp.server import Mpp
 
-server = Mpp.create(
-    method=evm(
+server = Mpp(
+    methods=evm.charge(
         currency=BASE_USDC,
         recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         facilitator="https://facilitator.example.com",
@@ -76,37 +81,40 @@ server = Mpp.create(
 
 
 @app.get("/paid")
-@server.pay(amount="0.01")
+@pay(server.charge(amount="0.01"))
 async def handler(request, credential, receipt):
     return JSONResponse({"data": "..."})
 ```
 
-Routes bind x402 payments the way mppx does. Routes wrapped by `server.pay` or
-`compose` are scoped, and with the default `route_binding="required"` they only
+Routes bind x402 payments the way mppx does. Routes are scoped to their HTTP
+method, path and query, and with the default `route_binding="required"` they only
 accept clients that sign mppx's `extensions.mppx` route binding. To accept
 standard x402 clients there, such as Coinbase's SDK, pass
-`route_binding="resource"` to `evm()`; they're then bound by the echoed terms and
-resource URL. Unscoped `server.charge()` routes accept both either way.
+`route_binding="resource"` to `evm.charge()`; they're then bound by the echoed terms and
+resource URL.
 
 Return a response object so pympp can add `PAYMENT-RESPONSE`. Pass
-`methods=[tempo(...), evm(...)]` to offer both on one route. Servers that build
-responses themselves pass `payment_signature=` and `resource_url=` to
-`server.charge()` and add `server.x402_payment_required(result, url)` to 402s.
-Send paid x402 responses with `Cache-Control: private` so shared caches can't
-serve them to callers who didn't pay. `server.pay` adds it, and
-`PAYMENT-RESPONSE`, when the handler returns a response object rather than plain data.
+`methods=[tempo.charge(...), evm.charge(...)]` to offer both on one route. The `402` response of
+a route handler already carries `PAYMENT-REQUIRED`. Send paid responses with
+`Cache-Control: private` so shared caches can't serve them to callers who didn't
+pay. `with_receipt()` adds it, and `PAYMENT-RESPONSE`, when the handler returns a
+response object rather than plain data.
 
 ### Client
 
 ```python
-from mpp.client import Client
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import Mpp
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
 
 account = TempoAccount.from_key("0x...")
 
-async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
-    response = await client.get("https://mpp.dev/api/ping/paid")
+async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
+    response = await mpp.fetch("https://mpp.dev/api/ping/paid")
 ```
+
+To use your own `httpx.AsyncClient`, pass it `transport=mpp.payment_transport`, or
+call `mpp.client()`.
 
 Custom transports can reuse method matching and credential creation without
 depending on HTTPX:
@@ -124,6 +132,14 @@ transport = PaymentTransport(runtime=payments)
 
 ## Examples
 
+Stripe charges verify Shared Payment Tokens:
+
+```python
+from mpp.methods.stripe import server as stripe
+
+server = Mpp(methods=stripe.charge(secret_key="sk_...", network_id="bn_...", currency="usd"))
+```
+
 Stripe charge and composed-offer inputs accept `payment_intent_options` as a
 mapping or a sync/async callable receiving `PaymentIntentContext`. The supported
 fields are `customer`, `receipt_email`, `metadata`, and
@@ -136,12 +152,8 @@ async def options(context):
     return {"metadata": {"order_id": "order_123"}}
 
 
-result = await server.charge(
-    authorization,
-    "0.50",
-    payment_intent_options=options,
-)
-# Also supported in compose offer mappings and server.pay(...).
+handler = server.charge(amount="0.50", payment_intent_options=options)
+# Also supported in compose offer mappings.
 ```
 
 Both Stripe rails include SDK/challenge analytics. Existing configured metadata
@@ -150,12 +162,11 @@ the new options' metadata overrides all generated/configured metadata. Crypto
 recording retries a definitive optional-field rejection once without optional
 fields, and remains best-effort after settlement.
 
-Custom methods may implement the optional
-`prepare_intent(intent, input) -> (intent, request_input)` hook to consume private
-method-specific input before request construction. Return an isolated intent
-view; never mutate a shared intent or execute deferred work during preparation.
-Unconsumed unknown offer options are still rejected. Existing methods need no
-changes, and the intent verification signatures and event payloads are unchanged.
+Custom methods define a `mpp.methods.Method` (wire name, intent and pydantic
+request and payload models) and wrap it in a `mpp.server.ServerMethod` (`verify`,
+or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
+(`create_credential`). A request model may consume private route input, such as
+`payment_intent_options`, by leaving it out of the wire request.
 
 | Example | Description |
 |---------|-------------|
@@ -179,11 +190,11 @@ An empty allowlist disables automatic payments. Omitting it preserves the defaul
 of allowing payments to any directly requested origin.
 
 ```python
-async with Client(
-    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
+async with Mpp(
+    methods=[tempo.charge(account=account)],
     allowed_origins=["https://api.example.com"],
-) as client:
-    response = await client.get("https://api.example.com/paid")
+) as mpp:
+    response = await mpp.fetch("https://api.example.com/paid")
 ```
 
 Use method-level amount, currency, and recipient limits as well. A challenge realm
@@ -239,15 +250,15 @@ retain durable recovery records. Existing records keep their original retention.
 
 ### Payment request context
 
-Direct and composed payment gates bind `meta` into their signed challenges:
+Route handlers bind `meta` into their signed challenges:
 
 ```python
-result = await payment.charge(authorization, "1.00", meta={"account": authenticated_account_id})
+handler = server.charge(amount="1.00", meta={"account": authenticated_account_id})
 ```
 
 Derive `authenticated_account_id` from trusted session authentication, not an
-unverified request field. Framework decorators also bind the HTTP method and
-actual route, path, and query. Configured `_mppx_scope` is preserved in full
+unverified request field. Route handlers also bind the HTTP method, path and
+query, and the route template that framework decorators report. Configured `_mppx_scope` is preserved in full
 under the signed scope’s `custom` key, alongside trusted framework fields.
 Custom request objects should expose their HTTP `method`.
 
@@ -268,8 +279,7 @@ traffic drained, or pin challenge issuance and all credential retries to the
 same version until outstanding challenges expire. Merely switching all replicas
 at once can still strand payments already issued by the old version.
 
-`unique_challenges=False` (`Mpp.create`, standalone `pay`, or
-`verify_or_challenge`) disables only nonce issuance; it does **not** make this
+`unique_challenges=False` (`Mpp`) disables only nonce issuance; it does **not** make this
 release compatible with old verifiers. It cannot disable the new method,
 custom-scope, or metadata bindings. Mixing versions can reject already settled
 hash payments and cause a client to pay again. Nonce-only staging is useful only

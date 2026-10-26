@@ -1,11 +1,11 @@
-"""Server and client payment contract the engine refactor must preserve (0.15 API).
+"""Server and client payment contract the engine refactor must preserve.
 
-Fast, network-free tests over real HTTP plumbing: a Starlette app served
-through `httpx.ASGITransport`, protected with `@server.pay` /
-`server.compose`, and paid by `mpp.client.PaymentTransport` with an
-in-process payment method. They pin observable behaviour (status codes, problem
-types, headers, event names and payload keys, challenge bindings, offer order)
-rather than internals, so they can be ported to the new API unchanged in intent.
+Ported from the 0.15 API to the Mpp engine: fast, network-free tests over real
+HTTP plumbing: a Starlette app served through `httpx.ASGITransport`, protected
+with `mpp.server.pay` / `server.compose`, and paid by `mpp.client.PaymentTransport`
+with an in-process payment method. They pin observable behaviour (status codes,
+problem types, headers, event names and payload keys, challenge bindings, offer
+order) rather than internals.
 
 Behaviour already pinned elsewhere is not repeated here:
 - realm and secret detection: tests/test_mpp_create.py
@@ -22,17 +22,19 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
 import httpx
 import pytest
+from pydantic import BaseModel, ConfigDict, model_serializer, model_validator
 from starlette.applications import Starlette
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mpp import Challenge, Credential, Receipt
+from mpp._units import parse_units
 from mpp.client import PaymentTransport
 from mpp.errors import (
     CredentialReplayedError,
@@ -42,11 +44,24 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     VerificationFailedError,
 )
-from mpp.server import ComposedHandler, Intent, Mpp, VerifiableIntent, compose
+from mpp.methods import Method
+from mpp.runtime import ClientMethod, CredentialParams
+from mpp.server import (
+    ComposedHandler,
+    Mpp,
+    PaymentRequired,
+    PaymentVerified,
+    Request,
+    ServerMethod,
+    VerifyContext,
+    compose,
+    pay,
+)
 
 REALM = "contract.example.com"
 SECRET = "contract-secret"
 PROBLEMS = "https://paymentauth.org/problems"
+URL = "https://contract.example.com/paid"
 
 SERVER_EVENT_KEYS = {
     "challenge.created": {"challenge", "intent", "method", "request"},
@@ -66,7 +81,7 @@ CLIENT_EVENT_KEYS = {
     "payment.response": {"challenge", "credential", "method", "request", "response"},
 }
 
-# Tokens the in-process intent maps to outcomes.
+# Tokens the in-process method maps to outcomes.
 REJECTIONS: dict[str, Exception] = {
     "invalid-payload": InvalidPayloadError("payload is not understood"),
     "unsupported": PaymentMethodUnsupportedError("contract/other"),
@@ -75,44 +90,107 @@ REJECTIONS: dict[str, Exception] = {
 }
 
 
-class ContractIntent:
-    """Charge intent that settles any token not listed in REJECTIONS."""
+class ContractInput(BaseModel):
+    """Route input: a decimal amount converted to base units with the SDK's parse_units."""
 
-    name = "charge"
+    model_config = ConfigDict(extra="forbid")
 
-    def __init__(self) -> None:
-        self._store = None
-        self.settled: list[str] = []
+    amount: str
+    currency: str
+    recipient: str
+    decimals: int = 2
+    fee_payer: bool = False
+    splits: list[dict[str, Any]] | None = None
 
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        del request
-        token = str(credential.payload.get("token"))
-        if token in REJECTIONS:
-            raise REJECTIONS[token]
-        self.settled.append(token)
-        return Receipt.success(f"ref-{token}", method=credential.challenge.method)
+    @model_validator(mode="after")
+    def _check(self) -> ContractInput:
+        parse_units(self.amount, self.decimals)
+        if self.splits and self.fee_payer:
+            raise ValueError("splits and fee_payer cannot be used together")
+        return self
+
+    @model_serializer
+    def _wire(self) -> dict[str, Any]:
+        return {
+            "amount": str(parse_units(self.amount, self.decimals)),
+            "currency": self.currency,
+            "recipient": self.recipient,
+        }
+
+
+class ContractPayload(BaseModel):
+    token: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ContractDefinition(Method[ContractInput, ContractPayload]):
+    pass
 
 
 class ContractMethod:
-    """A payment method usable on both the server and the client."""
+    """A payment method usable on both the server and the client.
 
-    def __init__(self, name: str = "contract", token: str = "ok", decimals: int = 2) -> None:
+    `server` holds its configured server methods, one per currency like
+    `tempo.charge(currencies=[...])`; `client` pays with `token`.
+    """
+
+    def __init__(
+        self,
+        name: str = "contract",
+        token: str = "ok",
+        decimals: int = 2,
+        currencies: tuple[str, ...] | None = None,
+        *,
+        omit: str | None = None,
+        can_offer: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> None:
         self.name = name
-        self.currency = f"{name}-usd"
-        self.recipient = f"{name}-merchant"
-        self.decimals = decimals
         self.token = token
-        self.intent = ContractIntent()
-        self.intents: Mapping[str, Intent | VerifiableIntent] = {"charge": self.intent}
+        self.settled: list[str] = []
+        self.definition = ContractDefinition(
+            name=name,
+            intent="charge",
+            request_model=ContractInput,
+            payload_model=ContractPayload,
+        )
+        self.server = []
+        for currency in currencies or (f"{name}-usd",):
+            defaults: dict[str, Any] = {
+                "currency": currency,
+                "decimals": decimals,
+                "recipient": f"{name}-merchant",
+            }
+            if omit is not None:
+                del defaults[omit]
+            self.server.append(
+                ServerMethod(
+                    method=self.definition,
+                    verify=self._verify,
+                    defaults=defaults,
+                    can_offer=can_offer,
+                )
+            )
+        self.client = ClientMethod(method=self.definition, create_credential=self._credential)
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        return Credential(challenge=challenge.to_echo(), payload={"token": self.token})
+    async def _verify(self, context: VerifyContext) -> Receipt:
+        token = cast(ContractPayload, context.credential.payload).token
+        if token in REJECTIONS:
+            raise REJECTIONS[token]
+        self.settled.append(token)
+        return Receipt.success(f"ref-{token}", method=context.credential.challenge.method)
+
+    async def _credential(self, params: CredentialParams) -> str:
+        credential = Credential(challenge=params.challenge.to_echo(), payload={"token": self.token})
+        return credential.to_authorization()
 
 
 def make_server(*methods: ContractMethod, **options: Any) -> Mpp:
-    if len(methods) == 1:
-        return Mpp.create(method=methods[0], realm=REALM, secret_key=SECRET, **options)
-    return Mpp.create(methods=list(methods), realm=REALM, secret_key=SECRET, **options)
+    configured: Any = (
+        methods[0].server[0]
+        if len(methods) == 1 and len(methods[0].server) == 1
+        else [m.server for m in methods]
+    )
+    return Mpp(methods=configured, realm=REALM, secret_key=SECRET, **options)
 
 
 def record(target: Any) -> list[tuple[str, dict[str, Any]]]:
@@ -124,20 +202,22 @@ def record(target: Any) -> list[tuple[str, dict[str, Any]]]:
 
 def paid_endpoint(decorate: Callable[..., Any]) -> Any:
     @decorate
-    async def endpoint(request: Request, credential: Credential, receipt: Receipt) -> Any:
+    async def endpoint(request: Any, credential: Credential, receipt: Receipt) -> Any:
+        payload = credential.payload
+        token = payload.get("token") if isinstance(payload, dict) else payload.token
         return JSONResponse(
-            {"payer": credential.payload.get("token"), "reference": receipt.reference},
+            {"payer": token, "reference": receipt.reference},
             headers={"Payment-Receipt": receipt.to_payment_receipt()},
         )
 
     return endpoint
 
 
-def app(routes: Mapping[str, Callable[..., Any]], methods: list[str] | None = None) -> Starlette:
+def app(routes: Mapping[str, ComposedHandler], methods: list[str] | None = None) -> Starlette:
     return Starlette(
         routes=[
-            Route(path, paid_endpoint(decorate), methods=methods or ["GET", "POST"])
-            for path, decorate in routes.items()
+            Route(path, paid_endpoint(pay(handler)), methods=methods or ["GET", "POST"])
+            for path, handler in routes.items()
         ]
     )
 
@@ -152,21 +232,32 @@ def paying(
     application: Starlette, *methods: ContractMethod, **options: Any
 ) -> tuple[httpx.AsyncClient, PaymentTransport]:
     transport = PaymentTransport(
-        methods=list(methods), inner=httpx.ASGITransport(app=application), **options
+        methods=[m.client for m in methods], inner=httpx.ASGITransport(app=application), **options
     )
     return httpx.AsyncClient(transport=transport, base_url="http://testserver"), transport
 
 
-def offers(response: httpx.Response) -> list[Challenge]:
+def offers(response: Any) -> list[Challenge]:
+    headers = (
+        response.challenge.headers if isinstance(response, PaymentRequired) else response.headers
+    )
     return [
-        Challenge.from_www_authenticate(value)
-        for value in response.headers.get_list("www-authenticate")
+        Challenge.from_www_authenticate(value) for value in headers.get_list("www-authenticate")
     ]
 
 
 def authorization(challenge: Challenge, token: str = "ok") -> dict[str, str]:
     credential = Credential(challenge=challenge.to_echo(), payload={"token": token})
     return {"Authorization": credential.to_authorization()}
+
+
+def engine_request(headers: dict[str, str] | None = None) -> Request:
+    return Request("GET", URL, headers=headers)
+
+
+async def issue(handler: ComposedHandler) -> Challenge:
+    [issued] = offers(await handler(engine_request()))
+    return issued
 
 
 def failures(events: list[tuple[str, dict[str, Any]]]) -> list[Exception]:
@@ -178,7 +269,7 @@ class TestRoundTrip:
         method = ContractMethod()
         server = make_server(method)
         server_events = record(server)
-        client, transport = paying(app({"/paid": server.pay(amount="1.25")}), ContractMethod())
+        client, transport = paying(app({"/paid": server.charge(amount="1.25")}), ContractMethod())
         client_events = record(transport)
 
         async with client:
@@ -192,7 +283,7 @@ class TestRoundTrip:
             "ref-ok",
             "contract",
         )
-        assert method.intent.settled == ["ok"]
+        assert method.settled == ["ok"]
 
         assert [name for name, _ in server_events] == ["challenge.created", "payment.success"]
         assert [name for name, _ in client_events] == [
@@ -216,7 +307,7 @@ class TestRoundTrip:
 
     async def test_unpaid_response_shape(self) -> None:
         server = make_server(ContractMethod())
-        async with http(app({"/paid": server.pay(amount="1", description="One item")})) as c:
+        async with http(app({"/paid": server.charge(amount="1", description="One item")})) as c:
             response = await c.get("/paid")
 
         assert response.status_code == 402
@@ -237,7 +328,7 @@ class TestRoundTrip:
 
     async def test_each_unpaid_request_gets_a_distinct_challenge(self) -> None:
         server = make_server(ContractMethod())
-        async with http(app({"/paid": server.pay(amount="1")})) as c:
+        async with http(app({"/paid": server.charge(amount="1")})) as c:
             first, second = offers(await c.get("/paid")), offers(await c.get("/paid"))
         assert first[0].id != second[0].id
         assert first[0].request == second[0].request
@@ -260,8 +351,8 @@ class TestChallengeBinding:
         method = ContractMethod()
         server = make_server(method)
         events = record(server)
-        decorate = server.pay(amount="1")
-        application = app({"/items/{id}": decorate, "/other/{id}": decorate})
+        handler = server.charge(amount="1")
+        application = app({"/items/{id}": handler, "/other/{id}": handler})
         async with http(application) as c:
             [issued] = offers(await c.get("/items/1?page=1"))
             assert issued.request["_mppx_scope"] == {
@@ -273,68 +364,65 @@ class TestChallengeBinding:
             refused = await c.request(verb, url, headers=authorization(issued))
             assert refused.status_code == 402
             assert offers(refused)[0].id != issued.id
-            assert method.intent.settled == []
+            assert method.settled == []
             [error] = failures(events)
             assert isinstance(error, InvalidChallengeError)
 
             accepted = await c.get("/items/1?page=1", headers=authorization(issued))
             assert accepted.status_code == 200
-        assert method.intent.settled == ["ok"]
+        assert method.settled == ["ok"]
 
     async def test_async_body_callback_binds_the_body_digest(self) -> None:
         method = ContractMethod()
         server = make_server(method)
 
         async def body(request: Request) -> bytes:
-            return await request.body()
+            return request.body or b""
 
-        async with http(app({"/paid": server.pay(amount="1", body=body)})) as c:
+        async with http(app({"/paid": server.charge(amount="1", body=body)})) as c:
             [issued] = offers(await c.post("/paid", content=b'{"q": 1}'))
             assert issued.digest is not None and issued.digest.startswith("sha-256=")
             tampered = await c.post("/paid", content=b'{"q": 2}', headers=authorization(issued))
             assert tampered.status_code == 402
-            assert method.intent.settled == []
+            assert method.settled == []
             paid = await c.post("/paid", content=b'{"q": 1}', headers=authorization(issued))
             assert paid.status_code == 200
-        assert method.intent.settled == ["ok"]
+        assert method.settled == ["ok"]
 
     async def test_body_bound_route_refuses_credential_without_digest(self) -> None:
         method = ContractMethod()
         server = make_server(method)
         events = record(server)
-        issued = await server.charge(None, "1")
-        assert isinstance(issued, Challenge)
+        issued = await issue(server.charge(amount="1"))
         assert issued.digest is None
 
-        result = await server.charge(authorization(issued)["Authorization"], "1", body=b"{}")
-        assert isinstance(result, Challenge)
-        assert result.digest is not None
+        result = await server.charge(amount="1", body=b"{}")(engine_request(authorization(issued)))
+        [retry] = offers(result)
+        assert retry.digest is not None
         [error] = failures(events)
         assert isinstance(error, InvalidChallengeError)
         assert "missing body digest" in str(error)
-        assert method.intent.settled == []
+        assert method.settled == []
 
     async def test_amount_is_bound(self) -> None:
         method = ContractMethod()
         server = make_server(method)
-        cheap = await server.charge(None, "0.01")
-        assert isinstance(cheap, Challenge)
-        result = await server.charge(authorization(cheap)["Authorization"], "1")
-        assert isinstance(result, Challenge)
-        assert result.request["amount"] == "100"
-        assert method.intent.settled == []
+        cheap = await issue(server.charge(amount="0.01"))
+        result = await server.charge(amount="1")(engine_request(authorization(cheap)))
+        [retry] = offers(result)
+        assert retry.request["amount"] == "100"
+        assert method.settled == []
 
     async def test_credential_from_another_server_secret_is_refused(self) -> None:
         method = ContractMethod()
         server = make_server(method)
         events = record(server)
-        other = Mpp.create(method=ContractMethod(), realm=REALM, secret_key="other-secret")
-        foreign = await other.charge(None, "1")
-        assert isinstance(foreign, Challenge)
-        result = await server.charge(authorization(foreign)["Authorization"], "1")
-        assert isinstance(result, Challenge)
+        other = Mpp(methods=ContractMethod().server[0], realm=REALM, secret_key="other-secret")
+        foreign = await issue(other.charge(amount="1"))
+        result = await server.charge(amount="1")(engine_request(authorization(foreign)))
+        assert offers(result)
         assert isinstance(failures(events)[0], InvalidChallengeError)
-        assert method.intent.settled == []
+        assert method.settled == []
 
 
 class TestFailureResponses:
@@ -343,7 +431,7 @@ class TestFailureResponses:
     async def _paid_route(self) -> tuple[Mpp, ContractMethod, list[Any], Starlette]:
         method = ContractMethod()
         server = make_server(method)
-        return server, method, record(server), app({"/paid": server.pay(amount="1")})
+        return server, method, record(server), app({"/paid": server.charge(amount="1")})
 
     @pytest.mark.parametrize(
         "header",
@@ -359,7 +447,7 @@ class TestFailureResponses:
         assert len(offers(response)) == 1
         [error] = failures(events)
         assert isinstance(error, MalformedCredentialError)
-        assert method.intent.settled == []
+        assert method.settled == []
 
     async def test_non_payment_authorization_is_a_silent_challenge(self) -> None:
         server, _, events, application = await self._paid_route()
@@ -370,16 +458,15 @@ class TestFailureResponses:
 
     async def test_credential_for_an_unknown_method_gets_a_fresh_challenge(self) -> None:
         server, method, events, application = await self._paid_route()
-        other = Mpp.create(method=ContractMethod("other"), realm=REALM, secret_key=SECRET)
-        foreign = await other.charge(None, "1")
-        assert isinstance(foreign, Challenge)
+        other = Mpp(methods=ContractMethod("other").server[0], realm=REALM, secret_key=SECRET)
+        foreign = await issue(other.charge(amount="1"))
         async with http(application) as c:
             response = await c.get("/paid", headers=authorization(foreign))
         assert response.status_code == 402
         assert offers(response)[0].method == "contract"
         [error] = failures(events)
         assert isinstance(error, InvalidChallengeError)
-        assert method.intent.settled == []
+        assert method.settled == []
 
     @pytest.mark.parametrize(
         ("token", "status", "problem", "same_challenge"),
@@ -417,7 +504,7 @@ class TestFailureResponses:
     async def test_rejection_is_reported_to_the_paying_client(self) -> None:
         server = make_server(ContractMethod())
         client, transport = paying(
-            app({"/paid": server.pay(amount="1")}), ContractMethod(token="replayed")
+            app({"/paid": server.charge(amount="1")}), ContractMethod(token="replayed")
         )
         client_events = record(transport)
         async with client:
@@ -431,7 +518,7 @@ class TestFailureResponses:
 
     async def test_responses_without_starlette(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server = make_server(ContractMethod("first"), ContractMethod("second"))
-        decorated = paid_endpoint(server.pay(amount="1"))
+        decorated = paid_endpoint(pay(server.charge(amount="1")))
         monkeypatch.setitem(sys.modules, "starlette.responses", None)
 
         class PlainRequest:
@@ -466,7 +553,7 @@ class TestComposedOffers:
         server = make_server(first, second)
         handler = server.compose(
             ("second/charge", {"amount": "2"}),
-            (first, {"amount": "1"}),
+            (first.server[0], {"amount": "1"}),
         )
         application = app({"/paid": handler})
         async with http(application) as c:
@@ -481,42 +568,41 @@ class TestComposedOffers:
         client, _ = paying(application, ContractMethod("first"), ContractMethod("second"))
         async with client:
             assert (await client.get("/paid")).status_code == 200
-        assert (first.intent.settled, second.intent.settled) == ([], ["ok"])
+        assert (first.settled, second.settled) == ([], ["ok"])
 
         # A client that supports only a later offer pays that one.
         client, _ = paying(application, ContractMethod("first"))
         async with client:
             assert (await client.get("/paid")).status_code == 200
-        assert (first.intent.settled, second.intent.settled) == (["ok"], ["ok"])
+        assert (first.settled, second.settled) == (["ok"], ["ok"])
 
     async def test_server_with_methods_offers_every_method_in_order(self) -> None:
         server = make_server(ContractMethod("first"), ContractMethod("second"))
-        async with http(app({"/paid": server.pay(amount="1")})) as c:
+        async with http(app({"/paid": server.charge(amount="1")})) as c:
             unpaid = await c.get("/paid")
         assert [o.method for o in offers(unpaid)] == ["first", "second"]
 
-        charged = await server.charge(None, "1")
-        assert not isinstance(charged, Challenge)
-        assert [c.method for c in cast(Any, charged).challenges] == ["first", "second"]
+        charged = await server.charge(amount="1")(engine_request())
+        assert [c.method for c in offers(charged)] == ["first", "second"]
 
     async def test_multi_currency_method_offers_each_currency_in_order(self) -> None:
-        method = ContractMethod()
-        method.currencies = ("usd-a", "usd-b")  # type: ignore[attr-defined]
+        method = ContractMethod(currencies=("usd-a", "usd-b"))
         server = make_server(method)
-        async with http(app({"/paid": server.pay(amount="1")})) as c:
+        async with http(app({"/paid": server.charge(amount="1")})) as c:
             unpaid = await c.get("/paid")
             assert [o.request["currency"] for o in offers(unpaid)] == ["usd-a", "usd-b"]
             # A per-route currency yields a single offer.
-            single = make_server(method).pay(amount="1", currency="usd-b")
+            single = make_server(method).charge(amount="1", currency="usd-b")
         async with http(app({"/paid": single})) as c:
             assert [o.request["currency"] for o in offers(await c.get("/paid"))] == ["usd-b"]
 
     async def test_static_compose_keeps_each_server(self) -> None:
         first, second = ContractMethod("first"), ContractMethod("second")
-        one = Mpp.create(method=first, realm="one.example.com", secret_key="one")
-        two = Mpp.create(method=second, realm="two.example.com", secret_key="two")
+        one = Mpp(methods=first.server[0], realm="one.example.com", secret_key="one")
+        two = Mpp(methods=second.server[0], realm="two.example.com", secret_key="two")
         handler = compose(
-            one.compose((first, {"amount": "1"})), two.compose((second, {"amount": "2"}))
+            one.compose((first.server[0], {"amount": "1"})),
+            two.compose((second.server[0], {"amount": "2"})),
         )
         application = app({"/paid": handler})
         async with http(application) as c:
@@ -525,14 +611,13 @@ class TestComposedOffers:
         client, _ = paying(application, ContractMethod("second"))
         async with client:
             assert (await client.get("/paid")).status_code == 200
-        assert second.intent.settled == ["ok"]
+        assert second.settled == ["ok"]
 
     async def test_no_available_offer_is_a_configuration_error(self) -> None:
-        method = ContractMethod()
-        method.can_offer = lambda request: False  # type: ignore[attr-defined]
-        handler = make_server(method).compose((method, {"amount": "1"}))
+        method = ContractMethod(can_offer=lambda request: False)
+        handler = make_server(method).compose((method.server[0], {"amount": "1"}))
         with pytest.raises(ValueError, match="No payment offers are available"):
-            await handler.verify(None)
+            await handler(engine_request())
 
     def test_compose_rejects_invalid_handlers(self) -> None:
         with pytest.raises(ValueError, match="at least one configured handler"):
@@ -543,12 +628,12 @@ class TestComposedOffers:
     @pytest.mark.parametrize(
         ("entry", "message"),
         [
-            (("contract/charge/extra", {"amount": "1"}), "invalid payment method reference"),
-            (("/charge", {"amount": "1"}), "invalid payment method reference"),
+            (("contract/charge/extra", {"amount": "1"}), "not registered"),
+            (("/charge", {"amount": "1"}), "not registered"),
             (("contract",), "tuples"),
-            ((ContractMethod(), {"amount": "1"}), "not registered"),
+            ((ContractMethod().server[0], {"amount": "1"}), "not registered"),
             (("contract", [("amount", "1")]), "mapping"),
-            (("contract", {"amount": "  "}), "non-empty string amount"),
+            (("contract", {"amount": "  "}), "amount is required"),
             (
                 ("contract", {"amount": "1", "expires": "x", "expires_in": timedelta(1)}),
                 "cannot both be set",
@@ -565,10 +650,9 @@ class TestComposedOffers:
 
     @pytest.mark.parametrize("missing", ["currency", "recipient"])
     def test_compose_requires_currency_and_recipient(self, missing: str) -> None:
-        method = ContractMethod()
-        setattr(method, missing, None)
-        with pytest.raises(ValueError, match=f"{missing} must be set"):
-            make_server(method).compose((method, {"amount": "1"}))
+        method = ContractMethod(omit=missing)
+        with pytest.raises(ValueError, match=missing):
+            make_server(method).compose((method.server[0], {"amount": "1"}))
 
 
 class TestRouteConfiguration:
@@ -578,44 +662,44 @@ class TestRouteConfiguration:
             ({"splits": [{"amount": "1", "recipient": "x"}], "fee_payer": True}, "splits"),
             ({"expires": "2030-01-01T00:00:00Z", "expires_in": timedelta(minutes=1)}, "both"),
             ({"meta": {"_mpp_nonce": "x"}}, "reserved"),
-            ({"unknown_option": True}, "unsupported charge option"),
+            ({"unknown_option": True}, "unknown_option"),
         ],
     )
     async def test_charge_rejects_invalid_options(
         self, options: dict[str, Any], message: str
     ) -> None:
+        # Rejected when the route is configured, or at the latest when it issues a challenge.
         with pytest.raises((ValueError, TypeError), match=message):
-            await make_server(ContractMethod()).charge(None, "1", **options)
+            await make_server(ContractMethod()).charge(amount="1", **options)(engine_request())
 
     async def test_meta_is_bound_into_opaque(self) -> None:
         method = ContractMethod()
         server = make_server(method)
-        issued = await server.charge(None, "1", meta={"account": "acct_1"})
-        assert isinstance(issued, Challenge)
+        issued = await issue(server.charge(amount="1", meta={"account": "acct_1"}))
         assert issued.opaque is not None and issued.opaque["account"] == "acct_1"
-        header = authorization(issued)["Authorization"]
-        other = await server.charge(header, "1", meta={"account": "acct_2"})
-        assert isinstance(other, Challenge)
-        paid = await server.charge(header, "1", meta={"account": "acct_1"})
-        assert isinstance(paid, tuple)
-        assert method.intent.settled == ["ok"]
+        header = authorization(issued)
+        other = await server.charge(amount="1", meta={"account": "acct_2"})(engine_request(header))
+        assert isinstance(other, PaymentRequired)
+        paid = await server.charge(amount="1", meta={"account": "acct_1"})(engine_request(header))
+        assert isinstance(paid, PaymentVerified)
+        assert method.settled == ["ok"]
 
     async def test_requires_auth_reads_only_payment_authorization(self) -> None:
         method = ContractMethod()
         server = make_server(method, requires_auth=True)
-        application = app({"/paid": server.pay(amount="1")})
+        application = app({"/paid": server.charge(amount="1")})
         async with http(application) as c:
             [issued] = offers(await c.get("/paid"))
             assert issued.credential_header == "Payment-Authorization"
             wrong_header = await c.get("/paid", headers=authorization(issued))
             assert wrong_header.status_code == 402
-        assert method.intent.settled == []
+        assert method.settled == []
 
         client, _ = paying(application, ContractMethod())
         async with client:
             response = await client.get("/paid", headers={"Authorization": "Bearer app"})
         assert response.status_code == 200
-        assert method.intent.settled == ["ok"]
+        assert method.settled == ["ok"]
 
 
 class TestFrameworkScope:
@@ -624,7 +708,7 @@ class TestFrameworkScope:
     @staticmethod
     async def scope_of(request: Any) -> dict[str, str]:
         server = make_server(ContractMethod())
-        response = await paid_endpoint(server.pay(amount="1"))(request)
+        response = await paid_endpoint(pay(server.charge(amount="1")))(request)
         return offers_from(response)[0].request["_mppx_scope"]
 
     async def test_flask_style_request(self) -> None:
@@ -723,37 +807,23 @@ class TestAmounts:
         [(" 0.01 ", "1"), ("1", "100"), ("0", "0"), ("12.34", "1234")],
     )
     async def test_human_amounts_convert_to_base_units(self, amount: str, wire: str) -> None:
-        issued = await make_server(ContractMethod(decimals=2)).charge(None, amount)
-        assert isinstance(issued, Challenge)
+        issued = await issue(make_server(ContractMethod(decimals=2)).charge(amount=amount))
         assert issued.request["amount"] == wire
 
     @pytest.mark.parametrize("amount", ["abc", "-1", "0.001", "", "nan"])
     async def test_invalid_amounts_are_rejected(self, amount: str) -> None:
         with pytest.raises(ValueError):
-            await make_server(ContractMethod(decimals=2)).charge(None, amount)
+            await make_server(ContractMethod(decimals=2)).charge(amount=amount)(engine_request())
 
 
 class TestMcpToolIdentity:
     async def test_tool_identity_is_required(self) -> None:
         pytest.importorskip("mcp")
-        from mpp.extensions.mcp import create_challenge, verify_or_challenge
+        from mpp.extensions.mcp import pay as mcp_pay
+        from mpp.extensions.mcp import verify_or_challenge
 
+        handler = make_server(ContractMethod()).charge(amount="1")
         with pytest.raises(ValueError, match="tool must be"):
-            await verify_or_challenge(
-                meta=None,
-                intent=ContractIntent(),
-                request={"amount": "1"},
-                realm=REALM,
-                secret_key=SECRET,
-                tool="",
-                method="contract",
-            )
+            await verify_or_challenge(handler, meta=None, tool="")
         with pytest.raises(ValueError, match="tool must be"):
-            create_challenge(
-                method="contract",
-                intent_name="charge",
-                request={"amount": "1"},
-                realm=REALM,
-                secret_key=SECRET,
-                tool="",
-            )
+            mcp_pay(handler, tool="")

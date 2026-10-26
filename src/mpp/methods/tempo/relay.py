@@ -20,7 +20,7 @@ from mpp.errors import (
 if TYPE_CHECKING:
     import httpx
 
-    from mpp.server.intent import Intent, VerifiableIntent
+    from mpp.methods.tempo.intents import ChargeIntent
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +65,10 @@ class Relay:
     failures surface as payment errors that stay opaque except for the safe
     machine-readable codes exposed in error ``details``.
 
-    Pass a relay to :func:`~mpp.methods.tempo.tempo` to serve a charge
-    intent's lifecycle through the Tempo API::
+    Pass a relay to :func:`mpp.methods.tempo.server.charge` to serve the
+    charge lifecycle through the Tempo API::
 
-        method = tempo(
-            intents={"charge": ChargeIntent()},
-            relay=Relay(api_key=os.environ["TEMPO_API_KEY"]),
-        )
+        methods = tempo.charge(relay=Relay(api_key=os.environ["TEMPO_API_KEY"]))
     """
 
     def __init__(
@@ -102,7 +99,7 @@ class Relay:
         self._owns_client = http_client is None
         self._timeout = timeout
 
-    def configure(self, intent: Intent | VerifiableIntent) -> VerifiableIntent:
+    def configure(self, intent: ChargeIntent) -> _RelayIntent:
         """Wrap an intent so its lifecycle is served by the relay.
 
         The returned intent delegates ``validate`` and ``broadcast`` to

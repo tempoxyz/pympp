@@ -13,53 +13,30 @@ dependencies = [
 
 ## Basic Usage
 
-The simplest way to make paid requests:
+`Mpp` pays `402` challenges automatically:
 
 ```python
-from mpp.client import get
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
+from mpp.client import Mpp
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
 
 account = TempoAccount.from_key("0x...")
 
-response = await get(
-    "https://api.example.com/resource",
-    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
-)
+async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
+    r1 = await mpp.fetch("https://api.example.com/a")
+    r2 = await mpp.fetch("https://api.example.com/b")
 ```
 
-## Client Wrapper
+## Custom Client
 
-For multiple requests, use the `Client` wrapper:
-
-```python
-from mpp.client import Client
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
-
-account = TempoAccount.from_key("0x...")
-
-async with Client(methods=[tempo(account=account, intents={"charge": ChargeIntent()})]) as client:
-    r1 = await client.get("https://api.example.com/a")
-    r2 = await client.get("https://api.example.com/b")
-```
-
-## Custom Transport
-
-For full control, use `PaymentTransport` with a custom httpx client:
+To use your own `httpx.AsyncClient`, pass it the payment transport:
 
 ```python
-from mpp.client import PaymentTransport
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
-account = TempoAccount.from_key("0x...")
-
-transport = PaymentTransport(
-    methods=[tempo(account=account, intents={"charge": ChargeIntent()})],
-    inner=httpx.AsyncHTTPTransport(),
-)
-
-async with httpx.AsyncClient(transport=transport) as client:
-    response = await client.get("https://api.example.com/resource")
+async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
+    async with httpx.AsyncClient(transport=mpp.payment_transport) as client:
+        response = await client.get("https://api.example.com/resource")
 ```
 
 ## Manual Flow
@@ -67,12 +44,12 @@ async with httpx.AsyncClient(transport=transport) as client:
 For complete control over the payment flow:
 
 ```python
-from mpp import Challenge, Credential
-from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
 import httpx
 
-account = TempoAccount.from_key("0x...")
-method = tempo(account=account, intents={"charge": ChargeIntent()})
+from mpp import Challenge
+from mpp.runtime import PaymentRuntime
+
+payments = PaymentRuntime([tempo.charge(account=account)])
 
 async with httpx.AsyncClient() as client:
     # Initial request - expect 402
@@ -80,11 +57,15 @@ async with httpx.AsyncClient() as client:
     if res.status_code != 402:
         return res
 
-    # Parse challenge from WWW-Authenticate header
-    challenge = Challenge.from_www_authenticate(res.headers["www-authenticate"])
+    # Parse challenges from WWW-Authenticate headers
+    challenges = [
+        Challenge.from_www_authenticate(value)
+        for value in res.headers.get_list("www-authenticate")
+    ]
 
-    # Create credential (executes payment)
-    credential = await method.create_credential(challenge)
+    # Pick a challenge and create its credential (executes payment)
+    challenge, method = payments.match_challenge(challenges)
+    credential = await payments.create_credential(challenge, method)
 
     # Retry with credential
     res2 = await client.get(

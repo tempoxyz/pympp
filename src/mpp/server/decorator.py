@@ -1,58 +1,20 @@
-"""Decorator for payment-protected endpoints."""
+"""Decorator for payment-protected framework endpoints."""
 
 from __future__ import annotations
 
 import inspect
-import json as _json
-import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
-from mpp.errors import PaymentError, PaymentRequiredError
-from mpp.events import EventDispatcher
-from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.verify import verify_or_challenge
-from mpp.x402._server import (
-    X402Input,
-    X402Intent,
-    challenges_payment_required_header,
-    is_x402_credential,
-    payment_response_header,
-)
-from mpp.x402._types import (
-    PAYMENT_REQUIRED_HEADER,
-    PAYMENT_RESPONSE_HEADER,
-    PAYMENT_SIGNATURE_HEADER,
-    PaymentRequirements,
-)
+from mpp.server.http import PaymentRequired, Request, Response
+from mpp.x402._server import X402Input
+from mpp.x402._types import PAYMENT_SIGNATURE_HEADER
 
 if TYPE_CHECKING:
-    from mpp.server.compose import ComposedResult
-    from mpp.server.intent import Intent, VerifiableIntent
+    from mpp.server.compose import ComposedHandler
 
 R = TypeVar("R")
-logger = logging.getLogger(__name__)
-
-RequestParamsType = dict[str, Any] | Callable[[Any], dict[str, Any]]
-BodyType = str | bytes | dict[str, Any]
-BodyParamsType = BodyType | Callable[[Any], BodyType | Awaitable[BodyType]] | None
-X402AcceptsFn = Callable[[Challenge], PaymentRequirements | None]
-
-
-def get_authorization(request: Any) -> str | None:
-    """Extract Authorization header from various request types.
-
-    Supports Starlette/FastAPI (request.headers), Django (request.META),
-    and any object with a ``headers`` dict-like attribute.
-    """
-    return get_header(request, "authorization")
-
-
-def get_payment_authorization(request: Any) -> str | None:
-    """Extract Payment-Authorization header from various request types."""
-    return get_header(request, "payment-authorization")
 
 
 def get_header(request: Any, name: str) -> str | None:
@@ -185,362 +147,138 @@ def framework_scope(request: Any) -> dict[str, str]:
     return scope
 
 
-def bind_framework_scope(request_params: dict[str, Any], request_obj: Any) -> dict[str, Any]:
-    """Return request params with automatic framework scope when available."""
-    scope = framework_scope(request_obj)
-    configured = request_params.get("_mppx_scope")
-    if configured is not None:
-        scope = {**scope, "custom": configured}
-    if not scope:
-        return request_params
-    return {**request_params, "_mppx_scope": scope}
-
-
-def make_challenge_response(
-    challenge: Challenge | Sequence[Challenge],
-    realm: str,
-    error: Exception | None = None,
-    *,
-    headers: Mapping[str, str] | None = None,
-) -> Any:
-    """Build a 402 response for a payment challenge with RFC 9457 problem details body.
-
-    ``headers`` adds response headers, such as x402's ``PAYMENT-REQUIRED``.
-
-    Returns a Starlette ``Response`` when starlette is installed,
-    otherwise a plain dict with ``_mpp_challenge``, ``status``, and ``headers``.
-    """
-    challenges = (challenge,) if isinstance(challenge, Challenge) else tuple(challenge)
-    problem = (
-        error
-        if isinstance(error, PaymentError)
-        else PaymentRequiredError(realm=realm, description=challenges[0].description)
-    )
-    body = _json.dumps(problem.to_problem_details(challenges[0].id))
-    values = [item.to_www_authenticate(item.realm or realm) for item in challenges]
-    base_headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/problem+json",
-        **(headers or {}),
-    }
-    try:
-        from starlette.responses import Response
-
-        response = Response(
-            content=body,
-            status_code=402,
-            headers=base_headers,
-            media_type="application/problem+json",
-        )
-        for value in values:
-            response.headers.append("WWW-Authenticate", value)
-        return response
-    except ImportError:
-        fallback_headers: dict[str, Any] = dict(base_headers)
-        fallback_headers["WWW-Authenticate"] = values[0] if len(values) == 1 else values
-        return {
-            "_mpp_challenge": True,
-            "status": 402,
-            "headers": fallback_headers,
-            "body": body,
-        }
-
-
-def make_error_response(error: PaymentError) -> Any:
-    """Build a final RFC 9457 problem details response without a challenge.
-
-    Used for errors such as :class:`~mpp.errors.CredentialReplayedError`
-    (403), where a fresh challenge would invite the client to pay again.
-
-    Returns a Starlette ``Response`` when starlette is installed,
-    otherwise a plain dict with ``_mpp_error``, ``status``, ``headers``, and ``body``.
-    """
-    body = _json.dumps(error.to_problem_details())
-    headers = {
-        "Cache-Control": "no-store",
-        "Content-Type": "application/problem+json",
-    }
-    try:
-        from starlette.responses import Response
-
-        return Response(
-            content=body,
-            status_code=error.status,
-            headers=headers,
-            media_type="application/problem+json",
-        )
-    except ImportError:
-        return {"_mpp_error": True, "status": error.status, "headers": headers, "body": body}
-
-
-async def resolve_body_param(body: BodyParamsType, request_obj: Any) -> BodyType | None:
-    """Resolve a static or request-derived body value for digest verification."""
-    if body is None:
-        return None
-    if callable(body):
-        value = body(request_obj)
-        if inspect.isawaitable(value):
-            value = await value
-        return value
-    return body
-
-
-def wrap_payment_handler(
-    handler: Callable[..., Awaitable[R]],
-    verify_fn: Callable[[str | None, Any], Awaitable[Challenge | ComposedResult]],
-    realm_fn: Callable[[], str],
-    *,
-    requires_auth: bool = False,
-    x402_accepts: X402AcceptsFn | None = None,
-) -> Callable[..., Awaitable[R | Any]]:
-    """Wrap a handler with the payment challenge/verify flow.
-
-    Shared logic used by both the standalone ``pay()`` decorator and
-    ``Mpp.pay()``.  Strips ``credential`` and ``receipt`` from the handler
-    signature (for FastAPI compatibility) and injects them after verification.
-
-    The handler **must** use parameter names ``credential`` and ``receipt``
-    for the injected payment objects.
-
-    Args:
-        handler: The async endpoint handler to wrap.
-        verify_fn: Called with ``(authorization, request_obj)``; must return
-            a ``Challenge``, composed challenges, or ``(Credential, Receipt)`` tuple.
-        realm_fn: Returns the realm string for challenge responses.
-        unique_challenges: Disable only during a verifier-first rolling upgrade.
-        requires_auth: When True, read the Payment credential from
-            ``Payment-Authorization`` instead of ``Authorization``.
-        x402_accepts: Returns the x402 requirements that pay a challenge, or
-            ``None``. When any challenge has some, 402 responses carry
-            ``PAYMENT-REQUIRED``, and responses to paid x402 requests carry
-            ``PAYMENT-RESPONSE`` when the handler returns a response object.
-    """
-    sig = inspect.signature(handler)
-    params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
-    new_sig = sig.replace(parameters=params)
-
-    request_param_name = params[0].name if params else "request"
-
-    @wraps(handler)
-    async def wrapper(*args: Any, **kwargs: Any) -> R | Any:
-        if args:
-            request_obj = args[0]
-        else:
-            request_obj = kwargs.get(request_param_name)
-
-        if request_obj is None:
-            raise TypeError(
-                f"Missing request argument '{request_param_name}'. "
-                "The decorated handler must receive a request object as its first argument."
-            )
-
-        authorization = (
-            get_payment_authorization(request_obj)
-            if requires_auth
-            else get_authorization(request_obj)
-        )
-
-        def challenge_response(
-            challenges: Sequence[Challenge], realm: str, error: Exception | None = None
-        ) -> Any:
-            headers: dict[str, str] | None = None
-            resource_url = get_request_url(request_obj) if x402_accepts is not None else None
-            if x402_accepts is not None and resource_url is not None:
-                value = challenges_payment_required_header(
-                    challenges,
-                    x402_accepts,
-                    resource_url,
-                    framework_scope(request_obj).get("http_method", "GET"),
-                    str(error) if error is not None else None,
-                )
-                if value is not None:
-                    headers = {PAYMENT_REQUIRED_HEADER: value}
-            return make_challenge_response(challenges, realm, error, headers=headers)
-
-        try:
-            result = await verify_fn(authorization, request_obj)
-        except PaymentError as error:
-            if isinstance(error.retry_challenge, Challenge):
-                return challenge_response((error.retry_challenge,), realm_fn(), error)
-            if error.status == 403:
-                return make_error_response(error)
-            raise
-
-        if isinstance(result, Challenge):
-            return challenge_response((result,), realm_fn())
-
-        from mpp.server.compose import ComposedChallenges
-
-        if isinstance(result, ComposedChallenges):
-            return challenge_response(result.challenges, result.challenges[0].realm, result.error)
-
-        credential, receipt = result
-        response = await handler(request_obj, credential, receipt)
-        if is_x402_credential(credential):
-            _warn_plain_x402_response(response)
-            _set_response_header(
-                response, PAYMENT_RESPONSE_HEADER, payment_response_header(credential, receipt)
-            )
-            _mark_private(response)
-        return response
-
-    wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
-
-    return wrapper
-
-
-def _set_response_header(response: Any, name: str, value: str | None) -> None:
-    """Set a header on a framework response object, if it exposes mutable headers."""
-    headers = getattr(response, "headers", None)
-    if value is None or headers is None:
-        return
-    try:
-        if name not in headers:
-            headers[name] = value
-    except TypeError:
-        return
-
-
-_warned_plain_x402_response = False
-
-
-def _warn_plain_x402_response(response: Any) -> None:
-    """Warn once when a paid x402 response can't carry its headers."""
-    global _warned_plain_x402_response
-    if _warned_plain_x402_response or getattr(response, "headers", None) is not None:
-        return
-    _warned_plain_x402_response = True
-    logger.warning(
-        "A handler paid with x402 returned %s instead of a response object, so "
-        "PAYMENT-RESPONSE and Cache-Control: private could not be added. Return a "
-        "response object from x402-paid handlers so shared caches can't serve the "
-        "paid response to callers who didn't pay.",
-        type(response).__name__,
-    )
-
-
-def _mark_private(response: Any) -> None:
-    """Keep a paid response out of shared caches, like Coinbase's x402 SDK.
-
-    A CDN that stored a paid response could serve it to callers who never paid.
-    """
-    headers = getattr(response, "headers", None)
-    if headers is None:
-        return
-    try:
-        current = headers.get("cache-control") or ""
-        directives = [part.strip() for part in current.split(",") if part.strip()]
-        lowered = [part.lower() for part in directives]
-        if "private" in lowered or "no-store" in lowered:
-            return
-        kept = [
-            part
-            for part in directives
-            if part.lower() != "public" and not part.lower().startswith("s-maxage")
+def _framework_headers(request: Any) -> list[tuple[str, str]]:
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        items = headers.items() if hasattr(headers, "items") else headers
+        return [(str(name), str(value)) for name, value in items]
+    meta = getattr(request, "META", None)
+    if isinstance(meta, dict):
+        return [
+            (key[5:].replace("_", "-").title(), str(value))
+            for key, value in meta.items()
+            if key.startswith("HTTP_")
         ]
-        headers["Cache-Control"] = ", ".join(["private", *kept])
-    except (TypeError, AttributeError):
-        return
+    return []
+
+
+async def _framework_body(request: Any) -> bytes | None:
+    try:
+        body = getattr(request, "body", None)
+        if body is None and callable(get_data := getattr(request, "get_data", None)):
+            # Flask/werkzeug: get_data() caches the body for the endpoint.
+            body = get_data()
+        if callable(body):
+            body = body()
+        if inspect.isawaitable(body):
+            body = await body
+    except Exception:
+        return None
+    if isinstance(body, str):
+        return body.encode()
+    return body if isinstance(body, bytes) and body else None
+
+
+async def to_request(request: Any, *, read_body: bool = True) -> Request:
+    """Convert a framework request (Starlette, FastAPI, Django, Flask) to a :class:`Request`.
+
+    With ``read_body=False`` the request body stream is left untouched.
+    """
+    scope = framework_scope(request)
+    url = get_request_url(request)
+    if url is None:
+        resource = scope.get("resource", "/")
+        url = f"{resource}?{scope['query']}" if scope.get("query") else resource
+    return Request(
+        scope.get("http_method", "GET"),
+        url,
+        headers=_framework_headers(request),
+        body=await _framework_body(request) if read_body else None,
+        route=scope.get("route"),
+    )
+
+
+def to_framework_response(response: Response) -> Any:
+    """Convert an engine :class:`Response` to a Starlette response when Starlette is installed.
+
+    Otherwise returns a plain dict with ``status``, ``headers`` and ``body``, marked with
+    ``_mpp_challenge`` for 402 responses and ``_mpp_error`` for final errors.
+    """
+    body = (response.body or b"").decode()
+    try:
+        from starlette.responses import Response as StarletteResponse
+    except ImportError:
+        headers: dict[str, Any] = {}
+        encoding = response.headers.encoding
+        for raw_name, raw_value in response.headers.raw:
+            name, value = raw_name.decode(encoding), raw_value.decode(encoding)
+            key = "WWW-Authenticate" if name.lower() == "www-authenticate" else name
+            if key in headers:
+                previous = headers[key]
+                headers[key] = (
+                    [*previous, value] if isinstance(previous, list) else [previous, value]
+                )
+            else:
+                headers[key] = value
+        marker = "_mpp_challenge" if response.status == 402 else "_mpp_error"
+        return {marker: True, "status": response.status, "headers": headers, "body": body}
+    result = StarletteResponse(
+        content=body,
+        status_code=response.status,
+        media_type=response.headers.get("content-type"),
+    )
+    for name, value in response.headers.multi_items():
+        if name.lower() == "www-authenticate":
+            result.headers.append(name, value)
+        elif name.lower() != "content-length":
+            result.headers[name] = value
+    return result
 
 
 def pay(
-    *,
-    intent: Intent | VerifiableIntent,
-    request: RequestParamsType,
-    realm: str | None = None,
-    secret_key: str | None = None,
-    method: str | None = None,
-    description: str | None = None,
-    body: BodyParamsType = None,
-    events: EventDispatcher | None = None,
-    requires_auth: bool = False,
-    unique_challenges: bool = True,
+    handler: ComposedHandler,
 ) -> Callable[
-    [Callable[[Any, Credential, Receipt], Awaitable[R]]],
-    Callable[[Any], Awaitable[R | Any]],
+    [Callable[..., Awaitable[R]]],
+    Callable[..., Awaitable[R | Any]],
 ]:
-    """Decorator to require payment for an endpoint.
+    """Require payment for a framework endpoint.
 
-    Automatically handles the 402 challenge flow by:
-    1. Extracting the Authorization header from the request
-    2. Calling verify_or_challenge
-    3. Returning 402 with WWW-Authenticate if payment is required
-    4. Calling the handler with (request, credential, receipt) if verified
-
-    The handler **must** use parameter names ``credential`` and ``receipt``
-    for the injected payment objects.
-
-    Args:
-        intent: The payment intent to verify against.
-        request: Payment request params - either a static dict or a callable
-            that takes the request and returns the params.
-        realm: The realm for the WWW-Authenticate header.
-            Auto-detected from environment if omitted.
-        secret_key: Server secret for HMAC-bound challenge IDs.
-            Required unless `MPP_SECRET_KEY` is set.
-        method: The payment method name (defaults to "tempo").
-        description: Human-readable description of what the payment is for.
-        body: Optional static body bytes/string/dict or callback receiving the
-            request object. The resolved value is bound into issued challenges
-            via digest and used to verify paid retries.
-        unique_challenges: Disable only during a verifier-first rolling upgrade.
-        requires_auth: When True, challenges advertise
-            ``header="Payment-Authorization"`` and credentials are read from
-            that header so ``Authorization`` can carry application auth.
+    Converts the framework request to a :class:`Request`, runs the route handler, and
+    returns its 402 challenge or calls the endpoint with ``(request, credential, receipt)``
+    and attaches the receipt to its response. The endpoint **must** name the injected
+    parameters ``credential`` and ``receipt``.
 
     Example:
-        @app.get("/resource")
-        @pay(
-            intent=ChargeIntent(),
-            request={"amount": "1000"},
-        )
-        async def get_resource(request: Request, credential: Credential, receipt: Receipt):
-            return {"data": "paid content", "payer": receipt.payer}
+        mpp = Mpp(methods=tempo.charge(recipient="0x..."))
+
+        @app.get("/paid")
+        @pay(mpp.charge(amount="0.50"))
+        async def paid(request, credential, receipt):
+            return JSONResponse({"payer": receipt.payer})
     """
 
-    resolved_realm = realm if realm is not None else detect_realm()
-    resolved_secret_key = secret_key if secret_key is not None else detect_secret_key()
+    def decorator(endpoint: Callable[..., Awaitable[R]]) -> Callable[..., Awaitable[R | Any]]:
+        sig = inspect.signature(endpoint)
+        params = [p for name, p in sig.parameters.items() if name not in ("credential", "receipt")]
+        request_param_name = params[0].name if params else "request"
 
-    def decorator(
-        handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
-    ) -> Callable[[Any], Awaitable[R | Any]]:
-        async def _verify(
-            authorization: str | None, request_obj: Any
-        ) -> Challenge | tuple[Credential, Receipt]:
-            if callable(request):
-                request_params = request(request_obj)
-            else:
-                request_params = request
-            request_params = bind_framework_scope(request_params, request_obj)
+        @wraps(endpoint)
+        async def wrapper(*args: Any, **kwargs: Any) -> R | Any:
+            request_obj = args[0] if args else kwargs.get(request_param_name)
+            if request_obj is None:
+                raise TypeError(
+                    f"Missing request argument '{request_param_name}'. "
+                    "The decorated handler must receive a request object as its first argument."
+                )
+            # Read the body only for an offer whose ``body`` option reads the request.
+            read_body = getattr(handler, "needs_request_body", True)
+            result = await handler(await to_request(request_obj, read_body=read_body))
+            if isinstance(result, PaymentRequired):
+                return to_framework_response(result.challenge)
+            response = await endpoint(request_obj, result.credential, result.receipt)
+            return result.with_receipt(response)
 
-            return await verify_or_challenge(
-                authorization=authorization,
-                intent=intent,
-                request=request_params,
-                realm=resolved_realm,
-                secret_key=resolved_secret_key,
-                method=method,
-                description=description,
-                body=await resolve_body_param(body, request_obj),
-                events=events,
-                header=PAYMENT_AUTHORIZATION_HEADER if requires_auth else None,
-                unique_challenges=unique_challenges,
-                x402=x402_input(request_obj) if isinstance(intent, X402Intent) else None,
-            )
-
-        def _x402_accepts(challenge: Challenge) -> PaymentRequirements | None:
-            if not isinstance(intent, X402Intent):
-                return None
-            if challenge.method != (method or "tempo") or challenge.intent != intent.name:
-                return None
-            return intent.x402_requirements(challenge.request)
-
-        return wrap_payment_handler(
-            handler,
-            _verify,
-            lambda: resolved_realm,
-            requires_auth=requires_auth,
-            x402_accepts=_x402_accepts,
-        )
+        wrapper.__signature__ = sig.replace(parameters=params)  # type: ignore[attr-defined]
+        return wrapper
 
     return decorator

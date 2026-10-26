@@ -8,8 +8,9 @@ import secrets
 import httpx
 
 from mpp import Receipt
-from mpp.client import Client
-from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.client import Mpp
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 
@@ -36,14 +37,9 @@ async def main() -> None:
     )
     await fund(account)
 
-    method = tempo(
-        account=account,
-        chain_id=TESTNET_CHAIN_ID,
-        rpc_url=TESTNET_RPC_URL,
-        intents={"charge": ChargeIntent()},
-    )
-    async with Client(methods=[method]) as client:
-        response = await client.get(os.environ.get("PAYMENT_URL", "http://127.0.0.1:8000/photo"))
+    method = tempo.charge(account=account, chain_id=TESTNET_CHAIN_ID, rpc_url=TESTNET_RPC_URL)
+    async with Mpp(methods=[method]) as mpp:
+        response = await mpp.fetch(os.environ.get("PAYMENT_URL", "http://127.0.0.1:8000/photo"))
     response.raise_for_status()
 
     receipt = Receipt.from_payment_receipt(response.headers["Payment-Receipt"])

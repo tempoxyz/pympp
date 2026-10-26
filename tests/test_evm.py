@@ -27,10 +27,15 @@ from mpp.methods.evm import (
     challenge_hash,
     evm,
 )
+from mpp.methods.evm import client as evm_client
+from mpp.methods.evm import server as evm_server
 from mpp.methods.evm._eip3009 import authorization_domain, sign_authorization, to_source
+from mpp.runtime import ClientMethod, CredentialParams
 from mpp.server import Mpp
+from mpp.server.method import RequestContext, ServerMethod
 from mpp.store import MemoryStore
 from mpp.x402 import FacilitatorError, PaymentPayload, PaymentRequirements
+from tests import http_request
 
 PAYER = Account.from_key("0x" + "11" * 32)
 OTHER = Account.from_key("0x" + "22" * 32)
@@ -69,8 +74,8 @@ class FakeFacilitator:
         return self.settle_response
 
 
-def server_method(facilitator: Any = None, **kwargs: Any):
-    return evm(
+def server_method(facilitator: Any = None, **kwargs: Any) -> ServerMethod:
+    return evm_server.charge(
         currency=BASE_SEPOLIA_USDC,
         recipient=RECIPIENT,
         facilitator=facilitator or FakeFacilitator(),
@@ -78,10 +83,26 @@ def server_method(facilitator: Any = None, **kwargs: Any):
     )
 
 
-def request(method: Any = None, amount: str = "10000") -> dict[str, Any]:
-    method = method or server_method()
-    return method.transform_request(
-        {"amount": amount, "currency": method.currency, "recipient": RECIPIENT}, None
+def charge_intent(method: ServerMethod) -> ChargeIntent:
+    assert isinstance(method.x402, ChargeIntent)
+    return method.x402
+
+
+def resolve(method: ServerMethod, **options: Any) -> dict[str, Any]:
+    """Resolve route options to the wire request a challenge carries."""
+    assert method.resolve_request is not None
+    resolved = method.resolve_request(RequestContext(request=options))
+    assert isinstance(resolved, dict)
+    return method.method.normalize_request(resolved)
+
+
+def request(method: ServerMethod | None = None, amount: str = "0.01") -> dict[str, Any]:
+    return resolve(method or server_method(), amount=amount)
+
+
+async def sign(method: ClientMethod, challenge: Challenge) -> Credential:
+    return Credential.from_authorization(
+        await method.create_credential(CredentialParams(challenge=challenge))
     )
 
 
@@ -137,11 +158,12 @@ def x402_echo(credential: Credential) -> Credential:
 class TestConfiguration:
     def test_known_asset(self) -> None:
         method = server_method()
-        assert method.name == "evm"
-        assert method.currency == BASE_SEPOLIA_USDC.address
-        assert (method.chain_id, method.decimals) == (84532, 6)
-        assert (method.domain_name, method.domain_version) == ("USDC", "2")
-        assert isinstance(method.intents["charge"], ChargeIntent)
+        assert method.key == "evm/charge"
+        req = request(method)
+        assert req["currency"] == BASE_SEPOLIA_USDC.address
+        assert (req["methodDetails"]["chainId"], req["methodDetails"]["decimals"]) == (84532, 6)
+        intent = charge_intent(method)
+        assert (intent.domain_name, intent.domain_version) == ("USDC", "2")
 
     def test_known_assets_carry_their_domains(self) -> None:
         assert (BASE_USDC.name, BASE_USDC.network) == ("USD Coin", "eip155:8453")
@@ -166,7 +188,9 @@ class TestConfiguration:
             decimals=18,
             authorization={"name": "Token", "version": "1"},
         )
-        assert (method.chain_id, method.decimals, method.domain_name) == (31337, 18, "Token")
+        details = request(method)["methodDetails"]
+        assert (details["chainId"], details["decimals"]) == (31337, 18)
+        assert charge_intent(method).domain_name == "Token"
 
     @pytest.mark.parametrize("decimals", [True, 1.5, -1, 37])
     def test_rejects_invalid_decimal_overrides(self, decimals: Any) -> None:
@@ -223,24 +247,37 @@ class TestConfiguration:
         with pytest.raises(ValueError):
             EvmAsset(address="0x" + "aa" * 20, decimals=6, chain_id=1, name="", version="1")
 
+    def test_uses_its_store(self) -> None:
+        store = MemoryStore()
+        assert charge_intent(server_method(store=store))._store is store
+
     def test_mpp_wires_its_store(self) -> None:
         store = MemoryStore()
         method = server_method()
-        Mpp.create(method=method, realm=REALM, secret_key="k", store=store)
-        assert method.intents["charge"]._store is store  # type: ignore[attr-defined]
+        Mpp(methods=method, realm=REALM, secret_key="k", store=store)
+        assert charge_intent(method)._store is store
+
+    def test_mpp_store_does_not_replace_its_own(self) -> None:
+        own = MemoryStore()
+        method = server_method(store=own)
+        Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        assert charge_intent(method)._store is own
+
+    def test_without_a_store_claims_stay_in_process(self) -> None:
+        method = server_method()
+        Mpp(methods=method, realm=REALM, secret_key="k")
+        assert charge_intent(method)._store is None
 
 
 class TestRequestShape:
     def test_matches_mppx_evm_charge_requests(self) -> None:
         method = server_method()
-        assert method.transform_request(
-            {
-                "amount": "10000",
-                "currency": method.currency.lower(),
-                "recipient": RECIPIENT.lower(),
-                "methodDetails": {"chainId": 84532},
-            },
-            None,
+        assert resolve(
+            method,
+            amount="0.01",
+            currency=BASE_SEPOLIA_USDC.address.lower(),
+            recipient=RECIPIENT.lower(),
+            chain_id=84532,
         ) == {
             "amount": "10000",
             "currency": BASE_SEPOLIA_USDC.address,
@@ -252,35 +289,32 @@ class TestRequestShape:
             },
         }
 
-    def test_is_idempotent(self) -> None:
-        method = server_method()
-        once = request(method)
-        assert method.transform_request(once, None) == once
-
     @pytest.mark.parametrize(
         ("change", "message"),
         [
             ({"currency": "0x" + "bb" * 20}, "currency"),
             ({"recipient": "bob"}, "recipient"),
-            ({"methodDetails": {"chainId": 1}}, "chain_id"),
-            ({"methodDetails": {"splits": [{"amount": "1", "recipient": RECIPIENT}]}}, "splits"),
-            ({"methodDetails": {"feePayer": True}}, "fee_payer"),
-            ({"methodDetails": "x"}, "methodDetails"),
+            ({"chain_id": 1}, "chain_id"),
+            ({"splits": [{"amount": "1", "recipient": RECIPIENT}]}, "splits"),
+            ({"fee_payer": True}, "fee_payer"),
+            ({"amount": ""}, "amount"),
         ],
     )
     def test_rejects_requests_evm_cannot_pay(self, change: dict[str, Any], message: str) -> None:
-        method = server_method()
-        base = {"amount": "1", "currency": method.currency, "recipient": RECIPIENT, **change}
         with pytest.raises(ValueError, match=message):
-            method.transform_request(base, None)
+            resolve(server_method(), **{"amount": "0.01", **change})
+
+    def test_rejects_unknown_options(self) -> None:
+        with pytest.raises(TypeError, match="unsupported option: nope"):
+            resolve(server_method(), amount="0.01", nope=True)
 
     async def test_mpp_rejects_splits_and_fee_payer(self) -> None:
-        server = Mpp.create(method=server_method(), realm=REALM, secret_key="k")
+        server = Mpp(methods=server_method(), realm=REALM, secret_key="k")
         with pytest.raises(ValueError, match="fee_payer"):
-            await server.charge(None, "0.01", fee_payer=True)
+            await server.charge(amount="0.01", fee_payer=True)(http_request())
 
     def test_x402_requirements(self) -> None:
-        intent = server_method(max_timeout_seconds=60).intents["charge"]
+        intent = charge_intent(server_method(max_timeout_seconds=60))
         assert isinstance(intent, ChargeIntent)
         assert intent.x402_requirements(request()) == {
             "scheme": "exact",
@@ -312,7 +346,7 @@ class TestValidate:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
         req = request(method)
-        validation = await method.intents["charge"].validate(native_credential(req), req)  # type: ignore[union-attr]
+        validation = await charge_intent(method).validate(native_credential(req), req)
         assert validation.payer == PAYER.address
         assert validation.intent == "charge"
         [(payment, requirements)] = facilitator.verified
@@ -336,24 +370,20 @@ class TestValidate:
         method = server_method(facilitator)
         req = request(method)
         with pytest.raises(VerificationFailedError, match=message):
-            await method.intents["charge"].validate(  # type: ignore[union-attr]
-                native_credential(req, **overrides), req
-            )
+            await charge_intent(method).validate(native_credential(req, **overrides), req)
         assert facilitator.verified == []
 
     async def test_rejects_signatures_by_another_key(self) -> None:
         method = server_method()
         req = request(method)
         with pytest.raises(VerificationFailedError, match="signature mismatch"):
-            await method.intents["charge"].validate(  # type: ignore[union-attr]
-                native_credential(req, signer=OTHER), req
-            )
+            await charge_intent(method).validate(native_credential(req, signer=OTHER), req)
 
     async def test_x402_credentials_are_not_bound_to_a_challenge_hash(self) -> None:
         method = server_method()
         req = request(method)
         credential = x402_echo(native_credential(req, nonce="0x" + "42" * 32))
-        validation = await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        validation = await charge_intent(method).validate(credential, req)
         assert validation.payer == PAYER.address
 
     @pytest.mark.parametrize(
@@ -368,14 +398,12 @@ class TestValidate:
         method = server_method()
         req = request(method)
         with pytest.raises(VerificationFailedError, match="source mismatch"):
-            await method.intents["charge"].validate(  # type: ignore[union-attr]
-                native_credential(req, source=source), req
-            )
+            await charge_intent(method).validate(native_credential(req, source=source), req)
 
     async def test_source_is_optional(self) -> None:
         method = server_method()
         req = request(method)
-        await method.intents["charge"].validate(native_credential(req, source=None), req)  # type: ignore[union-attr]
+        await charge_intent(method).validate(native_credential(req, source=None), req)
 
     @pytest.mark.parametrize(
         "payload",
@@ -391,16 +419,16 @@ class TestValidate:
         credential = native_credential(req)
         bad = Credential(challenge=credential.challenge, payload=payload)
         with pytest.raises(InvalidPayloadError):
-            await method.intents["charge"].validate(bad, req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(bad, req)
 
     async def test_rejects_authorizations_valid_for_too_long(self) -> None:
         method = server_method()
         req = request(method)
         credential = x402_echo(native_credential(req, validBefore=str(int(time.time()) + 7200)))
         with pytest.raises(VerificationFailedError, match="valid for too long"):
-            await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(credential, req)
         longer = server_method(max_validity_seconds=86_400)
-        await longer.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        await charge_intent(longer).validate(credential, req)
         with pytest.raises(ValueError, match="max_validity_seconds"):
             server_method(max_validity_seconds=10)
 
@@ -419,24 +447,24 @@ class TestValidate:
             expires=expires,
         )
         credential = Credential(challenge=echo, payload=signed.payload, source=signed.source)
-        await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+        await charge_intent(method).validate(credential, req)
         # Without a challenge expiry the one-hour cap still applies.
         with pytest.raises(VerificationFailedError, match="valid for too long"):
-            await method.intents["charge"].validate(signed, req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(signed, req)
 
     async def test_rejects_values_too_long_to_parse(self) -> None:
         method = server_method()
         req = request(method)
         credential = native_credential(req, value="9" * 5000, signature="0x" + "00" * 65)
         with pytest.raises(InvalidPayloadError, match="value is malformed"):
-            await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(credential, req)
 
     async def test_rejects_out_of_range_values(self) -> None:
         method = server_method()
         req = request(method)
         credential = native_credential(req, validBefore=str(2**256), signature="0x" + "00" * 65)
         with pytest.raises(InvalidPayloadError, match="out of range"):
-            await method.intents["charge"].validate(credential, req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(credential, req)
 
     async def test_rejects_requests_without_authorization_credentials(self) -> None:
         method = server_method()
@@ -444,14 +472,14 @@ class TestValidate:
         credential = native_credential(req)
         stripped = {**req, "methodDetails": {"chainId": 84532}}
         with pytest.raises(VerificationFailedError, match="not supported"):
-            await method.intents["charge"].validate(credential, stripped)  # type: ignore[union-attr]
+            await charge_intent(method).validate(credential, stripped)
         with pytest.raises(VerificationFailedError, match="splits"):
-            await method.intents["charge"].validate(  # type: ignore[union-attr]
+            await charge_intent(method).validate(
                 credential,
                 {**req, "methodDetails": {**req["methodDetails"], "splits": [{"amount": "1"}]}},
             )
         with pytest.raises(VerificationFailedError, match="chainId"):
-            await method.intents["charge"].validate(credential, {**req, "methodDetails": {}})  # type: ignore[union-attr]
+            await charge_intent(method).validate(credential, {**req, "methodDetails": {}})
 
     async def test_facilitator_rejection(self) -> None:
         facilitator = FakeFacilitator(
@@ -460,7 +488,7 @@ class TestValidate:
         method = server_method(facilitator)
         req = request(method)
         with pytest.raises(VerificationFailedError, match="insufficient_funds"):
-            await method.intents["charge"].validate(native_credential(req), req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(native_credential(req), req)
 
     async def test_facilitator_message_wins_over_reason(self) -> None:
         facilitator = FakeFacilitator(
@@ -469,13 +497,13 @@ class TestValidate:
         method = server_method(facilitator)
         req = request(method)
         with pytest.raises(VerificationFailedError, match="human message"):
-            await method.intents["charge"].validate(native_credential(req), req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(native_credential(req), req)
 
     async def test_facilitator_outage_is_an_internal_error(self) -> None:
         method = server_method(FakeFacilitator(verify=FacilitatorError("down")))
         req = request(method)
         with pytest.raises(InternalPaymentError):
-            await method.intents["charge"].validate(native_credential(req), req)  # type: ignore[union-attr]
+            await charge_intent(method).validate(native_credential(req), req)
 
     async def test_custom_settle_skips_the_facilitator(self) -> None:
         facilitator = FakeFacilitator()
@@ -486,7 +514,7 @@ class TestValidate:
             settle=lambda authorization: "0x1",
         )
         req = request(method)
-        await method.intents["charge"].validate(native_credential(req), req)  # type: ignore[union-attr]
+        await charge_intent(method).validate(native_credential(req), req)
         assert facilitator.verified == []
 
 
@@ -495,7 +523,7 @@ class TestBroadcast:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
         req = request(method)
-        receipt = await method.intents["charge"].broadcast(native_credential(req), req)  # type: ignore[union-attr]
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
         assert receipt.reference == "0x" + "ab" * 32
         assert receipt.method == "evm"
         assert receipt.payer == PAYER.address
@@ -520,7 +548,7 @@ class TestBroadcast:
             settle=settle_async if is_async else settle,
         )
         req = request(method)
-        receipt = await method.intents["charge"].broadcast(native_credential(req), req)  # type: ignore[union-attr]
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
         assert receipt.reference == "0xhook"
         [authorization] = seen
         assert authorization.source == to_source(address=PAYER.address, chain_id=84532)
@@ -531,7 +559,7 @@ class TestBroadcast:
         method = evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=lambda a: "")
         req = request(method)
         with pytest.raises(InternalPaymentError):
-            await method.intents["charge"].broadcast(native_credential(req), req)  # type: ignore[union-attr]
+            await charge_intent(method).broadcast(native_credential(req), req)
 
     async def test_failed_settlement_releases_the_claim(self) -> None:
         store = MemoryStore()
@@ -544,12 +572,12 @@ class TestBroadcast:
             }
         )
         method = server_method(facilitator)
-        intent = method.intents["charge"]
-        intent._store = store  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = store
         req = request(method)
         credential = native_credential(req)
         with pytest.raises(VerificationFailedError, match="nonce used"):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
         assert store._data == {}
 
         facilitator.settle_response = {
@@ -557,21 +585,21 @@ class TestBroadcast:
             "transaction": "0xdone",
             "network": "eip155:84532",
         }
-        receipt = await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        receipt = await intent.broadcast(credential, req)
         assert receipt.reference == "0xdone"
         assert list(store._data.values()) == ["0xdone"]
 
     async def test_unknown_settlement_outcome_keeps_the_claim(self) -> None:
         store = MemoryStore()
         method = server_method(FakeFacilitator(settle=FacilitatorError("timeout")))
-        intent = method.intents["charge"]
-        intent._store = store  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = store
         req = request(method)
         credential = native_credential(req)
         with pytest.raises(InternalPaymentError):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
         with pytest.raises(CredentialReplayedError):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
 
     async def test_pending_settlement_keeps_the_claim(self) -> None:
         store = MemoryStore()
@@ -585,41 +613,41 @@ class TestBroadcast:
                 }
             )
         )
-        intent = method.intents["charge"]
-        intent._store = store  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = store
         req = request(method)
         credential = native_credential(req)
         with pytest.raises(InternalPaymentError):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
         assert list(store._data.values()) == ["pending"]
         with pytest.raises(CredentialReplayedError):
-            await intent.validate(credential, req)  # type: ignore[union-attr]
+            await intent.validate(credential, req)
 
     async def test_validate_reports_claimed_authorizations_as_replays(self) -> None:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
-        intent = method.intents["charge"]
-        intent._store = MemoryStore()  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = MemoryStore()
         req = request(method)
         credential = native_credential(req)
-        await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        await intent.broadcast(credential, req)
         facilitator.verified.clear()
         with pytest.raises(CredentialReplayedError):
-            await intent.validate(credential, req)  # type: ignore[union-attr]
+            await intent.validate(credential, req)
         # Reported before asking the facilitator.
         assert facilitator.verified == []
 
     async def test_claims_without_a_configured_store(self) -> None:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
-        intent = method.intents["charge"]
+        intent = charge_intent(method)
         req = request(method)
         credential = native_credential(req)
-        await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        await intent.broadcast(credential, req)
         with pytest.raises(CredentialReplayedError):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
         with pytest.raises(CredentialReplayedError):
-            await intent.validate(credential, req)  # type: ignore[union-attr]
+            await intent.validate(credential, req)
         assert len(facilitator.settled) == 1
 
     async def test_fallback_claims_expire_with_their_authorization(self) -> None:
@@ -646,11 +674,11 @@ class TestBroadcast:
             assert await cache.put_if_absent(key, "pending")
             cache.claim_until(key, now + 300)
         method = server_method()
-        intent = method.intents["charge"]
-        intent._store = cache  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = cache
         req = request(method)
         with pytest.raises(InternalPaymentError):
-            await intent.broadcast(native_credential(req), req)  # type: ignore[union-attr]
+            await intent.broadcast(native_credential(req), req)
         # Live claims are kept and still block duplicates.
         assert not await cache.put_if_absent("a", "pending")
         assert not await cache.put_if_absent("b", "pending")
@@ -670,13 +698,13 @@ class TestBroadcast:
     async def test_claims_each_authorization_once(self) -> None:
         facilitator = FakeFacilitator()
         method = server_method(facilitator)
-        intent = method.intents["charge"]
-        intent._store = MemoryStore()  # type: ignore[union-attr]
+        intent = charge_intent(method)
+        intent._store = MemoryStore()
         req = request(method)
         credential = native_credential(req)
-        await intent.broadcast(credential, req)  # type: ignore[union-attr]
+        await intent.broadcast(credential, req)
         with pytest.raises(CredentialReplayedError):
-            await intent.broadcast(credential, req)  # type: ignore[union-attr]
+            await intent.broadcast(credential, req)
         assert len(facilitator.settled) == 1
 
     async def test_success_without_a_transaction_is_an_internal_error(self) -> None:
@@ -685,17 +713,17 @@ class TestBroadcast:
         )
         req = request(method)
         with pytest.raises(InternalPaymentError):
-            await method.intents["charge"].broadcast(native_credential(req), req)  # type: ignore[union-attr]
+            await charge_intent(method).broadcast(native_credential(req), req)
 
 
 class TestX402Conversion:
     def payment(self, body: dict[str, Any]) -> PaymentPayload:
-        intent = server_method().intents["charge"]
+        intent = charge_intent(server_method())
         assert isinstance(intent, ChargeIntent)
         return {"x402Version": 2, "accepted": intent.x402_requirements(request()), "payload": body}
 
     def test_converts_eip3009_payloads(self) -> None:
-        intent = server_method().intents["charge"]
+        intent = charge_intent(server_method())
         assert isinstance(intent, ChargeIntent)
         authorization = {
             "from": PAYER.address,
@@ -713,7 +741,7 @@ class TestX402Conversion:
         assert source == to_source(address=PAYER.address, chain_id=84532)
 
     def test_rejects_permit2_payloads(self) -> None:
-        intent = server_method().intents["charge"]
+        intent = charge_intent(server_method())
         assert isinstance(intent, ChargeIntent)
         with pytest.raises(VerificationFailedError, match="EIP-3009"):
             intent.x402_credential_payload(
@@ -721,7 +749,7 @@ class TestX402Conversion:
             )
 
     def test_rejects_malformed_eip3009_payloads(self) -> None:
-        intent = server_method().intents["charge"]
+        intent = charge_intent(server_method())
         assert isinstance(intent, ChargeIntent)
         with pytest.raises(InvalidPayloadError):
             intent.x402_credential_payload(
@@ -742,10 +770,14 @@ class TestClient:
             expires=expires,
         )
 
+    def test_requires_an_account(self) -> None:
+        with pytest.raises(ValueError, match="No account"):
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=None)  # type: ignore[arg-type]
+
     async def test_signs_a_credential_the_server_accepts(self) -> None:
         challenge = self.challenge()
-        credential = await evm(currency=BASE_SEPOLIA_USDC, account=PAYER).create_credential(
-            challenge
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), challenge
         )
         assert credential.payload["nonce"] == challenge_hash(challenge.id, REALM)
         assert credential.payload["validBefore"] == str(
@@ -753,13 +785,13 @@ class TestClient:
         )
         assert credential.source == to_source(address=PAYER.address, chain_id=84532)
         method = server_method()
-        validation = await method.intents["charge"].validate(credential, challenge.request)  # type: ignore[union-attr]
+        validation = await charge_intent(method).validate(credential, challenge.request)
         assert validation.payer == PAYER.address
 
     async def test_defaults_validity_without_expires(self) -> None:
         challenge = Challenge(id="c", method="evm", intent="charge", request=request(), realm=REALM)
-        credential = await evm(currency=BASE_SEPOLIA_USDC, account=PAYER).create_credential(
-            challenge
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), challenge
         )
         assert int(credential.payload["validBefore"]) >= int(time.time()) + 290
 
@@ -784,17 +816,22 @@ class TestClient:
         ],
     )
     async def test_refuses_challenges_it_cannot_pay(self, overrides: dict[str, Any]) -> None:
-        method = evm(currency=BASE_SEPOLIA_USDC, account=PAYER, max_amount="0.02")
+        method = evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER, max_amount="0.02")
         challenge = self.challenge(**overrides)
+        assert method.can_handle_challenge is not None
         assert not method.can_handle_challenge(challenge)
         with pytest.raises(ValueError):
-            await method.create_credential(challenge)
-
-    async def test_requires_an_account(self) -> None:
-        with pytest.raises(ValueError, match="No account"):
-            await server_method().create_credential(self.challenge())
+            await sign(method, challenge)
 
     def test_client_methods_match_evm_charge(self) -> None:
-        method = evm(currency=BASE_SEPOLIA_USDC, account=PAYER)
-        assert list(method.intents) == ["charge"]
+        method = evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER)
+        assert method.key == "evm/charge"
+        assert method.can_handle_challenge is not None
         assert method.can_handle_challenge(self.challenge())
+
+
+def test_evm_shorthand_creates_either_side() -> None:
+    assert isinstance(
+        evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=lambda a: "0x1"), ServerMethod
+    )
+    assert isinstance(evm(currency=BASE_SEPOLIA_USDC, account=PAYER), ClientMethod)

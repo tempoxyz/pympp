@@ -5,27 +5,24 @@ Protocol (MCP) per draft-payment-transport-mcp-00.
 
 ## Framework-Agnostic Usage
 
-For any MCP server, use verify_or_challenge() directly:
+Gate tool calls with a route handler of a server ``Mpp``. For any MCP server,
+use verify_or_challenge() directly:
 
-    from mpp.extensions.mcp import (
-        verify_or_challenge,
-        create_challenge,
-        MCPChallenge,
-        PaymentRequiredError,
-    )
+    from mpp.extensions.mcp import PaymentRequiredError, verify_or_challenge
+    from mpp.server import Mpp
+
+    mpp = Mpp(methods=tempo.charge(recipient="0x..."))
 
     async def handle_tool_call(params: dict):
         result = await verify_or_challenge(
+            mpp.charge(amount="0.01"),
             tool="expensive_tool",
             meta=params.get("_meta"),
-            intent=intent,
-            request={"amount": "1000", ...},
-            realm="api.example.com",
         )
 
-        if isinstance(result, MCPChallenge):
+        if isinstance(result, list):
             # Return -32042 Payment Required error
-            error = PaymentRequiredError(challenges=[result])
+            error = PaymentRequiredError(challenges=result)
             return {"error": error.to_jsonrpc_error()}
 
         credential, receipt = result
@@ -46,16 +43,11 @@ For FastMCP-style frameworks, use the @pay decorator:
 
     mcp = FastMCP(
         "paid-api",
-        capabilities={"experimental": payment_capabilities(["tempo"], ["charge"])},
+        capabilities={"experimental": payment_capabilities(mpp)},
     )
 
     @mcp.tool()
-    @pay(
-        tool="expensive_tool",
-        intent=intent,
-        request={"amount": "1000", ...},
-        realm="api.example.com",
-    )
+    @pay(mpp.charge(amount="0.01"), tool="expensive_tool")
     async def expensive_tool(query: str, *, credential, receipt) -> str:
         return f"Result for {query}, paid by {credential.source}"
 """
@@ -87,7 +79,7 @@ _LAZY_EXPORTS = {
         "PaymentVerificationError",
     ),
     "mpp.extensions.mcp.types": ("MCPChallenge", "MCPCredential", "MCPReceipt"),
-    "mpp.extensions.mcp.verify": ("create_challenge", "verify_or_challenge"),
+    "mpp.extensions.mcp.verify": ("verify_or_challenge",),
 }
 
 

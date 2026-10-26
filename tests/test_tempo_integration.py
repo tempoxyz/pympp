@@ -14,9 +14,10 @@ import pytest
 
 from mpp import Challenge
 from mpp.errors import InternalPaymentError, VerificationError
-from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.methods.tempo import ChargeIntent, TempoAccount
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._rpc import get_tx_params
+from mpp.methods.tempo.client import _tempo_method
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
 from tests import INTEGRATION, TEST_REALM, internal_cause, make_credential
 from tests.conftest import _fund_account
@@ -109,11 +110,10 @@ class TestChargeIntegration:
     async def test_create_credential_builds_real_tx(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="integ-create-cred",
@@ -136,11 +136,10 @@ class TestChargeIntegration:
     async def test_verify_transaction_credential(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         expires = _future_expires()
         request_dict = {
@@ -295,11 +294,10 @@ class TestChargeIntegration:
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         premium_amount = "900000000"
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         expires = _future_expires()
         request_dict = {
@@ -335,19 +333,12 @@ class TestChargeIntegration:
         fee_payer_account = TempoAccount.from_key("0x" + __import__("os").urandom(32).hex())
         _fund_account(rpc_url, fee_payer_account.address, currency)
 
-        intent = ChargeIntent(rpc_url=rpc_url)
-        tempo(
-            chain_id=chain_id,
-            rpc_url=rpc_url,
-            fee_payer=fee_payer_account,
-            intents={"charge": intent},
-        )
+        intent = ChargeIntent(rpc_url=rpc_url, fee_payer=fee_payer_account)
 
-        client_method = tempo(
+        client_method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
 
         expires = _future_expires()
@@ -402,11 +393,10 @@ class TestChargeIntegration:
         """Legacy primary memos must not override the client's challenge binding."""
         memo = "0x" + "ab" * 32
 
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         expires = _future_expires()
         request_dict = {
@@ -480,11 +470,10 @@ class TestChargeIntegration:
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id
     ):
         """Auto-generated attribution memos should still verify without a server memo."""
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         expires = _future_expires()
         # Server request has NO memo — client will default one via encode_attribution
@@ -638,11 +627,10 @@ class TestChargeIntegration:
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
         """externalId in request should be parseable and not break verification."""
-        method = tempo(
+        method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         expires = _future_expires()
         request_dict = {
@@ -677,22 +665,15 @@ class TestChargeIntegration:
         fee_payer_account = TempoAccount.from_key("0x" + __import__("os").urandom(32).hex())
         _fund_account(rpc_url, fee_payer_account.address, currency)
 
-        intent = ChargeIntent(rpc_url=rpc_url)
-        tempo(
-            chain_id=chain_id,
-            rpc_url=rpc_url,
-            fee_payer=fee_payer_account,
-            intents={"charge": intent},
-        )
+        intent = ChargeIntent(rpc_url=rpc_url, fee_payer=fee_payer_account)
 
         wrong_recipient = "0x0000000000000000000000000000000000000001"
         expires = _future_expires()
 
-        client_method = tempo(
+        client_method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="integ-fee-payer-wrong",

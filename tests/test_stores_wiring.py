@@ -1,124 +1,99 @@
-"""Tests for Mpp store wiring."""
+"""Tests for Tempo charge store wiring."""
 
 from __future__ import annotations
-
-from types import MappingProxyType
 
 import pytest
 
 from mpp import Challenge, Credential
-from mpp.methods.tempo import tempo
-from mpp.methods.tempo.intents import ChargeIntent
+from mpp.errors import CredentialReplayedError
+from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp
 from mpp.store import MemoryStore
+from tests import challenge, http_request
 
 
 class TestMppStoreWiring:
-    def test_store_wired_into_charge_intent(self) -> None:
-        """Mpp.create(store=...) should inject the store into ChargeIntent."""
+    @pytest.mark.asyncio
+    async def test_store_wired_into_charge_intent(self) -> None:
+        """tempo_server.charge(store=...) should use the store for replay protection."""
         store = MemoryStore()
-        intent = ChargeIntent()
-        assert intent._store is None
+        tx_hash = "0x" + "ab" * 32
+        await store.put(f"mpp:charge:{tx_hash}", tx_hash)
 
-        Mpp.create(
-            method=tempo(
+        srv = Mpp(
+            methods=tempo_server.charge(
                 currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                intents={"charge": intent},
-            ),
-            realm="test.com",
-            secret_key="test-secret",
-            store=store,
-        )
-
-        assert intent._store is store
-
-    def test_store_wired_into_read_only_intent_mapping(self) -> None:
-        """Mpp should wire stores into any mapping accepted by Method."""
-        store = MemoryStore()
-        intent = ChargeIntent()
-
-        class ReadOnlyMethod:
-            name = "tempo"
-            intents = MappingProxyType({"charge": intent})
-
-            async def create_credential(self, challenge: Challenge) -> Credential:
-                raise NotImplementedError
-
-        Mpp.create(
-            method=ReadOnlyMethod(),
-            realm="test.com",
-            secret_key="test-secret",
-            store=store,
-        )
-
-        assert intent._store is store
-
-    def test_store_not_wired_when_none(self) -> None:
-        """Mpp.create() without store should leave intent._store as None."""
-        intent = ChargeIntent()
-        Mpp.create(
-            method=tempo(
-                currency="0x20c0000000000000000000000000000000000000",
-                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                intents={"charge": intent},
+                store=store,
             ),
             realm="test.com",
             secret_key="test-secret",
         )
-        assert intent._store is None
-
-    def test_store_does_not_overwrite_existing_intent_store(self) -> None:
-        """If an intent already has a store, Mpp should not overwrite it."""
-        existing_store = MemoryStore()
-        new_store = MemoryStore()
-        intent = ChargeIntent(store=existing_store)
-
-        Mpp.create(
-            method=tempo(
-                currency="0x20c0000000000000000000000000000000000000",
-                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                intents={"charge": intent},
-            ),
-            realm="test.com",
-            secret_key="test-secret",
-            store=new_store,
+        issued = challenge(await srv.charge(amount="0.50")(http_request()))
+        credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
         )
 
-        assert intent._store is existing_store
-
-    def test_constructor_also_wires_store(self) -> None:
-        """Direct Mpp() constructor should also wire the store."""
-        store = MemoryStore()
-        intent = ChargeIntent()
-        Mpp(
-            method=tempo(
-                currency="0x20c0000000000000000000000000000000000000",
-                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                intents={"charge": intent},
-            ),
-            realm="test.com",
-            secret_key="test-secret",
-            store=store,
-        )
-        assert intent._store is store
+        with pytest.raises(CredentialReplayedError):
+            await srv.validate_credential(credential)
 
     @pytest.mark.asyncio
     async def test_charge_with_store_returns_challenge(self) -> None:
         """End-to-end: Mpp with store still returns challenges correctly."""
         store = MemoryStore()
-        srv = Mpp.create(
-            method=tempo(
+        srv = Mpp(
+            methods=tempo_server.charge(
                 currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                intents={"charge": ChargeIntent()},
+                store=store,
             ),
             realm="test.com",
             secret_key="test-secret",
-            store=store,
         )
-        result = await srv.charge(authorization=None, amount="0.50")
-        assert isinstance(result, Challenge)
+        result = await srv.charge(amount="0.50")(http_request())
+        assert isinstance(challenge(result), Challenge)
+
+
+class TestMppSharedStore:
+    def _methods(self, **kwargs):
+        return tempo_server.charge(
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_mpp_store_used_by_methods_without_one(self) -> None:
+        """Mpp(store=...) protects methods configured without their own store."""
+        store = MemoryStore()
+        tx_hash = "0x" + "cd" * 32
+        await store.put(f"mpp:charge:{tx_hash}", tx_hash)
+        srv = Mpp(methods=self._methods(), realm="test.com", secret_key="test-secret", store=store)
+        issued = challenge(await srv.charge(amount="0.50")(http_request()))
+        credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        )
+        with pytest.raises(CredentialReplayedError):
+            await srv.validate_credential(credential)
+
+    @pytest.mark.asyncio
+    async def test_method_store_takes_precedence(self) -> None:
+        """A method's own store is not replaced by Mpp(store=...)."""
+        own, shared = MemoryStore(), MemoryStore()
+        tx_hash = "0x" + "ef" * 32
+        await own.put(f"mpp:charge:{tx_hash}", tx_hash)
+        srv = Mpp(
+            methods=self._methods(store=own),
+            realm="test.com",
+            secret_key="test-secret",
+            store=shared,
+        )
+        issued = challenge(await srv.charge(amount="0.50")(http_request()))
+        credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        )
+        with pytest.raises(CredentialReplayedError):
+            await srv.validate_credential(credential)
 
 
 class TestStoreProtocolConformance:

@@ -10,10 +10,11 @@ from mpp.errors import CredentialReplayedError
 from mpp.methods.stripe import MachinePayments, create
 from mpp.methods.stripe import _defaults as stripe_defaults
 from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
+from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID, USDC
-from mpp.server import Mpp
+from mpp.server import Mpp, ServerMethod, pay
 from mpp.store import MemoryStore
-from tests import MockRequest
+from tests import MockRequest, challenge, http_request
 
 TEMPO_ADDRESS = "0x" + "1" * 40
 
@@ -53,15 +54,21 @@ def make_payments(**overrides: Any) -> tuple[FakeStripeClient, MachinePayments]:
     )
 
 
-def test_defaults_are_spt_only_and_include_configured_metadata() -> None:
+async def wire(method: ServerMethod, amount: str = "0.50") -> dict[str, Any]:
+    """Return the wire request of the challenge ``method`` issues for ``amount``."""
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    return challenge(await server.charge(amount=amount)(http_request())).request
+
+
+async def test_defaults_are_spt_only_and_include_configured_metadata() -> None:
     _, payments = make_payments(metadata={"order": "123"})
 
     methods = payments.default_methods()
     spt = payments.spt.charge()
-    request = spt.transform_request({"amount": "50", "currency": "usd"}, None)
+    request = await wire(spt)
 
     assert [method.name for method in methods] == ["stripe"]
-    assert methods[0].recipient == "bn_test"
+    assert (await wire(methods[0]))["recipient"] == "bn_test"
     assert request["methodDetails"] == {
         "metadata": {"order": "123"},
         "networkId": "bn_test",
@@ -69,21 +76,24 @@ def test_defaults_are_spt_only_and_include_configured_metadata() -> None:
     }
 
 
-def test_static_tempo_is_preferred_and_uses_network_defaults() -> None:
+async def test_static_tempo_is_preferred_and_uses_network_defaults() -> None:
     _, test_payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
     _, live_payments = make_payments(livemode=True, deposit_addresses={"tempo": TEMPO_ADDRESS})
 
     methods = test_payments.default_methods()
-    test_tempo = test_payments.tempo.charge()
-    live_tempo = live_payments.tempo.charge()
+    test_tempo = await wire(test_payments.tempo.charge())
+    live_tempo = await wire(live_payments.tempo.charge())
 
     assert [method.name for method in methods] == ["tempo", "stripe"]
-    assert (test_tempo.recipient, test_tempo.chain_id) == (TEMPO_ADDRESS, TESTNET_CHAIN_ID)
-    assert test_tempo.currency == PATH_USD
-    assert (live_tempo.chain_id, live_tempo.currency) == (CHAIN_ID, USDC)
+    assert (test_tempo["recipient"], test_tempo["methodDetails"]["chainId"]) == (
+        TEMPO_ADDRESS,
+        TESTNET_CHAIN_ID,
+    )
+    assert test_tempo["currency"] == PATH_USD
+    assert (live_tempo["methodDetails"]["chainId"], live_tempo["currency"]) == (CHAIN_ID, USDC)
     # Stripe's Tempo rail stays on one currency rather than OUSD-first defaults.
-    assert test_tempo.currencies == (PATH_USD,)
-    assert live_tempo.currencies == (USDC,)
+    assert test_payments.tempo.charge().defaults == {"currency": PATH_USD}
+    assert live_payments.tempo.charge().defaults == {"currency": USDC}
 
 
 def test_methods_filter_amounts_below_stripe_minima() -> None:
@@ -101,17 +111,17 @@ def test_methods_filter_amounts_below_stripe_minima() -> None:
 @pytest.mark.asyncio
 async def test_spt_only_defaults_enforce_minimum_through_implicit_handlers() -> None:
     _, payments = make_payments()
-    server = Mpp.create(
+    server = Mpp(
         methods=payments.default_methods(),
         realm="api.example.com",
         secret_key="secret",
     )
 
     with pytest.raises(ValueError, match="No payment offers"):
-        await server.charge(None, "0.49")
-    assert isinstance(await server.charge(None, "0.50"), Challenge)
+        await server.charge(amount="0.49")(http_request())
+    assert isinstance(challenge(await server.charge(amount="0.50")(http_request())), Challenge)
 
-    @server.pay(amount="0.49")
+    @pay(server.charge(amount="0.49"))
     async def endpoint(
         _request: MockRequest,
         _credential: Credential,
@@ -135,21 +145,12 @@ def test_configuration_boundary_errors() -> None:
 @pytest.mark.asyncio
 async def test_spt_uses_pinned_explicit_request_shape() -> None:
     client, payments = make_payments(metadata={"order": "123"})
-    method = payments.spt.charge()
-    request = method.transform_request(
-        {"amount": "100", "currency": "usd", "recipient": "bn_test"}, None
-    )
-    challenge = Challenge.create(
-        secret_key="secret",
-        realm="api.example.com",
-        method="stripe",
-        intent="charge",
-        request=request,
-    )
+    server = Mpp(methods=payments.spt.charge(), realm="api.example.com", secret_key="secret")
+    handler = server.charge(amount="1.00", recipient="bn_test")
+    issued = challenge(await handler(http_request()))
 
-    await cast(Any, method.intents["charge"]).verify(
-        Credential(challenge=challenge.to_echo(), payload={"spt": "spt_test"}), request
-    )
+    credential = Credential(challenge=issued.to_echo(), payload={"spt": "spt_test"})
+    await handler(http_request(credential.to_authorization()))
 
     params, options = client.payment_intents.calls[0]
     assert params["shared_payment_granted_token"] == "spt_test"
@@ -158,20 +159,31 @@ async def test_spt_uses_pinned_explicit_request_shape() -> None:
     assert params["metadata"]["order"] == "123"
     assert options == {
         "headers": {"X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE},
-        "idempotency_key": f"mpp_{challenge.id}_spt_test",
+        "idempotency_key": f"mpp_{issued.id}_spt_test",
         "max_network_retries": 0,
         "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
     }
 
 
 @pytest.mark.asyncio
-async def test_tempo_charge_uses_factory_store_for_replay_protection() -> None:
+async def test_tempo_charge_uses_factory_store_for_replay_protection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     store = MemoryStore()
     _, first = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
     _, second = make_payments(store=store, deposit_addresses={"tempo": TEMPO_ADDRESS})
 
-    first_intent = cast(TempoChargeIntent, first.tempo.charge().intents["charge"])
-    second_intent = cast(TempoChargeIntent, second.tempo.charge().intents["charge"])
+    intents: list[TempoChargeIntent] = []
+
+    class RecordingChargeIntent(TempoChargeIntent):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            intents.append(self)
+
+    monkeypatch.setattr(tempo_server, "ChargeIntent", RecordingChargeIntent)
+    first.tempo.charge()
+    second.tempo.charge()
+    first_intent, second_intent = intents
 
     assert first_intent._store is store
     assert second_intent._store is store

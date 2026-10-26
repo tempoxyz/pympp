@@ -1,23 +1,20 @@
-"""Server-side payment verification.
+"""Server-side payment engine: route handlers and framework-neutral HTTP types.
 
 Example:
-    from mpp.server import verify_or_challenge, Intent
-    from mpp.methods.tempo import ChargeIntent
+    from mpp.server import Mpp, Request, Response
+    from mpp.methods.tempo import server as tempo
 
-    result = await verify_or_challenge(
-        authorization=request.headers.get("Authorization"),
-        intent=ChargeIntent(client),
-        request={"amount": "1000", "currency": "0x...", ...},
-        realm="api.example.com",
-    )
+    mpp = Mpp(methods=tempo.charge(recipient="0x..."))
 
-    if isinstance(result, Challenge):
-        return Response(status=402, headers={"WWW-Authenticate": ...})
-    else:
-        return Response({"data": "..."}, headers={"Payment-Receipt": ...})
+    async def handle(request: Request) -> Response:
+        result = await mpp.charge(amount="0.50")(request)
+        if result.status != 200:
+            return result.challenge  # 402 with WWW-Authenticate
+        return result.with_receipt(Response.json({"data": "paid content"}))
 """
 
 from mpp import _expires as Expires
+from mpp._validation import Validation
 from mpp.errors import (
     BadRequestError,
     CredentialReplayedError,
@@ -31,6 +28,7 @@ from mpp.errors import (
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
     PaymentRequiredError,
+    VerificationError,
     VerificationFailedError,
 )
 from mpp.events import (
@@ -42,24 +40,20 @@ from mpp.events import (
     PaymentEvent,
     PaymentEventName,
 )
-from mpp.server.compose import (
-    ComposedChallenges,
-    ComposedHandler,
-    ComposedResult,
-    ComposeEntry,
-    ComposeOptions,
-    compose,
-)
+from mpp.methods import Method
+from mpp.server.compose import ComposedHandler, compose
 from mpp.server.decorator import pay
-from mpp.server.intent import (
-    Intent,
-    Validation,
-    VerifiableIntent,
-    VerificationError,
-    broadcast_credential,
-    intent,
-    validate_credential,
+from mpp.server.http import (
+    PaymentRequired,
+    PaymentResult,
+    PaymentVerified,
+    Request,
+    Response,
 )
-from mpp.server.method import Method, transform_request
-from mpp.server.mpp import Mpp
-from mpp.server.verify import verify_or_challenge
+from mpp.server.method import (
+    RequestContext,
+    ServerMethod,
+    ValidateContext,
+    VerifyContext,
+)
+from mpp.server.mpp import HandlerFactory, Mpp

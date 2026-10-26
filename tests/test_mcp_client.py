@@ -7,8 +7,9 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
-from mpp import Challenge, Credential
+from mpp import Challenge, ChallengeEcho, Credential
 from mpp import PaymentOutcomeUnknownError as CoreOutcomeUnknownError
 from mpp.extensions.mcp import (
     META_CREDENTIAL,
@@ -19,6 +20,8 @@ from mpp.extensions.mcp import (
 )
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
+from mpp.methods import Method
+from mpp.runtime import ClientMethod, CredentialParams
 
 
 def test_outcome_unknown_error_is_shared() -> None:
@@ -65,36 +68,47 @@ class FakeCurrentMcpError(Exception):
         self.error = error
 
 
-@dataclass
-class FakeMethod:
-    """Fake payment method for testing."""
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
-    name: str = "tempo"
-    currency: str | None = None
-    _intents: dict[str, Any] | None = None
-    _credential_to_return: Credential | None = None
 
-    def __post_init__(self):
-        if self._intents is None:
-            self._intents = {"charge": True}
-        if self._credential_to_return is None:
-            from mpp import ChallengeEcho
+def _credential() -> Credential:
+    echo = ChallengeEcho(
+        id="test-id",
+        realm="test.example.com",
+        method="tempo",
+        intent="charge",
+        request="e30",
+    )
+    return Credential(
+        challenge=echo,
+        payload={"type": "transaction", "signature": "0xabc"},
+        source="did:pkh:eip155:42431:0x1234",
+    )
 
-            echo = ChallengeEcho(
-                id="test-id",
-                realm="test.example.com",
-                method="tempo",
-                intent="charge",
-                request="e30",
-            )
-            self._credential_to_return = Credential(
-                challenge=echo,
-                payload={"type": "transaction", "signature": "0xabc"},
-                source="did:pkh:eip155:42431:0x1234",
-            )
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        return self._credential_to_return  # type: ignore[return-value]
+def fake_method(
+    name: str = "tempo",
+    intent: str = "charge",
+    currency: str | None = None,
+    create_credential: Any = None,
+) -> ClientMethod:
+    """Fake client payment method, optionally limited to one currency."""
+
+    async def create(params: CredentialParams) -> str:
+        return _credential().to_authorization()
+
+    def can_handle_challenge(challenge: Challenge) -> bool:
+        offered = challenge.request.get("currency")
+        return currency is None or (
+            isinstance(offered, str) and offered.lower() == currency.lower()
+        )
+
+    return ClientMethod(
+        method=Method(name=name, intent=intent, request_model=_Model, payload_model=_Model),
+        create_credential=create_credential or create,
+        can_handle_challenge=can_handle_challenge,
+    )
 
 
 def _make_challenge_dict(
@@ -196,7 +210,7 @@ class TestMcpClientFreeTool:
         session = AsyncMock()
         session.call_tool = AsyncMock(return_value=FakeCallToolResult())
 
-        client = McpClient(session, methods=[FakeMethod()])
+        client = McpClient(session, methods=[fake_method()])
         result = await client.call_tool("echo", {"message": "hi"})
 
         assert isinstance(result, McpToolResult)
@@ -209,7 +223,7 @@ class TestMcpClientFreeTool:
         session = AsyncMock()
         session.call_tool = AsyncMock(return_value=FakeCallToolResult(meta=_make_receipt_meta()))
 
-        client = McpClient(session, methods=[FakeMethod()])
+        client = McpClient(session, methods=[fake_method()])
         result = await client.call_tool("tool", {})
 
         assert result.content[0]["text"] == "ok"
@@ -223,7 +237,7 @@ class TestMcpClientFreeTool:
         session = AsyncMock()
         session.list_tools = AsyncMock(return_value="tools")
 
-        client = McpClient(session, methods=[FakeMethod()])
+        client = McpClient(session, methods=[fake_method()])
 
         assert await client.list_tools() == "tools"
 
@@ -284,7 +298,7 @@ class TestMcpClientPaidTool:
 
             session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
             result = await client.call_tool("premium_tool", {"query": "test"})
 
             assert result.content[0]["text"] == "premium result"
@@ -344,7 +358,7 @@ class TestMcpClientPaidTool:
             )
             session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
             result = await client.call_tool("premium_tool", {"query": "test"})
 
             assert result.content[0]["text"] == "premium result"
@@ -384,7 +398,7 @@ class TestMcpClientPaidTool:
             )
             session.call_tool = AsyncMock(side_effect=payment_error)
 
-            client = McpClient(session, methods=[FakeMethod(name="tempo")])
+            client = McpClient(session, methods=[fake_method(name="tempo")])
 
             with pytest.raises(ValueError, match="No compatible payment method"):
                 await client.call_tool("tool", {})
@@ -416,7 +430,7 @@ class TestMcpClientPaidTool:
             other_error = FakeMcpError(-32601, message="Method not found")
             session.call_tool = AsyncMock(side_effect=other_error)
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
 
             with pytest.raises(FakeMcpError) as exc_info:
                 await client.call_tool("tool", {})
@@ -434,7 +448,7 @@ class TestMcpClientPaidTool:
         session = AsyncMock()
         session.call_tool = AsyncMock(return_value=FakeCallToolResult())
 
-        client = McpClient(session, methods=[FakeMethod()])
+        client = McpClient(session, methods=[fake_method()])
         await client.call_tool("tool", {}, timeout=60.0)
 
         _, kwargs = session.call_tool.call_args
@@ -446,7 +460,7 @@ class TestMcpClientPaidTool:
         session = AsyncMock()
         session.call_tool = AsyncMock(return_value=FakeCallToolResult())
 
-        client = McpClient(session, methods=[FakeMethod()])
+        client = McpClient(session, methods=[fake_method()])
         await client.call_tool("tool", {}, meta={"custom": "value"})
 
         _, kwargs = session.call_tool.call_args
@@ -477,7 +491,7 @@ class TestMcpClientPaidTool:
             retry_result = FakeCallToolResult(meta=_make_receipt_meta())
             session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
             await client.call_tool("tool", {}, meta={"trace_id": "abc"})
 
             retry_kwargs = session.call_tool.call_args_list[1].kwargs
@@ -514,7 +528,7 @@ class TestMcpClientPaidTool:
             )
             session.call_tool = AsyncMock(side_effect=payment_error)
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
 
             with pytest.raises(ValueError, match="Server returned malformed payment challenges"):
                 await client.call_tool("tool", {})
@@ -548,7 +562,7 @@ class TestMcpClientPaidTool:
             )
             session.call_tool = AsyncMock(side_effect=[payment_error, TimeoutError("timed out")])
 
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
 
             with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
                 await client.call_tool("premium_tool", {"query": "test"})
@@ -584,7 +598,7 @@ class TestMcpClientPaidTool:
                 await anyio.sleep_forever()
 
             session.call_tool = AsyncMock(side_effect=call_tool)
-            client = McpClient(session, methods=[FakeMethod()])
+            client = McpClient(session, methods=[fake_method()])
             with anyio.CancelScope() as scope:
                 with pytest.raises(
                     PaymentOutcomeUnknownError, match="Do not blindly retry"
@@ -604,7 +618,7 @@ class TestMcpClientMethodMatching:
     """Tests for challenge-to-method matching logic."""
 
     def test_match_by_method_and_intent(self) -> None:
-        method = FakeMethod(name="tempo", _intents={"charge": True})
+        method = fake_method(name="tempo")
         client = McpClient(AsyncMock(), methods=[method])
 
         challenge, matched = client._match_challenge([_make_challenge()])
@@ -613,8 +627,8 @@ class TestMcpClientMethodMatching:
 
     def test_match_prefers_client_order(self) -> None:
         """Methods are matched in client-preference order."""
-        stripe_method = FakeMethod(name="stripe", _intents={"charge": True})
-        tempo_method = FakeMethod(name="tempo", _intents={"charge": True})
+        stripe_method = fake_method(name="stripe")
+        tempo_method = fake_method(name="tempo")
 
         client = McpClient(AsyncMock(), methods=[stripe_method, tempo_method])
 
@@ -626,7 +640,7 @@ class TestMcpClientMethodMatching:
         assert matched is stripe_method
 
     def test_match_skips_currency_rejected_by_configured_method(self) -> None:
-        method = FakeMethod(currency="0xUsdc")
+        method = fake_method(currency="0xUsdc")
         client = McpClient(AsyncMock(), methods=[method])
         challenges = [
             _make_challenge(currency="0xMachineUsd"),
@@ -639,14 +653,14 @@ class TestMcpClientMethodMatching:
         assert matched is method
 
     def test_no_match_raises(self) -> None:
-        method = FakeMethod(name="tempo", _intents={"charge": True})
+        method = fake_method(name="tempo")
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
             client._match_challenge([_make_challenge(method="stripe")])
 
     def test_intent_mismatch(self) -> None:
-        method = FakeMethod(name="tempo", _intents={"session": True})
+        method = fake_method(name="tempo", intent="session")
         client = McpClient(AsyncMock(), methods=[method])
 
         with pytest.raises(ValueError, match="No compatible payment method"):
@@ -709,12 +723,12 @@ async def test_caller_payment_is_not_replaced() -> None:
     )
     session = AsyncMock()
     session.call_tool.side_effect = error
-    method = FakeMethod()
-    method.create_credential = AsyncMock()
+    create_credential = AsyncMock()
+    method = fake_method(create_credential=create_credential)
     client = McpClient(session, methods=[method])
     with pytest.raises(exceptions.McpError):
         await client.call_tool("paid", meta={META_CREDENTIAL: {"existing": True}})
-    method.create_credential.assert_not_called()
+    create_credential.assert_not_called()
     session.call_tool.assert_awaited_once()
 
 
@@ -724,7 +738,7 @@ def test_mcp_zero_amount_tempo_charge_requires_pinned_realm() -> None:
     raw = _make_challenge_dict()
     raw["request"]["amount"] = "00"
     challenge = MCPChallenge.from_dict(raw)
-    method = FakeMethod()
+    method = fake_method()
     unpinned = McpClient(AsyncMock(), methods=[method])
 
     with pytest.raises(ValueError, match="trusted_tempo_realms"):

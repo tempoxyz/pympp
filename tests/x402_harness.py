@@ -24,7 +24,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from mpp import Challenge, Credential
+from mpp.methods.evm import EvmAsset
+from mpp.methods.evm import client as evm_client
 from mpp.methods.evm._eip3009 import authorization_domain, recover_authorizer, sign_authorization
+from mpp.runtime import CredentialParams
 from mpp.x402 import encode_payment_signature, route_nonce
 
 MNEMONIC = "test test test test test test test test test test test junk"
@@ -151,6 +155,13 @@ class StubFacilitator:
                 Route("/settle", settle, methods=["POST"]),
             ]
         )
+
+
+async def sign_native(account: Any, challenge: Challenge, currency: EvmAsset) -> Credential:
+    """Sign a native ``evm/charge`` credential with a client ``evm`` method."""
+    method = evm_client.charge(currency=currency, account=account)
+    serialized = await method.create_credential(CredentialParams(challenge=challenge))
+    return Credential.from_authorization(serialized)
 
 
 async def wait_for(predicate: Callable[[], Awaitable[bool]], timeout: float = 10.0) -> None:

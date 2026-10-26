@@ -3,12 +3,14 @@
 import os
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
-from mpp import Challenge, Credential, Receipt
-from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp import Credential, Receipt
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import server as tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID
-from mpp.server import Mpp
+from mpp.server import Mpp, pay
+from mpp.server import Request as PaymentRequest
 
 app = FastAPI(
     title="Payment-Protected API",
@@ -24,13 +26,12 @@ DESTINATION = os.environ.get(
 fee_payer_key = os.environ.get("FEE_PAYER_KEY")
 fee_payer = TempoAccount.from_key(fee_payer_key) if fee_payer_key else None
 
-server = Mpp.create(
-    method=tempo(
+server = Mpp(
+    methods=tempo.charge(
         chain_id=TESTNET_CHAIN_ID,
         currency=PATH_USD,
         recipient=DESTINATION,
         fee_payer=fee_payer,
-        intents={"charge": ChargeIntent()},
     ),
 )
 
@@ -44,32 +45,29 @@ async def free_endpoint():
 @app.get("/paid")
 async def paid_endpoint(request: Request):
     """A paid endpoint that requires payment to access."""
-    result = await server.charge(
-        authorization=request.headers.get("Authorization"),
-        amount="0.001",
-        chain_id=TESTNET_CHAIN_ID,
-        fee_payer=fee_payer is not None,
+    handler = server.charge(amount="0.001", fee_payer=fee_payer is not None)
+    result = await handler(
+        PaymentRequest(request.method, str(request.url), headers=dict(request.headers))
     )
+    if result.status != 200:
+        challenge = result.challenge
+        return Response(challenge.body, challenge.status, headers=dict(challenge.headers))
 
-    if isinstance(result, Challenge):
-        return JSONResponse(
-            status_code=402,
-            content={"error": "Payment required"},
-            headers={"WWW-Authenticate": result.to_www_authenticate(server.realm)},
+    return result.with_receipt(
+        JSONResponse(
+            {
+                "message": "This is paid content!",
+                "payer": result.credential.source,
+                "tx": result.receipt.reference,
+            }
         )
-
-    credential, receipt = result
-    return {
-        "message": "This is paid content!",
-        "payer": credential.source,
-        "tx": receipt.reference,
-    }
+    )
 
 
 @app.get("/paid-decorator")
-@server.pay(amount="0.001", chain_id=TESTNET_CHAIN_ID)
+@pay(server.charge(amount="0.001"))
 async def paid_decorator_endpoint(request: Request, credential: Credential, receipt: Receipt):
-    """A paid endpoint using the server.pay() decorator."""
+    """A paid endpoint using the pay() decorator."""
     return {
         "message": "This is paid content!",
         "payer": credential.source,

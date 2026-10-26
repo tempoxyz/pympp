@@ -14,8 +14,8 @@ import sys
 
 import httpx
 
-from mpp.client import Client
-from mpp.methods.stripe import spt
+from mpp.client import Mpp
+from mpp.methods.stripe import client as stripe
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,14 +55,10 @@ async def run(args: argparse.Namespace) -> int:
             response.raise_for_status()
             return response.json()["spt"]
 
-    method = spt(
-        create_token=create_token,
-        payment_method="pm_card_visa",
-        intents={},
-    )
+    method = stripe.charge(create_token=create_token, payment_method="pm_card_visa")
 
-    async with Client(methods=[method]) as client:
-        response = await client.get(f"{server_url}/api/fortune")
+    async with Mpp(methods=[method]) as mpp:
+        response = await mpp.fetch(f"{server_url}/api/fortune")
 
         if response.status_code >= 400:
             print(f"Error {response.status_code}: {response.text}", file=sys.stderr)

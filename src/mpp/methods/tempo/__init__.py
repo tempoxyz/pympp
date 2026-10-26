@@ -1,28 +1,20 @@
-"""Tempo payment method for HTTP 402 authentication.
+"""Tempo payment method for HTTP 402 authentication: the charge intent.
 
 Example:
     # Client-side
-    from mpp.client import get
-    from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
+    from mpp.client import Mpp
+    from mpp.methods.tempo import TempoAccount
+    from mpp.methods.tempo import client as tempo
 
     account = TempoAccount.from_key("0x...")
-    response = await get(
-        "https://api.example.com/resource",
-        methods=[tempo(
-            account=account,
-            intents={"charge": ChargeIntent()},
-        )],
-    )
+    async with Mpp(methods=[tempo.charge(account=account)]) as client:
+        response = await client.get("https://api.example.com/resource")
 
     # Server-side
     from mpp.server import Mpp
-    from mpp.methods.tempo import tempo, ChargeIntent
+    from mpp.methods.tempo import server as tempo
 
-    server = Mpp.create(
-        method=tempo(
-            intents={"charge": ChargeIntent()},
-        ),
-    )
+    mpp = Mpp(methods=tempo.charge(recipient="0x..."))
 """
 
 from typing import Any
@@ -47,7 +39,7 @@ _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install
 
 _LAZY_EXPORTS = {
     "mpp.methods.tempo.account": ("TempoAccount",),
-    "mpp.methods.tempo.client": ("TempoMethod", "TransactionError", "tempo"),
+    "mpp.methods.tempo.client": ("TempoMethod", "TransactionError"),
     "mpp.methods.tempo.intents": (
         "ChargeIntent",
         "Transfer",
@@ -56,7 +48,7 @@ _LAZY_EXPORTS = {
         "get_transfers",
     ),
     "mpp.methods.tempo.relay": ("Relay", "RelayErrorCode"),
-    "mpp.methods.tempo.schemas": ("Split",),
+    "mpp.methods.tempo.schemas": ("ChargeInput", "ChargePayload", "Split"),
 }
 
 

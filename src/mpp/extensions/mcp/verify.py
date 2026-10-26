@@ -4,23 +4,21 @@ This module provides framework-agnostic functions for MCP payment handling.
 Use these with any MCP server implementation (FastMCP, mcp-python, custom, etc.).
 
 Example with raw JSON-RPC handling:
-    from mpp.extensions.mcp import verify_or_challenge, MCPChallenge
+    from mpp.extensions.mcp import PaymentRequiredError, verify_or_challenge
+    from mpp.server import Mpp
+
+    mpp = Mpp(methods=tempo.charge(recipient="0x..."))
 
     async def handle_tool_call(params: dict) -> dict:
-        meta = params.get("_meta", {})
         result = await verify_or_challenge(
+            mpp.charge(amount="0.01"),
             tool="expensive_tool",
-            meta=meta,
-            intent=intent,
-            request={"amount": "1000", ...},
-            realm="api.example.com",
+            meta=params.get("_meta"),
         )
 
-        if isinstance(result, MCPChallenge):
+        if isinstance(result, list):
             # Return JSON-RPC error with -32042
-            return {
-                "error": PaymentRequiredError(challenges=[result]).to_jsonrpc_error()
-            }
+            return {"error": PaymentRequiredError(challenges=result).to_jsonrpc_error()}
 
         credential, receipt = result
         # Proceed with tool execution
@@ -36,269 +34,118 @@ Example with raw JSON-RPC handling:
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+import json
+from typing import Any
 
 import rfc8785
 
-from mpp import _constant_time_equal, generate_challenge_id
-from mpp.errors import InternalPaymentError, PaymentError, PaymentOutcomeUnknownError
+from mpp import Challenge
+from mpp.errors import PaymentRequiredError as CorePaymentRequiredError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
     PaymentVerificationError,
 )
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
+from mpp.server import ComposedHandler, PaymentVerified, Request
+from mpp.server.compose import MCP_URL_PREFIX
 
-if TYPE_CHECKING:
-    from mpp.server.intent import Intent, VerifiableIntent
+TOOL_ROUTE_PREFIX = "tool:"
+"""Prefix of the route bound into a paid tool's challenges (``"tool:<name>"``)."""
 
-DEFAULT_CHALLENGE_TTL = timedelta(minutes=5)
+_TOOL_CALL_URL = f"{MCP_URL_PREFIX}tools/call"
 
 
 async def verify_or_challenge(
+    handler: ComposedHandler,
     *,
-    meta: dict[str, Any] | None,
-    intent: Intent | VerifiableIntent,
-    request: dict[str, Any],
-    realm: str,
-    secret_key: str,
     tool: str,
-    method: str | None = None,
-    expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
-    description: str | None = None,
-) -> MCPChallenge | tuple[MCPCredential, MCPReceipt]:
-    """Verify a payment credential or generate a new challenge.
+    meta: dict[str, Any] | None = None,
+) -> list[MCPChallenge] | tuple[MCPCredential, MCPReceipt]:
+    """Verify a tool call's payment credential or return the challenges to pay.
 
-    This is the core function for MCP payment handling. It works with any
-    MCP server implementation - just extract _meta from params and pass it here.
+    Runs a route handler of a server ``Mpp`` (such as ``mpp.charge(amount="0.01")``)
+    for an MCP tool call: the credential is read from
+    ``_meta["org.paymentauth/credential"]`` and every challenge is bound to ``tool``,
+    so a credential paid for one tool is rejected by every other tool.
 
     Args:
-        meta: The _meta dict from MCP params (may be None).
-        intent: The payment intent to verify against.
-        request: The payment request parameters.
-        realm: Protection space identifier for the challenge.
-        secret_key: Server secret for HMAC-bound challenge IDs. Required.
-            Enables stateless challenge verification by computing challenge IDs
-            as HMAC-SHA256 over the challenge parameters.
-        method: Payment method name (defaults to "tempo").
-        expires_in: Challenge validity duration (default: 5 minutes).
-        tool: Stable receiving tool identity. Must match at issuance and verification.
-        description: Human-readable description of what the payment is for.
+        handler: A configured payment handler of a server ``Mpp``.
+        tool: Stable receiving tool identity, unique to this paid tool within the realm.
+            Use the registered MCP tool name.
+        meta: The ``_meta`` dict from the MCP request params (may be None).
 
     Returns:
-        If no valid credential:
-            An MCPChallenge to return as a -32042 error.
-        If credential is valid:
-            A tuple of (MCPCredential, MCPReceipt) for the successful payment.
+        The challenges to return as a -32042 error when no valid credential was sent,
+        or the verified credential and its receipt.
 
     Raises:
-        MalformedCredentialError: If credential structure is invalid (-32602).
-        PaymentVerificationError: If credential verification fails (-32043).
-
-    Example:
-        # In any MCP server handler
-        meta = params.get("_meta", {})
-        result = await verify_or_challenge(
-            tool="expensive_tool",
-            meta=meta,
-            intent=intent,  # ChargeIntent with rpc_url set by tempo()
-            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
-            realm="api.example.com",
-            secret_key="my-server-secret",
-        )
-
-        if isinstance(result, MCPChallenge):
-            # No credential - return payment required error
-            error = PaymentRequiredError(challenges=[result])
-            return {"error": error.to_jsonrpc_error()}
-
-        credential, receipt = result
-        # Payment verified - execute tool and include receipt
-        tool_result = await run_tool(...)
-        return {
-            "result": {
-                "content": [{"type": "text", "text": tool_result}],
-                "_meta": receipt.to_meta(),
-            }
-        }
+        MalformedCredentialError: If the credential structure is invalid (-32602).
+        PaymentVerificationError: If the credential was rejected (-32043).
     """
-    if not tool:
+    if not isinstance(tool, str) or not tool.strip():
         raise ValueError("tool must be a non-empty stable identifier")
-    method_name = method or "tempo"
-    meta = meta or {}
 
-    def new_challenge() -> MCPChallenge:
-        return create_challenge(
-            method=method_name,
-            intent_name=intent.name,
-            request=request,
-            realm=realm,
-            secret_key=secret_key,
-            tool=tool,
-            expires_in=expires_in,
-            description=description,
-        )
-
-    credential_data = meta.get(META_CREDENTIAL)
-
-    if credential_data is None:
-        return new_challenge()
-
-    try:
-        mcp_credential = MCPCredential.from_dict(credential_data)
-    except (KeyError, TypeError) as e:
-        raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
-
-    # Stateless challenge verification: recompute expected challenge ID from
-    # echoed parameters and compare to the credential's challenge ID.
-    echoed = mcp_credential.challenge
-    try:
-        expected_id = generate_challenge_id(
-            secret_key=secret_key,
-            realm=echoed.realm,
-            method=echoed.method,
-            intent=echoed.intent,
-            request=echoed.request,
-            expires=echoed.expires,
-            digest=echoed.digest,
-            opaque=echoed.opaque,
-        )
-    except rfc8785.CanonicalizationError:
-        return new_challenge()
-    if not _constant_time_equal(echoed.id, expected_id):
-        return new_challenge()
-
-    # Assert echoed challenge fields match server's values
-    if echoed.realm != realm or echoed.method != method_name or echoed.intent != intent.name:
-        return new_challenge()
-
-    # Tool scope is authenticated through opaque; reject before settlement.
-    if not isinstance(echoed.opaque, dict) or echoed.opaque.get("tool") != tool:
-        return new_challenge()
-
-    # Assert echoed request matches server's current request
-    if echoed.request != request:
-        return new_challenge()
-
-    # Reject expired challenges at the transport layer as defense-in-depth
-    if echoed.expires:
+    credential: MCPCredential | None = None
+    authorization: str | None = None
+    credential_data = (meta or {}).get(META_CREDENTIAL)
+    if credential_data is not None:
         try:
-            expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
-            if expires_dt <= datetime.now(UTC):
-                return new_challenge()
-        except (ValueError, TypeError):
-            pass
+            credential = MCPCredential.from_dict(credential_data)
+        except (KeyError, TypeError, AttributeError) as e:
+            raise MalformedCredentialError(detail=f"Invalid credential structure: {e}") from e
+        try:
+            authorization = credential.to_core().to_authorization()
+        except rfc8785.CanonicalizationError:
+            # An echo that cannot be canonically encoded was not issued by this server.
+            authorization = None
 
-    # Verify the echoed request parameters match this endpoint's expected
-    # request to prevent cross-endpoint replay when two endpoints share
-    # the same intent name but differ in amount, recipient, or currency.
-    echoed_request = echoed.request if isinstance(echoed.request, dict) else {}
-    for key, value in request.items():
-        if key == "expires":
-            continue
-        if echoed_request.get(key) != value:
-            return new_challenge()
+    headers = {}
+    if authorization is not None:
+        headers = {"Authorization": authorization, "Payment-Authorization": authorization}
+    result = await handler(
+        Request("POST", _TOOL_CALL_URL, headers=headers, route=f"{TOOL_ROUTE_PREFIX}{tool}")
+    )
 
-    # Enforce challenge expiry — fail closed.  Credentials without an
-    # expires field or with an unparseable value are rejected outright.
-    if not echoed.expires:
-        return new_challenge()
-    try:
-        expires_dt = datetime.fromisoformat(echoed.expires.replace("Z", "+00:00"))
-    except ValueError:
-        return new_challenge()
-    if expires_dt <= datetime.now(UTC):
-        return new_challenge()
-
-    from mpp.server.intent import broadcast_credential
-
-    core_credential = mcp_credential.to_core()
-
-    try:
-        core_receipt = await broadcast_credential(
-            intent=intent,
-            credential=core_credential,
-            request=request,
+    if isinstance(result, PaymentVerified):
+        assert credential is not None
+        receipt = MCPReceipt.from_core(
+            receipt=result.receipt,
+            challenge_id=credential.challenge.id,
+            method=credential.challenge.method,
+            settlement=_extract_settlement(credential.challenge.request),
         )
-    except (InternalPaymentError, PaymentOutcomeUnknownError):
-        raise
-    except PaymentError as e:
-        raise PaymentVerificationError(
-            challenges=[] if e.status == 403 else [new_challenge()],
-            http_status=403 if e.status == 403 else 402,
-            reason="verification-failed",
-            detail=str(e),
-            details=getattr(e, "details", None),
-        ) from e
+        return credential, receipt
 
-    mcp_receipt = MCPReceipt.from_core(
-        receipt=core_receipt,
-        challenge_id=mcp_credential.challenge.id,
-        method=mcp_credential.challenge.method,
-        settlement=_extract_settlement(request),
+    response = result.challenge
+    challenges = [
+        _mcp_challenge(Challenge.from_www_authenticate(value))
+        for value in response.headers.get_list("www-authenticate")
+    ]
+    try:
+        problem = json.loads(response.body or b"{}")
+    except ValueError:
+        problem = {}
+    if not isinstance(problem, dict):
+        problem = {}
+    if response.status == 402 and problem.get("type") in (None, CorePaymentRequiredError.type):
+        return challenges
+    problem_type = problem.get("type")
+    raise PaymentVerificationError(
+        challenges=challenges,
+        http_status=response.status,
+        reason=problem_type.rsplit("/", 1)[-1] if isinstance(problem_type, str) else None,
+        detail=problem.get("detail"),
+        details=problem.get("details"),
     )
 
-    return (mcp_credential, mcp_receipt)
 
-
-def create_challenge(
-    *,
-    method: str,
-    intent_name: str,
-    request: dict[str, Any],
-    realm: str,
-    secret_key: str,
-    tool: str,
-    expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
-    description: str | None = None,
-) -> MCPChallenge:
-    """Create a new MCP payment challenge with HMAC-bound ID.
-
-    Use this to generate challenges for custom MCP server implementations.
-
-    Args:
-        method: Payment method identifier (e.g., "tempo", "stripe").
-        intent_name: Payment intent type (e.g., "charge").
-        request: Payment request parameters.
-        realm: Protection space identifier.
-        secret_key: Server secret for HMAC-bound challenge IDs.
-        expires_in: Challenge validity duration.
-        tool: Stable receiving tool identity. Must match at issuance and verification.
-        description: Human-readable description.
-
-    Returns:
-        An MCPChallenge ready to be included in a -32042 error response.
-    """
-    if not tool:
-        raise ValueError("tool must be a non-empty stable identifier")
-    if method == "tempo" and intent_name == "charge":
-        from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
-
-        reject_fixed_attribution_memos(request)
-    expires = (datetime.now(UTC) + expires_in).isoformat()
-    if expires.endswith("+00:00"):
-        expires = expires[:-6] + "Z"
-
-    challenge_id = generate_challenge_id(
-        secret_key=secret_key,
-        realm=realm,
-        method=method,
-        intent=intent_name,
-        request=request,
-        expires=expires,
-        opaque={"tool": tool},
-    )
-
-    return MCPChallenge(
-        id=challenge_id,
-        realm=realm,
-        method=method,
-        intent=intent_name,
-        request=request,
-        expires=expires,
-        description=description,
-        opaque={"tool": tool},
+def _mcp_challenge(challenge: Challenge) -> MCPChallenge:
+    return MCPChallenge.from_core(
+        challenge,
+        realm=challenge.realm,
+        expires=challenge.expires,
+        description=challenge.description,
     )
 
 

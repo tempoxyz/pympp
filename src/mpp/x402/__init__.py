@@ -7,11 +7,12 @@ endpoint, as mppx does. Unpaid responses carry ``PAYMENT-REQUIRED`` next to
 x402 responses carry ``PAYMENT-RESPONSE``.
 
 Example:
-    from mpp.methods.evm import BASE_USDC, evm
-    from mpp.server import Mpp
+    from mpp.methods.evm import BASE_USDC
+    from mpp.methods.evm import server as evm
+    from mpp.server import Mpp, pay
 
-    server = Mpp.create(
-        method=evm(
+    server = Mpp(
+        methods=evm.charge(
             currency=BASE_USDC,
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             facilitator="https://facilitator.example.com",
@@ -19,7 +20,7 @@ Example:
     )
 
     @app.get("/paid")
-    @server.pay(amount="0.01")
+    @pay(server.charge(amount="0.01"))
     async def handler(request, credential, receipt):
         return JSONResponse({"data": "..."})
 """

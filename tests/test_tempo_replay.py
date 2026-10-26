@@ -11,9 +11,12 @@ import pytest
 from mpp import Challenge, Credential
 from mpp.client import PaymentTransport
 from mpp.methods.tempo import CHAIN_ID, ChargeIntent
+from mpp.methods.tempo import server as tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-from mpp.server import pay
+from mpp.methods.tempo.schemas import charge
+from mpp.runtime import ClientMethod, CredentialParams
+from mpp.server import Mpp, pay
 from mpp.store import MemoryStore
 from tests import MockRequest, challenge_from_402
 
@@ -26,11 +29,10 @@ CURRENCY = "0x20c0000000000000000000000000000000000000"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 PAYER = "0x1234567890123456789012345678901234567890"
 TX_HASH = "0x" + "ab" * 32
-REQUEST = {"amount": "1000", "currency": CURRENCY, "recipient": RECIPIENT}
 
 
 class Route:
-    """A paid route backed by a real ChargeIntent and a mocked Tempo RPC.
+    """A paid Tempo charge route backed by a mocked Tempo RPC.
 
     ``receipt_case`` shapes the receipt: ``ok`` pays this challenge, ``memo``
     binds the transfer to another challenge, ``amount`` underpays, and
@@ -45,13 +47,15 @@ class Route:
         self.lookup_held = asyncio.Event()
         self.release_lookup = asyncio.Event()
         self.store = MemoryStore()
-        self.intent = ChargeIntent(
+        methods = tempo.charge(
             rpc_url="https://rpc.test",
             store=self.store,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(self._rpc)),
+            currency=CURRENCY,
+            recipient=RECIPIENT,
         )
 
-        @pay(intent=self.intent, request=REQUEST, realm=REALM, secret_key=SECRET)
+        @pay(Mpp(methods=methods, realm=REALM, secret_key=SECRET).charge(amount="0.001"))
         async def handler(request: Any, credential: Credential, receipt: Any) -> dict:
             return {"reference": receipt.reference}
 
@@ -154,17 +158,17 @@ async def test_hash_credential_failure_response(
 class HashMethod:
     """Client method that answers every challenge with the same pushed transaction."""
 
-    name = "tempo"
-    intents = {"charge": True}
-
     def __init__(self, route: Route) -> None:
         self.route = route
         self.challenges: list[Challenge] = []
+        self.client = ClientMethod(method=charge, create_credential=self.create_credential)
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
+    async def create_credential(self, params: CredentialParams) -> str:
+        challenge = params.challenge
         self.challenges.append(challenge)
         self.route.challenge_id = challenge.id
-        return Credential(challenge=challenge.to_echo(), payload={"type": "hash", "hash": TX_HASH})
+        payload = {"type": "hash", "hash": TX_HASH}
+        return Credential(challenge=challenge.to_echo(), payload=payload).to_authorization()
 
 
 class RouteTransport(httpx.AsyncBaseTransport):
@@ -197,9 +201,9 @@ async def test_client_does_not_pay_again_for_spent_payment(
 ) -> None:
     route = Route(receipt_case)
     if consumed:
-        await route.store.put(route.intent._hash_store_key(TX_HASH), TX_HASH)
+        await route.store.put(ChargeIntent._hash_store_key(TX_HASH), TX_HASH)
     method = HashMethod(route)
-    transport = PaymentTransport(methods=[method], inner=RouteTransport(route))
+    transport = PaymentTransport(methods=[method.client], inner=RouteTransport(route))
 
     async with httpx.AsyncClient(transport=transport) as client:
         response = await client.get("https://api.example.com/paid")

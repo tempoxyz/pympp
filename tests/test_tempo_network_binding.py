@@ -9,12 +9,13 @@ from pytempo import Call, TempoTransaction
 
 from mpp import Challenge, Credential
 from mpp.errors import InternalPaymentError, PaymentError, VerificationError
-from mpp.methods.tempo import ChargeIntent, tempo
+from mpp.methods.tempo import server as tempo
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_ID, PATH_USD, TESTNET_CHAIN_ID
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC
-from mpp.server import Mpp
-from tests import internal_cause
+from mpp.server import Mpp, PaymentRequired
+from tests import challenge as challenge_of
+from tests import http_request, internal_cause
 
 PAYER_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PAYER = Account.from_key(PAYER_KEY).address
@@ -43,19 +44,20 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
-        server = Mpp.create(
-            method=tempo(
+        server = Mpp(
+            methods=tempo.charge(
                 chain_id=TESTNET_CHAIN_ID,
                 rpc_url=RPC_URL,
                 currency=PATH_USD,
                 recipient=RECIPIENT,
-                intents={"charge": ChargeIntent(http_client=client)},
+                http_client=client,
             ),
             realm=REALM,
             secret_key="test-secret",
         )
         options = {"amount": "0.000001", "chain_id": CHAIN_ID}
-        challenge = await server.charge(None, **options)
+        handler = server.charge(**options)
+        challenge = challenge_of(await handler(http_request()))
         assert isinstance(challenge, Challenge)
         assert challenge.request["methodDetails"]["chainId"] == CHAIN_ID
 
@@ -103,9 +105,16 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
         )
         with pytest.raises(error) as validated:
             await server.validate_credential(credential)
-        with pytest.raises(error) as charged:
-            await server.charge(credential.to_authorization(), **options)
-        for failure in (validated.value, charged.value):
+        failures: list[object] = [validated.value]
+        if error is InternalPaymentError:
+            with pytest.raises(error) as charged:
+                await handler(http_request(credential.to_authorization()))
+            failures.append(charged.value)
+        else:
+            result = await handler(http_request(credential.to_authorization()))
+            assert isinstance(result, PaymentRequired)
+            failures.append((result.challenge.body or b"").decode())
+        for failure in failures:
             if isinstance(failure, InternalPaymentError):
                 failure = internal_cause(failure)
             assert reason in str(failure)

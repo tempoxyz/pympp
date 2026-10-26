@@ -1,72 +1,67 @@
-"""Composition of configured server payment offers."""
+"""Route handlers: configured server payment offers and their composition."""
 
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Required, TypeAlias, TypedDict, TypeVar, cast
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, TypeAlias
 
-from mpp import Challenge, Credential, Receipt, _body_digest
+from pydantic import ValidationError
+
+from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode
-from mpp.errors import InvalidChallengeError, MalformedCredentialError, VerificationFailedError
-from mpp.events import PAYMENT_FAILED
-from mpp.server.decorator import (
-    BodyParamsType,
-    resolve_body_param,
-    wrap_payment_handler,
-    x402_input,
+from mpp.errors import (
+    InvalidChallengeError,
+    InvalidPayloadError,
+    MalformedCredentialError,
+    PaymentError,
+    PaymentRequiredError,
+    VerificationFailedError,
 )
-from mpp.server.method import Method, _SupportsCanOffer, prepare_intent, request_amount
+from mpp.events import PAYMENT_FAILED
+from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
+from mpp.server.method import (
+    SETTLING_METHOD,
+    RequestContext,
+    ServerMethod,
+    VerifyContext,
+    resolve,
+)
 from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
+    _challenge_from_echo,
     _extract_payment_scheme,
     verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
-from mpp.x402._server import X402Input, X402Intent
-from mpp.x402._types import PAYMENT_SIGNATURE_HEADER, PaymentRequirements, requirements_match
+from mpp.x402._server import X402Input, challenges_payment_required_header
+from mpp.x402._types import (
+    PAYMENT_REQUIRED_HEADER,
+    PAYMENT_SIGNATURE_HEADER,
+    PaymentPayload,
+    PaymentRequirements,
+    requirements_match,
+)
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent, VerifiableIntent
     from mpp.server.mpp import Mpp
 
-R = TypeVar("R")
+BodyType = str | bytes | dict[str, Any]
+BodyParamsType = BodyType | Callable[[Request], BodyType | Awaitable[BodyType]] | None
+ROUTE_OPTION_KEYS = frozenset({"body", "description", "expires", "expires_in", "meta"})
 
-
-class ComposeOptions(TypedDict, total=False):
-    """Options for one configured payment offer."""
-
-    amount: Required[str]
-    currency: str | None
-    recipient: str | None
-    description: str | None
-    expires: str | None
-    expires_in: timedelta | None
-    splits: list[dict[str, str]] | None
-    fee_payer: bool
-    chain_id: int | None
-    extra: dict[str, str] | None
-    meta: dict[str, str] | None
-    payment_intent_options: object
-
-
-ComposeEntry: TypeAlias = tuple[Method | str, ComposeOptions]
-
-
-class _Unset:
-    """Marks an argument the caller did not pass."""
-
-
-_UNSET = _Unset()
+MCP_URL_PREFIX = "mcp:"
+"""URL prefix of MCP tool calls, which carry credentials in _meta, not an HTTP field."""
 
 
 @dataclass
 class ComposedChallenges:
-    """Challenges issued by an unpaid composed handler.
+    """Challenges issued by an unpaid handler.
 
     ``error`` is set when a submitted credential matched no offer, such as an
     x402 payment for requirements this route does not offer.
@@ -77,7 +72,54 @@ class ComposedChallenges:
 
 
 ComposedResult: TypeAlias = ComposedChallenges | tuple[Credential, Receipt]
-_OPTION_KEYS = frozenset(ComposeOptions.__annotations__) - {"payment_intent_options"}
+
+
+class _MethodIntent:
+    """Runs a server method's hooks for one prepared offer."""
+
+    def __init__(self, method: ServerMethod, input: dict[str, Any]) -> None:
+        self.name = method.intent
+        self._method = method
+        self._input = input
+
+    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
+        try:
+            payload = self._method.method.parse_payload(credential.payload)
+        except ValidationError as error:
+            raise InvalidPayloadError(str(error)) from error
+        echo = credential.challenge
+        try:
+            opaque = _b64_decode(echo.opaque) if echo.opaque else None
+        except ParseError:
+            opaque = None
+        receipt, _ = await self._method.settle(
+            VerifyContext(
+                credential=replace(credential, payload=payload),
+                request=self._input,
+                challenge=_challenge_from_echo(
+                    echo, request, opaque if isinstance(opaque, dict) else None
+                ),
+            )
+        )
+        return receipt
+
+
+class _X402MethodIntent(_MethodIntent):
+    """A method intent that x402 clients can also pay."""
+
+    @property
+    def route_binding(self) -> str:
+        return getattr(self._method.x402, "route_binding", "required")
+
+    def x402_requirements(self, request: dict[str, Any]) -> PaymentRequirements:
+        assert self._method.x402 is not None
+        return self._method.x402.x402_requirements(request)
+
+    def x402_credential_payload(
+        self, payment: PaymentPayload, request: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        assert self._method.x402 is not None
+        return self._method.x402.x402_credential_payload(payment, request)
 
 
 @dataclass
@@ -85,10 +127,8 @@ class _Offer:
     """One payment offer configured on a particular Mpp server."""
 
     server: Mpp
-    method: Method
-    intent: str
-    options: ComposeOptions
-    body: BodyParamsType
+    method: ServerMethod
+    options: dict[str, Any]
 
     def owns(self, credential: Credential) -> bool:
         """Return whether this offer's server authenticated the credential."""
@@ -100,28 +140,27 @@ class _Offer:
             return False
         return True
 
+    @property
+    def meta(self) -> dict[str, str] | None:
+        return self.options.get("meta")
+
 
 @dataclass
 class _PreparedOffer:
     """One configured offer resolved for the current request."""
 
     offer: _Offer
-    intent: Intent | VerifiableIntent
+    intent: _MethodIntent
     request: dict[str, Any]
     expires: str | None
-    body: str | bytes | dict[str, Any] | None
+    body: BodyType | None
+    header: str | None = None
 
     async def is_available(self) -> bool:
         """Return whether the method wants to advertise this prepared offer."""
-        callback = (
-            self.offer.method.can_offer
-            if isinstance(self.offer.method, _SupportsCanOffer)
-            else None
-        )
+        callback = self.offer.method.can_offer
         if callback is None:
             return True
-        if not callable(callback):
-            raise ValueError("can_offer must be callable")
         available = callback(deepcopy(self.request))
         if inspect.isawaitable(available):
             available = await available
@@ -134,6 +173,15 @@ class _PreparedOffer:
     ) -> Challenge | tuple[Credential, Receipt]:
         """Verify this offer using its originating server."""
         server = self.offer.server
+        token = SETTLING_METHOD.set(self.offer.method)
+        try:
+            return await self._verify(server, authorization, x402)
+        finally:
+            SETTLING_METHOD.reset(token)
+
+    async def _verify(
+        self, server: Mpp, authorization: str | None, x402: X402Input | None
+    ) -> Challenge | tuple[Credential, Receipt]:
         return await verify_or_challenge(
             authorization=authorization,
             intent=self.intent,
@@ -142,14 +190,22 @@ class _PreparedOffer:
             secret_key=server.secret_key,
             method=self.offer.method.name,
             description=self.offer.options.get("description"),
-            meta=self.offer.options.get("meta"),
+            meta=self.offer.meta,
             expires=self.expires,
             body=self.body,
             events=server._events,
-            header=server.credential_header,
+            header=self.header,
             unique_challenges=server.unique_challenges,
             x402=x402,
         )
+
+
+@dataclass
+class _Call:
+    """State shared by the offers prepared for one request."""
+
+    bodies: dict[int, BodyType | None] = field(default_factory=dict)
+    prepared: list[_PreparedOffer] = field(default_factory=list)
 
 
 class _AmbiguousOffersError(Exception):
@@ -171,25 +227,81 @@ def _parse_credential(authorization: str | None) -> Credential | None:
 
 async def _prepare_offer(
     offer: _Offer,
-    request: Any,
-    body_cache: dict[int, str | bytes | dict[str, Any] | None],
+    request: Request,
+    credential: Credential | None,
+    call: _Call,
 ) -> _PreparedOffer:
-    """Resolve an offer's request and body for this call."""
-    intent, payment_request, expires = offer.server._build_offer_request(
-        offer.method,
-        offer.intent,
-        offer.options,
-        request,
-        api_name="compose",
+    """Resolve an offer's wire request, expiry and body for this call."""
+    method = offer.method
+    options = {
+        key: value
+        for key, value in offer.options.items()
+        if key not in ROUTE_OPTION_KEYS and value is not None
+    }
+    input = {**(method.defaults or {}), **options}
+    if method.resolve_request is not None:
+        input = await resolve(
+            method.resolve_request(
+                RequestContext(request=input, credential=credential, input=request)
+            )
+        )
+    wire = method.method.normalize_request(input)
+    scope: dict[str, Any] = request.scope()
+    if wire.get("_mppx_scope") is not None:
+        scope = {**scope, "custom": wire["_mppx_scope"]}
+    wire = {**wire, "_mppx_scope": scope}
+
+    expires = offer.options.get("expires")
+    expires_in = offer.options.get("expires_in")
+    if expires_in is not None:
+        expires = (datetime.now(UTC) + expires_in).isoformat()
+
+    body = offer.options.get("body")
+    key = id(body)
+    if key not in call.bodies:
+        value: Any = body(request) if callable(body) else body
+        if inspect.isawaitable(value):
+            value = await value
+        call.bodies[key] = value
+    # MCP tool calls carry credentials in _meta, not an HTTP field: bind no header.
+    header = None if request.url.startswith(MCP_URL_PREFIX) else offer.server.credential_header
+    prepared = _PreparedOffer(
+        offer, _intent(method, input), wire, expires, call.bodies[key], header
     )
-    key = id(offer.body)
-    if key not in body_cache:
-        body_cache[key] = await resolve_body_param(offer.body, request)
-    return _PreparedOffer(offer, intent, payment_request, expires, body_cache[key])
+    call.prepared.append(prepared)
+    return prepared
+
+
+def _intent(method: ServerMethod, input: dict[str, Any]) -> _MethodIntent:
+    if method.x402 is not None:
+        return _X402MethodIntent(method, input)
+    return _MethodIntent(method, input)
+
+
+def _validate_options(options: Mapping[str, Any]) -> dict[str, Any]:
+    """Check route options shared by every method."""
+    if options.get("expires") is not None and options.get("expires_in") is not None:
+        raise ValueError("expires and expires_in cannot both be set")
+    expires_in = options.get("expires_in")
+    if expires_in is not None and not isinstance(expires_in, timedelta):
+        raise ValueError("expires_in must be a timedelta")
+    meta = options.get("meta")
+    if meta is not None and (
+        not isinstance(meta, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in meta.items()
+        )
+    ):
+        raise ValueError("meta must be a dict[str, str]")
+    return dict(options)
 
 
 class ComposedHandler:
-    """A configured handler containing one or more payment offers."""
+    """A route handler presenting one or more payment offers.
+
+    Call it with a :class:`~mpp.server.Request` to get :class:`~mpp.server.PaymentRequired`
+    or :class:`~mpp.server.PaymentVerified`.
+    """
 
     def __init__(self, *handlers: ComposedHandler) -> None:
         """Combine previously configured handlers."""
@@ -198,41 +310,126 @@ class ComposedHandler:
         if any(not isinstance(handler, ComposedHandler) for handler in handlers):
             raise TypeError("compose() accepts only configured handlers")
         self._offers = tuple(offer for handler in handlers for offer in handler._offers)
+        self._composed = True
 
     @classmethod
-    def _from_offers(cls, offers: Sequence[_Offer]) -> ComposedHandler:
+    def _from_offers(cls, offers: Sequence[_Offer], *, composed: bool) -> ComposedHandler:
         """Create a handler from newly configured offers."""
         handler = cls.__new__(cls)
         handler._offers = tuple(offers)
+        handler._composed = composed
         return handler
 
-    async def verify(
+    @property
+    def needs_request_body(self) -> bool:
+        """Whether an offer's ``body`` option is a callable reading the request."""
+        return any(callable(offer.options.get("body")) for offer in self._offers)
+
+    @property
+    def methods(self) -> tuple[ServerMethod, ...]:
+        """The configured method of each offer."""
+        return tuple(offer.method for offer in self._offers)
+
+    async def __call__(self, request: Request) -> PaymentResult:
+        """Verify the request's credential, or return the challenges to pay."""
+        server = self._offers[0].server
+        authorization = request.headers.get(
+            PAYMENT_AUTHORIZATION_HEADER if server.requires_auth else "Authorization"
+        )
+        x402 = (
+            X402Input(
+                resource_url=request.url,
+                payment_signature=request.headers.get(PAYMENT_SIGNATURE_HEADER),
+                http_method=request.method,
+            )
+            if request.url.startswith(("http://", "https://"))
+            else None
+        )
+        call = _Call()
+        try:
+            result = await self._verify(authorization, request, x402, call)
+        except PaymentError as error:
+            if isinstance(error.retry_challenge, Challenge):
+                return PaymentRequired(
+                    self._challenge_response(request, (error.retry_challenge,), error, call)
+                )
+            if error.status == 403:
+                return PaymentRequired(
+                    Response(
+                        status=error.status,
+                        headers={
+                            "Cache-Control": "no-store",
+                            "Content-Type": "application/problem+json",
+                        },
+                        body=json.dumps(error.to_problem_details()),
+                    )
+                )
+            raise
+        if isinstance(result, ComposedChallenges):
+            return PaymentRequired(
+                self._challenge_response(request, result.challenges, result.error, call)
+            )
+        credential, receipt = result
+        return PaymentVerified(credential=credential, receipt=receipt)
+
+    def _challenge_response(
         self,
-        authorization: str | None,
-        request: Any = None,
-        *,
-        x402: X402Input | None | _Unset = _UNSET,
+        request: Request,
+        challenges: Sequence[Challenge],
+        error: Exception | None,
+        call: _Call,
+    ) -> Response:
+        """Build a 402 response with RFC 9457 problem details."""
+        realm = self._offers[0].server.realm
+        problem = (
+            error
+            if isinstance(error, PaymentError)
+            else PaymentRequiredError(realm=realm, description=challenges[0].description)
+        )
+        headers = [
+            ("WWW-Authenticate", challenge.to_www_authenticate(challenge.realm or realm))
+            for challenge in challenges
+        ]
+        headers += [("Cache-Control", "no-store"), ("Content-Type", "application/problem+json")]
+        if request.url.startswith(("http://", "https://")):
+            x402 = challenges_payment_required_header(
+                challenges,
+                lambda challenge: _x402_accepts(call, challenge),
+                request.url,
+                request.method,
+                str(error) if error is not None else None,
+            )
+            if x402 is not None:
+                headers.append((PAYMENT_REQUIRED_HEADER, x402))
+        return Response(
+            status=402,
+            headers=headers,
+            body=json.dumps(problem.to_problem_details(challenges[0].id)),
+        )
+
+    async def _available(self, offer: _PreparedOffer) -> bool:
+        """Whether to advertise a prepared offer; a direct single-offer handler always does."""
+        return not self._composed or await offer.is_available()
+
+    async def _verify(
+        self, authorization: str | None, request: Request, x402: X402Input | None, call: _Call
     ) -> ComposedResult:
         """Verify a matching credential or issue every configured challenge.
 
-        Without a Payment credential, an x402 ``PAYMENT-SIGNATURE`` (from
-        ``x402``, or read from ``request`` when ``x402`` is not given) pays the
-        offer whose x402 requirements it echoes.
+        Without a Payment credential, an x402 ``PAYMENT-SIGNATURE`` pays the offer
+        whose x402 requirements it echoes.
         """
-        body_cache: dict[int, str | bytes | dict[str, Any] | None] = {}
-        if isinstance(x402, _Unset):
-            x402 = x402_input(request)
         credential = _parse_credential(authorization)
         if credential is None and x402 is not None and x402.payment_signature:
-            x402_result = await self._verify_x402(x402, request, body_cache)
+            x402_result = await self._verify_x402(x402, request, call)
             if x402_result is not None:
                 return x402_result
         if credential is not None:
             prepared_offers = [
-                await _prepare_offer(offer, request, body_cache)
+                await _prepare_offer(offer, request, credential, call)
                 for offer in self._offers
                 if offer.method.name == credential.challenge.method
-                and offer.intent == credential.challenge.intent
+                and offer.method.intent == credential.challenge.intent
             ]
             try:
                 selected_offer = self._select_offer(credential, prepared_offers)
@@ -252,8 +449,8 @@ class ComposedHandler:
 
         challenges: list[Challenge] = []
         for offer in self._offers:
-            prepared_offer = await _prepare_offer(offer, request, body_cache)
-            if not await prepared_offer.is_available():
+            prepared_offer = await _prepare_offer(offer, request, None, call)
+            if not await self._available(prepared_offer):
                 continue
             result = await prepared_offer.verify(authorization)
             if not isinstance(result, Challenge):
@@ -266,12 +463,12 @@ class ComposedHandler:
     async def _verify_x402(
         self,
         x402: X402Input,
-        request: Any,
-        body_cache: dict[int, str | bytes | dict[str, Any] | None],
+        request: Request,
+        call: _Call,
     ) -> ComposedResult | None:
         """Pay the offer an x402 payload addresses, or return every challenge."""
-        prepared = [await _prepare_offer(offer, request, body_cache) for offer in self._offers]
-        x402_offers = [offer for offer in prepared if isinstance(offer.intent, X402Intent)]
+        prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
+        x402_offers = [offer for offer in prepared if isinstance(offer.intent, _X402MethodIntent)]
         if not x402_offers:
             return None
         assert x402.payment_signature is not None
@@ -285,14 +482,14 @@ class ComposedHandler:
         else:
             for offer in x402_offers:
                 intent = offer.intent
-                assert isinstance(intent, X402Intent)
+                assert isinstance(intent, _X402MethodIntent)
                 if not requirements_match(
                     payment["accepted"], intent.x402_requirements(offer.request)
                 ):
                     continue
                 # Like a native credential, an x402 payment can only pay an offer
                 # this request would have advertised.
-                if await offer.is_available():
+                if await self._available(offer):
                     result = await offer.verify(None, x402)
                     return (
                         ComposedChallenges((result,)) if isinstance(result, Challenge) else result
@@ -302,7 +499,7 @@ class ComposedHandler:
             )
         challenges: list[Challenge] = []
         for offer in prepared:
-            if not await offer.is_available():
+            if not await self._available(offer):
                 continue
             result = await offer.verify(None)
             if not isinstance(result, Challenge):
@@ -324,41 +521,6 @@ class ComposedHandler:
             },
         )
         return ComposedChallenges(tuple(challenges), error=error)
-
-    def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
-        """Return the x402 requirements that pay one of this handler's challenges."""
-        details = challenge.request.get("methodDetails")
-        chain_id = details.get("chainId") if isinstance(details, Mapping) else None
-        currency = str(challenge.request.get("currency", "")).lower()
-        for offer in self._offers:
-            if (
-                offer.method.name != challenge.method
-                or offer.intent != challenge.intent
-                or offer.server.realm != challenge.realm
-                # Composed servers may share a realm with different tokens: use the
-                # method that issued this challenge, so its EIP-712 domain applies.
-                or str(getattr(offer.method, "currency", "")).lower() != currency
-                or getattr(offer.method, "chain_id", chain_id) != chain_id
-            ):
-                continue
-            intent = offer.method.intents.get(offer.intent)
-            if isinstance(intent, X402Intent):
-                return intent.x402_requirements(challenge.request)
-        return None
-
-    def __call__(
-        self,
-        handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
-    ) -> Callable[[Any], Awaitable[R | Any]]:
-        """Wrap a payment-protected endpoint."""
-        server = self._offers[0].server
-        return wrap_payment_handler(
-            handler,
-            self.verify,
-            lambda: server.realm,
-            requires_auth=server.requires_auth,
-            x402_accepts=self._x402_accepts,
-        )
 
     @staticmethod
     def _select_offer(
@@ -388,7 +550,7 @@ class ComposedHandler:
                 if offer.body is None
                 else digest is not None and _body_digest.verify(digest, offer.body)
             )
-            and _application_meta(echoed_meta) == (offer.offer.options.get("meta") or None)
+            and _application_meta(echoed_meta) == (offer.offer.meta or None)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:
@@ -406,91 +568,25 @@ class ComposedHandler:
         return offers[0] if offers else None
 
 
+def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | None:
+    """Return the x402 requirements of the prepared offer that issued a challenge.
+
+    Composed servers may share a realm with different tokens: the issuing offer's
+    method decides the EIP-712 domain.
+    """
+    for prepared in call.prepared:
+        offer = prepared.offer
+        if (
+            isinstance(prepared.intent, _X402MethodIntent)
+            and offer.method.name == challenge.method
+            and offer.method.intent == challenge.intent
+            and offer.server.realm == challenge.realm
+            and prepared.request == challenge.request
+        ):
+            return prepared.intent.x402_requirements(challenge.request)
+    return None
+
+
 def compose(*handlers: ComposedHandler) -> ComposedHandler:
     """Combine configured handlers while preserving each handler's server."""
     return ComposedHandler(*handlers)
-
-
-def _configure_entries(
-    server: Mpp,
-    entries: Sequence[ComposeEntry],
-    body: BodyParamsType,
-) -> ComposedHandler:
-    """Validate compose entries and bind them to a server."""
-    if not entries:
-        raise ValueError("compose() requires at least one entry")
-
-    registered = {method.name: method for method in server.methods}
-    offers: list[_Offer] = []
-    for entry in entries:
-        if not isinstance(entry, tuple) or len(entry) != 2:
-            raise ValueError("compose() entries must be (method, options) tuples")
-        method_ref, raw_options = entry
-        if isinstance(method_ref, str):
-            parts = method_ref.split("/")
-            if len(parts) not in (1, 2) or not all(parts):
-                raise ValueError(f"invalid payment method reference: {method_ref}")
-            method = registered.get(parts[0])
-            if method is None:
-                raise ValueError(f"unknown payment method: {parts[0]}")
-            intent = parts[1] if len(parts) == 2 else "charge"
-        else:
-            method = registered.get(getattr(method_ref, "name", ""))
-            if method is None or method is not method_ref:
-                raise ValueError("payment method is not registered")
-            intent = "charge"
-        if intent not in method.intents:
-            raise ValueError(f"Method {method.name} does not support {intent} intent")
-
-        if not isinstance(raw_options, Mapping):
-            raise ValueError("compose() options must be a mapping")
-        # Methods may consume private input before the common option check.
-        _, common_options = prepare_intent(method, method.intents[intent], raw_options)
-        unknown = common_options.keys() - _OPTION_KEYS
-        if unknown:
-            raise ValueError(f"unsupported compose option: {sorted(unknown, key=str)[0]}")
-        amount = raw_options.get("amount")
-        if not isinstance(amount, str) or not amount.strip():
-            raise ValueError("compose() offer requires a non-empty string amount")
-        if raw_options.get("expires") is not None and raw_options.get("expires_in") is not None:
-            raise ValueError("compose() options expires and expires_in cannot both be set")
-        if raw_options.get("splits") and raw_options.get("fee_payer"):
-            raise ValueError("splits and fee_payer cannot be used together")
-        meta = raw_options.get("meta")
-        if meta is not None and (
-            not isinstance(meta, dict)
-            or any(
-                not isinstance(key, str) or not isinstance(value, str)
-                for key, value in meta.items()
-            )
-        ):
-            raise ValueError("meta must be a dict[str, str]")
-        options = cast(ComposeOptions, raw_options)
-        if not (options.get("currency") or getattr(method, "currency", None)):
-            raise ValueError("currency must be set on the method or compose() offer")
-        if not (options.get("recipient") or getattr(method, "recipient", None)):
-            raise ValueError("recipient must be set on the method or compose() offer")
-        request_amount(method, options["amount"])
-        currencies = _offer_currencies(method, options)
-        if currencies is None:
-            offers.append(_Offer(server, method, intent, options, body))
-        else:
-            # One offer per accepted currency, in the method's order.
-            offers.extend(
-                _Offer(server, method, intent, {**options, "currency": currency}, body)
-                for currency in currencies
-            )
-    return ComposedHandler._from_offers(offers)
-
-
-def _offer_currencies(method: Method, options: Mapping[str, Any]) -> tuple[str, ...] | None:
-    """Return the currencies to expand into separate offers, if more than one.
-
-    A per-offer ``currency`` override always yields a single offer.
-    """
-    if options.get("currency"):
-        return None
-    currencies = getattr(method, "currencies", None)
-    if not isinstance(currencies, tuple | list) or len(currencies) < 2:
-        return None
-    return tuple(currencies)

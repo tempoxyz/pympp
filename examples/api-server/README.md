@@ -10,7 +10,7 @@ A FastAPI server with payment-protected endpoints using the Machine Payments Pro
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 
 ## Installation
@@ -22,11 +22,12 @@ uv sync
 
 ## Configuration
 
-Set environment variables (optional - defaults are provided):
+Set the secret that signs challenges, and optionally the recipient and a fee payer:
 
 ```bash
-export TEMPO_RPC_URL="https://rpc.testnet.tempo.xyz/"
+export MPP_SECRET_KEY="$(openssl rand -hex 32)"
 export PAYMENT_DESTINATION="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+export FEE_PAYER_KEY="0x..."  # optional: sponsor clients' gas
 ```
 
 ## Running
@@ -46,10 +47,10 @@ curl http://localhost:8000/free
 # {"message":"This content is free!"}
 ```
 
-**Paid endpoint** (use the pympp client to handle payment automatically):
+**Paid endpoint** (use the [fetch example](../fetch/) to pay automatically):
 
 ```bash
-python -m mpp.fetch http://localhost:8000/paid
+python ../fetch/fetch.py --key 0x... --rpc-url https://rpc.moderato.tempo.xyz http://localhost:8000/paid
 # {"message":"This is paid content!","payer":"0x...","tx":"0x..."}
 ```
 
@@ -67,14 +68,12 @@ curl -i http://localhost:8000/paid
 
 ```python
 from mpp.server import Mpp
-from mpp.methods.tempo import tempo
+from mpp.methods.tempo import server as tempo
 
-server = Mpp.create(
-    method=tempo(currency=PATH_USD, recipient=DESTINATION),
-)
+server = Mpp(methods=tempo.charge(currency=PATH_USD, recipient=DESTINATION))
 ```
 
-`Mpp.create()` sets up the payment handler with smart defaults:
+`Mpp` sets up the payment handler with smart defaults:
 - **realm** auto-detected from environment (`MPP_REALM`, `VERCEL_URL`, etc.)
 - **secret_key** read from `MPP_SECRET_KEY` env var (or passed explicitly)
 - **currency** and **recipient** configured once on the method
@@ -82,10 +81,8 @@ server = Mpp.create(
 ### Charging
 
 ```python
-result = await server.charge(
-    authorization=request.headers.get("Authorization"),
-    amount="0.001",
-)
+handler = server.charge(amount="0.001")
+result = await handler(PaymentRequest(request.method, str(request.url), headers=dict(request.headers)))
 ```
 
 - `amount` is in dollars (e.g., `"0.50"` = $0.50), auto-converted to base units
@@ -94,6 +91,6 @@ result = await server.charge(
 
 ### Payment Flow
 
-1. **No Authorization header**: Returns a `Challenge` → respond with 402
-2. **Valid credential**: Returns `(Credential, Receipt)` → return the resource
-3. **Invalid credential**: Returns a `Challenge` → respond with 402
+1. **No Authorization header**: Returns `PaymentRequired` → respond with its `402` `challenge`
+2. **Valid credential**: Returns `PaymentVerified` → return the resource with `with_receipt()`
+3. **Invalid credential**: Returns `PaymentRequired` → respond with its `challenge`

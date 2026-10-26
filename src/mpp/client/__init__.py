@@ -1,23 +1,19 @@
-"""HTTP client with automatic 402 payment handling.
+"""Client payment engine: automatic 402 payment handling for httpx.
 
 Example:
-    from mpp.client import Client, get
-    from mpp.methods.tempo import tempo
+    from mpp.client import Mpp
+    from mpp.methods.tempo import client as tempo
 
-    # Simple function API
-    response = await get(
-        "https://api.example.com/resource",
-        methods=[tempo(account=my_account, rpc_url="...")],
-    )
+    async with Mpp(methods=[tempo.charge(account=my_account)]) as mpp:
+        response = await mpp.fetch("https://api.example.com/resource")
 
-    # Client object for connection pooling
-    async with Client(methods=[tempo(...)]) as client:
-        r1 = await client.get("https://api.example.com/a")
-        r2 = await client.get("https://api.example.com/b")
+    # Or plug the transport into your own client:
+    async with httpx.AsyncClient(transport=mpp.payment_transport) as client:
+        response = await client.get("https://api.example.com/resource")
 """
 
 from mpp import _expires as Expires
-from mpp.client.transport import Client, PaymentTransport, get, post, request
+from mpp.client.transport import Mpp, PaymentTransport
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -28,3 +24,5 @@ from mpp.events import (
     PaymentEvent,
     PaymentEventName,
 )
+from mpp.methods import Method
+from mpp.runtime import ClientMethod, CredentialParams, PaymentRuntime

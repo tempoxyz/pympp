@@ -4,7 +4,7 @@ A pay-per-fortune API using Stripe's Shared Payment Token (SPT) flow.
 
 ## What This Demonstrates
 
-- Server-side payment protection with `Mpp.create()` and the Stripe method
+- Server-side payment protection with `Mpp` and the Stripe method
 - SPT proxy endpoint (secret key stays server-side)
 - Headless client using a test card (`pm_card_visa`)
 - Full 402 → challenge → credential → retry flow

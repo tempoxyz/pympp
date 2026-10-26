@@ -9,10 +9,11 @@ Example:
     from mcp import ClientSession
     from mcp.client.sse import sse_client
     from mpp.extensions.mcp import McpClient
-    from mpp.methods.tempo import tempo, TempoAccount, ChargeIntent
+    from mpp.methods.tempo import TempoAccount
+    from mpp.methods.tempo import client as tempo
 
     account = TempoAccount.from_key("0x...")
-    method = tempo(account=account, intents={"charge": ChargeIntent()})
+    method = tempo.charge(account=account)
 
     async with sse_client("http://localhost:8000/sse") as streams:
         async with ClientSession(streams[0], streams[1]) as session:
@@ -33,8 +34,7 @@ from typing import Any
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpp.runtime import Method as Method
-from mpp.runtime import _method_accepts_challenge
+from mpp.runtime import ClientMethod, PaymentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -140,12 +140,13 @@ class McpClient:
 
     Args:
         session: An initialized ``mcp.ClientSession``.
-        methods: Payment methods available for credential creation.
+        methods: Client payment methods available for credential creation, in
+            preference order (nested sequences are flattened).
         trusted_tempo_realms: Explicitly trusted realms for zero-amount Tempo
             charges; MCP has no authenticated HTTP host to compare.
 
     Example:
-        client = McpClient(session, methods=[tempo(...)])
+        client = McpClient(session, methods=[tempo.charge(account=account)])
         result = await client.call_tool("premium_tool", {"query": "hello"})
         print(result.receipt)
     """
@@ -153,12 +154,12 @@ class McpClient:
     def __init__(
         self,
         session: Any,
-        methods: list[Method],
+        methods: Sequence[ClientMethod | Any],
         *,
         trusted_tempo_realms: Sequence[str] = (),
     ) -> None:
         self._session = session
-        self._methods = methods
+        self._runtime = PaymentRuntime(methods)
         self._trusted_tempo_realms = set(trusted_tempo_realms)
 
     def __getattr__(self, name: str) -> Any:
@@ -216,7 +217,7 @@ class McpClient:
 
             challenge, method = self._match_challenge(challenges)
 
-            core_credential = await method.create_credential(challenge.to_core())
+            core_credential = await self._runtime.create_credential(challenge.to_core(), method)
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
 
             retry_meta = dict(meta) if meta else {}
@@ -234,25 +235,27 @@ class McpClient:
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
 
-    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, Method]:
+    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, ClientMethod]:
         """Match a challenge to an installed method.
 
         Iterates installed methods in order (client preference) and returns
-        the first match by ``name`` and ``intent``.
+        the first challenge with its ``name`` and ``intent`` that the method accepts.
         """
-        for method in self._methods:
-            supported_intents = self._intent_names(method)
+        for method in self._runtime.methods:
             for challenge in challenges:
                 if (
                     challenge.method == method.name
-                    and challenge.intent in supported_intents
-                    and _method_accepts_challenge(method, challenge.to_core())
+                    and challenge.intent == method.intent
+                    and (
+                        method.can_handle_challenge is None
+                        or method.can_handle_challenge(challenge.to_core())
+                    )
                     and not self._is_untrusted_zero_tempo_charge(challenge)
                 ):
                     return challenge, method
 
         available = [challenge.method for challenge in challenges]
-        installed = [m.name for m in self._methods]
+        installed = list(dict.fromkeys(m.name for m in self._runtime.methods))
         raise ValueError(
             f"No compatible payment method. Server offered: {available}, client has: {installed}. "
             "Zero-amount Tempo charges require a pinned trusted_tempo_realms entry."
@@ -266,14 +269,6 @@ class McpClient:
         except (KeyError, TypeError, ValueError, OverflowError):
             return False
         return zero and challenge.realm not in self._trusted_tempo_realms
-
-    @staticmethod
-    def _intent_names(method: Method) -> set[str]:
-        """Get intent names supported by a method."""
-        intents = getattr(method, "intents", None) or getattr(method, "_intents", None)
-        if isinstance(intents, dict):
-            return set(intents.keys())
-        return {"charge"}
 
     @staticmethod
     def _extract_receipt(result: Any) -> MCPReceipt | None:

@@ -16,7 +16,6 @@ from mpp.extensions.mcp.errors import PaymentVerificationError as _PaymentVerifi
 from mpp.extensions.mcp.types import MCPChallenge as _MCPChallenge
 from mpp.extensions.mcp.types import MCPCredential as _MCPCredential
 from mpp.extensions.mcp.types import MCPReceipt as _MCPReceipt
-from mpp.extensions.mcp.verify import create_challenge as _create_challenge
 from mpp.extensions.mcp.verify import verify_or_challenge as _verify_or_challenge
 
 CODE_MALFORMED_CREDENTIAL = _CODE_MALFORMED_CREDENTIAL
@@ -35,5 +34,4 @@ PaymentVerificationError = _PaymentVerificationError
 MCPChallenge = _MCPChallenge
 MCPCredential = _MCPCredential
 MCPReceipt = _MCPReceipt
-create_challenge = _create_challenge
 verify_or_challenge = _verify_or_challenge

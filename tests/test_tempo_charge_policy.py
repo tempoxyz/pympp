@@ -17,11 +17,9 @@ from mpp.methods.tempo import (
     PATH_USD,
     TESTNET_CHAIN_ID,
     USDC,
-    ChargeIntent,
     TempoAccount,
-    tempo,
 )
-from mpp.methods.tempo.client import TempoMethod
+from mpp.methods.tempo.client import TempoMethod, _client_method, _tempo_method
 from mpp.runtime import PaymentRuntime
 
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -64,9 +62,8 @@ def make_method(**policy: Any) -> TempoMethod:
     """Build a client method, pinned to pathUSD unless the policy pins a currency."""
     if "currency" not in policy and "currencies" not in policy:
         policy["currencies"] = [PATH_USD]
-    return tempo(
+    return _tempo_method(
         account=TempoAccount.from_key(TEST_PRIVATE_KEY),
-        intents={"charge": ChargeIntent()},
         **policy,
     )
 
@@ -187,7 +184,7 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             id="cap-currency-pin-case-insensitive",
         ),
         pytest.param({}, make_challenge(currency=USDC), None, id="no-cap-any-currency"),
-        # chain pin (default tempo() pins mainnet)
+        # chain pin (the default configuration pins mainnet)
         pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-pinned"),
         pytest.param(
             {},
@@ -434,7 +431,7 @@ UNDER = {"amount": "1000"}
 def test_challenge_selection_skips_offers_outside_policy(
     policy: dict[str, Any], offers: list[dict[str, Any]], expected: int | None
 ) -> None:
-    method = make_method(**policy)
+    method = _client_method(make_method(**policy))
     challenges = [
         make_challenge(challenge_id=f"offer-{index}", **offer) for index, offer in enumerate(offers)
     ]
@@ -459,7 +456,7 @@ def test_challenge_selection_skips_offers_outside_policy(
         with pytest.raises(ValueError, match="No compatible payment method"):
             mcp._match_challenge(mcp_challenges)
         return
-    assert runtime.match_challenge(challenges) == (challenges[expected], method)
+    assert runtime.match_challenge(challenges) == (challenges[expected], runtime.methods[0])
     mcp_challenge, mcp_method = mcp._match_challenge(mcp_challenges)
     assert mcp_challenge.id == f"offer-{expected}"
     assert mcp_method is method
@@ -483,7 +480,8 @@ async def test_selection_uses_cached_rpc_chain_pin(
         make_challenge(chain_id=TESTNET_CHAIN_ID, challenge_id="offer-1"),
     ]
 
-    assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[expected], method)
+    runtime = PaymentRuntime([_client_method(method)])
+    assert runtime.match_challenge(challenges) == (challenges[expected], runtime.methods[0])
     method._cached_chain_ids["https://rpc.custom"] = TESTNET_CHAIN_ID
     build = AsyncMock(return_value=("0xdeadbeef", TESTNET_CHAIN_ID))
     with patch.object(method, "_build_tempo_transfer", build):
@@ -530,14 +528,14 @@ async def test_direct_method_cap_skips_and_rejects_other_currency() -> None:
         currencies=(PATH_USD,),
         max_atomic_amount=1000,
     )
-    method._intents = {"charge": ChargeIntent()}
     challenges = [
         make_challenge(currency=USDC, challenge_id="offer-0"),
         make_challenge(challenge_id="offer-1"),
     ]
     build = AsyncMock(return_value=("0xdeadbeef", CHAIN_ID))
 
-    assert PaymentRuntime([method]).match_challenge(challenges) == (challenges[1], method)
+    runtime = PaymentRuntime([_client_method(method)])
+    assert runtime.match_challenge(challenges) == (challenges[1], runtime.methods[0])
     with (
         patch.object(method, "_build_tempo_transfer", build),
         patch.object(method, "_get_chain_id", AsyncMock(return_value=CHAIN_ID)),
@@ -567,7 +565,7 @@ async def test_caps_changed_after_construction_are_enforced() -> None:
         with pytest.raises(ValueError, match="requires max_amount_decimals"):
             await method.create_credential(make_challenge(amount="1"))
 
-    unpinned = tempo(account=TempoAccount.from_key(TEST_PRIVATE_KEY), intents={})
+    unpinned = _tempo_method(account=TempoAccount.from_key(TEST_PRIVATE_KEY))
     unpinned.max_atomic_amount = 1000
     assert unpinned.can_handle_challenge(make_challenge(amount="1")) is False
     with patch.object(unpinned, "_build_tempo_transfer", build):
@@ -608,7 +606,7 @@ def test_tempo_stores_charge_policy(kwargs: dict[str, Any], attribute: str, expe
 
 
 def tempo_charge(**kwargs: Any) -> TempoMethod:
-    return tempo(intents={"charge": ChargeIntent()}, **kwargs)
+    return _tempo_method(**kwargs)
 
 
 FINER_THAN_DECIMALS = "has more fractional digits than 6 decimals allow"

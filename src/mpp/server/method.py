@@ -1,135 +1,151 @@
-"""Method protocol for payment method implementations."""
+"""Server-side payment method hooks."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+import inspect
+from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
-from mpp._units import _parse_decimal, parse_units
-from mpp.methods import CanOfferFn, PaymentSuccessHandler
+from mpp._validation import Validation
+from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from mpp import Challenge, Credential, Receipt
+    from mpp.server.http import Request
+    from mpp.store import Store
+    from mpp.x402._server import X402Intent
 
-    from mpp import Challenge, Credential
-    from mpp.server.intent import Intent, VerifiableIntent
+T = TypeVar("T")
+
+# The configured method settling the current payment, so success callbacks reach only it.
+SETTLING_METHOD: ContextVar[ServerMethod | None] = ContextVar("mpp_settling_method", default=None)
 
 
-@runtime_checkable
-class Method(Protocol):
-    """Payment method interface.
+async def resolve(value: T | Awaitable[T]) -> T:
+    """Await `value` when it is awaitable, so hooks may be sync or async."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
-    A method represents a payment network (e.g., Tempo, Stripe) and provides:
-    - Named intents for different payment operations
-    - Client-side credential creation
-    - Optional request transformation
 
-    Example:
-        class StripeMethod:
-            name = "stripe"
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RequestContext:
+    """Arguments for :attr:`ServerMethod.resolve_request`.
 
-            @property
-            def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
-                return {"charge": StripeChargeIntent(self.api_key)}
-
-            async def create_credential(self, challenge: Challenge) -> Credential:
-                # Create Stripe payment intent and return credential
-                ...
+    `request` is the route input: the method's defaults merged with the route options.
     """
 
-    name: str
+    request: dict[str, Any]
+    credential: Credential | None = None
+    input: Request | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class VerifyContext:
+    """Arguments for `verify` and `broadcast`.
+
+    `credential.payload` is parsed by the method's payload model. `request` is the
+    resolved route input; `challenge` is the authenticated challenge the credential
+    echoes, whose `request` is the wire request.
+    """
+
+    credential: Credential
+    request: dict[str, Any]
+    challenge: Challenge
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ValidateContext(VerifyContext):
+    """Arguments for `validate`; `operation` says whether a broadcast follows."""
+
+    operation: Literal["broadcast", "validate"] = "validate"
+
+
+VerifyFn = Callable[[VerifyContext], Awaitable["Receipt"]]
+ValidateFn = Callable[[ValidateContext], Awaitable[Validation]]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True, eq=False)
+class ServerMethod:
+    """A payment method configured for servers.
+
+    Provide either `verify` (validation and settlement in one hook) or `broadcast`
+    (terminal settlement) with an optional non-mutating `validate`.
+
+    Attributes:
+        method: The method definition.
+        verify: Validates and settles a credential, returning its receipt.
+        validate: Confirms a credential is acceptable without settling or reserving it.
+        broadcast: Performs the terminal payment operation and returns its receipt.
+        resolve_request: Returns the route input to normalize, given the merged input.
+        can_offer: Decides whether to advertise an offer for a wire request.
+        on_payment_success: Called with the `payment.success` event of this method.
+        defaults: Route input merged under every route's options.
+        x402: Lets x402 `exact` clients pay this method's offers.
+        use_store: Adopts the `Mpp(store=...)` replay store when the method was
+            configured without one of its own.
+        credential_options: Keyword options `Mpp.validate_credential` and
+            `Mpp.broadcast_credential` accept for this method; others are rejected.
+    """
+
+    method: Method[Any, Any]
+    verify: VerifyFn | None = None
+    validate: ValidateFn | None = None
+    broadcast: VerifyFn | None = None
+    resolve_request: (
+        Callable[[RequestContext], dict[str, Any] | Awaitable[dict[str, Any]]] | None
+    ) = None
+    can_offer: CanOfferFn | None = None
+    on_payment_success: PaymentSuccessHandler | None = None
+    defaults: Mapping[str, Any] | None = None
+    x402: X402Intent | None = None
+    use_store: Callable[[Store], None] | None = None
+    credential_options: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.verify is None and self.broadcast is None:
+            raise TypeError("ServerMethod requires verify or broadcast")
+        if self.verify is not None and (self.broadcast is not None or self.validate is not None):
+            raise TypeError("ServerMethod accepts either verify or validate/broadcast")
+        if self.can_offer is not None and not callable(self.can_offer):
+            raise ValueError("can_offer must be callable")
+        if self.on_payment_success is not None and not callable(self.on_payment_success):
+            raise ValueError("on_payment_success must be callable")
 
     @property
-    def intents(self) -> Mapping[str, Intent | VerifiableIntent]:
-        """Available intents for this method."""
-        ...
+    def name(self) -> str:
+        return self.method.name
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        """Create a credential to satisfy the given challenge.
+    @property
+    def intent(self) -> str:
+        return self.method.intent
 
-        This is called on the client side when a 402 response is received.
+    @property
+    def key(self) -> str:
+        """The `name/intent` key."""
+        return self.method.key
 
-        Args:
-            challenge: The payment challenge from the server.
+    async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]:
+        """Run `validate` then `broadcast`, or `verify`.
 
-        Returns:
-            A credential that satisfies the challenge.
+        The validation's `payer` is copied to the receipt unless it already has one.
         """
-        ...
-
-
-@runtime_checkable
-class _SupportsCanOffer(Protocol):
-    """A method that can decide whether to advertise a prepared offer."""
-
-    can_offer: CanOfferFn | None
-
-
-@runtime_checkable
-class _SupportsPaymentSuccess(Protocol):
-    """A method that handles its own successfully verified payments."""
-
-    on_payment_success: PaymentSuccessHandler | None
-
-
-def transform_request(
-    method: Method,
-    request: dict[str, Any],
-    credential: Credential | None,
-) -> dict[str, Any]:
-    """Transform request using method's transform_request if available.
-
-    This hook allows methods to modify the request before challenge creation,
-    with access to the credential (if present) for conditional logic like
-    feePayer sponsorship.
-
-    Args:
-        method: The payment method.
-        request: The original request parameters.
-        credential: The parsed credential, or None if not provided.
-
-    Returns:
-        The transformed request.
-    """
-    if hasattr(method, "transform_request"):
-        return method.transform_request(request, credential)  # type: ignore[union-attr]
-    return request
-
-
-def request_amount(method: Method, amount: str) -> str:
-    """Convert a route's amount option to the method's wire ``amount``.
-
-    A method that defines ``parse_amount(amount: str) -> str`` owns its wire
-    representation, as a method's request schema does in mppx; a method whose
-    wire format is a decimal string can return ``amount`` unchanged. The hook
-    receives a stripped, finite, non-negative decimal string. Otherwise
-    the amount is converted to base units with the method's ``decimals``
-    (default 6).
-    """
-    hook = getattr(method, "parse_amount", None)
-    if hook is None:
-        return str(parse_units(amount, getattr(method, "decimals", 6)))
-    _parse_decimal(amount)
-    wire_amount = hook(amount.strip())
-    if not isinstance(wire_amount, str) or not wire_amount:
-        raise TypeError("parse_amount must return a non-empty string")
-    return wire_amount
-
-
-def prepare_intent(
-    method: Method,
-    intent: Intent | VerifiableIntent,
-    input: Mapping[str, Any],
-) -> tuple[Intent | VerifiableIntent, dict[str, Any]]:
-    """Bind private method input to an isolated intent before request construction.
-
-    Optional method hooks must only prepare input, never execute deferred work.
-    Existing methods need not implement this hook. Neither the caller's mapping
-    nor the shared method/intent may be mutated by a hook.
-    """
-    hook = getattr(method, "prepare_intent", None)
-    if hook is None:
-        return intent, dict(input)
-    prepared = hook(intent, dict(input))
-    if not isinstance(prepared, tuple) or len(prepared) != 2 or not isinstance(prepared[1], dict):
-        raise TypeError("prepare_intent must return (intent, request_input)")
-    return prepared
+        if self.verify is not None:
+            return await self.verify(context), None
+        assert self.broadcast is not None
+        validation = None
+        if self.validate is not None:
+            validation = await self.validate(
+                ValidateContext(
+                    credential=context.credential,
+                    request=context.request,
+                    challenge=context.challenge,
+                    operation="broadcast",
+                )
+            )
+        receipt = await self.broadcast(context)
+        if validation is not None and validation.payer is not None and receipt.payer is None:
+            receipt = replace(receipt, payer=validation.payer)
+        return receipt, validation

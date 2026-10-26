@@ -1,19 +1,26 @@
-"""Payment handler that binds method, realm, and secret_key."""
+"""Server payment engine: configured methods, route handlers and events."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, overload
+import inspect
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
-from mpp._units import transform_units
+from mpp._validation import Validation
 from mpp.errors import (
     InvalidChallengeError,
+    InvalidPayloadError,
     MalformedCredentialError,
     PaymentExpiredError,
     PaymentMethodUnsupportedError,
+    VerificationFailedError,
 )
 from mpp.events import (
     CHALLENGE_CREATED,
@@ -24,49 +31,24 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.compose import (
-    ComposedChallenges,
-    ComposedHandler,
-    ComposedResult,
-    ComposeEntry,
-    ComposeOptions,
-    _offer_currencies,
-)
-from mpp.server.decorator import (
-    BodyParamsType,
-    bind_framework_scope,
-    resolve_body_param,
-    wrap_payment_handler,
-    x402_input,
-)
-from mpp.server.intent import Validation
-from mpp.server.intent import broadcast_credential as broadcast_intent_credential
-from mpp.server.intent import validate_credential as validate_intent_credential
+from mpp.server.compose import ComposedHandler, _Offer, _validate_options
 from mpp.server.method import (
-    _SupportsPaymentSuccess,
-    prepare_intent,
-    request_amount,
-    transform_request,
+    SETTLING_METHOD,
+    RequestContext,
+    ServerMethod,
+    ValidateContext,
+    VerifyContext,
 )
 from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
     _body_digest_error,
     _challenge_from_echo,
-    verify_or_challenge,
 )
 from mpp.store import Store
-from mpp.x402._server import X402Input, X402Intent, challenges_payment_required_header
-from mpp.x402._types import PaymentRequirements
 
 if TYPE_CHECKING:
     from mpp.events import ServerPaymentSuccessPayload
-    from mpp.server.intent import Intent, VerifiableIntent
-    from mpp.server.method import Method
-
-R = TypeVar("R")
-
-DEFAULT_DECIMALS = 6
 
 
 class _ContextUnset:
@@ -77,86 +59,184 @@ class _ContextUnset:
 _CONTEXT_UNSET: Any = _ContextUnset()
 
 
-class Mpp:
-    """Server-side payment handler.
+class HandlerFactory:
+    """Creates route handlers from route options, such as ``mpp.tempo.charge(amount="1")``."""
 
-    Binds a payment method with realm and secret_key for stateless
-    challenge verification. Currencies and recipient are configured once
-    on the method, so charge() only needs an amount. Tempo methods accept
-    OUSD then USDC.e on mainnet (OUSD then pathUSD on Moderato) by default
-    and issue one challenge per accepted currency.
+    def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None:
+        self._server = server
+        self.methods = tuple(methods)
+
+    def __call__(self, **options: Any) -> ComposedHandler:
+        """Configure the offers of this factory's methods for a route.
+
+        Engine options: ``description``, ``meta`` (opaque challenge metadata),
+        ``expires`` or ``expires_in``, and ``body`` (bytes, string or JSON-like dict, or a
+        callable receiving the :class:`~mpp.server.Request`, bound as a digest). Every
+        other option is method input, merged over the method's ``defaults``.
+        """
+        options = _validate_options(options)
+        methods = _select(self.methods, options)
+        for method in methods:
+            _check_input(method, options)
+        return ComposedHandler._from_offers(
+            [_Offer(self._server, method, dict(options)) for method in methods],
+            composed=self._server._compose_implicit or len(methods) > 1,
+        )
+
+
+class _Namespace:
+    """Handler factories of one method name, such as ``mpp.tempo``."""
+
+    def __init__(self, entries: dict[str, HandlerFactory]) -> None:
+        self._entries = entries
+
+    def __getattr__(self, name: str) -> HandlerFactory:
+        entries = self.__dict__.get("_entries", {})
+        if name in entries:
+            return entries[name]
+        raise AttributeError(name)
+
+    def __getitem__(self, name: str) -> HandlerFactory:
+        return self._entries[name]
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._entries
+
+
+def _select(methods: Sequence[ServerMethod], options: Mapping[str, Any]) -> list[ServerMethod]:
+    """Keep the methods whose defaults agree with explicit route options.
+
+    Several configured offers of one method, such as one per accepted currency, collapse
+    to the one a route names; when none matches, the first one takes the route's value.
+    """
+    selected = [
+        method
+        for method in methods
+        if not any(
+            options.get(key) is not None and options[key] != value
+            for key, value in (method.defaults or {}).items()
+        )
+    ]
+    return selected or [methods[0]]
+
+
+def _check_input(method: ServerMethod, options: Mapping[str, Any]) -> None:
+    """Reject invalid method input when the route is configured, when that runs synchronously."""
+    from mpp.server.compose import ROUTE_OPTION_KEYS
+
+    input = {
+        **(method.defaults or {}),
+        **{
+            key: value
+            for key, value in options.items()
+            if key not in ROUTE_OPTION_KEYS and value is not None
+        },
+    }
+    if method.resolve_request is not None:
+        if inspect.iscoroutinefunction(method.resolve_request):
+            return
+        input = method.resolve_request(RequestContext(request=input))
+        if inspect.isawaitable(input):
+            if inspect.iscoroutine(input):
+                input.close()
+            return
+    method.method.normalize_request(input)
+
+
+class Mpp:
+    """Server-side payment engine.
+
+    Binds configured payment methods to a realm and secret key for stateless,
+    HMAC-bound challenges, and creates route handlers from route options.
 
     Example:
-        from mpp.server import Mpp
-        from mpp.methods.tempo import ChargeIntent, tempo
+        from mpp.server import Mpp, Request
+        from mpp.methods.tempo import server as tempo
 
-        m = Mpp.create(
-            method=tempo(
-                intents={"charge": ChargeIntent()},
-                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            ),
-        )
+        mpp = Mpp(methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"))
 
-        result = await m.charge(
-            authorization=request.headers.get("Authorization"),
-            amount="0.50",
-        )
-
-        if isinstance(result, Challenge | ComposedChallenges):
-            challenges = (
-                result.challenges if isinstance(result, ComposedChallenges) else (result,)
-            )
-            headers = [
-                ("WWW-Authenticate", challenge.to_www_authenticate(m.realm))
-                for challenge in challenges
-            ]
-            return Response(status=402, headers=headers)
-
-        credential, receipt = result
-        return Response({"data": "..."}, headers={"Payment-Receipt": ...})
+        result = await mpp.charge(amount="0.50")(request)
+        if result.status != 200:
+            return result.challenge
+        return result.with_receipt(Response.json({"data": "..."}))
     """
 
     def __init__(
         self,
-        method: Method,
-        realm: str,
-        secret_key: str,
-        defaults: dict[str, Any] | None = None,
+        methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]],
+        *,
+        realm: str | None = None,
+        secret_key: str | None = None,
         store: Store | None = None,
         requires_auth: bool = False,
         unique_challenges: bool = True,
     ) -> None:
-        """Initialize the payment handler.
+        """Initialize the payment engine.
 
         Args:
-            method: Payment method (e.g., TempoMethod).
-            realm: Server realm for WWW-Authenticate header.
-            secret_key: Server secret for HMAC-bound challenge IDs.
-                Enables stateless challenge verification.
-            defaults: Default request values merged with per-call request params.
-            store: Optional key-value store for replay protection.
-                When provided, automatically wired into intents that
-                accept a ``store`` (e.g., ``ChargeIntent``).
+            methods: A configured server method, or a sequence of them (nested sequences
+                are flattened). Handlers of a sequence always compose their offers, so
+                each method's ``can_offer`` applies; a single method's handler offers it
+                directly.
+            realm: Server realm. Auto-detected from the environment if omitted.
+            secret_key: HMAC secret. Required unless ``MPP_SECRET_KEY`` is set.
+            store: Replay store shared by every method configured without its own, such
+                as a Tempo or EVM charge built without ``store=``.
+            requires_auth: Read Payment credentials from ``Payment-Authorization`` so
+                ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
                 to all replicas; enable afterward to prevent fixed-expiry collisions.
-            requires_auth: When True, challenges advertise
-                ``header="Payment-Authorization"`` so ``Authorization`` remains
-                available for application authentication.
         """
-        self.method = method
-        self.methods = (method,)
-        self.realm = realm
-        self.secret_key = secret_key
-        self.defaults = defaults or {}
+        self.methods = _flatten(methods)
+        self._compose_implicit = isinstance(methods, Sequence)
+        if not self.methods:
+            raise ValueError("methods is required")
+        if store is not None:
+            for method in self.methods:
+                if method.use_store is not None:
+                    method.use_store(store)
+        self.realm = detect_realm() if realm is None else realm
+        self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
-        self._compose_implicit_methods = False
         self._events = EventDispatcher()
-        self._register_method_payment_success_handler(method)
+        self._payment_success_hooks: set[tuple[str, str, int]] = set()
+        for method in self.methods:
+            self._register_payment_success_handler(method)
 
-        if store is not None:
-            self._wire_store(store)
+        keys: dict[str, list[ServerMethod]] = {}
+        intents: dict[str, list[ServerMethod]] = {}
+        for method in self.methods:
+            keys.setdefault(method.key, []).append(method)
+            intents.setdefault(method.intent, []).append(method)
+        self._handlers: dict[str, Any] = {
+            key: HandlerFactory(self, group) for key, group in keys.items()
+        }
+        names: dict[str, dict[str, HandlerFactory]] = {}
+        for key, factory in list(self._handlers.items()):
+            name, intent = key.split("/", 1)
+            names.setdefault(name, {})[intent] = factory
+        for intent, group in intents.items():
+            self._handlers.setdefault(intent, HandlerFactory(self, group))
+        for name, entries in names.items():
+            self._handlers.setdefault(name, _Namespace(entries))
+
+    def __getitem__(self, key: str) -> Any:
+        """Return the handler factory for ``"name/intent"`` or an intent, or a method namespace."""
+        try:
+            return self._handlers[key]
+        except KeyError:
+            raise KeyError(f"no payment method for {key!r}") from None
+
+    def __getattr__(self, name: str) -> Any:
+        handlers = self.__dict__.get("_handlers")
+        if handlers is not None and name in handlers:
+            return handlers[name]
+        raise AttributeError(name)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._handlers
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a server payment event handler."""
@@ -174,28 +254,54 @@ class Mpp:
         """Register a handler for failed payment verification."""
         return self.on(PAYMENT_FAILED, handler)
 
-    def _wire_store(self, store: Store) -> None:
-        """Inject *store* into intents that have a ``_store`` attribute set to None."""
-        for method in self.methods:
-            intents = getattr(method, "intents", None)
-            if not isinstance(intents, Mapping):
-                continue
-            for intent_obj in intents.values():
-                if hasattr(intent_obj, "_store") and intent_obj._store is None:
-                    intent_obj._store = store
+    def compose(self, *entries: tuple[Any, Mapping[str, Any]]) -> ComposedHandler:
+        """Combine configured offers into one route handler.
 
-    def _register_method_payment_success_handler(self, method: Method) -> None:
+        Each entry is ``(target, options)``, where ``target`` is a configured
+        :class:`ServerMethod`, a ``"name/intent"`` key, or a handler factory such as
+        ``mpp.tempo.charge``.
+        """
+        if not entries:
+            raise ValueError("compose() requires at least one entry")
+        handlers: list[ComposedHandler] = []
+        for entry in entries:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError("compose() entries must be (method, options) tuples")
+            target, options = entry
+            if not isinstance(options, Mapping):
+                raise ValueError("compose() options must be a mapping")
+            if isinstance(target, str):
+                factory = self._handlers.get(target if "/" in target else f"{target}/charge")
+            elif isinstance(target, HandlerFactory):
+                factory = target if target._server is self else None
+            elif isinstance(target, ServerMethod) and target in self.methods:
+                factory = HandlerFactory(self, [target])
+            else:
+                factory = None
+            if not isinstance(factory, HandlerFactory):
+                raise ValueError(f"payment method is not registered: {target!r}")
+            handlers.append(factory(**options))
+        return ComposedHandler(*handlers)
+
+    def _register_payment_success_handler(self, method: ServerMethod) -> None:
         """Forward successful payments to a method's optional callback."""
-        handler = method.on_payment_success if isinstance(method, _SupportsPaymentSuccess) else None
+        handler = method.on_payment_success
         if handler is None:
             return
-        if not callable(handler):
-            raise ValueError("on_payment_success must be callable")
+        # Copies of one configured method (such as one per accepted currency) share
+        # their callback: register it once so each payment calls it once.
+        hook = (method.name, method.intent, id(handler))
+        if hook in self._payment_success_hooks:
+            return
+        self._payment_success_hooks.add(hook)
 
         def dispatch(payload: ServerPaymentSuccessPayload) -> Any:
-            if payload["method"] == method.name:
-                return handler(payload)
-            return None
+            if payload["method"] != method.name or payload["intent"] != method.intent:
+                return None
+            settling = SETTLING_METHOD.get()
+            if settling is not None and settling.on_payment_success is not handler:
+                return None
+            return handler(payload)
 
         self._events.on(PAYMENT_SUCCESS, dispatch)
 
@@ -208,7 +314,7 @@ class Mpp:
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
         method_options: Mapping[str, Any] | None = None,
-    ) -> tuple[Credential, Method, Intent | VerifiableIntent, dict[str, Any], Challenge]:
+    ) -> tuple[Credential, ServerMethod, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         credential = self._parse_credential(value)
 
@@ -220,10 +326,14 @@ class Mpp:
 
         if echo.realm != self.realm:
             raise InvalidChallengeError(echo.id, "credential realm does not match")
-        method = next(
-            (candidate for candidate in self.methods if candidate.name == echo.method), None
-        )
-        if method is None:
+        candidates = [
+            candidate
+            for candidate in self.methods
+            if candidate.name == echo.method and candidate.intent == echo.intent
+        ]
+        if not candidates:
+            if any(candidate.name == echo.method for candidate in self.methods):
+                raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
             raise PaymentMethodUnsupportedError(echo.method)
         if intent is not None and echo.intent != intent:
             raise InvalidChallengeError(echo.id, "credential intent does not match")
@@ -237,14 +347,38 @@ class Mpp:
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
-        if request is not None:
-            expected_request = transform_request(
-                method,
-                transform_units(request),
-                credential,
-            )
-            if expected_request != echoed_request:
+        echoed = _comparable(echoed_request)
+        if request is None:
+            method = _select_echoed(candidates, echoed_request, echo.id)
+        else:
+            # Read `request` as route input first. Only when no method accepts it as
+            # route input is it compared as the echoed wire request (the 0.15 form), so an
+            # input that reads both ways, such as `amount` in display or base units, is
+            # always checked in its stricter route-input reading.
+            matching: list[ServerMethod] = []
+            normalized = False
+            for candidate in candidates:
+                try:
+                    expected = _expected_request(candidate, request, parsed=credential)
+                except _AsyncResolveRequestError:
+                    raise
+                except (ValidationError, TypeError, ValueError):
+                    # Rejected as route input by the method's resolve_request or model.
+                    continue
+                normalized = True
+                if expected == echoed:
+                    matching.append(candidate)
+            if normalized:
+                if not matching:
+                    raise InvalidChallengeError(echo.id, "credential request does not match")
+                method = matching[0]
+            elif _comparable(request) == echoed:
+                method = _select_echoed(candidates, echoed_request, echo.id)
+            else:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
+        unsupported = sorted(set(method_options or {}) - set(method.credential_options))
+        if unsupported:
+            raise TypeError(f"unsupported method option: {unsupported[0]}")
 
         if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
             expected_meta = None if meta is _CONTEXT_UNSET else meta
@@ -254,14 +388,13 @@ class Mpp:
             if digest_error := _body_digest_error(echo.digest, expected_body):
                 raise InvalidChallengeError(echo.id, digest_error)
 
-        intent_obj = method.intents.get(echo.intent)
-        if intent_obj is None:
-            raise PaymentMethodUnsupportedError(f"{echo.method}/{echo.intent}")
-        intent_obj, remaining = prepare_intent(method, intent_obj, method_options or {})
-        if remaining:
-            raise TypeError(f"unsupported method option: {next(iter(remaining))}")
         challenge = _challenge_from_echo(echo, echoed_request, echoed_opaque)
-        return credential, method, intent_obj, echoed_request, challenge
+        try:
+            payload = method.method.parse_payload(credential.payload)
+        except ValidationError as error:
+            raise InvalidPayloadError(str(error)) from error
+        input = {**echoed_request, **(method_options or {})}
+        return replace(credential, payload=payload), method, input, challenge
 
     @staticmethod
     def _parse_credential(value: Credential | str) -> Credential:
@@ -299,7 +432,10 @@ class Mpp:
             intent: If provided, also require the credential to be bound to
                 this intent name.
             request: If provided, also require the credential's echoed
-                request to match these request parameters.
+                request to match. Accepts either the route input (such as
+                ``{"amount": "0.50"}``, normalized like a route's options) or
+                the echoed wire request itself (base-unit ``amount``,
+                ``methodDetails``; ``_mppx_scope`` is ignored).
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -318,7 +454,7 @@ class Mpp:
             VerificationFailedError: If the intent does not support
                 non-mutating validation or rejects the credential.
         """
-        prepared, _, intent_obj, echoed_request, _ = self._prepare_credential(
+        prepared, method, input, challenge = self._prepare_credential(
             credential,
             intent=intent,
             request=request,
@@ -326,11 +462,16 @@ class Mpp:
             body=body,
             method_options=method_options,
         )
-        return await validate_intent_credential(
-            intent=intent_obj,
-            credential=prepared,
-            request=echoed_request,
+        if method.validate is None:
+            raise VerificationFailedError(
+                f"{method.intent} does not support non-mutating credential validation"
+            )
+        result = await method.validate(
+            ValidateContext(credential=prepared, request=input, challenge=challenge)
         )
+        if not isinstance(result, Validation):
+            raise VerificationFailedError("Intent returned an invalid validation result")
+        return result
 
     async def broadcast_credential(
         self,
@@ -345,18 +486,20 @@ class Mpp:
         """Revalidate and perform a bound credential's terminal operation.
 
         Applies the same challenge authentication as
-        :meth:`validate_credential`, then runs the intent's validate-then-broadcast
+        :meth:`validate_credential`, then runs the method's validate-then-broadcast
         lifecycle — the non-mutating ``validate`` hook followed by the terminal
-        ``broadcast`` (legacy intents fall back to their combined ``verify``
-        hook). Emits the same payment success/failure events as HTTP route
-        handlers.
+        ``broadcast`` (or its combined ``verify`` hook). Emits the same payment
+        success/failure events as HTTP route handlers.
 
         Args:
             credential: A parsed ``Credential`` or its serialized form.
             intent: If provided, also require the credential to be bound to
                 this intent name.
             request: If provided, also require the credential's echoed
-                request to match these request parameters.
+                request to match. Accepts either the route input (such as
+                ``{"amount": "0.50"}``, normalized like a route's options) or
+                the echoed wire request itself (base-unit ``amount``,
+                ``methodDetails``; ``_mppx_scope`` is ignored).
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -372,7 +515,7 @@ class Mpp:
         """
         parsed = self._parse_credential(credential)
         try:
-            prepared, method, intent_obj, echoed_request, challenge = self._prepare_credential(
+            prepared, method, input, challenge = self._prepare_credential(
                 parsed,
                 intent=intent,
                 request=request,
@@ -384,7 +527,7 @@ class Mpp:
             echo = parsed.challenge
             event_method = next(
                 (candidate.name for candidate in self.methods if candidate.name == echo.method),
-                self.method.name,
+                self.methods[0].name,
             )
             try:
                 decoded_request = _b64_decode(echo.request) if echo.request else {}
@@ -405,479 +548,201 @@ class Mpp:
             raise
         context = {
             "challenge": challenge,
-            "credential": prepared,
-            "intent": intent_obj.name,
+            "credential": parsed,
+            "intent": method.intent,
             "method": method.name,
-            "request": echoed_request,
+            "request": challenge.request,
         }
         try:
-            receipt = await broadcast_intent_credential(
-                intent=intent_obj,
-                credential=prepared,
-                request=echoed_request,
+            receipt, _ = await method.settle(
+                VerifyContext(credential=prepared, request=input, challenge=challenge)
             )
         except Exception as error:
             await self._events.emit(PAYMENT_FAILED, {**context, "error": error})
             raise
-        await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
+        token = SETTLING_METHOD.set(method)
+        try:
+            await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
+        finally:
+            SETTLING_METHOD.reset(token)
         return receipt
 
-    @classmethod
-    @overload
-    def create(
-        cls,
-        method: Method,
-        realm: str | None = None,
-        secret_key: str | None = None,
-        store: Store | None = None,
-        *,
-        requires_auth: bool = False,
-        unique_challenges: bool = True,
-    ) -> Mpp: ...
 
-    @classmethod
-    @overload
-    def create(
-        cls,
-        *,
-        methods: Sequence[Method],
-        realm: str | None = None,
-        secret_key: str | None = None,
-        store: Store | None = None,
-        requires_auth: bool = False,
-        unique_challenges: bool = True,
-    ) -> Mpp: ...
+class _AsyncResolveRequestError(TypeError):
+    """A method's resolve_request is async where a synchronous one is required."""
 
-    @classmethod
-    def create(
-        cls,
-        method: Method | None = None,
-        realm: str | None = None,
-        secret_key: str | None = None,
-        store: Store | None = None,
-        *,
-        methods: Sequence[Method] | None = None,
-        requires_auth: bool = False,
-        unique_challenges: bool = True,
-    ) -> Mpp:
-        """Create an Mpp instance with smart defaults.
 
-        Args:
-            method: Payment method (e.g., tempo(intents=..., recipient=...)).
-            methods: Ordered payment methods. Mutually exclusive with ``method``.
-            realm: Server realm. Auto-detected from environment if omitted.
-            secret_key: HMAC secret. Required unless `MPP_SECRET_KEY` is set.
-            store: Optional key-value store for replay protection.
-                Automatically wired into intents that accept a store.
-            unique_challenges: Disable only for a staged verifier-first rollout.
-            requires_auth: Uses ``Payment-Authorization`` for Payment credentials
-                so ``Authorization`` remains available for application
-                authentication.
-        """
-        if method is not None and methods is not None:
-            raise ValueError("pass method= or methods=, not both")
-        configured = (
-            tuple(methods) if methods is not None else (() if method is None else (method,))
-        )
-        if not configured:
-            raise ValueError("method= or methods= is required")
-        names = [candidate.name for candidate in configured]
-        if len(set(names)) != len(names):
-            raise ValueError("payment method names must be unique")
+def _expected_request(
+    method: ServerMethod, request: Mapping[str, Any], *, parsed: Credential
+) -> dict[str, Any]:
+    input = {
+        **(method.defaults or {}),
+        **{key: value for key, value in request.items() if value is not None},
+    }
+    if method.resolve_request is not None:
+        resolved = method.resolve_request(RequestContext(request=input, credential=parsed))
+        if inspect.isawaitable(resolved):
+            if inspect.iscoroutine(resolved):
+                resolved.close()
+            raise _AsyncResolveRequestError(
+                "validate_credential(request=...) needs a synchronous resolve_request"
+            )
+        input = resolved
+    return _comparable(method.method.normalize_request(input))
 
-        resolved_realm = detect_realm() if realm is None else realm
-        resolved_secret_key = detect_secret_key() if secret_key is None else secret_key
-        server = cls(
-            method=configured[0],
-            realm=resolved_realm,
-            secret_key=resolved_secret_key,
-            store=store,
-            requires_auth=requires_auth,
-            unique_challenges=unique_challenges,
-        )
-        server._compose_implicit_methods = methods is not None
-        if methods is not None:
-            server.methods = configured
-        if len(configured) > 1:
-            if store is not None:
-                server._wire_store(store)
-            for configured_method in configured[1:]:
-                server._register_method_payment_success_handler(configured_method)
-        return server
 
-    def compose(
-        self,
-        *entries: ComposeEntry,
-        body: BodyParamsType = None,
-    ) -> ComposedHandler:
-        """Configure one or more payment offers for an endpoint."""
-        from mpp.server.compose import _configure_entries
+def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
+    """A wire request without the route scope the engine binds into it."""
+    return {key: value for key, value in request.items() if key != "_mppx_scope"}
 
-        return _configure_entries(self, entries, body)
 
-    def _x402_accepts(self, challenge: Challenge) -> PaymentRequirements | None:
-        """Return the x402 requirements that pay one of this server's challenges."""
-        if challenge.realm and challenge.realm != self.realm:
-            return None
-        method = next((m for m in self.methods if m.name == challenge.method), None)
-        intent = method.intents.get(challenge.intent) if method is not None else None
-        if not isinstance(intent, X402Intent):
-            return None
-        return intent.x402_requirements(challenge.request)
+_IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
 
-    def x402_payment_required(
-        self,
-        challenges: Challenge | ComposedChallenges | Sequence[Challenge],
-        resource_url: str,
-        error: Exception | str | None = None,
-        *,
-        http_method: str = "GET",
-    ) -> str | None:
-        """Build the x402 ``PAYMENT-REQUIRED`` header value for unpaid challenges.
 
-        For servers that build responses themselves from :meth:`charge`.
-        Returns ``None`` when no challenge can be paid with x402.
+def _select_echoed(
+    candidates: Sequence[ServerMethod], echoed: Mapping[str, Any], challenge_id: str
+) -> ServerMethod:
+    """Choose the configured method copy whose configuration issued an echoed request.
 
-        Args:
-            challenges: The challenges returned by :meth:`charge`.
-            resource_url: Absolute URL of the protected resource.
-            error: Optional reason the previous payment was rejected.
-            http_method: The request's HTTP method, bound into the route binding.
-                Pass the same value to :meth:`charge`.
-        """
-        if isinstance(challenges, Challenge):
-            items: Sequence[Challenge] = (challenges,)
-        elif isinstance(challenges, ComposedChallenges):
-            items = challenges.challenges
-            error = error if error is not None else challenges.error
+    Copies of one method (such as one per currency, or per chain) must agree with
+    the echo's currency and chain; among those left, the copy whose configuration
+    agrees with the rest of the echo wins. Copies left with different
+    configurations are ambiguous.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    probes = {id(candidate): _probe(candidate) for candidate in candidates}
+    matching: list[ServerMethod] = []
+    # A route may override the currency or chain: like route selection, fall back to
+    # the copies agreeing on the rest, then to the first copy. Overridden fields no
+    # longer tell copies apart.
+    for paths, use_defaults in (
+        (_IDENTITY_PATHS, True),
+        (_IDENTITY_PATHS[:1], True),
+        (_IDENTITY_PATHS[1:], False),
+    ):
+        matching = [
+            candidate
+            for candidate in candidates
+            if _agrees(candidate, probes[id(candidate)], echoed, paths, defaults=use_defaults)
+        ]
+        if matching:
+            overridden = [path for path in _IDENTITY_PATHS if path not in paths]
+            probes = {key: _without(probe, overridden) for key, probe in probes.items()}
+            break
+    if not matching:
+        return candidates[0]
+    if len(matching) > 1:
+        narrowed = [
+            candidate
+            for candidate in matching
+            if (probe := probes[id(candidate)]) is not None
+            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
+        ]
+        matching = narrowed or matching
+    if len(matching) > 1:
+        configs = [probes[id(candidate)] for candidate in matching]
+        if configs[0] is None or any(config != configs[0] for config in configs):
+            raise InvalidChallengeError(
+                challenge_id,
+                "credential matches several configured methods; pass request= to select one",
+            )
+    return matching[0]
+
+
+def _probe(method: ServerMethod) -> dict[str, Any] | None:
+    """The wire request a method's configuration produces for a nominal amount."""
+    input: dict[str, Any] = {
+        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
+        "amount": "1",
+    }
+    try:
+        if method.resolve_request is not None:
+            resolved = method.resolve_request(RequestContext(request=input))
+            if inspect.isawaitable(resolved):
+                if inspect.iscoroutine(resolved):
+                    resolved.close()
+                return None
+            input = resolved
+        wire = method.method.normalize_request(input)
+    except Exception:
+        return None
+    return {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+
+
+def _without(
+    probe: dict[str, Any] | None, paths: Sequence[tuple[str, ...]]
+) -> dict[str, Any] | None:
+    """A probe without the given paths."""
+    if probe is None or not paths:
+        return probe
+    result = deepcopy(probe)
+    for path in paths:
+        parent = _at(result, path[:-1])
+        if isinstance(parent, dict):
+            parent.pop(path[-1], None)
+    return result
+
+
+def _leaves(value: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = []
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            paths.extend(_leaves(item, (*prefix, key)))
         else:
-            items = challenges
-        return challenges_payment_required_header(
-            items,
-            self._x402_accepts,
-            resource_url,
-            http_method,
-            str(error) if error is not None else None,
-        )
+            paths.append((*prefix, key))
+    return paths
 
-    def payment_credential_value(
-        self,
-        authorization: str | None,
-        payment_authorization: str | None = None,
-    ) -> str | None:
-        """Select the HTTP header value that carries the Payment credential.
 
-        When ``requires_auth`` is True, Payment credentials ride in
-        ``Payment-Authorization`` so ``Authorization`` can hold application auth.
-        """
-        return payment_authorization if self.requires_auth else authorization
+_MISSING: Any = object()
 
-    async def charge(
-        self,
-        authorization: str | None,
-        amount: str,
-        *,
-        currency: str | None = None,
-        recipient: str | None = None,
-        expires: str | None = None,
-        description: str | None = None,
-        splits: list[dict[str, str]] | None = None,
-        fee_payer: bool = False,
-        chain_id: int | None = None,
-        extra: dict[str, str] | None = None,
-        body: str | bytes | dict[str, Any] | None = None,
-        payment_authorization: str | None = None,
-        payment_signature: str | None = None,
-        resource_url: str | None = None,
-        http_method: str = "GET",
-        **method_options: Any,
-    ) -> Challenge | ComposedResult:
-        """Handle a charge intent.
 
-        Args:
-            authorization: The Authorization header value (or None).
-            amount: Payment amount in human units (e.g., "0.50" for $0.50).
-                Converted to base units using the method's decimals (6 for
-                Tempo stablecoins), unless the method defines ``parse_amount``.
-            currency: Offer only this currency instead of the method's
-                accepted currencies.
-            recipient: Override the method's default recipient.
-            expires: Challenge expiration as auth-param (ISO 8601).
-                Defaults to now + 5 minutes. Not included in the request body.
-            description: Optional human-readable description.
-            splits: Optional split recipients/amounts for multi-transfer charges.
-            fee_payer: Whether to use a fee payer for gas sponsorship.
-            chain_id: Override the default chain ID (e.g., 42431 for moderato).
-            extra: Optional string metadata embedded in the charge request.
-            body: Actual request body bytes, string, or JSON-like dict to bind
-                with a SHA-256 digest. If provided, new challenges include a
-                digest and submitted credentials must echo a matching digest.
-            payment_authorization: The Payment-Authorization header value.
-                Used when the server was created with ``requires_auth=True``.
-            payment_signature: The x402 ``PAYMENT-SIGNATURE`` header value.
-                Paid only by methods that support x402 (``evm``), and only
-                when ``resource_url`` is set and no Payment credential is sent.
-            resource_url: Absolute URL of the protected resource. Enables x402
-                for methods that support it; build the ``PAYMENT-REQUIRED``
-                header for unpaid results with :meth:`x402_payment_required`.
-            http_method: The request's HTTP method, bound into x402 route
-                binding. Pass the same value to :meth:`x402_payment_required`.
+def _at(value: Any, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if not isinstance(value, Mapping) or key not in value:
+            return _MISSING
+        value = value[key]
+    return value
 
-        Returns:
-            Challenge, or ComposedChallenges for multiple offers (methods or
-            accepted currencies), if payment is required; otherwise
-            (Credential, Receipt).
-        """
-        methods = [method for method in self.methods if "charge" in method.intents]
-        if not methods:
-            raise ValueError(f"Method {self.method.name} does not support charge intent")
-        options: dict[str, Any] = {
-            "amount": amount,
-            "currency": currency,
-            "recipient": recipient,
-            "expires": expires,
-            "description": description,
-            "splits": splits,
-            "fee_payer": fee_payer,
-            "chain_id": chain_id,
-            "extra": extra,
-            **method_options,
-        }
-        if payment_signature is not None and resource_url is None:
-            raise ValueError("payment_signature requires resource_url")
-        x402 = (
-            X402Input(
-                resource_url=resource_url,
-                payment_signature=payment_signature,
-                http_method=http_method,
-            )
-            if resource_url is not None
-            else None
-        )
-        composed_methods = self._composed_methods(methods, options)
-        if composed_methods:
-            handler = self.compose(
-                *((method, cast(ComposeOptions, options)) for method in composed_methods),
-                body=body,
-            )
-            result = await handler.verify(
-                self.payment_credential_value(authorization, payment_authorization),
-                x402=x402,
-            )
-            if len(handler._offers) == 1 and isinstance(result, ComposedChallenges):
-                return result.challenges[0]
-            return result
 
-        intent, request, challenge_expires = self._build_offer_request(
-            methods[0], "charge", options, None, api_name="charge"
-        )
-        return await verify_or_challenge(
-            authorization=self.payment_credential_value(authorization, payment_authorization),
-            intent=intent,
-            request=request,
-            realm=self.realm,
-            secret_key=self.secret_key,
-            method=methods[0].name,
-            description=description,
-            meta=options.get("meta"),
-            expires=challenge_expires,
-            body=body,
-            events=self._events,
-            header=self.credential_header,
-            unique_challenges=self.unique_challenges,
-            x402=x402,
-        )
+def _agrees(
+    method: ServerMethod,
+    probe: Mapping[str, Any] | None,
+    echoed: Mapping[str, Any],
+    paths: Sequence[tuple[str, ...]],
+    *,
+    defaults: bool = True,
+) -> bool:
+    """Whether the method's defaults and probed configuration agree with the echo."""
+    expected: dict[tuple[str, ...], Any] = {
+        (key,): value
+        for key, value in ((method.defaults or {}) if defaults else {}).items()
+        if value is not None
+    }
+    if probe is not None:
+        expected.update((path, _at(probe, path)) for path in paths)
+    for path, value in expected.items():
+        echoed_value = _at(echoed, path)
+        if value is _MISSING or echoed_value is _MISSING:
+            continue
+        if isinstance(value, str) and isinstance(echoed_value, str):
+            if value.lower() != echoed_value.lower():
+                return False
+        elif value != echoed_value:
+            return False
+    return True
 
-    def pay(
-        self,
-        amount: str,
-        *,
-        intent: str = "charge",
-        currency: str | None = None,
-        recipient: str | None = None,
-        description: str | None = None,
-        expires_in: timedelta | None = None,
-        chain_id: int | None = None,
-        extra: dict[str, str] | None = None,
-        body: BodyParamsType = None,
-        **method_options: Any,
-    ) -> Callable[  # noqa: UP047
-        [Callable[[Any, Credential, Receipt], Awaitable[R]]],
-        Callable[[Any], Awaitable[R | Any]],
-    ]:
-        """Decorator that wraps payment verification for protected endpoints.
 
-        Uses the server's configured method, realm, secret_key, currency,
-        and recipient as defaults. Only ``amount`` is required per-endpoint.
-
-        The handler **must** use parameter names ``credential`` and ``receipt``
-        for the injected payment objects.
-
-        Args:
-            amount: Payment amount in human units (e.g., "0.50").
-            intent: Intent name to look up on the method (default: "charge").
-            currency: Offer only this currency instead of the method's
-                accepted currencies.
-            recipient: Override the method's default recipient.
-            description: Optional human-readable description.
-            expires_in: Challenge validity duration. Defaults to 5 minutes.
-            chain_id: Override the default chain ID (e.g., 42431 for moderato).
-            extra: Optional string metadata embedded in the charge request.
-            body: Optional static body bytes/string/dict or callback receiving
-                the request object. The resolved value is bound into issued
-                challenges via digest and used to verify paid retries.
-
-        Example:
-            server = Mpp.create(method=tempo(intents=..., recipient=...))
-
-            @app.get("/paid")
-            @server.pay(amount="0.50")
-            async def handler(request, credential, receipt):
-                return {"data": "paid content"}
-
-            @app.get("/session")
-            @server.pay(amount="0.000075", intent="session")
-            async def session_handler(request, credential, receipt):
-                return {"data": "session content"}
-        """
-        methods = [method for method in self.methods if intent in method.intents]
-        if not methods:
-            raise ValueError(f"Method {self.method.name} does not support {intent} intent")
-        options: dict[str, Any] = {
-            "amount": amount,
-            "currency": currency,
-            "recipient": recipient,
-            "description": description,
-            "expires_in": expires_in,
-            "chain_id": chain_id,
-            "extra": extra,
-            **method_options,
-        }
-        composed_methods = self._composed_methods(methods, options)
-        if composed_methods:
-            return self.compose(
-                *(
-                    (f"{method.name}/{intent}", cast(ComposeOptions, options))
-                    for method in composed_methods
-                ),
-                body=body,
-            )
-
-        def decorator(
-            handler: Callable[[Any, Credential, Receipt], Awaitable[R]],
-        ) -> Callable[[Any], Awaitable[R | Any]]:
-            async def _verify(
-                authorization: str | None, _request_obj: Any
-            ) -> Challenge | tuple[Credential, Receipt]:
-                intent_obj, request, challenge_expires = self._build_offer_request(
-                    methods[0],
-                    intent,
-                    options,
-                    _request_obj,
-                    api_name="pay",
-                )
-                return await verify_or_challenge(
-                    authorization=authorization,
-                    intent=intent_obj,
-                    request=request,
-                    realm=self.realm,
-                    secret_key=self.secret_key,
-                    method=methods[0].name,
-                    description=description,
-                    meta=options.get("meta"),
-                    expires=challenge_expires,
-                    body=await resolve_body_param(body, _request_obj),
-                    events=self._events,
-                    header=self.credential_header,
-                    unique_challenges=self.unique_challenges,
-                    x402=x402_input(_request_obj) if isinstance(intent_obj, X402Intent) else None,
-                )
-
-            return wrap_payment_handler(
-                handler,
-                _verify,
-                lambda: self.realm,
-                requires_auth=self.requires_auth,
-                x402_accepts=self._x402_accepts,
-            )
-
-        return decorator
-
-    def _composed_methods(
-        self,
-        methods: Sequence[Method],
-        options: Mapping[str, Any],
-    ) -> Sequence[Method]:
-        """Return the methods to serve through composition, or none.
-
-        Servers created with ``methods=`` always compose. A single ``method=``
-        composes only when it offers more than one currency for this request.
-        """
-        if self._compose_implicit_methods:
-            return methods
-        if _offer_currencies(methods[0], options) is not None:
-            return methods[:1]
-        return ()
-
-    def _build_offer_request(
-        self,
-        method: Method,
-        intent_name: str,
-        options: Mapping[str, Any],
-        request_obj: Any,
-        *,
-        api_name: Literal["charge", "pay", "compose"],
-    ) -> tuple[Intent | VerifiableIntent, dict[str, Any], str | None]:
-        """Build the canonical request shared by one configured payment offer."""
-        intent = method.intents[intent_name]
-        intent, options = prepare_intent(method, intent, options)
-        from mpp.server.compose import _OPTION_KEYS
-
-        unknown = options.keys() - _OPTION_KEYS
-        if unknown:
-            raise TypeError(f"unsupported {api_name} option: {sorted(unknown)[0]}")
-        currency = options.get("currency") or getattr(method, "currency", None)
-        recipient = options.get("recipient") or getattr(method, "recipient", None)
-        if not currency:
-            raise ValueError(f"currency must be set on the method or passed to {api_name}()")
-        if not recipient:
-            raise ValueError(f"recipient must be set on the method or passed to {api_name}()")
-
-        request: dict[str, Any] = {
-            "amount": request_amount(method, options["amount"]),
-            "currency": currency,
-            "recipient": recipient,
-        }
-        extra = options.get("extra")
-        if extra is not None:
-            if any(
-                not isinstance(key, str) or not isinstance(value, str)
-                for key, value in extra.items()
-            ):
-                raise ValueError("extra must be a dict[str, str]")
-            request["extra"] = extra
-
-        chain_id = options.get("chain_id")
-        if chain_id is None:
-            chain_id = getattr(method, "chain_id", None)
-        splits = options.get("splits")
-        fee_payer = options.get("fee_payer", False)
-        if splits and fee_payer:
-            raise ValueError("splits and fee_payer cannot be used together")
-        details = {
-            key: value for key, value in (("splits", splits), ("feePayer", fee_payer)) if value
-        }
-        if chain_id is not None:
-            details["chainId"] = chain_id
-        if details:
-            request["methodDetails"] = details
-
-        expires = options.get("expires")
-        expires_in = options.get("expires_in")
-        if expires is not None and expires_in is not None:
-            raise ValueError("expires and expires_in cannot both be set")
-        if expires_in is not None:
-            expires = (datetime.now(UTC) + expires_in).isoformat()
-
-        request = transform_request(method, request, None)
-        return intent, bind_framework_scope(request, request_obj), expires
+def _flatten(methods: Any) -> tuple[ServerMethod, ...]:
+    """Flatten a server method or (nested) sequences of them."""
+    if isinstance(methods, ServerMethod):
+        return (methods,)
+    flat: list[ServerMethod] = []
+    for entry in methods:
+        if isinstance(entry, ServerMethod):
+            flat.append(entry)
+        elif isinstance(entry, Sequence) and not isinstance(entry, str):
+            flat.extend(_flatten(entry))
+        else:
+            raise TypeError(f"not a server payment method: {entry!r}")
+    return tuple(flat)

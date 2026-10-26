@@ -34,7 +34,7 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import Method, PaymentRuntime
+from mpp.runtime import ClientMethod, PaymentRuntime
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -132,13 +132,8 @@ def _payment_origins(
     return frozenset(result)
 
 
-def _accept_payment(methods: Sequence[Method]) -> str:
-    capabilities = (
-        f"{method.name}/{intent}"
-        for method in methods
-        for intent in getattr(method, "intents", ("charge",))
-    )
-    return ", ".join(dict.fromkeys(capabilities))
+def _accept_payment(methods: Sequence[ClientMethod]) -> str:
+    return ", ".join(dict.fromkeys(method.key for method in methods))
 
 
 async def _buffer_error_body(response: httpx.Response) -> None:
@@ -175,10 +170,10 @@ async def _buffer_error_body(response: httpx.Response) -> None:
     response.stream = httpx.ByteStream(bytes(body[:_MAX_BUFFERED_ERROR_BODY]))
 
 
-def _transaction_hash(method: Method, credential: Credential) -> str | None:
+def _transaction_hash(method: ClientMethod, credential: Credential) -> str | None:
     """Return the credential's on-chain hash if the method can derive it."""
     try:
-        derive = getattr(method, "transaction_hash", None)
+        derive = method.transaction_hash
         return None if derive is None else derive(credential)
     except Exception:
         # Reconciliation metadata must never mask the payment outcome itself.
@@ -191,7 +186,7 @@ def _client_payment_failed_payload(
     challenges: list[Challenge],
     credential: Credential | None,
     error: Exception,
-    method: Method | None,
+    method: ClientMethod | None,
     request: httpx.Request,
     response: httpx.Response,
 ) -> ClientPaymentFailedPayload:
@@ -223,7 +218,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     Example:
         transport = PaymentTransport(
-            methods=[tempo(...)],
+            methods=[tempo.charge(account=account)],
             inner=httpx.AsyncHTTPTransport(),
         )
 
@@ -233,7 +228,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
     def __init__(
         self,
-        methods: Sequence[Method] | None = None,
+        methods: Sequence[ClientMethod | Any] | None = None,
         inner: httpx.AsyncBaseTransport | None = None,
         events: EventDispatcher | None = None,
         *,
@@ -575,21 +570,25 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-class Client:
-    """HTTP client with automatic payment handling.
+class Mpp:
+    """Client payment engine: pays 402 challenges automatically over httpx.
+
+    :attr:`payment_transport` is an httpx transport to plug into your own
+    ``httpx.AsyncClient(transport=...)``; :meth:`fetch` sends one request through a
+    client this engine owns. Nothing is patched globally.
 
     The paid retry may wait up to the server's confirmation window, so unless
     ``paid_retry_timeout`` is set its read timeout is at least 35s; see
     ``PaymentTransport``.
 
     Example:
-        async with Client(methods=[tempo(...)]) as client:
-            response = await client.get("https://api.example.com/resource")
+        async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
+            response = await mpp.fetch("https://api.example.com/resource")
     """
 
     def __init__(
         self,
-        methods: Sequence[Method] | None = None,
+        methods: Sequence[ClientMethod | Any] | None = None,
         *,
         runtime: PaymentRuntime | None = None,
         allowed_origins: Sequence[str] | None = None,
@@ -597,7 +596,7 @@ class Client:
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
     ) -> None:
-        self._transport = PaymentTransport(
+        self.payment_transport = PaymentTransport(
             methods,
             runtime=runtime,
             allowed_origins=allowed_origins,
@@ -605,11 +604,39 @@ class Client:
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
         )
-        self._client = httpx.AsyncClient(transport=self._transport)
+        self._client: httpx.AsyncClient | None = None
+
+    @property
+    def methods(self) -> tuple[ClientMethod, ...]:
+        """The configured client methods."""
+        return self.payment_transport._runtime.methods
+
+    def client(self, **kwargs: Any) -> httpx.AsyncClient:
+        """Create an ``httpx.AsyncClient`` that pays through this engine.
+
+        The caller owns the returned client and closes it.
+        """
+        return httpx.AsyncClient(transport=self.payment_transport, **kwargs)
+
+    async def fetch(
+        self, url: str | httpx.URL, *, method: str = "GET", **kwargs: Any
+    ) -> httpx.Response:
+        """Send a request, paying a 402 challenge with a configured method."""
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=self.payment_transport)
+        return await self._client.request(method, url, **kwargs)
+
+    async def aclose(self) -> None:
+        """Close the client used by :meth:`fetch` and the transport."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+        else:
+            await self.payment_transport.aclose()
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
-        return self._transport.on(name, handler)
+        return self.payment_transport.on(name, handler)
 
     def on_challenge_received(self, handler: EventHandler) -> Unsubscribe:
         """Register a handler for selected payment challenges."""
@@ -627,76 +654,11 @@ class Client:
         """Register a handler for failed automatic payment handling."""
         return self.on(PAYMENT_FAILED, handler)
 
-    async def __aenter__(self) -> Client:
-        await self._client.__aenter__()
+    async def __aenter__(self) -> Mpp:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        await self._client.__aexit__(*args)
-
-    async def request(
-        self,
-        method: str,
-        url: str,
-        **kwargs: Any,
-    ) -> httpx.Response:
-        """Send an HTTP request."""
-        return await self._client.request(method, url, **kwargs)
-
-    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
-        """Send a GET request."""
-        return await self.request("GET", url, **kwargs)
-
-    async def post(self, url: str, **kwargs: Any) -> httpx.Response:
-        """Send a POST request."""
-        return await self.request("POST", url, **kwargs)
-
-    async def put(self, url: str, **kwargs: Any) -> httpx.Response:
-        """Send a PUT request."""
-        return await self.request("PUT", url, **kwargs)
-
-    async def delete(self, url: str, **kwargs: Any) -> httpx.Response:
-        """Send a DELETE request."""
-        return await self.request("DELETE", url, **kwargs)
-
-
-async def request(
-    method: str,
-    url: str,
-    *,
-    methods: Sequence[Method],
-    paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
-    trusted_tempo_realms: Mapping[str, str] | None = None,
-    **kwargs: Any,
-) -> httpx.Response:
-    """Send an HTTP request with automatic payment handling.
-
-    This is a convenience function that creates a temporary client for a single request.
-    For multiple requests, use Client for connection pooling.
-
-    Example:
-        response = await request(
-            "GET",
-            "https://api.example.com/resource",
-            methods=[tempo(...)],
-        )
-    """
-    async with Client(
-        methods,
-        paid_retry_timeout=paid_retry_timeout,
-        trusted_tempo_realms=trusted_tempo_realms,
-    ) as client:
-        return await client.request(method, url, **kwargs)
-
-
-async def get(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
-    """Send a GET request with automatic payment handling."""
-    return await request("GET", url, methods=methods, **kwargs)
-
-
-async def post(url: str, *, methods: Sequence[Method], **kwargs: Any) -> httpx.Response:
-    """Send a POST request with automatic payment handling."""
-    return await request("POST", url, methods=methods, **kwargs)
+        await self.aclose()
 
 
 def _payment_challenges(value: str) -> list[str]:

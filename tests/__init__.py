@@ -7,6 +7,7 @@ import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode
 from mpp.errors import InternalPaymentError
+from mpp.server import PaymentRequired, Request
 
 # Default secret used by tests when calling verify_or_challenge
 TEST_SECRET = "test-secret"
@@ -110,6 +111,41 @@ class MockRequest:
             self.query_string = query_string
 
 
+def http_request(
+    authorization: str | None = None,
+    *,
+    method: str = "GET",
+    url: str = "https://test.example.com/resource",
+    headers: dict[str, str] | None = None,
+    body: bytes | str | None = None,
+    route: str | None = None,
+    payment_authorization: str | None = None,
+) -> Request:
+    """Build an engine request carrying optional Payment credentials."""
+    values = dict(headers or {})
+    if authorization is not None:
+        values["Authorization"] = authorization
+    if payment_authorization is not None:
+        values["Payment-Authorization"] = payment_authorization
+    return Request(method, url, headers=values, body=body, route=route)
+
+
+def challenges(result: Any) -> list[Challenge]:
+    """Return the challenges of a 402 :class:`PaymentRequired` result."""
+    assert isinstance(result, PaymentRequired), result
+    assert result.status == 402
+    return [
+        Challenge.from_www_authenticate(value)
+        for value in result.challenge.headers.get_list("www-authenticate")
+    ]
+
+
+def challenge(result: Any) -> Challenge:
+    """Return the single challenge of a 402 :class:`PaymentRequired` result."""
+    [issued] = challenges(result)
+    return issued
+
+
 def challenge_from_402(result: Any) -> Challenge:
     """Extract the challenge from a 402 response (Starlette or plain-dict form)."""
     headers = result.headers if hasattr(result, "headers") else result["headers"]
@@ -122,3 +158,36 @@ def internal_cause(error: BaseException) -> BaseException:
     assert str(error) == "An internal payment error occurred."
     assert error.__cause__ is not None
     return error.__cause__
+
+
+def server_method(
+    *,
+    name: str = "tempo",
+    intent: str = "charge",
+    request: dict[str, Any] | None = None,
+    **hooks: Any,
+) -> Any:
+    """A ServerMethod with the given hooks whose wire request is ``request`` plus route options.
+
+    Credential payloads reach the hooks unparsed.
+    """
+    from dataclasses import dataclass
+
+    from pydantic import BaseModel, ConfigDict
+
+    from mpp.methods import Method
+    from mpp.server import ServerMethod
+
+    class Wire(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Raw(Method[Any, Any]):
+        def parse_payload(self, payload: Any) -> Any:
+            return payload
+
+    return ServerMethod(
+        method=Raw(name=name, intent=intent, request_model=Wire, payload_model=Wire),
+        defaults=request,
+        **hooks,
+    )

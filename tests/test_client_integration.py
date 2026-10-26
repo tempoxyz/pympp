@@ -14,7 +14,9 @@ import pytest
 
 from mpp import Challenge, Receipt
 from mpp.client import PaymentTransport
-from mpp.methods.tempo import TempoAccount, tempo
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo_client
+from mpp.methods.tempo.client import _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent
 from mpp.server.verify import verify_or_challenge
 from tests import INTEGRATION, TEST_SECRET
@@ -59,13 +61,7 @@ class RealVerifyTransport(httpx.AsyncBaseTransport):
 
 
 def _make_transport(rpc_url, recipient_address, currency, chain_id, *, fee_payer=None):
-    intent = ChargeIntent(rpc_url=rpc_url)
-    if fee_payer is not None:
-        tempo(
-            rpc_url=rpc_url,
-            fee_payer=fee_payer,
-            intents={"charge": intent},
-        )
+    intent = ChargeIntent(rpc_url=rpc_url, fee_payer=fee_payer)
     request_params = {
         "amount": "1000000",
         "currency": currency,
@@ -112,11 +108,10 @@ class TestClientServerIntegration:
 
     @pytest.mark.xfail(reason="pre-existing: transaction validation mismatch on devnet")
     async def test_full_payment_roundtrip(self, rpc_url, funded_payer, server_transport, chain_id):
-        method = tempo(
+        method = tempo_client.charge(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         payment_transport = PaymentTransport(methods=[method], inner=server_transport)
 
@@ -168,11 +163,10 @@ class TestClientServerIntegration:
 
         references = []
         for payer in [payer_a, payer_b]:
-            method = tempo(
+            method = tempo_client.charge(
                 account=payer,
                 chain_id=chain_id,
                 rpc_url=rpc_url,
-                intents={"charge": ChargeIntent()},
             )
             payment_transport = PaymentTransport(methods=[method], inner=transport)
             async with httpx.AsyncClient(
@@ -193,11 +187,10 @@ class TestClientServerIntegration:
         with httpx.Client(timeout=30) as c:
             balance_before = _tip20_balance(rpc_url, currency, funded_payer.address, c)
 
-        method = tempo(
+        method = tempo_client.charge(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         payment_transport = PaymentTransport(methods=[method], inner=server_transport)
 
@@ -215,11 +208,10 @@ class TestClientServerIntegration:
     async def test_e2e_charge_with_fee_payer(
         self, rpc_url, funded_payer, fee_payer_transport, chain_id
     ):
-        method = tempo(
+        method = tempo_client.charge(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         payment_transport = PaymentTransport(methods=[method], inner=fee_payer_transport)
 
@@ -252,11 +244,10 @@ class TestClientServerIntegration:
             },
         }
 
-        client_method = tempo(
+        client_method = _tempo_method(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="integ-no-signer",
@@ -293,11 +284,10 @@ class TestClientServerIntegration:
             realm="test.local",
         )
 
-        method = tempo(
+        method = tempo_client.charge(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         payment_transport = PaymentTransport(methods=[method], inner=transport)
 
@@ -329,11 +319,10 @@ class TestClientServerIntegration:
             payer_before = _tip20_balance(rpc_url, currency, funded_payer.address, c)
             recipient_before = _tip20_balance(rpc_url, currency, funded_recipient.address, c)
 
-        method = tempo(
+        method = tempo_client.charge(
             account=funded_payer,
             chain_id=chain_id,
             rpc_url=rpc_url,
-            intents={"charge": ChargeIntent()},
         )
         payment_transport = PaymentTransport(methods=[method], inner=transport)
 

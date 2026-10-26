@@ -37,9 +37,9 @@ from x402.mechanisms.evm.exact import register_exact_evm_client, register_exact_
 from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 
 from mpp import Challenge, Receipt
-from mpp.client import Client
+from mpp.client import Mpp as MppClient
 from mpp.methods.evm import EvmAsset, challenge_hash, evm
-from mpp.server import Mpp
+from mpp.server import Mpp, pay
 from mpp.store import MemoryStore
 from mpp.x402 import (
     PAYMENT_REQUIRED_HEADER,
@@ -48,7 +48,7 @@ from mpp.x402 import (
     decode_payment_required,
     decode_payment_response,
 )
-from tests.x402_harness import hd_account, serve
+from tests.x402_harness import hd_account, serve, sign_native
 
 RPC_URL = os.environ.get("X402_ANVIL_RPC_URL")
 CHAIN_ID = 31337
@@ -157,7 +157,7 @@ class CoinbaseFacilitator:
 
 
 def paid_app(server: Mpp, amount: str) -> Starlette:
-    @server.pay(amount=amount, description="localnet x402")
+    @pay(server.charge(amount=amount, description="localnet x402"))
     async def paid(request: Request, credential: Any, receipt: Receipt) -> PlainTextResponse:
         return PlainTextResponse("paid", headers={"Payment-Receipt": receipt.to_payment_receipt()})
 
@@ -189,16 +189,16 @@ async def start(chain: Chain, amount: str = "0.01", store: MemoryStore | None = 
     facilitator = CoinbaseFacilitator(RPC_URL)
     facilitator_server = serve(facilitator.app())
     facilitator_url = await facilitator_server.__aenter__()
-    server = Mpp.create(
-        method=evm(
+    server = Mpp(
+        methods=evm(
             currency=chain.asset,
             recipient=recipient.address,
             facilitator=facilitator_url,
             route_binding="resource",
+            store=store,
         ),
         realm="localnet.test",
         secret_key=SECRET_KEY,
-        store=store,
     )
     paid_server = serve(paid_app(server, amount))
     url = await paid_server.__aenter__()
@@ -251,8 +251,8 @@ async def test_pympp_client_settles_native_evm_charge_on_chain(chain: Chain) -> 
     try:
         recipient_before = chain.balance(recipient.address)
         method = evm(currency=chain.asset, account=payer, max_amount="0.05")
-        async with Client(methods=[method]) as client:
-            response = await client.get(url)
+        async with MppClient(methods=[method]) as client:
+            response = await client.fetch(url)
 
         assert response.status_code == 200, response.text
         assert PAYMENT_RESPONSE_HEADER not in response.headers
@@ -271,8 +271,7 @@ async def test_native_evm_charge_uses_the_challenge_hash_as_nonce(chain: Chain) 
         async with httpx.AsyncClient() as http:
             unpaid = await http.get(url)
         challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
-        method = evm(currency=chain.asset, account=payer)
-        credential = await method.create_credential(challenge)
+        credential = await sign_native(payer, challenge, chain.asset)
         nonce = challenge_hash(challenge.id, challenge.realm)
         assert credential.payload["nonce"] == nonce
         assert not chain.authorization_used(payer.address, nonce)

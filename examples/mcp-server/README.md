@@ -30,11 +30,14 @@ pip install -e .
 export DESTINATION_ADDRESS="0x..."      # Payment recipient address (required)
 export TEMPO_RPC_URL="https://rpc.testnet.tempo.xyz/"  # Default: Tempo testnet
 export MCP_PORT="8000"                  # Default: 8000
+export MPP_SECRET_KEY="..."             # Secret that signs challenges (required)
+export FEE_PAYER_KEY="0x..."            # Sponsor clients' gas (optional)
 ```
 
 **Client:**
 ```bash
 export TEMPO_PRIVATE_KEY="0x..."        # Private key for signing (required)
+export TEMPO_RPC_URL="https://rpc.moderato.tempo.xyz"  # Default: Moderato testnet
 export MCP_SERVER_URL="http://127.0.0.1:8000/sse"      # Default
 ```
 
@@ -117,7 +120,7 @@ The server requires this payment for `premium_echo`:
   "currency": "0x20c0000000000000000000000000000000000000",
   "recipient": "<DESTINATION_ADDRESS>",
   "expires": "<5 minutes from now>",
-  "methodDetails": {"chainId": 42431, "feePayer": true}
+  "methodDetails": {"chainId": 42431}
 }
 ```
 

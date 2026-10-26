@@ -1,7 +1,7 @@
 """Focused contracts for request-scoped Stripe PaymentIntent input."""
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from typing import Any
@@ -13,10 +13,13 @@ import stripe
 
 from mpp import Challenge, Credential, Receipt
 from mpp.errors import BadRequestError, VerificationFailedError
-from mpp.methods.stripe import ChargeIntent, PaymentIntentContext
+from mpp.methods import Method
+from mpp.methods.stripe import PaymentIntentContext, payment_intent_method
+from mpp.methods.stripe import server as stripe_server
 from mpp.methods.stripe.payment_intent_options import validate_options
-from mpp.server import Mpp, Validation
-from mpp.server.compose import ComposedChallenges
+from mpp.server import Mpp, PaymentRequired, PaymentVerified, Validation
+from mpp.server.method import ValidateContext, VerifyContext
+from tests import challenges, http_request
 from tests.test_stripe_machine_payments import TEMPO_ADDRESS, make_payments
 
 OPTIONS = {
@@ -33,37 +36,62 @@ class Rail:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def validate(self, credential: Credential, request: dict[str, Any]) -> Validation:
+    async def validate(self, context: ValidateContext) -> Validation:
         self.calls.append("validate")
-        if not credential.payload.get("valid"):
+        if not context.credential.payload.get("valid"):
             raise VerificationFailedError("invalid credential")
-        return Validation(credential, {}, self.name, dict(request))
+        return Validation(context.credential, {}, self.name, dict(context.challenge.request))
 
-    async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
+    async def broadcast(self, context: VerifyContext) -> Receipt:
         self.calls.append("broadcast")
         return Receipt.success("0xtest", method="tempo")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RawPayload(Method[Any, Any]):
+    """A method definition whose credential payloads reach the hooks unparsed."""
+
+    def parse_payload(self, payload: Any) -> Any:
+        return payload
+
+
+def settle_tempo_with(monkeypatch: pytest.MonkeyPatch, **hooks: Any) -> None:
+    """Make ``payments.tempo.charge()`` settle with ``hooks`` instead of the Tempo chain."""
+    wrap = payment_intent_method.with_payment_intent_input
+
+    def wrapped(method: Any, *args: Any, **kwargs: Any) -> Any:
+        settle = {"verify": None, "validate": None, "broadcast": None, **hooks}
+        method = wrap(replace(method, **settle), *args, **kwargs)
+        definition = {
+            field.name: getattr(method.method, field.name) for field in fields(method.method)
+        }
+        return replace(method, method=RawPayload(**definition))
+
+    monkeypatch.setattr(payment_intent_method, "with_payment_intent_input", wrapped)
+
+
 @pytest.fixture(params=["stripe", "tempo"])
-def payment(request):
+def payment(request, monkeypatch):
+    rail = Rail()
+    settle_tempo_with(monkeypatch, validate=rail.validate, broadcast=rail.broadcast)
     client, payments = make_payments(
         deposit_addresses={"tempo": TEMPO_ADDRESS}, metadata={"configured": "yes"}
     )
     method = payments.spt.charge() if request.param == "stripe" else payments.tempo.charge()
-    rail = Rail()
-    if request.param == "tempo":
-        method.intents["charge"] = rail
-    return Mpp.create(method=method, realm="example.com", secret_key="secret"), client, rail
+    return Mpp(methods=method, realm="example.com", secret_key="secret"), client, rail
 
 
 def credential(challenge: Challenge, **payload: Any) -> Credential:
     return Credential(challenge.to_echo(), payload or {"spt": "spt_test", "valid": True})
 
 
+async def pay(server: Mpp, authorization: str | None, options: Any = None, **extra: Any) -> Any:
+    handler = server.charge(amount="0.50", payment_intent_options=options, **extra)
+    return await handler(http_request(authorization))
+
+
 async def issue(server: Mpp, options: Any = None) -> Challenge:
-    result = await server.charge(None, "0.50", payment_intent_options=options)
-    assert isinstance(result, Challenge)
-    return result
+    return challenges(await pay(server, None, options))[0]
 
 
 async def test_static_options_are_private_and_propagate_with_analytics(payment):
@@ -71,9 +99,7 @@ async def test_static_options_are_private_and_propagate_with_analytics(payment):
     for options in (None, OPTIONS):
         challenge = await issue(server, options)
         assert "payment_intent_options" not in challenge.request
-        await server.charge(
-            credential(challenge).to_authorization(), "0.50", payment_intent_options=options
-        )
+        await pay(server, credential(challenge).to_authorization(), options)
         params, _ = client.payment_intents.calls[-1]
         assert {
             key: params["metadata"][key]
@@ -90,7 +116,7 @@ async def test_static_options_are_private_and_propagate_with_analytics(payment):
             }
             assert params["metadata"]["order_id"] == "order_test"
     assert len(client.payment_intents.calls) == 2
-    if server.method.name == "tempo":
+    if server.methods[0].name == "tempo":
         assert rail.calls == ["validate", "broadcast", "validate", "broadcast"]
 
 
@@ -98,24 +124,25 @@ async def test_deferred_resolver_skips_unpaid_and_rejected_credentials(payment):
     server, client, rail = payment
     resolver = AsyncMock(return_value=OPTIONS)
     challenge = await issue(server, resolver)
-    expired = await server.charge(
-        None, "0.50", expires=(datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-    )
-    assert isinstance(expired, Challenge)
+    expired = challenges(
+        await pay(
+            server,
+            None,
+            resolver,
+            expires=(datetime.now(UTC) - timedelta(minutes=1)).isoformat(),
+        )
+    )[0]
     rejected = (
         "Payment broken",
         credential(replace(challenge, id="forged")).to_authorization(),
         credential(expired).to_authorization(),
     )
     for authorization in rejected:
-        result = await server.charge(authorization, "0.50", payment_intent_options=resolver)
-        assert isinstance(result, Challenge)
-    with pytest.raises(VerificationFailedError):
-        await server.charge(
-            credential(challenge, spt="").to_authorization(),
-            "0.50",
-            payment_intent_options=resolver,
-        )
+        result = await pay(server, authorization, resolver)
+        assert isinstance(result, PaymentRequired)
+    result = await pay(server, credential(challenge, spt="").to_authorization(), resolver)
+    assert isinstance(result, PaymentRequired)
+    assert VerificationFailedError.title in (result.challenge.body or b"").decode()
     resolver.assert_not_called()
     assert not client.payment_intents.calls
 
@@ -126,15 +153,14 @@ async def test_resolver_runs_before_spt_payment_intent_or_tempo_broadcast(paymen
     async def resolve(context: PaymentIntentContext):
         assert context.challenge.id == challenge.id and context.request == challenge.request
         assert not client.payment_intents.calls
-        if server.method.name == "tempo":
+        if server.methods[0].name == "tempo":
             assert rail.calls == ["validate"]
         raise BadRequestError("invalid tax country")
 
     challenge = await issue(server, resolve)
-    with pytest.raises(BadRequestError):
-        await server.charge(
-            credential(challenge).to_authorization(), "0.50", payment_intent_options=resolve
-        )
+    result = await pay(server, credential(challenge).to_authorization(), resolve)
+    assert isinstance(result, PaymentRequired)
+    assert BadRequestError.title in (result.challenge.body or b"").decode()
     assert not client.payment_intents.calls and "broadcast" not in rail.calls
 
 
@@ -163,11 +189,14 @@ def test_options_reject_uncontrolled_or_invalid_values(value):
         (stripe.APIConnectionError("timeout"), 0),
     ],
 )
-async def test_crypto_fallback_is_once_and_only_for_optional_field_rejection(error, retries):
+async def test_crypto_fallback_is_once_and_only_for_optional_field_rejection(
+    error, retries, monkeypatch
+):
+    rail = Rail()
+    settle_tempo_with(monkeypatch, validate=rail.validate, broadcast=rail.broadcast)
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
-    method, rail = payments.tempo.charge(), Rail()
-    method.intents["charge"] = rail
-    server = Mpp.create(method=method, realm="example.com", secret_key="secret")
+    method = payments.tempo.charge()
+    server = Mpp(methods=method, realm="example.com", secret_key="secret")
     calls = []
 
     async def create(params, *, options):
@@ -178,9 +207,7 @@ async def test_crypto_fallback_is_once_and_only_for_optional_field_rejection(err
 
     client.payment_intents.create_async = create
     challenge = await issue(server, OPTIONS)
-    await server.charge(
-        credential(challenge).to_authorization(), "0.50", payment_intent_options=OPTIONS
-    )
+    await pay(server, credential(challenge).to_authorization(), OPTIONS)
     assert len(calls) == retries + 1
     if retries:
         assert calls[1][1]["idempotency_key"] == "0xtest_fallback"
@@ -192,13 +219,11 @@ async def test_compose_and_direct_broadcast_accept_private_options(payment):
     server, client, rail = payment
     resolver = AsyncMock(return_value=OPTIONS)
     handler = server.compose(
-        (server.method, {"amount": "0.50", "payment_intent_options": resolver})
+        (server.methods[0], {"amount": "0.50", "payment_intent_options": resolver})
     )
-    unpaid = await handler.verify(None)
-    assert isinstance(unpaid, ComposedChallenges)
-    paid = credential(unpaid.challenges[0])
+    paid = credential(challenges(await handler(http_request()))[0])
     await server.broadcast_credential(paid, payment_intent_options=resolver)
-    await handler.verify(paid.to_authorization())
+    assert isinstance(await handler(http_request(paid.to_authorization())), PaymentVerified)
     assert resolver.await_count == 2 and len(client.payment_intents.calls) == 2
 
 
@@ -207,11 +232,7 @@ async def test_attempt_options_are_isolated(payment):
     challenge = await issue(server)
     await asyncio.gather(
         *(
-            server.charge(
-                credential(challenge).to_authorization(),
-                "0.50",
-                payment_intent_options={"customer": customer},
-            )
+            pay(server, credential(challenge).to_authorization(), {"customer": customer})
             for customer in ("cus_a", "cus_b")
         )
     )
@@ -226,17 +247,14 @@ async def test_raw_http_spt_supports_options_without_owning_injected_client():
         return httpx.Response(200, json={"id": "pi", "status": "succeeded"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-        intent = ChargeIntent(secret_key="sk_test", http_client=http)
-        _, payments = make_payments()
-        method = payments.spt.charge()
-        method.intents["charge"] = intent
-        server = Mpp.create(method=method, realm="example.com", secret_key="secret")
-        challenge = await issue(server, OPTIONS)
-        await server.charge(
-            credential(challenge).to_authorization(), "0.50", payment_intent_options=OPTIONS
+        method = stripe_server.charge(
+            secret_key="sk_test", http_client=http, network_id="bn_test", currency="usd"
         )
+        server = Mpp(methods=method, realm="example.com", secret_key="secret")
+        challenge = await issue(server, OPTIONS)
+        await pay(server, credential(challenge).to_authorization(), OPTIONS)
         assert "hooks%5Binputs%5D%5Btax%5D%5Bcalculation%5D=taxcalc_test" in calls[0]
-        assert intent._http_client is http and not http.is_closed
+        assert not http.is_closed
 
 
 async def test_raw_http_spt_failure_does_not_expose_private_options():
@@ -247,64 +265,49 @@ async def test_raw_http_spt_failure_does_not_expose_private_options():
             )
         )
     ) as http:
-        intent = ChargeIntent(secret_key="sk_test", http_client=http)
-        _, payments = make_payments()
-        method = payments.spt.charge()
-        method.intents["charge"] = intent
-        server = Mpp.create(method=method, realm="example.com", secret_key="secret")
+        method = stripe_server.charge(
+            secret_key="sk_test", http_client=http, network_id="bn_test", currency="usd"
+        )
+        server = Mpp(methods=method, realm="example.com", secret_key="secret")
         challenge = await issue(server, OPTIONS)
-        with pytest.raises(VerificationFailedError) as error:
-            await server.charge(
-                credential(challenge).to_authorization(), "0.50", payment_intent_options=OPTIONS
-            )
-        assert "cus_private" not in str(error.value)
+        result = await pay(server, credential(challenge).to_authorization(), OPTIONS)
+        assert isinstance(result, PaymentRequired)
+        assert "cus_private" not in (result.challenge.body or b"").decode()
 
 
-async def test_legacy_crypto_rail_remains_supported():
+async def test_legacy_crypto_rail_remains_supported(monkeypatch):
+    calls = []
+
+    async def verify(context):
+        calls.append("verify")
+        return Receipt.success("0xlegacy", method="tempo")
+
+    settle_tempo_with(monkeypatch, verify=verify)
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
-    method, calls = payments.tempo.charge(), []
-
-    class Legacy:
-        name = "charge"
-
-        async def verify(self, credential, request):
-            calls.append("verify")
-            return Receipt.success("0xlegacy", method="tempo")
-
-    method.intents["charge"] = Legacy()
-    server = Mpp.create(method=method, realm="example.com", secret_key="secret")
+    method = payments.tempo.charge()
+    server = Mpp(methods=method, realm="example.com", secret_key="secret")
 
     def resolver(context):
         calls.append("resolve")
         return None
 
     challenge = await issue(server, resolver)
-    await server.charge(
-        credential(challenge).to_authorization(), "0.50", payment_intent_options=resolver
-    )
+    await pay(server, credential(challenge).to_authorization(), resolver)
     assert calls == ["resolve", "verify"] and len(client.payment_intents.calls) == 1
 
 
-async def test_replacing_the_existing_tempo_callback_preserves_event_behavior():
+async def test_replacing_the_existing_tempo_callback_preserves_event_behavior(monkeypatch):
+    # The actual rail rejects this malformed transaction before either callback;
+    # use a verify-only rail to isolate callback registration behavior.
+    async def verify(context):
+        return Receipt.success("0xcallback", method="tempo")
+
+    settle_tempo_with(monkeypatch, verify=verify)
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
     method, callback = payments.tempo.charge(), AsyncMock()
-    method.on_payment_success = callback
-    server = Mpp.create(method=method, realm="example.com", secret_key="secret")
+    method = replace(method, on_payment_success=callback)
+    server = Mpp(methods=method, realm="example.com", secret_key="secret")
     challenge = await issue(server, {"metadata": {"order": "123"}})
-
-    # The actual rail rejects this malformed transaction before either callback;
-    # use a legacy intent to isolate callback registration behavior.
-    class Legacy:
-        name = "charge"
-
-        async def verify(self, credential, request):
-            return Receipt.success("0xcallback", method="tempo")
-
-    method.intents["charge"] = Legacy()
-    await server.charge(
-        credential(challenge).to_authorization(),
-        "0.50",
-        payment_intent_options={"metadata": {"order": "123"}},
-    )
+    await pay(server, credential(challenge).to_authorization(), {"metadata": {"order": "123"}})
     callback.assert_awaited_once()
     assert client.payment_intents.calls[0][0]["metadata"]["order"] == "123"

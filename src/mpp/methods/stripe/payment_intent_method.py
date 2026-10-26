@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from dataclasses import replace
+from typing import Annotated, Any
+
+from pydantic import AfterValidator, BaseModel, Field, create_model
 
 from mpp import Credential, Receipt
 from mpp.methods.stripe.analytics import merge_metadata
-from mpp.methods.stripe.payment_intent_options import (
-    PaymentIntentInput,
-    prepare_options,
-    resolve_options,
-)
-from mpp.server.intent import Intent, VerifiableIntent, broadcast_credential
+from mpp.methods.stripe.payment_intent_options import prepare_options, resolve_options
+from mpp.server.method import ServerMethod, VerifyContext
 
 RecordPayment = Callable[
     [Credential, dict[str, Any], Receipt, dict[str, Any], dict[str, str]], Awaitable[None]
@@ -20,67 +19,55 @@ RecordPayment = Callable[
 
 
 def with_payment_intent_input(
-    method: Any, record_payment: RecordPayment, configured_metadata: Mapping[str, str] | None = None
-) -> Any:
-    """Decorate a method in place without changing its public concrete type."""
+    method: ServerMethod,
+    record_payment: RecordPayment,
+    configured_metadata: Mapping[str, str] | None = None,
+) -> ServerMethod:
+    """Accept ``payment_intent_options`` route input on ``method`` and record its payments.
 
-    def prepare_intent(
-        intent: Intent | VerifiableIntent, input: dict[str, Any]
-    ) -> tuple[Intent | VerifiableIntent, dict[str, Any]]:
-        options = prepare_options(input.pop("payment_intent_options", None))
-        wrapper = (
-            VerifiableWrappedIntent(intent, options, record_payment, configured_metadata)
-            if isinstance(intent, VerifiableIntent)
-            else WrappedIntent(intent, options, record_payment, configured_metadata)
+    The options never enter the challenge. They are resolved immediately before
+    the terminal payment operation (after ``validate`` when the method has one),
+    so a resolver error prevents settlement, and passed to ``record_payment``
+    with the receipt.
+    """
+    definition = method.method
+    request_model = create_model(
+        f"{definition.request_model.__name__}WithPaymentIntentOptions",
+        __base__=definition.request_model,
+        payment_intent_options=(
+            Annotated[Any, AfterValidator(prepare_options)],
+            Field(default=None, exclude=True),
+        ),
+    )
+
+    async def settle(context: VerifyContext, terminal: Any) -> Receipt:
+        credential = _native(context.credential)
+        request = context.challenge.request
+        options = await resolve_options(
+            context.request.get("payment_intent_options"), credential, request
         )
-        return wrapper, input
-
-    method.prepare_intent = prepare_intent
-    return method
-
-
-class WrappedIntent:
-    def __init__(
-        self,
-        intent: Intent | VerifiableIntent,
-        options: PaymentIntentInput,
-        record_payment: RecordPayment,
-        configured_metadata: Mapping[str, str] | None,
-    ) -> None:
-        self.name = intent.name
-        self._intent = intent
-        self._options = options
-        self._record_payment = record_payment
-        self._configured_metadata = configured_metadata
-
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        # Legacy rails have no non-mutating validation to run before resolution.
-        options = await resolve_options(self._options, credential, request)
-        metadata = merge_metadata(credential, self._configured_metadata, options)
-        receipt = await cast(Intent, self._intent).verify(credential, request)
-        await self._record_payment(credential, request, receipt, options, metadata)
+        metadata = merge_metadata(credential, configured_metadata, options)
+        receipt = await terminal(context)
+        await record_payment(credential, request, receipt, options, metadata)
         return receipt
 
+    async def verify(context: VerifyContext) -> Receipt:
+        return await settle(context, method.verify)
 
-class VerifiableWrappedIntent(WrappedIntent):
-    def _verifiable_intent(self) -> VerifiableIntent:
-        if not isinstance(self._intent, VerifiableIntent):
-            raise TypeError("VerifiableWrappedIntent requires a VerifiableIntent")
-        return self._intent
+    async def broadcast(context: VerifyContext) -> Receipt:
+        return await settle(context, method.broadcast)
 
-    async def validate(self, credential: Credential, request: dict[str, Any]):
-        intent = self._verifiable_intent()
-        return await intent.validate(credential, request)
+    return replace(
+        method,
+        method=replace(definition, request_model=request_model),
+        verify=verify if method.verify is not None else None,
+        broadcast=broadcast if method.broadcast is not None else None,
+        credential_options=(*method.credential_options, "payment_intent_options"),
+    )
 
-    async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        # Server lifecycle has already run validate. Resolve immediately before
-        # the terminal operation so errors prevent settlement.
-        options = await resolve_options(self._options, credential, request)
-        metadata = merge_metadata(credential, self._configured_metadata, options)
-        intent = self._verifiable_intent()
-        receipt = await intent.broadcast(credential, request)
-        await self._record_payment(credential, request, receipt, options, metadata)
-        return receipt
 
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        return await broadcast_credential(intent=self, credential=credential, request=request)
+def _native(credential: Credential) -> Credential:
+    payload = credential.payload
+    if isinstance(payload, BaseModel):
+        return replace(credential, payload=payload.model_dump(mode="json", by_alias=True))
+    return credential

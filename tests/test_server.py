@@ -1,7 +1,9 @@
 """Tests for server-side verification."""
 
 import json
-from dataclasses import replace
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
+from typing import Any
 
 import pytest
 
@@ -19,12 +21,22 @@ from mpp.errors import (
     InternalPaymentError,
     PaymentError,
     PaymentExpiredError,
+    VerificationError,
     VerificationFailedError,
 )
 from mpp.events import EventDispatcher
-from mpp.server import Mpp, intent, pay, verify_or_challenge
-from mpp.server.intent import VerificationError
-from tests import MockRequest, challenge_from_402, make_bound_credential, make_credential
+from mpp.methods import Method
+from mpp.methods.tempo.schemas import ChargeInput
+from mpp.server import Mpp, PaymentVerified, RequestContext, ServerMethod, VerifyContext, pay
+from mpp.server.verify import verify_or_challenge
+from tests import (
+    MockRequest,
+    challenge,
+    challenge_from_402,
+    http_request,
+    make_bound_credential,
+    server_method,
+)
 
 try:
     from starlette.responses import Response as StarletteResponse
@@ -33,6 +45,34 @@ try:
 except ImportError:
     HAS_STARLETTE = False
     StarletteResponse = None  # type: ignore[misc, assignment]
+
+USD = "0x20c0000000000000000000000000000000000000"
+RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+OVERRIDE_CURRENCY = "0x20c0000000000000000000000000000000000001"
+OVERRIDE_RECIPIENT = "0x00000000000000000000000000000000000000AA"
+
+VerifyFn = Callable[[Credential, dict], Awaitable[Receipt]]
+
+
+class _Intent:
+    """An intent for the low-level verify_or_challenge: a name and verify(credential, request)."""
+
+    def __init__(self, name: str, verify: VerifyFn) -> None:
+        self.name = name
+        self.verify = verify
+
+
+def intent(*, name: str) -> Callable[[VerifyFn], _Intent]:
+    return lambda verify: _Intent(name, verify)
+
+
+def _verify_hook(payment_intent: _Intent) -> Callable[[VerifyContext], Awaitable[Receipt]]:
+    """A ServerMethod verify hook running the intent on the wire request."""
+
+    async def verify(context: VerifyContext) -> Receipt:
+        return await payment_intent.verify(context.credential, context.challenge.request)
+
+    return verify
 
 
 class TestVerifyOrChallenge:
@@ -274,24 +314,6 @@ class TestVerifyOrChallenge:
 
         assert isinstance(result, tuple)
         assert events == [f"success:{credential.challenge.id}:0x123"]
-
-
-class TestFunctionalIntent:
-    @pytest.mark.asyncio
-    async def test_decorator_creates_intent(self) -> None:
-        """@intent decorator should create a functional intent."""
-
-        @intent(name="subscribe")
-        async def my_subscribe(credential: Credential, request: dict) -> Receipt:
-            return Receipt.success(f"sub-{credential.challenge.id}")
-
-        assert my_subscribe.name == "subscribe"
-
-        receipt = await my_subscribe.verify(
-            make_credential(payload={}, challenge_id="test"),
-            {"plan": "premium"},
-        )
-        assert receipt.reference == "sub-test"
 
 
 class TestClassBasedIntent:
@@ -962,21 +984,37 @@ class DjangoStyleRequest:
             self.META["HTTP_PAYMENT_AUTHORIZATION"] = payment_authorization
 
 
+def _intent_server(payment_intent, *, name: str = "tempo", requires_auth: bool = False) -> Mpp:
+    """Serve a raw intent with a fixed amount request."""
+    return Mpp(
+        methods=server_method(
+            name=name, request={"amount": "1000"}, verify=_verify_hook(payment_intent)
+        ),
+        realm="api.example.com",
+        secret_key="test-secret",
+        requires_auth=requires_auth,
+    )
+
+
+async def _credential_for(handler, request=None, payload=None) -> Credential:
+    """Issue a challenge through a decorated handler and answer it."""
+    issued = challenge_from_402(await handler(request or MockRequest()))
+    return Credential(challenge=issued.to_echo(), payload=payload or {})
+
+
 class TestWrapPaymentHandler:
     @pytest.mark.asyncio
     async def test_raises_type_error_when_request_is_none(self) -> None:
-        """wrap_payment_handler should raise TypeError when request arg is missing."""
-        from mpp.server.decorator import wrap_payment_handler
+        """pay() should raise TypeError when request arg is missing."""
 
-        async def verify_fn(auth, req):
-            return Challenge.create(
-                secret_key="s", realm="r", method="tempo", intent="charge", request={}
-            )
+        @intent(name="charge")
+        async def test_intent(credential: Credential, request: dict) -> Receipt:
+            return Receipt.success("0x123")
 
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {}
 
-        wrapped = wrap_payment_handler(handler, verify_fn, lambda: "r")
+        wrapped = pay(_intent_server(test_intent).charge())(handler)
 
         with pytest.raises(TypeError, match="Missing request argument 'req'"):
             await wrapped()
@@ -1008,12 +1046,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid content"}
 
@@ -1036,20 +1069,15 @@ class TestPay:
     async def test_forwards_events_to_verify(self) -> None:
         """Standalone pay() should forward configured event handlers."""
         events: list[str] = []
-        dispatcher = EventDispatcher()
-        dispatcher.on("challenge.created", lambda payload: events.append(payload["intent"]))
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            events=dispatcher,
-        )
+        server = _intent_server(test_intent)
+        server.on("challenge.created", lambda payload: events.append(payload["intent"]))
+
+        @pay(server.charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid content"}
 
@@ -1065,24 +1093,14 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
                 "receipt_ref": receipt.reference,
             }
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={"hash": "0xabc"})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1101,12 +1119,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(request, credential: Credential, receipt: Receipt):
             return JSONResponse({"data": "paid", "receipt_ref": receipt.reference})
 
@@ -1145,12 +1158,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1162,6 +1170,7 @@ class TestPay:
             "route": "/paid/{id}",
             "resource": "/paid/one",
             "query": "view=full",
+            "http_method": "GET",
         }
         credential = Credential(
             challenge=challenge.to_echo(),
@@ -1187,32 +1196,19 @@ class TestPay:
 
     @pytest.mark.asyncio
     async def test_supports_dynamic_request_params(self) -> None:
-        """Should support callable request params."""
+        """Route options should override the method's request."""
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             assert request["amount"] == "2000"
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request=lambda req: {"amount": req.query_amount},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge(amount="2000"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        class RequestWithQuery(MockRequest):
-            query_amount = "2000"
-
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "2000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-        request = RequestWithQuery(authorization=credential.to_authorization())
+        credential = await _credential_for(handler, payload={})
+        request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
         assert result["data"] == "paid"
@@ -1225,13 +1221,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            body=lambda req: req.body,
-        )
+        @pay(_intent_server(test_intent).charge(body=lambda req: req.body))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1245,13 +1235,7 @@ class TestPay:
         challenge = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
         assert challenge.digest == BodyDigest.compute(original_body)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            digest=challenge.digest,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={"hash": "0xabc"})
 
         result = await handler(
             MockRequest(
@@ -1285,13 +1269,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("tx-ref-123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            body=lambda _req: body_value,
-        )
+        @pay(_intent_server(test_intent).charge(body=lambda _req: body_value))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"receipt_ref": receipt.reference}
 
@@ -1299,13 +1277,7 @@ class TestPay:
         challenge = challenge_from_402(challenge_result)
         assert challenge.digest == BodyDigest.compute(body_value)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            digest=challenge.digest,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={"hash": "0xabc"})
 
         result = await handler(MockRequest(authorization=credential.to_authorization()))
 
@@ -1319,23 +1291,13 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
             return {"paid": True}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1349,12 +1311,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1389,21 +1346,11 @@ class TestPay:
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
             raise error
 
-        @pay(
-            intent=failing_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(failing_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         result = await handler(MockRequest(authorization=credential.to_authorization()))
 
         if HAS_STARLETTE:
@@ -1433,21 +1380,11 @@ class TestPay:
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
             raise InternalPaymentError() from cause
 
-        @pay(
-            intent=failing_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(failing_intent).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
 
         with pytest.raises(InternalPaymentError) as raised:
             await handler(MockRequest(authorization=credential.to_authorization()))
@@ -1464,12 +1401,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        @pay(_intent_server(test_intent).charge())
         async def my_handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             """My handler docstring."""
             return {"data": "paid"}
@@ -1488,13 +1420,7 @@ class TestPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            method="custompay",
-        )
+        @pay(_intent_server(test_intent, name="custompay").charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1513,24 +1439,41 @@ class TestPay:
         assert challenge.method == "custompay"
 
 
-def _make_server(test_intent, *, requires_auth: bool = False):
-    """Create an Mpp instance with a mock method for testing."""
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _TempoCharge(Method[ChargeInput, Any]):
+    """Tempo's charge request model; credential payloads reach the hook unparsed."""
 
-    class MockMethod:
-        name = "tempo"
-        currency = "0xUSD"
-        recipient = "0xRecipient"
-        decimals = 6
-        intents = {"charge": test_intent}
+    def parse_payload(self, payload: Any) -> Any:
+        return payload
 
-        async def create_credential(self, challenge):
-            return make_credential(payload={}, challenge_id="test")
 
+def _make_server(test_intent, *, requires_auth: bool = False, **defaults: Any) -> Mpp:
+    """Create an Mpp instance serving a Tempo charge request with a mock verify hook."""
+    defaults = {"currency": USD, "recipient": RECIPIENT, **defaults}
     return Mpp(
-        method=MockMethod(),
+        methods=ServerMethod(
+            method=_TempoCharge(
+                name="tempo", intent="charge", request_model=ChargeInput, payload_model=ChargeInput
+            ),
+            verify=_verify_hook(test_intent),
+            defaults={key: value for key, value in defaults.items() if value is not None},
+        ),
         realm="api.example.com",
         secret_key="test-secret",
         requires_auth=requires_auth,
+    )
+
+
+def _transform_server(test_intent, transform: Callable[[RequestContext], dict]) -> Mpp:
+    """Create an Mpp instance whose method rewrites each route request."""
+    return Mpp(
+        methods=server_method(
+            request={"currency": USD, "recipient": RECIPIENT},
+            verify=_verify_hook(test_intent),
+            resolve_request=transform,
+        ),
+        realm="api.example.com",
+        secret_key="test-secret",
     )
 
 
@@ -1545,7 +1488,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid content"}
 
@@ -1581,7 +1524,7 @@ class TestMppPay:
         assert callable(server.on_payment_failed(lambda payload: events.append("failed")))
         server.on("*", lambda event: events.append(f"*:{event.name}"))
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"receipt_ref": receipt.reference}
 
@@ -1592,11 +1535,8 @@ class TestMppPay:
         else:
             assert isinstance(challenge_result, dict)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
+        credential = Credential(
+            challenge=challenge_from_402(challenge_result).to_echo(), payload={"hash": "0xabc"}
         )
         success_result = await handler(MockRequest(authorization=credential.to_authorization()))
 
@@ -1618,7 +1558,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {
                 "data": "paid content",
@@ -1626,12 +1566,7 @@ class TestMppPay:
                 "receipt_ref": receipt.reference,
             }
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={"hash": "0xabc"})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1648,7 +1583,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"receipt_ref": receipt.reference}
 
@@ -1660,6 +1595,7 @@ class TestMppPay:
             "route": "/paid/{id}",
             "resource": "/paid/one",
             "query": "view=full",
+            "http_method": "GET",
         }
         credential = Credential(
             challenge=challenge.to_echo(),
@@ -1693,7 +1629,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50", body=lambda req: req.body)
+        @pay(server.charge(amount="0.50", body=lambda req: req.body))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"receipt_ref": receipt.reference}
 
@@ -1707,13 +1643,7 @@ class TestMppPay:
         challenge = Challenge.from_www_authenticate(headers["WWW-Authenticate"])
         assert challenge.digest == BodyDigest.compute(original_body)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            digest=challenge.digest,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={"hash": "0xabc"})
 
         result = await handler(
             MockRequest(
@@ -1735,26 +1665,17 @@ class TestMppPay:
         server = _make_server(test_intent)
         body = b'{"query":"paid"}'
 
-        challenge = await server.charge(authorization=None, amount="0.50", body=body)
-        assert isinstance(challenge, Challenge)
-        assert challenge.digest == BodyDigest.compute(body)
+        issued = challenge(await server.charge(amount="0.50", body=body)(http_request()))
+        assert issued.digest == BodyDigest.compute(body)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            digest=challenge.digest,
+        credential = Credential(challenge=issued.to_echo(), payload={"hash": "0xabc"})
+
+        result = await server.charge(amount="0.50", body=body)(
+            http_request(credential.to_authorization())
         )
 
-        result = await server.charge(
-            authorization=credential.to_authorization(),
-            amount="0.50",
-            body=body,
-        )
-
-        assert isinstance(result, tuple)
-        _credential, receipt = result
+        assert isinstance(result, PaymentVerified)
+        receipt = result.receipt
         assert receipt.status == "success"
         assert receipt.reference == "tx-ref-456"
 
@@ -1775,7 +1696,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50", body=lambda _req: body_value)
+        @pay(server.charge(amount="0.50", body=lambda _req: body_value))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"receipt_ref": receipt.reference}
 
@@ -1783,13 +1704,7 @@ class TestMppPay:
         challenge = challenge_from_402(challenge_result)
         assert challenge.digest == BodyDigest.compute(body_value)
 
-        credential = make_bound_credential(
-            payload={"hash": "0xabc"},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            digest=challenge.digest,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={"hash": "0xabc"})
 
         result = await handler(MockRequest(authorization=credential.to_authorization()))
 
@@ -1806,16 +1721,11 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1831,7 +1741,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def my_handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             """My handler docstring."""
             return {"data": "paid"}
@@ -1845,21 +1755,16 @@ class TestMppPay:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            assert request["currency"] == "0xOverride"
+            assert request["currency"] == OVERRIDE_CURRENCY
             return Receipt.success("0x123")
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="1.00", currency="0xOverride")
+        @pay(server.charge(amount="1.00", currency=OVERRIDE_CURRENCY))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000000", "currency": "0xOverride", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1875,18 +1780,13 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(
             req: DjangoStyleRequest, credential: Credential, receipt: Receipt
         ) -> dict:
             return {"paid": True}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "500000", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         request = DjangoStyleRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1898,21 +1798,16 @@ class TestMppPay:
 
         @intent(name="charge")
         async def test_intent(credential: Credential, request: dict) -> Receipt:
-            assert request["recipient"] == "0xOverrideRecipient"
+            assert request["recipient"] == OVERRIDE_RECIPIENT
             return Receipt.success("0x123")
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="1.00", recipient="0xOverrideRecipient")
+        @pay(server.charge(amount="1.00", recipient=OVERRIDE_RECIPIENT))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000000", "currency": "0xUSD", "recipient": "0xOverrideRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = await _credential_for(handler, payload={})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -1928,7 +1823,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1954,7 +1849,7 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50", description="Premium access")
+        @pay(server.charge(amount="0.50", description="Premium access"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -1978,30 +1873,21 @@ class TestMppPay:
         async def session_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("session-ref")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": session_intent, "session": session_intent}
-
         server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
+            methods=server_method(
+                intent="session",
+                request={"currency": USD, "recipient": RECIPIENT},
+                verify=_verify_hook(session_intent),
+            ),
             realm="api.example.com",
             secret_key="test-secret",
         )
 
-        @server.pay(amount="0.000075", intent="session")
+        @pay(server.session(amount="0.000075"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "session", "receipt_ref": receipt.reference}
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "75", "currency": "0xUSD", "recipient": "0xRecipient"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            intent="session",
-        )
+        credential = await _credential_for(handler, payload={})
         request = MockRequest(authorization=credential.to_authorization())
         result = await handler(request)
 
@@ -2018,8 +1904,8 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        with pytest.raises(ValueError, match="does not support nonexistent intent"):
-            server.pay(amount="0.50", intent="nonexistent")
+        with pytest.raises((AttributeError, KeyError), match="nonexistent"):
+            server["nonexistent"](amount="0.50")
 
     @pytest.mark.asyncio
     async def test_raises_when_method_has_no_currency(self) -> None:
@@ -2027,27 +1913,13 @@ class TestMppPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = None
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, currency=None)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50")
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        with pytest.raises(
-            ValueError, match=r"currency must be set on the method or passed to pay\(\)"
-        ):
-            await handler(MockRequest())
+        with pytest.raises(ValueError, match=r"currency\s+Field required"):
+            await pay(server.charge(amount="0.50"))(handler)(MockRequest())
 
     @pytest.mark.asyncio
     async def test_raises_when_method_has_no_recipient(self) -> None:
@@ -2055,27 +1927,13 @@ class TestMppPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = None
-            decimals = 6
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, recipient=None)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50")
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
-        with pytest.raises(
-            ValueError, match=r"recipient must be set on the method or passed to pay\(\)"
-        ):
-            await handler(MockRequest())
+        with pytest.raises(ValueError, match=r"recipient\s+Field required"):
+            await pay(server.charge(amount="0.50"))(handler)(MockRequest())
 
     @pytest.mark.asyncio
     async def test_passes_expires_and_extra_into_challenge(self) -> None:
@@ -2085,9 +1943,9 @@ class TestMppPay:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        server = _make_server(test_intent)
+        server = _intent_server(test_intent)
 
-        @server.pay(amount="0.50", extra={"plan": "pro"}, expires_in=timedelta(minutes=1))
+        @pay(server.charge(extra={"plan": "pro"}, expires_in=timedelta(minutes=1)))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -2117,12 +1975,8 @@ class TestMppPay:
 
         server = _make_server(test_intent)
 
-        @server.pay(amount="0.50", extra={"plan": "pro", "attempts": 1})  # type: ignore[dict-item]
-        async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
-            return {"data": "paid"}
-
-        with pytest.raises(ValueError, match=r"extra must be a dict\[str, str\]"):
-            await handler(MockRequest())
+        with pytest.raises(ValueError, match="extra"):
+            server.charge(amount="0.50", extra={"plan": "pro", "attempts": 1})
 
 
 class TestMppChainIdAutoEmit:
@@ -2136,22 +1990,9 @@ class TestMppChainIdAutoEmit:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            chain_id = 42431
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, chain_id=42431)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        result = await server.charge(authorization=None, amount="0.50")
-        assert isinstance(result, Challenge)
+        result = challenge(await server.charge(amount="0.50")(http_request()))
         assert result.request["methodDetails"]["chainId"] == 42431
 
     @pytest.mark.asyncio
@@ -2162,22 +2003,9 @@ class TestMppChainIdAutoEmit:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            chain_id = 42431
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, chain_id=42431)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        result = await server.charge(authorization=None, amount="0.50", chain_id=4217)
-        assert isinstance(result, Challenge)
+        result = challenge(await server.charge(amount="0.50", chain_id=4217)(http_request()))
         assert result.request["methodDetails"]["chainId"] == 4217
 
     @pytest.mark.asyncio
@@ -2190,8 +2018,7 @@ class TestMppChainIdAutoEmit:
 
         server = _make_server(test_intent)
 
-        result = await server.charge(authorization=None, amount="0.50")
-        assert isinstance(result, Challenge)
+        result = challenge(await server.charge(amount="0.50")(http_request()))
         assert "methodDetails" not in result.request
 
     @pytest.mark.asyncio
@@ -2202,21 +2029,9 @@ class TestMppChainIdAutoEmit:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            chain_id = 42431
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, chain_id=42431)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -2240,21 +2055,9 @@ class TestMppChainIdAutoEmit:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            chain_id = 42431
-            intents = {"charge": test_intent}
+        server = _make_server(test_intent, chain_id=42431)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50", chain_id=4217)
+        @pay(server.charge(amount="0.50", chain_id=4217))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -2280,25 +2083,13 @@ class TestMppRequestTransformHook:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": test_intent}
+        def transform_request(context: RequestContext) -> dict:
+            assert context.credential is None
+            return {**context.request, "extra": {"hook": "charge"}}
 
-            def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                assert credential is None
-                return {**request, "extra": {"hook": "charge"}}
+        server = _transform_server(test_intent, transform_request)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        result = await server.charge(authorization=None, amount="0.50")
-        assert isinstance(result, Challenge)
+        result = challenge(await server.charge(amount="0.50")(http_request()))
         assert result.request["extra"]["hook"] == "charge"
 
     @pytest.mark.asyncio
@@ -2307,24 +2098,13 @@ class TestMppRequestTransformHook:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": test_intent}
+        def transform_request(context: RequestContext) -> dict:
+            assert context.credential is None
+            return {**context.request, "extra": {"hook": "pay"}}
 
-            def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                assert credential is None
-                return {**request, "extra": {"hook": "pay"}}
+        server = _transform_server(test_intent, transform_request)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -2348,38 +2128,21 @@ class TestMppRequestTransformHook:
 
         seen: list[bool] = []
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": test_intent}
+        def transform_request(context: RequestContext) -> dict:
+            # The paid retry also passes the credential; the request must not depend on it.
+            seen.append(context.credential is not None)
+            return {**context.request, "extra": {"hook": "none"}}
 
-            def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                seen.append(credential is not None)
-                marker = "credential" if credential is not None else "none"
-                return {**request, "extra": {"hook": marker}}
+        server = _transform_server(test_intent, transform_request)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        first = await server.charge(authorization=None, amount="0.50")
-        assert isinstance(first, Challenge)
+        first = challenge(await server.charge(amount="0.50")(http_request()))
         assert first.request["extra"]["hook"] == "none"
 
-        credential = make_bound_credential(
-            payload={},
-            request=first.request,
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = Credential(challenge=first.to_echo(), payload={})
 
-        result = await server.charge(authorization=credential.to_authorization(), amount="0.50")
-        assert isinstance(result, tuple)
-        assert seen == [False, False]
+        result = await server.charge(amount="0.50")(http_request(credential.to_authorization()))
+        assert isinstance(result, PaymentVerified)
+        assert seen[-1] and not any(seen[:-1])
 
     @pytest.mark.asyncio
     async def test_pay_transform_request_is_deterministic_across_retries(self) -> None:
@@ -2389,25 +2152,14 @@ class TestMppRequestTransformHook:
 
         seen: list[bool] = []
 
-        class MockMethod:
-            name = "tempo"
-            currency = "0xUSD"
-            recipient = "0xRecipient"
-            decimals = 6
-            intents = {"charge": test_intent}
+        def transform_request(context: RequestContext) -> dict:
+            # The paid retry also passes the credential; the request must not depend on it.
+            seen.append(context.credential is not None)
+            return {**context.request, "extra": {"hook": "none"}}
 
-            def transform_request(self, request: dict, credential: Credential | None) -> dict:
-                seen.append(credential is not None)
-                marker = "credential" if credential is not None else "none"
-                return {**request, "extra": {"hook": marker}}
+        server = _transform_server(test_intent, transform_request)
 
-        server = Mpp(
-            method=MockMethod(),  # type: ignore[arg-type]
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
-
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"data": "paid"}
 
@@ -2424,16 +2176,11 @@ class TestMppRequestTransformHook:
                 challenge_result["headers"]["WWW-Authenticate"]
             )
 
-        credential = make_bound_credential(
-            payload={},
-            request=challenge.request,
-            realm="api.example.com",
-            secret_key="test-secret",
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={})
 
         result = await handler(MockRequest(authorization=credential.to_authorization()))
         assert result["data"] == "paid"
-        assert seen == [False, False]
+        assert seen[-1] and not any(seen[:-1])
 
 
 class TestMalformedEchoedFields:
@@ -2755,9 +2502,8 @@ class TestRequiresAuth:
             return Receipt.success("0x123")
 
         server = _make_server(test_intent, requires_auth=True)
-        result = await server.charge(authorization="Bearer app-token", amount="0.50")
+        result = challenge(await server.charge(amount="0.50")(http_request("Bearer app-token")))
 
-        assert isinstance(result, Challenge)
         assert result.header == PAYMENT_AUTHORIZATION_HEADER
         assert f'header="{PAYMENT_AUTHORIZATION_HEADER}"' in result.to_www_authenticate(
             server.realm
@@ -2770,23 +2516,18 @@ class TestRequiresAuth:
             return Receipt.success("0x123")
 
         server = _make_server(test_intent, requires_auth=True)
-        challenge = await server.charge(authorization="Bearer app-token", amount="0.50")
-        assert isinstance(challenge, Challenge)
-        credential = Credential(challenge=challenge.to_echo(), payload={"type": "test"})
+        handler = server.charge(amount="0.50")
+        issued = challenge(await handler(http_request("Bearer app-token")))
+        credential = Credential(challenge=issued.to_echo(), payload={"type": "test"})
 
-        ignored = await server.charge(
-            authorization=credential.to_authorization(),
-            amount="0.50",
-        )
-        assert isinstance(ignored, Challenge)
+        ignored = await handler(http_request(credential.to_authorization()))
+        challenge(ignored)
 
-        paid = await server.charge(
-            authorization="Bearer app-token",
-            amount="0.50",
-            payment_authorization=credential.to_authorization(),
+        paid = await handler(
+            http_request("Bearer app-token", payment_authorization=credential.to_authorization())
         )
-        assert isinstance(paid, tuple)
-        assert paid[1].status == "success"
+        assert isinstance(paid, PaymentVerified)
+        assert paid.receipt.status == "success"
 
     @pytest.mark.asyncio
     async def test_pay_decorator_reads_payment_authorization(self) -> None:
@@ -2796,7 +2537,7 @@ class TestRequiresAuth:
 
         server = _make_server(test_intent, requires_auth=True)
 
-        @server.pay(amount="0.50")
+        @pay(server.charge(amount="0.50"))
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"paid": True, "ref": receipt.reference}
 
@@ -2804,14 +2545,7 @@ class TestRequiresAuth:
         challenge = challenge_from_402(challenge_result)
         assert challenge.header == PAYMENT_AUTHORIZATION_HEADER
 
-        credential = make_bound_credential(
-            payload={},
-            request=challenge.request,
-            realm="api.example.com",
-            secret_key="test-secret",
-            expires=challenge.expires,
-            header=PAYMENT_AUTHORIZATION_HEADER,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={})
         result = await handler(
             MockRequest(
                 authorization="Bearer app-token",
@@ -2826,13 +2560,7 @@ class TestRequiresAuth:
         async def test_intent(credential: Credential, request: dict) -> Receipt:
             return Receipt.success("0x123")
 
-        @pay(
-            intent=test_intent,
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            requires_auth=True,
-        )
+        @pay(_intent_server(test_intent, requires_auth=True).charge())
         async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
             return {"paid": True}
 
@@ -2840,13 +2568,7 @@ class TestRequiresAuth:
         challenge = challenge_from_402(challenge_result)
         assert challenge.header == PAYMENT_AUTHORIZATION_HEADER
 
-        credential = make_bound_credential(
-            payload={},
-            request={"amount": "1000"},
-            realm="api.example.com",
-            secret_key="test-secret",
-            header=PAYMENT_AUTHORIZATION_HEADER,
-        )
+        credential = Credential(challenge=challenge.to_echo(), payload={})
         result = await handler(MockRequest(payment_authorization=credential.to_authorization()))
         assert result == {"paid": True}
 
@@ -2857,12 +2579,7 @@ async def test_unsafe_echoed_description_returns_fresh_payment_challenge(descrip
     async def payment_intent(credential: Credential, request: dict) -> Receipt:
         raise AssertionError("Malformed credentials must not reach settlement")
 
-    @pay(
-        intent=payment_intent,
-        request={"amount": "1000"},
-        realm="api.example.com",
-        secret_key="test-secret",
-    )
+    @pay(_intent_server(payment_intent).charge())
     async def handler(req: MockRequest, credential: Credential, receipt: Receipt) -> dict:
         raise AssertionError("Invalid payment must not reach the handler")
 

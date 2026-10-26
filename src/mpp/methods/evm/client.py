@@ -1,14 +1,14 @@
-"""EVM payment method (mppx ``evm`` server and client methods)."""
+"""EVM charge for clients, and the ``evm()`` shorthand for either side."""
 
 from __future__ import annotations
 
 import re
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, overload
 
 from eth_utils.address import to_checksum_address
 
@@ -22,12 +22,15 @@ from mpp.methods.evm._eip3009 import (
     to_source,
 )
 from mpp.methods.evm.assets import EvmAsset
-from mpp.methods.evm.intents import CREDENTIAL_TYPE, ChargeIntent, SettleFn
+from mpp.methods.evm.intents import CREDENTIAL_TYPE, SettleFn
+from mpp.methods.evm.intents import charge as definition
+from mpp.runtime import ClientMethod, CredentialParams
 from mpp.x402._server import RouteBinding
-from mpp.x402.facilitator import Facilitator, resolve_facilitator
+from mpp.x402.facilitator import Facilitator
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent, VerifiableIntent
+    from mpp.server.method import RequestContext, ServerMethod
+    from mpp.store import Store
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 DEFAULT_VALIDITY_SECONDS = 300
@@ -40,39 +43,56 @@ class AuthorizationConfig(TypedDict):
     version: str
 
 
-@dataclass
-class EvmMethod:
-    """EVM payment method for HTTP 402 authentication.
+_OPTION_KEYS = frozenset(
+    {"amount", "currency", "recipient", "splits", "fee_payer", "chain_id", "extra"}
+)
 
-    Serves native Payment-auth ``evm/charge`` challenges and, through the same
-    intent, x402 ``exact`` clients. Build it with :func:`evm`.
-    """
 
-    name: str = "evm"
-    currency: str = ""
-    chain_id: int = 0
-    decimals: int = 6
-    domain_name: str = ""
-    domain_version: str = ""
+@dataclass(frozen=True)
+class _Config:
+    """The token, chain and party an EVM method charges or pays with."""
+
+    currency: str
+    chain_id: int
+    decimals: int
+    domain_name: str
+    domain_version: str
     recipient: str | None = None
     account: Any = None
     max_amount: int | None = None
-    can_offer: CanOfferFn | None = None
-    on_payment_success: PaymentSuccessHandler | None = None
-    _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
-
-    @property
-    def intents(self) -> dict[str, Intent | VerifiableIntent]:
-        """Intents this method serves (``charge``)."""
-        return self._intents
 
     # -- server ----------------------------------------------------------
 
-    def transform_request(
-        self, request: dict[str, Any], credential: Credential | None
-    ) -> dict[str, Any]:
-        """Normalize a charge request to mppx's ``evm/charge`` wire shape."""
-        del credential
+    def resolve_request(self, context: RequestContext) -> dict[str, Any]:
+        """Turn route input (a display-unit ``amount`` and options) into the wire request."""
+        options = context.request
+        unknown = options.keys() - _OPTION_KEYS
+        if unknown:
+            raise TypeError(f"unsupported option: {sorted(unknown, key=str)[0]}")
+        amount = options.get("amount")
+        if not isinstance(amount, str) or not amount.strip():
+            raise ValueError("offer requires a non-empty string amount")
+        details = {
+            key: value
+            for key, value in (
+                ("chainId", options.get("chain_id")),
+                ("splits", options.get("splits")),
+                ("feePayer", options.get("fee_payer")),
+            )
+            if value is not None
+        }
+        request: dict[str, Any] = {
+            "amount": str(parse_units(amount, self.decimals)),
+            "currency": options.get("currency") or self.currency,
+            "recipient": options.get("recipient") or self.recipient,
+            "methodDetails": details,
+        }
+        if options.get("extra") is not None:
+            request["extra"] = options["extra"]
+        return self.wire_request(request)
+
+    def wire_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a charge request to the ``evm/charge`` wire shape."""
         currency = request.get("currency")
         if not isinstance(currency, str) or currency.lower() != self.currency.lower():
             raise ValueError(f"EVM charge currency must be the method's currency {self.currency}")
@@ -178,67 +198,17 @@ class EvmMethod:
         )
 
 
-def evm(
+def _config(
     *,
     currency: EvmAsset | str,
+    chain_id: int | None,
+    decimals: int | None,
+    authorization: AuthorizationConfig | None,
     recipient: str | None = None,
-    chain_id: int | None = None,
-    decimals: int | None = None,
-    authorization: AuthorizationConfig | None = None,
-    facilitator: str | Facilitator | None = None,
-    settle: SettleFn | None = None,
-    max_timeout_seconds: int = 300,
-    route_binding: RouteBinding = "required",
-    max_validity_seconds: int = 3600,
     account: Any = None,
     max_amount: str | Decimal | None = None,
-    can_offer: CanOfferFn | None = None,
-    on_payment_success: PaymentSuccessHandler | None = None,
-) -> EvmMethod:
-    """Create an EVM payment method that charges with EIP-3009 authorizations.
-
-    On a server, the method's ``charge`` intent serves both native MPP
-    clients and x402 ``exact`` clients from the same endpoint, and settles
-    through an x402 facilitator or a custom ``settle`` hook. On a client,
-    pass ``account`` to sign native ``evm/charge`` credentials.
-
-    Example:
-        from mpp.methods.evm import BASE_USDC, evm
-        from mpp.server import Mpp
-
-        server = Mpp.create(
-            method=evm(
-                currency=BASE_USDC,
-                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                facilitator="https://facilitator.example.com",
-            ),
-        )
-
-    Args:
-        currency: A known :class:`EvmAsset`, or a token address together
-            with ``chain_id``, ``decimals`` and ``authorization``.
-        recipient: Address that receives payments (servers).
-        chain_id: EVM chain ID. Inferred from a known asset.
-        decimals: Token decimals. Inferred from a known asset.
-        authorization: EIP-712 domain (``name``, ``version``) the token signs
-            EIP-3009 authorizations with. Inferred from a known asset.
-        facilitator: x402 facilitator URL or client that verifies and settles
-            payments (servers).
-        settle: Custom settlement hook used instead of a facilitator. It
-            receives the verified authorization and returns its reference.
-        max_timeout_seconds: x402 ``maxTimeoutSeconds`` offered to clients.
-        route_binding: How x402 payments bind to scoped routes, as mppx's
-            ``routeBinding``. Routes wrapped by ``server.pay`` or ``compose`` are
-            scoped. ``"required"`` (the default) accepts only clients that sign
-            mppx's route binding there; set ``"resource"`` to accept standard
-            x402 clients, which bind by the echoed terms and resource URL.
-        max_validity_seconds: Longest an authorization may stay valid from now
-            (servers, default one hour).
-        account: eth-account ``LocalAccount`` that signs credentials (clients).
-        max_amount: Largest display-unit amount the client pays (clients).
-        can_offer: Optional callback deciding whether to offer a request.
-        on_payment_success: Optional callback for this method's payments.
-    """
+) -> _Config:
+    """Resolve a currency (known asset or token address) to the method's configuration."""
     if isinstance(currency, EvmAsset):
         if chain_id is not None and chain_id != currency.chain_id:
             raise ValueError(
@@ -278,30 +248,7 @@ def evm(
         raise ValueError("authorization version is required")
     if recipient is not None and not _ADDRESS_RE.fullmatch(recipient):
         raise ValueError("recipient must be an address")
-
-    intents: dict[str, Intent | VerifiableIntent] = {}
-    if recipient is not None or facilitator is not None or settle is not None:
-        if recipient is None:
-            raise ValueError("EVM servers require recipient")
-        intents["charge"] = ChargeIntent(
-            name=domain["name"],
-            version=domain["version"],
-            facilitator=resolve_facilitator(facilitator) if facilitator is not None else None,
-            settle=settle,
-            max_timeout_seconds=max_timeout_seconds,
-            route_binding=route_binding,
-            max_validity_seconds=max_validity_seconds,
-        )
-    elif account is None:
-        raise ValueError(
-            "evm() requires recipient and a facilitator or settle hook (servers) "
-            "or account (clients)"
-        )
-    else:
-        # Clients match challenges on (method, intent) without verifying them.
-        intents["charge"] = _ClientChargeIntent()
-
-    return EvmMethod(
+    return _Config(
         currency=to_checksum_address(address),
         chain_id=resolved_chain_id,
         decimals=resolved_decimals,
@@ -312,16 +259,115 @@ def evm(
         max_amount=(
             parse_units(str(max_amount), resolved_decimals) if max_amount is not None else None
         ),
-        can_offer=can_offer,
-        on_payment_success=on_payment_success,
-        _intents=intents,
     )
 
 
-class _ClientChargeIntent:
-    """Placeholder intent that lets client runtimes match ``evm/charge``."""
+def charge(
+    *,
+    currency: EvmAsset | str,
+    account: Any,
+    chain_id: int | None = None,
+    decimals: int | None = None,
+    authorization: AuthorizationConfig | None = None,
+    max_amount: str | Decimal | None = None,
+) -> ClientMethod:
+    """Create a client ``evm/charge`` method that signs EIP-3009 authorizations.
 
-    name = "charge"
+    Example:
+        from eth_account import Account
+        from mpp.client import Mpp
+        from mpp.methods.evm import BASE_USDC
+        from mpp.methods.evm import client as evm
 
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Any:
-        raise NotImplementedError("client-side EVM methods cannot verify credentials")
+        method = evm.charge(currency=BASE_USDC, account=Account.from_key("0x..."))
+        async with Mpp(methods=[method]) as mpp:
+            response = await mpp.fetch("https://api.example.com/paid")
+
+    Args:
+        currency: A known :class:`EvmAsset`, or a token address together
+            with ``chain_id``, ``decimals`` and ``authorization``.
+        account: eth-account ``LocalAccount`` that signs credentials.
+        chain_id: EVM chain ID. Inferred from a known asset.
+        decimals: Token decimals. Inferred from a known asset.
+        authorization: EIP-712 domain (``name``, ``version``) the token signs
+            EIP-3009 authorizations with. Inferred from a known asset.
+        max_amount: Largest display-unit amount the client pays.
+    """
+    if account is None:
+        raise ValueError("No account configured for EVM credentials")
+    config = _config(
+        currency=currency,
+        chain_id=chain_id,
+        decimals=decimals,
+        authorization=authorization,
+        account=account,
+        max_amount=max_amount,
+    )
+
+    async def create_credential(params: CredentialParams) -> str:
+        credential = await config.create_credential(params.challenge)
+        return credential.to_authorization()
+
+    return ClientMethod(
+        method=definition,
+        create_credential=create_credential,
+        can_handle_challenge=config.can_handle_challenge,
+    )
+
+
+@overload
+def evm(
+    *,
+    currency: EvmAsset | str,
+    recipient: str,
+    chain_id: int | None = None,
+    decimals: int | None = None,
+    authorization: AuthorizationConfig | None = None,
+    facilitator: str | Facilitator | None = None,
+    settle: SettleFn | None = None,
+    max_timeout_seconds: int = 300,
+    route_binding: RouteBinding = "required",
+    max_validity_seconds: int = 3600,
+    store: Store | None = None,
+    can_offer: CanOfferFn | None = None,
+    on_payment_success: PaymentSuccessHandler | None = None,
+) -> ServerMethod: ...
+
+
+@overload
+def evm(
+    *,
+    currency: EvmAsset | str,
+    account: Any,
+    chain_id: int | None = None,
+    decimals: int | None = None,
+    authorization: AuthorizationConfig | None = None,
+    max_amount: str | Decimal | None = None,
+) -> ClientMethod: ...
+
+
+def evm(
+    *,
+    currency: EvmAsset | str,
+    recipient: str | None = None,
+    account: Any = None,
+    max_amount: str | Decimal | None = None,
+    **options: Any,
+) -> ServerMethod | ClientMethod:
+    """Create the server (with ``recipient``) or client (with ``account``) ``evm/charge`` method.
+
+    Shorthand for :func:`mpp.methods.evm.server.charge` and
+    :func:`mpp.methods.evm.client.charge`.
+    """
+    if recipient is not None or "facilitator" in options or "settle" in options:
+        from mpp.methods.evm.server import charge as server_charge
+
+        if recipient is None:
+            raise ValueError("EVM servers require recipient")
+        return server_charge(currency=currency, recipient=recipient, **options)
+    if account is None:
+        raise ValueError(
+            "evm() requires recipient and a facilitator or settle hook (servers) "
+            "or account (clients)"
+        )
+    return charge(currency=currency, account=account, max_amount=max_amount, **options)

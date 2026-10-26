@@ -9,11 +9,11 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from mpp.errors import VerificationError
 from mpp.methods.tempo import CHAIN_ID
 from mpp.methods.tempo._attribution import encode
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC, ChargeIntent
-from mpp.server import verify_or_challenge
-from mpp.server.intent import VerificationError
+from mpp.server.verify import verify_or_challenge
 from mpp.stores.sqlite import SQLiteStore
 from tests import make_bound_credential
 

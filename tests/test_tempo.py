@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -16,7 +16,12 @@ import rlp
 from pytest_httpx import HTTPXMock
 
 from mpp import Challenge
-from mpp.errors import CredentialReplayedError, InternalPaymentError, PaymentExpiredError
+from mpp.errors import (
+    CredentialReplayedError,
+    InternalPaymentError,
+    PaymentExpiredError,
+    VerificationError,
+)
 from mpp.methods.tempo import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -28,8 +33,8 @@ from mpp.methods.tempo import (
     TempoAccount,
     escrow_contract_for_chain,
     fee_tokens_for_chain,
-    tempo,
 )
+from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
 from mpp.methods.tempo._rpc import _tip20_balance
@@ -39,6 +44,7 @@ from mpp.methods.tempo.client import (
     TempoMethod,
     TransactionError,
     _expiring_valid_before,
+    _tempo_method,
 )
 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
@@ -67,9 +73,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
-from mpp.server.compose import ComposedChallenges
-from mpp.server.intent import VerificationError
-from tests import TEST_REALM, internal_cause, make_credential
+from tests import TEST_REALM, challenges, http_request, internal_cause, make_credential
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -192,18 +196,18 @@ class TestTempoMethod:
         assert fee_tokens_for_chain(TESTNET_CHAIN_ID) == (PATH_USD,)
 
     def test_tempo_factory(self) -> None:
-        """tempo() should create a TempoMethod."""
-        method = tempo(intents={"charge": ChargeIntent()})
+        """_tempo_method() should create a TempoMethod."""
+        method = _tempo_method()
         assert isinstance(method, TempoMethod)
         assert method.name == "tempo"
 
     def test_tempo_default_currency_is_not_a_client_constraint(self) -> None:
-        method = tempo(intents={"charge": ChargeIntent()})
+        method = _tempo_method()
 
         assert method._currency_explicit is False
 
     def test_tempo_provided_currency_is_a_client_constraint(self) -> None:
-        method = tempo(currency="0xUsdc", intents={"charge": ChargeIntent()})
+        method = _tempo_method(currency="0xUsdc")
 
         assert method._currency_explicit is True
 
@@ -279,13 +283,12 @@ class TestTempoMethod:
         assert TempoMethod().transaction_hash(credential) is None
 
     def test_tempo_with_account(self) -> None:
-        """tempo() should accept account and rpc_url."""
+        """_tempo_method() should accept account and rpc_url."""
         key = "0x" + "d" * 64
         account = TempoAccount.from_key(key)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://custom.rpc",
-            intents={"charge": ChargeIntent()},
         )
         assert method.account == account
         assert method.rpc_url == "https://custom.rpc"
@@ -295,12 +298,11 @@ class TestTempoMethod:
     async def test_mach_access_key_uses_root_balance_for_fee_token(self, currency: str) -> None:
         access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
         root = "0x975937feafc6869a260c176854dda8764a78e122"
-        method = tempo(
+        method = _tempo_method(
             account=access_key,
             root_account=root,
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="mach-fee-token",
@@ -349,11 +351,10 @@ class TestTempoMethod:
         self, currency: str, chain_id: int, fee_token: str
     ) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=chain_id,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="mach-usdc-fee-token",
@@ -401,11 +402,10 @@ class TestTempoMethod:
         self, currency: str
     ) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="mach-fee-token-balance",
@@ -452,11 +452,10 @@ class TestTempoMethod:
     @pytest.mark.parametrize("currency", [MACH, OUSD])
     async def test_sponsored_mach_charge_defers_fee_token_to_fee_payer(self, currency: str) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="mach-sponsored",
@@ -504,11 +503,10 @@ class TestTempoMethod:
     @pytest.mark.parametrize("currency", [MACH, OUSD])
     async def test_mach_charge_requires_a_funded_stablecoin_fee_token(self, currency: str) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="mach-no-fee-token",
@@ -541,35 +539,10 @@ class TestTempoMethod:
             with pytest.raises(TransactionError, match="funded supported stablecoin"):
                 await method.create_credential(challenge)
 
-    def test_tempo_propagates_rpc_url_to_intents(self, currency: str) -> None:
-        """tempo() should propagate rpc_url to intents that don't set one."""
-        intent = ChargeIntent()
-        assert intent.rpc_url is None
-        method = tempo(
-            rpc_url="https://custom.rpc",
-            intents={"charge": intent},
-        )
-        assert cast(ChargeIntent, method.intents["charge"]).rpc_url == "https://custom.rpc"
-
-    def test_tempo_does_not_override_explicit_intent_rpc_url(self, currency: str) -> None:
-        """tempo() should not override an intent's explicitly-set rpc_url."""
-        intent = ChargeIntent(rpc_url="https://intent.rpc")
-        method = tempo(
-            rpc_url="https://method.rpc",
-            intents={"charge": intent},
-        )
-        assert cast(ChargeIntent, method.intents["charge"]).rpc_url == "https://intent.rpc"
-
-    def test_intents_property(self, currency: str) -> None:
-        """Should have only the intents explicitly provided."""
-        method = tempo(intents={"charge": ChargeIntent()})
-        assert "charge" in method.intents
-        assert isinstance(method.intents["charge"], ChargeIntent)
-
     @pytest.mark.asyncio
     async def test_create_credential_no_account(self) -> None:
         """Should raise if no account configured."""
-        method = tempo(intents={"charge": ChargeIntent()})
+        method = _tempo_method()
         challenge = Challenge(
             id="test",
             method="tempo",
@@ -584,7 +557,7 @@ class TestTempoMethod:
         """Should raise for unsupported intent."""
         key = "0x" + "e" * 64
         account = TempoAccount.from_key(key)
-        method = tempo(account=account, intents={"charge": ChargeIntent()})
+        method = _tempo_method(account=account)
         challenge = Challenge(
             id="test",
             method="tempo",
@@ -596,7 +569,7 @@ class TestTempoMethod:
 
     def test_encode_transfer(self) -> None:
         """Should encode TIP-20 transfer correctly."""
-        method = tempo(intents={"charge": ChargeIntent()})
+        method = _tempo_method()
         data = method._encode_transfer("0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000)
         assert data.startswith("0xa9059cbb")
         assert len(data) == 138
@@ -605,10 +578,9 @@ class TestTempoMethod:
     async def test_create_credential_caches_chain_id_per_rpc_url(self) -> None:
         """Should reuse eth_chainId results for repeated calls to the same RPC URL."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="test-cache-chain-id",
@@ -658,10 +630,9 @@ class TestTempoMethod:
     async def test_create_credential_reuses_cached_rpc_chain_id_for_rejected_switch(self) -> None:
         """Should reject switched chains without refetching an already-cached RPC chain ID."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.main",
-            intents={"charge": ChargeIntent()},
         )
         initial_challenge = Challenge(
             id="test-mainnet-cache",
@@ -720,7 +691,7 @@ class TestTempoMethod:
     @pytest.mark.asyncio
     async def test_create_credential_binds_auto_memo_to_challenge(self) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
+        method = _tempo_method(account=account, client_id="client-app")
         challenge = Challenge(
             id="challenge-123",
             method="tempo",
@@ -759,7 +730,7 @@ class TestTempoMethod:
     @pytest.mark.parametrize("legacy_memo", ["", "0x" + "ab" * 32])
     async def test_create_credential_uses_attribution_memo(self, legacy_memo: str) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(account=account, client_id="client-app", intents={"charge": ChargeIntent()})
+        method = _tempo_method(account=account, client_id="client-app")
         challenge = Challenge(
             id="challenge-123",
             method="tempo",
@@ -798,11 +769,10 @@ class TestTempoMethod:
     @pytest.mark.asyncio
     async def test_create_credential_caps_fee_payer_priority_fee_to_policy(self) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=1337,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="test-sponsored-priority-cap",
@@ -917,11 +887,10 @@ class TestExpiringNonce:
     async def test_charge_signs_with_expiring_nonce(
         self, fee_payer: bool, expires_in: int | None, extra: dict | None
     ) -> None:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         start = time.time()
         expires = None
@@ -952,11 +921,10 @@ class TestExpiringNonce:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("fixed_memo", [None, "0x" + "dd" * 32])
     async def test_split_client_binds_each_unfixed_leg(self, fixed_memo: str | None) -> None:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         challenge = self._challenge("split-charge", fee_payer=False)
         split = {"amount": "300", "recipient": "0x" + "11" * 20}
@@ -978,10 +946,9 @@ class TestExpiringNonce:
 
     @pytest.mark.asyncio
     async def test_client_rejects_fixed_attribution_before_payment(self):
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
-            intents={"charge": ChargeIntent()},
         )
         challenge = self._challenge("split-charge", fee_payer=False)
         challenge.request["methodDetails"]["splits"] = [
@@ -1003,11 +970,10 @@ class TestExpiringNonce:
         """Raw 0/1 recovery IDs are canonicalized before hashing and broadcast."""
         from mpp.store import MemoryStore
 
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         with (
             patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc([])),
@@ -1022,7 +988,7 @@ class TestExpiringNonce:
         signature = fields[-1]
         assert len(signature) == 65 and signature[64] in (27, 28)
         raw_signature = signature[:64] + bytes([signature[64] - 27])
-        submitted_tx = "0x" + (b"\x76" + rlp.encode([*fields[:-1], raw_signature])).hex()
+        submitted_tx = "0x" + (b"\x76" + bytes(rlp.encode([*fields[:-1], raw_signature]))).hex()
         canonical_hash = _raw_transaction_hash(canonical_tx)
         assert _raw_transaction_hash(submitted_tx) != canonical_hash
 
@@ -1063,11 +1029,10 @@ class TestExpiringNonce:
 
     @pytest.mark.asyncio
     async def test_valid_before_is_set_after_slow_rpc_preparation(self) -> None:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         clock = [float(_NOW)]
 
@@ -1133,11 +1098,10 @@ class TestExpiringNonce:
     @pytest.mark.parametrize("seconds_left", [14.9, 10, 0.5])
     async def test_sponsored_challenge_near_expiry_is_refused(self, seconds_left: float) -> None:
         """A sponsored challenge with under 15s left is refused before signing."""
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         rpc_methods: list[str] = []
         expires = _iso(time.time() + seconds_left)
@@ -1154,11 +1118,10 @@ class TestExpiringNonce:
 
     @pytest.mark.asyncio
     async def test_unsponsored_challenge_near_expiry_still_signs(self) -> None:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         with (
             patch("mpp.methods.tempo.client._rpc_call", side_effect=self._fake_rpc([])),
@@ -1174,11 +1137,10 @@ class TestExpiringNonce:
     async def test_concurrent_charges_do_not_share_a_sequential_nonce(
         self, fee_payer: bool
     ) -> None:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
         rpc_methods: list[str] = []
         challenges = [self._challenge(f"concurrent-{i}", fee_payer=fee_payer) for i in range(5)]
@@ -1207,10 +1169,9 @@ class TestInFlightSigning:
 
     @staticmethod
     def _method() -> tuple[TempoMethod, AsyncMock]:
-        method = tempo(
+        method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=CHAIN_ID,
-            intents={"charge": ChargeIntent()},
         )
         signings = iter(range(1_000))
 
@@ -1924,7 +1885,7 @@ class TestChargeIntent:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("store_source", "expected_warnings"),
-        [("default", 1), ("intent", 0), ("server", 0)],
+        [("default", 1), ("intent", 0)],
     )
     async def test_default_memory_store_warns_once_per_process(
         self,
@@ -1933,7 +1894,6 @@ class TestChargeIntent:
         store_source: str,
         expected_warnings: int,
     ) -> None:
-        from mpp.server import Mpp
         from mpp.store import MemoryStore
 
         monkeypatch.setattr("mpp.methods.tempo.intents._warned_fallback_stores", set())
@@ -1951,17 +1911,6 @@ class TestChargeIntent:
                 rpc_url="https://rpc.test",
                 store=store if store_source == "intent" else None,
             )
-            if store_source == "server":
-                Mpp.create(
-                    method=tempo(
-                        intents={"charge": intent},
-                        currency=request["currency"],
-                        recipient=request["recipient"],
-                    ),
-                    realm="test.com",
-                    secret_key="test-secret",
-                    store=store,
-                )
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(
                 return_value=mock_response(
@@ -3282,10 +3231,9 @@ class TestSponsoredTransfer:
     async def test_client_builds_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
         """Client should build and return raw tx when fee_payer=True."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
 
         # eth_chainId
@@ -3435,15 +3383,8 @@ class TestCosignAsFeePayer:
 
     def _make_intent(self) -> ChargeIntent:
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent(rpc_url="https://rpc.test")
         # Pin the fee token so these RPC mocks don't need fee payer balance lookups.
-        tempo(
-            fee_payer=fee_payer,
-            fee_token=PATH_USD,
-            rpc_url="https://rpc.test",
-            intents={"charge": intent},
-        )
-        return intent
+        return ChargeIntent(rpc_url="https://rpc.test", fee_payer=fee_payer, fee_token=PATH_USD)
 
     def _encode_transfer_data(
         self,
@@ -4277,8 +4218,7 @@ class TestCosignAsFeePayer:
             with pytest.raises(asyncio.CancelledError):
                 await intent.verify(credential, request)
         assert await store.get(f"mpp:charge:{receipt['transactionHash']}") is not None
-        assert intent._method is not None
-        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+        intent.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
         with pytest.raises(CredentialReplayedError):
             await intent.verify(credential, request)
 
@@ -4288,8 +4228,7 @@ class TestCosignAsFeePayer:
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         await store.put(marker, signed.encode() if as_bytes else signed)
-        assert intent._method is not None
-        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+        intent.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
         lookups = []
 
         async def post(url, *, json):
@@ -4313,8 +4252,7 @@ class TestCosignAsFeePayer:
         token = PATH_USD.encode() if as_bytes else PATH_USD
         await store.put(marker, token)
         if outcome == "rotated":
-            assert intent._method is not None
-            intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+            intent.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
 
         async def post(url, *, json):
             assert json["method"] == "eth_getTransactionReceipt"
@@ -4337,8 +4275,7 @@ class TestCosignAsFeePayer:
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         await store.put(marker, signed)
-        assert intent._method is not None
-        intent._method.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
+        intent.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
         sent = []
 
         async def post(url, *, json):
@@ -4395,9 +4332,8 @@ class TestCosignAsFeePayer:
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         other = self._make_intent()
         other._store = store
-        assert other._method is not None
-        other._method.fee_token = "0x20c0000000000000000000000000000000000001"
-        other._method.allowed_fee_tokens = (PATH_USD, other._method.fee_token)
+        other.fee_token = "0x20c0000000000000000000000000000000000001"
+        other.allowed_fee_tokens = (PATH_USD, other.fee_token)
         intent._confirmation_timeout = other._confirmation_timeout = 0.01
         ready = asyncio.Event()
         count = 0
@@ -5539,25 +5475,11 @@ class TestValidateTransactionPayload:
         intent._validate_transaction_payload("0x02abcdef", request)
 
 
-class TestFeePayerPropagation:
-    """Tests for fee_payer propagation through tempo() factory."""
-
-    def test_tempo_propagates_fee_payer(self) -> None:
-        """tempo() should propagate fee_payer to intents via _method backlink."""
+class TestFeePayerConfiguration:
+    def test_fee_payer_configured(self) -> None:
         fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
-        intent = ChargeIntent()
-        tempo(
-            fee_payer=fee_payer,
-            rpc_url="https://rpc.test",
-            intents={"charge": intent},
-        )
+        intent = ChargeIntent(rpc_url="https://rpc.test", fee_payer=fee_payer)
         assert intent.fee_payer is fee_payer
-
-    def test_fee_payer_none_by_default(self) -> None:
-        """ChargeIntent should have no fee_payer when tempo() is called without one."""
-        intent = ChargeIntent()
-        tempo(rpc_url="https://rpc.test", intents={"charge": intent})
-        assert intent.fee_payer is None
 
     def test_fee_payer_none_standalone(self) -> None:
         """ChargeIntent should have no fee_payer when used standalone."""
@@ -5683,29 +5605,28 @@ class TestDefaults:
 
 
 class TestChainIdPropagation:
-    """Tests for chain_id propagation through tempo() factory and Mpp."""
+    """Tests for chain_id configuration and client chain pinning."""
 
     def test_tempo_factory_stores_chain_id(self) -> None:
-        """tempo(chain_id=...) should store chain_id on the method."""
-        method = tempo(chain_id=42431, intents={"charge": ChargeIntent()})
+        """chain_id should be stored on the method."""
+        method = _tempo_method(chain_id=42431)
         assert method.chain_id == 42431
 
     def test_tempo_factory_chain_id_defaults_mainnet(self) -> None:
-        """tempo() without chain_id should default to 4217 (mainnet)."""
-        method = tempo(intents={"charge": ChargeIntent()})
+        """chain_id should default to 4217 (mainnet)."""
+        method = _tempo_method()
         assert method.chain_id == 4217
 
     def test_tempo_factory_chain_id_resolves_rpc(self) -> None:
-        """tempo(chain_id=42431) should resolve testnet RPC URL."""
-        method = tempo(chain_id=42431, intents={"charge": ChargeIntent()})
+        """chain_id=42431 should resolve the testnet RPC URL."""
+        method = _tempo_method(chain_id=42431)
         assert method.rpc_url == "https://rpc.moderato.tempo.xyz"
 
     def test_tempo_factory_rpc_url_overrides_chain_id(self) -> None:
         """Explicit rpc_url should override chain_id resolution."""
-        method = tempo(
+        method = _tempo_method(
             chain_id=42431,
             rpc_url="https://custom.rpc",
-            intents={"charge": ChargeIntent()},
         )
         assert method.rpc_url == "https://custom.rpc"
 
@@ -5715,9 +5636,8 @@ class TestChainIdPropagation:
     ) -> None:
         """Client should reject challenges that try to switch away from its default chain."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
-            intents={"charge": ChargeIntent()},
         )
         challenge = Challenge(
             id="test-chain-switch-default",
@@ -5744,10 +5664,9 @@ class TestChainIdPropagation:
     ) -> None:
         """Client should reject challenges that try to switch away from a pinned RPC."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.custom",
-            intents={"charge": ChargeIntent()},
         )
         get_chain_id = AsyncMock(return_value=TESTNET_CHAIN_ID)
         monkeypatch.setattr(method, "_get_chain_id", get_chain_id)
@@ -5775,10 +5694,9 @@ class TestChainIdPropagation:
     async def test_client_ignores_non_numeric_chain_id(self, httpx_mock: HTTPXMock) -> None:
         """Client should ignore non-numeric chainId and fall back to method rpc_url."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.custom",
-            intents={"charge": ChargeIntent()},
         )
 
         # eth_chainId
@@ -5818,11 +5736,10 @@ class TestChainIdPropagation:
         from mpp.methods.tempo.client import TransactionError
 
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             chain_id=TESTNET_CHAIN_ID,
             rpc_url="https://rpc.custom",
-            intents={"charge": ChargeIntent()},
         )
 
         httpx_mock.add_response(
@@ -5860,11 +5777,10 @@ class TestAccessKeySigning:
         """When root_account is set, should use sign_tx_access_key."""
         access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
         root = "0x975937feafc6869a260c176854dda8764a78e122"
-        method = tempo(
+        method = _tempo_method(
             account=access_key,
             root_account=root,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
 
         # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
@@ -5904,11 +5820,10 @@ class TestAccessKeySigning:
         """Access key + feePayer should produce a 0x78 envelope with keychain sig."""
         access_key = TempoAccount.from_key(TEST_PRIVATE_KEY)
         root = "0x975937feafc6869a260c176854dda8764a78e122"
-        method = tempo(
+        method = _tempo_method(
             account=access_key,
             root_account=root,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
 
         # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
@@ -5947,10 +5862,9 @@ class TestAccessKeySigning:
     async def test_no_root_account_uses_regular_signing(self, httpx_mock: HTTPXMock) -> None:
         """Without root_account, should use regular tx.sign()."""
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
-        method = tempo(
+        method = _tempo_method(
             account=account,
             rpc_url="https://rpc.test",
-            intents={"charge": ChargeIntent()},
         )
 
         # Mock RPC: chain_id (4217=0x1079), gas_price, estimateGas
@@ -7199,19 +7113,17 @@ class TestSplitsFeePayerRejection:
 
     @pytest.mark.anyio
     async def test_splits_with_fee_payer_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mpp.methods.tempo import tempo
         from mpp.server import Mpp
 
         monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
-        server = Mpp.create(
-            method=tempo(
-                intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+        server = Mpp(
+            methods=tempo_server.charge(
+                rpc_url="https://rpc.test",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
         )
         with pytest.raises(ValueError, match="splits and fee_payer cannot be used together"):
             await server.charge(
-                authorization=None,
                 amount="1.00",
                 splits=[
                     {
@@ -7220,7 +7132,7 @@ class TestSplitsFeePayerRejection:
                     }
                 ],
                 fee_payer=True,
-            )
+            )(http_request())
 
 
 class TestSponsoredChallengeLifetime:
@@ -7231,9 +7143,9 @@ class TestSponsoredChallengeLifetime:
         from mpp.server import Mpp
 
         monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
-        return Mpp.create(
-            method=tempo(
-                intents={"charge": ChargeIntent(rpc_url="https://rpc.test")},
+        return Mpp(
+            methods=tempo_server.charge(
+                rpc_url="https://rpc.test",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
         )
@@ -7246,7 +7158,7 @@ class TestSponsoredChallengeLifetime:
         server = self._server(monkeypatch)
         expires = (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
         with pytest.raises(ValueError, match="at least 15 seconds after issuance"):
-            await server.charge(authorization=None, amount="1.00", fee_payer=True, expires=expires)
+            await server.charge(amount="1.00", fee_payer=True, expires=expires)(http_request())
 
     @pytest.mark.anyio
     @pytest.mark.parametrize(
@@ -7263,12 +7175,12 @@ class TestSponsoredChallengeLifetime:
             if seconds is None
             else (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
         )
-        result = await server.charge(
-            authorization=None, amount="1.00", fee_payer=fee_payer, expires=expires
+        result = await server.charge(amount="1.00", fee_payer=fee_payer, expires=expires)(
+            http_request()
         )
-        challenges = result.challenges if isinstance(result, ComposedChallenges) else (result,)
-        assert challenges
-        for challenge in challenges:
+        issued = challenges(result)
+        assert issued
+        for challenge in issued:
             assert isinstance(challenge, Challenge)
             assert bool(challenge.request.get("methodDetails", {}).get("feePayer")) is fee_payer
 
@@ -7678,6 +7590,15 @@ async def test_oversized_hash_source_chain_id_is_rejected() -> None:
         await ChargeIntent(rpc_url="https://rpc.test").validate(credential, request)
 
 
+async def _broadcast(*, intent: ChargeIntent, credential: Any, request: dict) -> Any:
+    """Validate then broadcast, copying the validated payer onto the receipt."""
+    validation = await intent.validate(credential, request)
+    receipt = await intent.broadcast(credential, request)
+    if validation.payer is not None and receipt.payer is None:
+        receipt = replace(receipt, payer=validation.payer)
+    return receipt
+
+
 class TestTransactionCredentialPayer:
     """Pull-mode credentials report the transaction sender as the verified payer."""
 
@@ -7868,8 +7789,6 @@ class TestTransactionCredentialPayer:
     ) -> None:
         from eth_account import Account
 
-        from mpp.server.intent import broadcast_credential
-
         sender = Account.from_key(TEST_PRIVATE_KEY).address
         signed = self._tx(
             awaiting_fee_payer=True, fee_token=None if sponsor_token == "invalid" else sponsor_token
@@ -7878,7 +7797,7 @@ class TestTransactionCredentialPayer:
         if sponsor_token == "invalid":
             fields = rlp.decode(bytes.fromhex(cosigned[4:]))
             fields[10] = b"invalid"
-            cosigned = "0x76" + rlp.encode(fields).hex()
+            cosigned = "0x76" + bytes(rlp.encode(fields)).hex()
         log = {
             "address": self.CURRENCY,
             "topics": [
@@ -7902,22 +7821,21 @@ class TestTransactionCredentialPayer:
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
-            intent = ChargeIntent(rpc_url="https://rpc.test", http_client=client)
-            tempo(intents={"charge": intent}, allowed_fee_tokens=allowed)
+            intent = ChargeIntent(
+                rpc_url="https://rpc.test", http_client=client, allowed_fee_tokens=allowed
+            )
             credential = self._credential(self._envelope(), None)
             request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
 
             if not accepted:
                 with pytest.raises(InternalPaymentError) as raised:
-                    await broadcast_credential(
-                        intent=intent, credential=credential, request=request
-                    )
+                    await _broadcast(intent=intent, credential=credential, request=request)
                 assert "feeToken is" in str(internal_cause(raised.value))
                 assert raised.value.retry_challenge is None
                 assert methods == ["eth_signRawTransaction"]
                 return
 
-            await broadcast_credential(intent=intent, credential=credential, request=request)
+            await _broadcast(intent=intent, credential=credential, request=request)
 
         assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
 
@@ -7943,8 +7861,6 @@ class TestTransactionCredentialPayer:
         self, source: str | None, cosigner: str
     ) -> None:
         from eth_account import Account
-
-        from mpp.server.intent import broadcast_credential
 
         sender = Account.from_key(TEST_PRIVATE_KEY).address
         signer_key = TEST_PRIVATE_KEY if cosigner == "sender" else self.OTHER_KEY
@@ -7981,15 +7897,11 @@ class TestTransactionCredentialPayer:
 
             if cosigner == "other":
                 with pytest.raises(VerificationError, match="Fee payer transaction sender"):
-                    await broadcast_credential(
-                        intent=intent, credential=credential, request=request
-                    )
+                    await _broadcast(intent=intent, credential=credential, request=request)
                 assert methods == ["eth_signRawTransaction"]
                 return
 
-            receipt = await broadcast_credential(
-                intent=intent, credential=credential, request=request
-            )
+            receipt = await _broadcast(intent=intent, credential=credential, request=request)
 
         assert receipt.payer == sender.lower()
         assert receipt.funding_currency == self.CURRENCY
@@ -8001,9 +7913,7 @@ async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeyp
     from mpp.server import Mpp
 
     monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
-    server = Mpp.create(
-        method=tempo(recipient="0x" + "11" * 20, intents={"charge": ChargeIntent()})
-    )
+    server = Mpp(methods=tempo_server.charge(recipient="0x" + "11" * 20))
     memo = encode_attribution(challenge_id="other", server_id="api.example.com")
     if encoding == "bare":
         memo = memo[2:]
@@ -8013,8 +7923,7 @@ async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeyp
         memo = "0x" + " ".join(memo[i : i + 2] for i in range(2, len(memo), 2))
     with pytest.raises(ValueError, match="Fixed split memos"):
         await server.charge(
-            None,
-            "1.00",
+            amount="1.00",
             splits=[
                 {
                     "amount": "300000",
@@ -8022,7 +7931,7 @@ async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeyp
                     "memo": memo,
                 }
             ],
-        )
+        )(http_request())
 
 
 def _fixed_attribution_request() -> dict:
@@ -8038,7 +7947,7 @@ def _fixed_attribution_request() -> dict:
 
 
 async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
-    from mpp.server import verify_or_challenge
+    from mpp.server.verify import verify_or_challenge
 
     with pytest.raises(ValueError, match="Fixed split memos"):
         await verify_or_challenge(
@@ -8051,15 +7960,19 @@ async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
         )
 
 
-def test_mcp_create_challenge_rejects_fixed_attribution():
-    from mpp.extensions.mcp import create_challenge
+async def test_mcp_verify_or_challenge_rejects_fixed_attribution():
+    pytest.importorskip("mcp")
+    from mpp.extensions.mcp import verify_or_challenge
+    from mpp.server import Mpp
 
+    server = Mpp(
+        methods=tempo_server.charge(recipient="0x" + "11" * 20),
+        realm="api.example.com",
+        secret_key="test-secret-key",
+    )
+    request = _fixed_attribution_request()
     with pytest.raises(ValueError, match="Fixed split memos"):
-        create_challenge(
-            method="tempo",
-            intent_name="charge",
-            request=_fixed_attribution_request(),
-            realm="api.example.com",
-            secret_key="test-secret-key",
+        await verify_or_challenge(
+            server.charge(amount="1.00", splits=request["methodDetails"]["splits"]),
             tool="paid-tool",
         )

@@ -1,8 +1,8 @@
-"""Server-side x402 compatibility for Payment-auth intents.
+"""Server-side x402 compatibility for Payment-auth methods.
 
-An intent that implements :class:`X402Intent` is offered to x402 clients
-next to its native Payment challenge, the way mppx's EVM charge transport adds
-an x402 path (``src/x402/server/EvmCharge.ts``):
+A :class:`~mpp.server.method.ServerMethod` whose ``x402`` implements
+:class:`X402Intent` is offered to x402 clients next to its native Payment
+challenge:
 
 - unpaid responses carry ``PAYMENT-REQUIRED`` next to ``WWW-Authenticate``,
 - a ``PAYMENT-SIGNATURE`` credential is bound to the route by comparing its
@@ -207,9 +207,8 @@ def x402_credential(
 ) -> Credential:
     """Bind a ``PAYMENT-SIGNATURE`` value to a route and convert it.
 
-    Port of mppx's x402 ``bindCredential``. The intent's ``route_binding``
-    (default ``"required"``) decides whether scoped routes also accept payments
-    without mppx's route binding.
+    The intent's ``route_binding`` (default ``"required"``) decides whether
+    scoped routes also accept payments without mppx's route binding.
 
     Raises:
         MalformedCredentialError: If the header is not a valid x402 v2 payload.

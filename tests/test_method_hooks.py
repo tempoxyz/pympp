@@ -5,50 +5,59 @@ from __future__ import annotations
 from typing import Any, cast
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from mpp import Challenge, Credential, Receipt
+from mpp._units import parse_units
 from mpp.events import ServerPaymentSuccessPayload
-from mpp.methods import CanOfferFn, PaymentSuccessHandler
-from mpp.methods.stripe import spt
-from mpp.methods.tempo import tempo
-from mpp.server import ComposedChallenges, Mpp, compose, intent
-from tests import MockRequest
+from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
+from mpp.methods.stripe import server as stripe_server
+from mpp.methods.tempo import server as tempo_server
+from mpp.server import (
+    Mpp,
+    PaymentVerified,
+    RequestContext,
+    ServerMethod,
+    VerifyContext,
+    compose,
+)
+from tests import challenge, challenges, http_request
 
 
-class ThirdPartyMethod:
-    def __init__(
-        self,
-        name: str,
-        *,
-        can_offer: CanOfferFn | None = None,
-        on_payment_success: PaymentSuccessHandler | None = None,
-    ) -> None:
-        self.name = name
-        self.can_offer = can_offer
-        self.on_payment_success = on_payment_success
-        self.currency = f"{name}-currency"
-        self.recipient = f"{name}-recipient"
-        self.decimals = 2
-
-        @intent(name="charge")
-        async def verify(_credential: Credential, _request: dict[str, Any]) -> Receipt:
-            return Receipt.success(name)
-
-        self.intents = {"charge": verify}
-
-    def transform_request(
-        self, request: dict[str, Any], _credential: Credential | None
-    ) -> dict[str, Any]:
-        return {**request, "transformedBy": self.name}
-
-    async def create_credential(self, challenge: Challenge) -> Credential:  # pragma: no cover
-        del challenge
-        raise NotImplementedError
+class Wire(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
 
-def create_server(*methods: ThirdPartyMethod) -> Mpp:
-    return Mpp.create(
-        methods=methods,
+def third_party_method(
+    name: str,
+    *,
+    can_offer: CanOfferFn | None = None,
+    on_payment_success: PaymentSuccessHandler | None = None,
+    request_model: type[BaseModel] = Wire,
+    verify: Any = None,
+) -> ServerMethod:
+    async def settle(_context: VerifyContext) -> Receipt:
+        return Receipt.success(name)
+
+    def resolve_request(context: RequestContext) -> dict[str, Any]:
+        request = {**context.request, "transformedBy": name}
+        if "amount" in request:
+            request["amount"] = str(parse_units(request["amount"], 2))
+        return request
+
+    return ServerMethod(
+        method=Method(name=name, intent="charge", request_model=request_model, payload_model=Wire),
+        verify=verify or settle,
+        resolve_request=resolve_request,
+        can_offer=can_offer,
+        on_payment_success=on_payment_success,
+        defaults={"currency": f"{name}-currency", "recipient": f"{name}-recipient"},
+    )
+
+
+def create_server(*methods: ServerMethod) -> Mpp:
+    return Mpp(
+        methods=list(methods),
         realm="api.example.com",
         secret_key="secret",
     )
@@ -61,46 +70,35 @@ def credential(challenge: Challenge) -> Credential:
 async def test_generic_preparation_consumes_private_input_without_changing_protocol():
     seen = []
 
-    class PreparedMethod(ThirdPartyMethod):
-        def prepare_intent(self, original, input):
-            private_value = input.pop("private_value", None)
+    class PrivateInput(BaseModel):
+        model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-            @intent(name=original.name)
-            async def verify(credential, request):
-                seen.append(private_value)
-                return await original.verify(credential, request)
+        amount: str
+        currency: str
+        recipient: str
+        transformed_by: str = Field(alias="transformedBy")
+        private_value: str | None = Field(default=None, exclude=True)
 
-            return verify, input
+    async def verify(context: VerifyContext) -> Receipt:
+        seen.append(context.request.get("private_value"))
+        return Receipt.success("custom")
 
-    method = PreparedMethod("custom")
+    method = third_party_method("custom", request_model=PrivateInput, verify=verify)
     server = create_server(method)
     events = []
     server.on_payment_success(events.append)
     for private_value in ("first", "second"):
-        unpaid = await server.charge(None, "1.50", private_value=private_value)
-        assert isinstance(unpaid, Challenge)
+        handler = server.charge(amount="1.50", private_value=private_value)
+        unpaid = challenge(await handler(http_request()))
         assert "private_value" not in unpaid.request
         assert unpaid.request["transformedBy"] == "custom"
         assert unpaid.request["amount"] == "150"
-        await server.charge(
-            credential(unpaid).to_authorization(), "1.50", private_value=private_value
-        )
+        paid = await handler(http_request(credential(unpaid).to_authorization()))
+        assert isinstance(paid, PaymentVerified)
     assert seen == ["first", "second"]
     assert all("private_value" not in event["request"] for event in events)
-    with pytest.raises(ValueError, match="unsupported compose option"):
-        server.compose((method, cast(Any, {"amount": "1.50", "typo": "bad"})))
-
-
-def test_invalid_preparation_result_is_rejected():
-    from mpp.server.method import prepare_intent
-
-    class BrokenMethod(ThirdPartyMethod):
-        def prepare_intent(self, original, input):
-            return original
-
-    method = BrokenMethod("broken")
-    with pytest.raises(TypeError, match="prepare_intent must return"):
-        prepare_intent(method, method.intents["charge"], {})
+    with pytest.raises(ValidationError, match="typo"):
+        server.compose(("custom/charge", cast(Any, {"amount": "1.50", "typo": "bad"})))
 
 
 @pytest.mark.asyncio
@@ -117,21 +115,22 @@ async def test_can_offer_filters_normalized_composed_offers_before_challenge_eve
         request["_mppx_scope"]["resource"] = "/tampered"
         return True
 
-    first = ThirdPartyMethod("first", can_offer=reject_first)
-    second = ThirdPartyMethod("second", can_offer=offer_second)
+    first = third_party_method("first", can_offer=reject_first)
+    second = third_party_method("second", can_offer=offer_second)
     server = create_server(first, second)
     challenged: list[str] = []
     server.on_challenge_created(lambda payload: challenged.append(payload["method"]))
 
-    result = await server.compose(
-        (first, {"amount": "1.50"}),
-        (second, {"amount": "1.50"}),
-    ).verify(None, MockRequest(path="/paid", route="/paid"))
+    result = challenges(
+        await server.compose(
+            ("first/charge", {"amount": "1.50"}),
+            ("second/charge", {"amount": "1.50"}),
+        )(http_request(url="https://test.example.com/paid", route="/paid"))
+    )
 
-    assert isinstance(result, ComposedChallenges)
-    assert [challenge.method for challenge in result.challenges] == ["second"]
-    assert result.challenges[0].request["amount"] == "150"
-    assert result.challenges[0].request["_mppx_scope"]["resource"] == "/paid"
+    assert [issued.method for issued in result] == ["second"]
+    assert result[0].request["amount"] == "150"
+    assert result[0].request["_mppx_scope"]["resource"] == "/paid"
     assert challenged == ["second"]
     assert [name for name, _request in seen] == ["first", "second"]
     assert seen[0][1] == {
@@ -139,7 +138,11 @@ async def test_can_offer_filters_normalized_composed_offers_before_challenge_eve
         "currency": "first-currency",
         "recipient": "first-recipient",
         "transformedBy": "first",
-        "_mppx_scope": {"resource": "/paid", "route": "/paid"},
+        "_mppx_scope": {
+            "http_method": "GET",
+            "resource": "/paid",
+            "route": "/paid",
+        },
     }
 
 
@@ -151,59 +154,57 @@ async def test_can_offer_checks_repeated_offers_but_not_direct_handlers_or_redem
         amounts.append(request["amount"])
         return request["amount"] == "200"
 
-    method = ThirdPartyMethod("only", can_offer=can_offer)
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    method = third_party_method("only", can_offer=can_offer)
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
 
-    direct = await server.charge(None, "1.00")
-    assert isinstance(direct, Challenge)
+    challenge(await server.charge(amount="1.00")(http_request()))
     assert amounts == []
 
     configured = server.compose(
-        (method, {"amount": "1.00"}),
-        (method, {"amount": "2.00"}),
+        ("only/charge", {"amount": "1.00"}),
+        ("only/charge", {"amount": "2.00"}),
     )
-    result = await configured.verify(None)
-    assert isinstance(result, ComposedChallenges)
-    assert [challenge.request["amount"] for challenge in result.challenges] == ["200"]
+    result = challenges(await configured(http_request()))
+    assert [issued.request["amount"] for issued in result] == ["200"]
     assert amounts == ["100", "200"]
 
-    paid = await configured.verify(credential(result.challenges[0]).to_authorization())
-    assert not isinstance(paid, ComposedChallenges)
-    assert paid[1].reference == "only"
+    paid = await configured(http_request(credential(result[0]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "only"
     assert amounts == ["100", "200"]
 
 
 @pytest.mark.asyncio
 async def test_implicit_charge_keeps_composed_result_when_one_method_is_filtered() -> None:
-    first = ThirdPartyMethod("first", can_offer=lambda _request: False)
-    second = ThirdPartyMethod("second", can_offer=lambda _request: True)
+    first = third_party_method("first", can_offer=lambda _request: False)
+    second = third_party_method("second", can_offer=lambda _request: True)
 
-    result = await create_server(first, second).charge(None, "1.00")
+    result = challenges(await create_server(first, second).charge(amount="1.00")(http_request()))
 
-    assert isinstance(result, ComposedChallenges)
-    assert [challenge.method for challenge in result.challenges] == ["second"]
+    assert [issued.method for issued in result] == ["second"]
 
 
 @pytest.mark.asyncio
 async def test_can_offer_rejects_invalid_results_and_propagates_errors() -> None:
-    non_callable = ThirdPartyMethod("non-callable", can_offer=cast(CanOfferFn, object()))
     with pytest.raises(ValueError, match="can_offer must be callable"):
-        await create_server(non_callable).compose((non_callable, {"amount": "1.00"})).verify(None)
+        third_party_method("non-callable", can_offer=cast(CanOfferFn, object()))
 
-    invalid = ThirdPartyMethod("invalid", can_offer=lambda _request: cast(Any, "yes"))
+    invalid = third_party_method("invalid", can_offer=lambda _request: cast(Any, "yes"))
     with pytest.raises(ValueError, match="can_offer must return bool"):
-        await create_server(invalid).compose((invalid, {"amount": "1.00"})).verify(None)
+        await create_server(invalid).compose(("invalid/charge", {"amount": "1.00"}))(http_request())
 
     def fail(_request: dict[str, Any]) -> bool:
         raise RuntimeError("offer hook failure")
 
-    failing = ThirdPartyMethod("failing", can_offer=fail)
+    failing = third_party_method("failing", can_offer=fail)
     with pytest.raises(RuntimeError, match="offer hook failure"):
-        await create_server(failing).compose((failing, {"amount": "1.00"})).verify(None)
+        await create_server(failing).compose(("failing/charge", {"amount": "1.00"}))(http_request())
 
-    unavailable = ThirdPartyMethod("unavailable", can_offer=lambda _request: False)
+    unavailable = third_party_method("unavailable", can_offer=lambda _request: False)
     with pytest.raises(ValueError, match="No payment offers"):
-        await create_server(unavailable).compose((unavailable, {"amount": "1.00"})).verify(None)
+        await create_server(unavailable).compose(("unavailable/charge", {"amount": "1.00"}))(
+            http_request()
+        )
 
 
 @pytest.mark.asyncio
@@ -214,21 +215,20 @@ async def test_success_hook_runs_only_for_the_settled_method() -> None:
     async def record_second(payload: ServerPaymentSuccessPayload) -> None:
         second_calls.append(payload)
 
-    first = ThirdPartyMethod("first", on_payment_success=first_calls.append)
-    second = ThirdPartyMethod("second", on_payment_success=record_second)
+    first = third_party_method("first", on_payment_success=first_calls.append)
+    second = third_party_method("second", on_payment_success=record_second)
     server = create_server(first, second)
     global_calls: list[ServerPaymentSuccessPayload] = []
     server.on_payment_success(global_calls.append)
     configured = server.compose(
-        (first, {"amount": "1.00"}),
-        (second, {"amount": "2.00"}),
+        ("first/charge", {"amount": "1.00"}),
+        ("second/charge", {"amount": "2.00"}),
     )
-    offered = await configured.verify(None)
-    assert isinstance(offered, ComposedChallenges)
+    offered = challenges(await configured(http_request()))
 
-    paid = await configured.verify(credential(offered.challenges[1]).to_authorization())
+    paid = await configured(http_request(credential(offered[1]).to_authorization()))
 
-    assert not isinstance(paid, ComposedChallenges)
+    assert isinstance(paid, PaymentVerified)
     assert first_calls == []
     assert second_calls == global_calls
     assert second_calls[0]["method"] == "second"
@@ -241,28 +241,27 @@ async def test_success_hook_runs_only_for_the_settled_method() -> None:
 async def test_static_composition_uses_only_the_owning_method_success_hook() -> None:
     first_calls: list[ServerPaymentSuccessPayload] = []
     second_calls: list[ServerPaymentSuccessPayload] = []
-    first_method = ThirdPartyMethod("shared", on_payment_success=first_calls.append)
-    second_method = ThirdPartyMethod("shared", on_payment_success=second_calls.append)
-    first = Mpp.create(
-        method=first_method,
+    first_method = third_party_method("shared", on_payment_success=first_calls.append)
+    second_method = third_party_method("shared", on_payment_success=second_calls.append)
+    first = Mpp(
+        methods=first_method,
         realm="api.example.com",
         secret_key="first-secret",
     )
-    second = Mpp.create(
-        method=second_method,
+    second = Mpp(
+        methods=second_method,
         realm="api.example.com",
         secret_key="second-secret",
     )
     configured = compose(
-        first.compose((first_method, {"amount": "1.00"})),
-        second.compose((second_method, {"amount": "1.00"})),
+        first.compose(("shared/charge", {"amount": "1.00"})),
+        second.compose(("shared/charge", {"amount": "1.00"})),
     )
-    offered = await configured.verify(None)
-    assert isinstance(offered, ComposedChallenges)
+    offered = challenges(await configured(http_request()))
 
-    paid = await configured.verify(credential(offered.challenges[1]).to_authorization())
+    paid = await configured(http_request(credential(offered[1]).to_authorization()))
 
-    assert not isinstance(paid, ComposedChallenges)
+    assert isinstance(paid, PaymentVerified)
     assert first_calls == []
     assert [payload["receipt"].reference for payload in second_calls] == ["shared"]
 
@@ -275,12 +274,11 @@ async def test_success_hook_errors_do_not_interrupt_bound_broadcast() -> None:
         calls.append(payload["receipt"].reference or "")
         raise RuntimeError("hook failure")
 
-    method = ThirdPartyMethod("only", on_payment_success=fail)
+    method = third_party_method("only", on_payment_success=fail)
     server = create_server(method)
-    challenge = await server.charge(None, "1.00")
-    assert isinstance(challenge, Challenge)
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
 
-    receipt = await server.broadcast_credential(credential(challenge))
+    receipt = await server.broadcast_credential(credential(issued))
 
     assert receipt.reference == "only"
     assert calls == ["only"]
@@ -293,17 +291,17 @@ def test_method_factories_preserve_hooks() -> None:
     def on_payment_success(_payload: ServerPaymentSuccessPayload) -> None:
         pass
 
-    stripe_method = spt(
-        intents={},
+    stripe_method = stripe_server.charge(
+        network_id="profile_123",
+        secret_key="sk_test_123",
         currency="usd",
         recipient="acct_123",
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
-    tempo_method = tempo(
-        intents={},
-        currency="0xcurrency",
-        recipient="0xrecipient",
+    [tempo_method] = tempo_server.charge(
+        currency="0x20c0000000000000000000000000000000000000",
+        recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         can_offer=can_offer,
         on_payment_success=on_payment_success,
     )
@@ -313,6 +311,5 @@ def test_method_factories_preserve_hooks() -> None:
 
 
 def test_non_callable_success_hook_is_rejected_at_configuration_time() -> None:
-    method = ThirdPartyMethod("only", on_payment_success=cast(PaymentSuccessHandler, object()))
     with pytest.raises(ValueError, match="on_payment_success must be callable"):
-        create_server(method)
+        third_party_method("only", on_payment_success=cast(PaymentSuccessHandler, object()))

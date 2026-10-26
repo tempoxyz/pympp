@@ -2,50 +2,89 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import replace
-from typing import Any, cast
+from typing import Any
 
 import pytest
+from pydantic import BaseModel, ConfigDict, field_validator, model_serializer
 
 from mpp import Challenge, Credential, Receipt
-from mpp.server import ComposedChallenges, Intent, Mpp, VerifiableIntent, compose
-from mpp.store import MemoryStore
-from tests import MockRequest
+from mpp._units import parse_units
+from mpp.methods import Method
+from mpp.server import (
+    Mpp,
+    PaymentRequired,
+    PaymentVerified,
+    RequestContext,
+    ServerMethod,
+    VerifyContext,
+    compose,
+    pay,
+)
+from tests import MockRequest, challenge, challenges, http_request
 
 
-class MockIntent:
-    def __init__(self, name: str, reference: str) -> None:
-        self.name = name
-        self.reference = reference
-        self._store: MemoryStore | None = None
-        self.settlements = 0
+class MockInput(BaseModel):
+    """Route input whose decimal amount is sent in base units of a 2-decimal currency."""
 
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        del credential, request
-        self.settlements += 1
-        return Receipt.success(self.reference)
+    model_config = ConfigDict(extra="forbid")
+
+    amount: str
+    currency: str
+    recipient: str
+    transformedBy: str | None = None
+
+    @field_validator("amount")
+    @classmethod
+    def _check_amount(cls, amount: str) -> str:
+        parse_units(amount, 18)
+        return amount.strip()
+
+    def wire_amount(self) -> str:
+        return str(parse_units(self.amount, 2))
+
+    @model_serializer
+    def _wire(self) -> dict[str, Any]:
+        wire = {
+            "amount": self.wire_amount(),
+            "currency": self.currency,
+            "recipient": self.recipient,
+        }
+        if self.transformedBy is not None:
+            wire["transformedBy"] = self.transformedBy
+        return wire
+
+
+class MockPayload(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
 
 class MockMethod:
+    request_model: type[MockInput] = MockInput
+
     def __init__(self, name: str, intent: str = "charge", reference: str | None = None) -> None:
         self.name = name
-        self.currency = f"{name}-currency"
-        self.recipient = f"{name}-recipient"
-        self.decimals = 2
-        self.intent = MockIntent(intent, reference or name)
-        self.intents: Mapping[str, Intent | VerifiableIntent] = {intent: self.intent}
+        self.reference = reference or name
+        self.settlements = 0
+        self.server = ServerMethod(
+            method=Method(
+                name=name,
+                intent=intent,
+                request_model=self.request_model,
+                payload_model=MockPayload,
+            ),
+            verify=self.verify,
+            resolve_request=self.resolve_request,
+            defaults={"currency": f"{name}-currency", "recipient": f"{name}-recipient"},
+        )
 
-    def transform_request(
-        self,
-        request: dict[str, Any],
-        _credential: Credential | None,
-    ) -> dict[str, Any]:
-        return {**request, "transformedBy": self.name}
+    def resolve_request(self, context: RequestContext) -> dict[str, Any]:
+        return {**context.request, "transformedBy": self.name}
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        del challenge
-        raise NotImplementedError
+    async def verify(self, context: VerifyContext) -> Receipt:
+        del context
+        self.settlements += 1
+        return Receipt.success(self.reference)
 
 
 def response_challenges(response: Any) -> list[Challenge]:
@@ -65,150 +104,136 @@ def credential(challenge: Challenge) -> Credential:
     return Credential(challenge=challenge.to_echo(), payload={})
 
 
-def test_multi_method_creation_wires_store_and_validates_configuration() -> None:
-    class Server(Mpp):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            self.received_store = kwargs.get("store")
-            super().__init__(*args, **kwargs)
-
+def test_multi_method_creation_validates_configuration() -> None:
     first = MockMethod("first")
     second = MockMethod("second")
-    store = MemoryStore()
-    server = Server.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="secret",
-        store=store,
     )
 
-    assert isinstance(server, Server)
-    assert server.method is first
-    assert server.methods == (first, second)
-    assert first.intent._store is store
-    assert second.intent._store is store
-    assert server.received_store is store
+    assert [method.key for method in server.methods] == ["first/charge", "second/charge"]
 
-    create = cast(Any, Mpp.create)
-    with pytest.raises(ValueError, match="method= or methods="):
-        create(realm="api.example.com", secret_key="secret")
-    with pytest.raises(ValueError, match="not both"):
-        create(method=first, methods=[second])
-    with pytest.raises(ValueError, match="unique"):
-        Mpp.create(
-            methods=[first, first],
-            realm="api.example.com",
-            secret_key="secret",
-        )
+    with pytest.raises(ValueError, match="methods is required"):
+        Mpp(methods=[], realm="api.example.com", secret_key="secret")
 
 
 def test_compose_validates_public_entries_at_configuration_time() -> None:
     method = MockMethod("first")
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
+    [configured] = server.methods
 
     with pytest.raises(ValueError, match="at least one entry"):
         server.compose()
-    with pytest.raises(ValueError, match="non-empty string amount"):
-        server.compose(cast(Any, (method, {})))
-    with pytest.raises(ValueError, match="unsupported compose option"):
-        server.compose(cast(Any, (method, {"amount": "1", "ammount": "1"})))
+    with pytest.raises(ValueError, match="amount"):
+        server.compose((configured, {}))
+    with pytest.raises(ValueError, match="ammount"):
+        server.compose((configured, {"amount": "1", "ammount": "1"}))
     with pytest.raises(ValueError, match=r"meta must be a dict\[str, str\]"):
-        server.compose(cast(Any, (method, {"amount": "1", "meta": {"plan": 1}})))
-    with pytest.raises(ValueError, match="does not support refund"):
-        server.compose(cast(Any, ("first/refund", {"amount": "1"})))
-    with pytest.raises(ValueError, match="unknown payment method"):
-        server.compose(cast(Any, ("other", {"amount": "1"})))
+        server.compose((configured, {"amount": "1", "meta": {"plan": 1}}))
+    with pytest.raises(ValueError, match="not registered"):
+        server.compose(("first/refund", {"amount": "1"}))
+    with pytest.raises(ValueError, match="not registered"):
+        server.compose(("other", {"amount": "1"}))
 
 
 @pytest.mark.asyncio
 async def test_explicit_compose_renders_all_offers_and_dispatches_one_payment() -> None:
     first = MockMethod("first")
     second = MockMethod("second")
-    server = Mpp.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="secret",
     )
     successes: list[dict[str, Any]] = []
     server.on_payment_success(successes.append)
     configured = server.compose(
-        (first, {"amount": "1.50"}),
+        (server.methods[0], {"amount": "1.50"}),
         ("second/charge", {"amount": "2.00"}),
     )
 
-    @configured
+    @pay(configured)
     async def endpoint(
         _request: MockRequest,
-        _credential: Credential,
+        credential: Credential,
         receipt: Receipt,
     ) -> str:
         return receipt.reference
 
     request = MockRequest(path="/paid", route="/paid")
-    challenges = response_challenges(await endpoint(request))
-    assert [item.request["amount"] for item in challenges] == ["150", "200"]
+    issued = response_challenges(await endpoint(request))
+    assert [item.request["amount"] for item in issued] == ["150", "200"]
 
     paid_request = MockRequest(
-        authorization=credential(challenges[1]).to_authorization(),
+        authorization=credential(issued[1]).to_authorization(),
         path="/paid",
         route="/paid",
     )
     assert await endpoint(paid_request) == "second"
-    assert second.intent.settlements == 1
+    assert second.settlements == 1
     assert [event["method"] for event in successes] == ["second"]
+
+
+class DecimalInput(MockInput):
+    def wire_amount(self) -> str:
+        return self.amount
 
 
 class DecimalAmountMethod(MockMethod):
     """A custom method whose wire amount is a decimal string, not base units."""
 
-    def parse_amount(self, amount: str) -> str:
-        return amount
+    request_model = DecimalInput
 
 
 @pytest.mark.asyncio
-async def test_method_parse_amount_controls_wire_amount() -> None:
+async def test_method_request_model_controls_wire_amount() -> None:
     decimal = DecimalAmountMethod("decimal")
     units = MockMethod("units")
-    server = Mpp.create(methods=[decimal, units], realm="api.example.com", secret_key="secret")
-    configured = server.compose((decimal, {"amount": "0.50"}), (units, {"amount": "0.50"}))
+    server = Mpp(
+        methods=[decimal.server, units.server], realm="api.example.com", secret_key="secret"
+    )
+    configured = server.compose(
+        ("decimal/charge", {"amount": "0.50"}), ("units/charge", {"amount": "0.50"})
+    )
 
-    @configured
+    @pay(configured)
     async def endpoint(
         _request: MockRequest,
-        _credential: Credential,
+        credential: Credential,
         receipt: Receipt,
     ) -> str:
         return receipt.reference
 
-    challenges = response_challenges(await endpoint(MockRequest(path="/paid", route="/paid")))
-    assert [item.request["amount"] for item in challenges] == ["0.50", "50"]
+    issued = response_challenges(await endpoint(MockRequest(path="/paid", route="/paid")))
+    assert [item.request["amount"] for item in issued] == ["0.50", "50"]
     paid_request = MockRequest(
-        authorization=credential(challenges[0]).to_authorization(),
+        authorization=credential(issued[0]).to_authorization(),
         path="/paid",
         route="/paid",
     )
     assert await endpoint(paid_request) == "decimal"
 
-    unpaid = await Mpp.create(method=decimal, realm="api.example.com", secret_key="secret").charge(
-        None, "0.50"
-    )
-    assert isinstance(unpaid, Challenge)
+    single = Mpp(methods=decimal.server, realm="api.example.com", secret_key="secret")
+    unpaid = challenge(await single.charge(amount="0.50")(http_request()))
     assert unpaid.request["amount"] == "0.50"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("amount", ["", " ", "-1", "NaN", "Infinity", "abc", None, 5])
 @pytest.mark.parametrize("entry", ["compose", "charge", "pay"])
-async def test_parse_amount_validates_route_input(amount: Any, entry: str) -> None:
+async def test_request_model_validates_route_input(amount: Any, entry: str) -> None:
     method = DecimalAmountMethod("decimal")
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
     with pytest.raises(ValueError):
         if entry == "compose":
-            server.compose((method, {"amount": amount}))
+            server.compose(("decimal/charge", {"amount": amount}))
         elif entry == "charge":
-            await server.charge(None, amount)
+            await server.charge(amount=amount)(http_request())
         else:
 
-            @server.pay(amount)
+            @pay(server.charge(amount=amount))
             async def endpoint(_request: MockRequest, credential: Credential, receipt: Receipt):
                 return receipt.reference
 
@@ -216,97 +241,74 @@ async def test_parse_amount_validates_route_input(amount: Any, entry: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_parse_amount_strips_whitespace_without_rounding() -> None:
-    method = DecimalAmountMethod("decimal")
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
-    challenge = await server.charge(None, " 0.0000000010 ")
-    assert isinstance(challenge, Challenge)
-    assert challenge.request["amount"] == "0.0000000010"
-
-
-def test_parse_amount_must_return_a_string() -> None:
-    class BadMethod(MockMethod):
-        def parse_amount(self, amount: str) -> Any:
-            return 50
-
-    method = BadMethod("bad")
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
-    with pytest.raises(TypeError, match="parse_amount must return a non-empty string"):
-        server.compose((method, {"amount": "0.50"}))
-
-
-@pytest.mark.asyncio
 async def test_implicit_charge_and_pay_are_composition_conveniences() -> None:
     first = MockMethod("first")
     second = MockMethod("second")
-    server = Mpp.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="secret",
     )
 
-    unpaid = await server.charge(None, "1.50")
-    assert isinstance(unpaid, ComposedChallenges)
-    assert [item.method for item in unpaid.challenges] == ["first", "second"]
-    paid = await server.charge(
-        credential(unpaid.challenges[1]).to_authorization(),
-        "1.50",
-    )
-    assert not isinstance(paid, (Challenge, ComposedChallenges))
-    assert paid[1].reference == "second"
+    handler = server.charge(amount="1.50")
+    unpaid = challenges(await handler(http_request()))
+    assert [item.method for item in unpaid] == ["first", "second"]
+    paid = await handler(http_request(credential(unpaid[1]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "second"
 
-    @server.pay(amount="2.00")
+    @pay(server.charge(amount="2.00"))
     async def endpoint(
         _request: MockRequest,
-        _credential: Credential,
+        credential: Credential,
         receipt: Receipt,
     ) -> str:
         return receipt.reference
 
-    challenges = response_challenges(await endpoint(MockRequest(path="/paid")))
-    assert [item.method for item in challenges] == ["first", "second"]
+    issued = response_challenges(await endpoint(MockRequest(path="/paid")))
+    assert [item.method for item in issued] == ["first", "second"]
     assert (
         await endpoint(
             MockRequest(
-                authorization=credential(challenges[0]).to_authorization(),
+                authorization=credential(issued[0]).to_authorization(),
                 path="/paid",
             )
         )
         == "first"
     )
 
-    only_charge = Mpp.create(
-        methods=[MockMethod("charge"), MockMethod("session", intent="session")],
+    only_charge = Mpp(
+        methods=[MockMethod("charge").server, MockMethod("session", intent="session").server],
         realm="api.example.com",
         secret_key="secret",
     )
-    assert isinstance(await only_charge.charge(None, "1.00"), Challenge)
+    challenge(await only_charge.charge(amount="1.00")(http_request()))
 
 
 @pytest.mark.asyncio
 async def test_implicit_pay_supports_shared_non_charge_intents() -> None:
     first = MockMethod("first", intent="session")
     second = MockMethod("second", intent="session")
-    server = Mpp.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="secret",
     )
 
-    @server.pay(amount="1.00", intent="session")
+    @pay(server.session(amount="1.00"))
     async def endpoint(
         _request: MockRequest,
-        _credential: Credential,
+        credential: Credential,
         receipt: Receipt,
     ) -> str:
         return receipt.reference
 
-    challenges = response_challenges(await endpoint(MockRequest(path="/session")))
-    assert [item.intent for item in challenges] == ["session", "session"]
+    issued = response_challenges(await endpoint(MockRequest(path="/session")))
+    assert [item.intent for item in issued] == ["session", "session"]
     assert (
         await endpoint(
             MockRequest(
-                authorization=credential(challenges[1]).to_authorization(),
+                authorization=credential(issued[1]).to_authorization(),
                 path="/session",
             )
         )
@@ -331,13 +333,13 @@ async def test_static_nested_compose_preserves_cross_instance_ownership(
 ) -> None:
     first_method = MockMethod("shared", reference="first")
     second_method = MockMethod("shared", reference="second")
-    first = Mpp.create(
-        method=first_method,
+    first = Mpp(
+        methods=first_method.server,
         realm=first_realm,
         secret_key="first-secret",
     )
-    second = Mpp.create(
-        method=second_method,
+    second = Mpp(
+        methods=second_method.server,
         realm=second_realm,
         secret_key=second_secret,
     )
@@ -345,26 +347,18 @@ async def test_static_nested_compose_preserves_cross_instance_ownership(
     second_events: list[dict[str, Any]] = []
     first.on_payment_success(first_events.append)
     second.on_payment_success(second_events.append)
-    first_offer = first.compose((first_method, {"amount": "1.00"}), body=b"first")
-    second_offer = second.compose((second_method, {"amount": "1.00"}), body=second_body)
+    first_offer = first.compose(("shared/charge", {"amount": "1.00", "body": b"first"}))
+    second_offer = second.compose(("shared/charge", {"amount": "1.00", "body": second_body}))
     configured = compose(first_offer, compose(second_offer))
 
-    @configured
-    async def endpoint(
-        _request: MockRequest,
-        _credential: Credential,
-        receipt: Receipt,
-    ) -> str:
-        return receipt.reference
+    issued = challenges(await configured(http_request()))
+    assert [item.realm for item in issued] == [first_realm, second_realm]
+    assert issued[0].request == issued[1].request
 
-    challenges = response_challenges(await endpoint(MockRequest()))
-    assert [item.realm for item in challenges] == [first_realm, second_realm]
-    assert challenges[0].request == challenges[1].request
-
-    paid = await configured.verify(credential(challenges[1]).to_authorization())
-    assert not isinstance(paid, ComposedChallenges)
-    assert paid[1].reference == "second"
-    assert first_method.intent.settlements == 0
+    paid = await configured(http_request(credential(issued[1]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "second"
+    assert first_method.settlements == 0
     assert first_events == []
     assert len(second_events) == 1
 
@@ -373,121 +367,113 @@ async def test_static_nested_compose_preserves_cross_instance_ownership(
 async def test_meta_disambiguates_wire_identical_cross_instance_offers() -> None:
     first_method = MockMethod("shared", reference="first")
     second_method = MockMethod("shared", reference="second")
-    first = Mpp.create(
-        method=first_method,
+    first = Mpp(
+        methods=first_method.server,
         realm="shared.example.com",
         secret_key="shared-secret",
     )
-    second = Mpp.create(
-        method=second_method,
+    second = Mpp(
+        methods=second_method.server,
         realm="shared.example.com",
         secret_key="shared-secret",
     )
     configured = compose(
-        first.compose((first_method, {"amount": "1.00", "meta": {"plan": "first"}})),
-        second.compose((second_method, {"amount": "1.00", "meta": {"plan": "second"}})),
+        first.compose(("shared/charge", {"amount": "1.00", "meta": {"plan": "first"}})),
+        second.compose(("shared/charge", {"amount": "1.00", "meta": {"plan": "second"}})),
     )
 
-    unpaid = await configured.verify(None)
-    assert isinstance(unpaid, ComposedChallenges)
+    unpaid = challenges(await configured(http_request()))
     assert [
-        {k: v for k, v in (challenge.opaque or {}).items() if k != "_mpp_nonce"}
-        for challenge in unpaid.challenges
+        {k: v for k, v in (item.opaque or {}).items() if k != "_mpp_nonce"} for item in unpaid
     ] == [
         {"plan": "first"},
         {"plan": "second"},
     ]
 
-    paid = await configured.verify(credential(unpaid.challenges[1]).to_authorization())
-    assert not isinstance(paid, ComposedChallenges)
-    assert paid[1].reference == "second"
-    assert first_method.intent.settlements == 0
-    assert second_method.intent.settlements == 1
+    paid = await configured(http_request(credential(unpaid[1]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "second"
+    assert first_method.settlements == 0
+    assert second_method.settlements == 1
 
 
 @pytest.mark.asyncio
 async def test_wire_identical_cross_instance_offers_fail_closed() -> None:
     first_method = MockMethod("shared", reference="first")
     second_method = MockMethod("shared", reference="second")
-    first = Mpp.create(
-        method=first_method,
+    first = Mpp(
+        methods=first_method.server,
         realm="shared.example.com",
         secret_key="shared-secret",
     )
-    second = Mpp.create(
-        method=second_method,
+    second = Mpp(
+        methods=second_method.server,
         realm="shared.example.com",
         secret_key="shared-secret",
     )
     configured = compose(
-        first.compose((first_method, {"amount": "1.00"})),
-        second.compose((second_method, {"amount": "1.00"})),
+        first.compose(("shared/charge", {"amount": "1.00"})),
+        second.compose(("shared/charge", {"amount": "1.00"})),
     )
 
-    unpaid = await configured.verify(None)
-    assert isinstance(unpaid, ComposedChallenges)
-    rejected = await configured.verify(credential(unpaid.challenges[1]).to_authorization())
+    unpaid = challenges(await configured(http_request()))
+    rejected = await configured(http_request(credential(unpaid[1]).to_authorization()))
 
-    assert isinstance(rejected, ComposedChallenges)
-    assert len(rejected.challenges) == 2
-    assert first_method.intent.settlements == 0
-    assert second_method.intent.settlements == 0
+    assert len(challenges(rejected)) == 2
+    assert first_method.settlements == 0
+    assert second_method.settlements == 0
 
 
 @pytest.mark.asyncio
 async def test_composed_offer_rejects_tampered_opaque() -> None:
     method = MockMethod("first")
-    server = Mpp.create(
-        method=method,
+    server = Mpp(
+        methods=method.server,
         realm="api.example.com",
         secret_key="shared-secret",
     )
     configured = server.compose(
-        (method, {"amount": "1.00", "meta": {"plan": "original"}}),
+        ("first/charge", {"amount": "1.00", "meta": {"plan": "original"}}),
     )
-    unpaid = await configured.verify(None)
-    assert isinstance(unpaid, ComposedChallenges)
-    challenge = unpaid.challenges[0]
+    issued = challenge(await configured(http_request()))
     tampered_opaque = (
         Challenge.create(
             secret_key="shared-secret",
-            realm=challenge.realm,
-            method=challenge.method,
-            intent=challenge.intent,
-            request=challenge.request,
-            expires=challenge.expires,
-            digest=challenge.digest,
+            realm=issued.realm,
+            method=issued.method,
+            intent=issued.intent,
+            request=issued.request,
+            expires=issued.expires,
+            digest=issued.digest,
             meta={"plan": "tampered"},
         )
         .to_echo()
         .opaque
     )
     tampered = Credential(
-        challenge=replace(challenge.to_echo(), opaque=tampered_opaque),
+        challenge=replace(issued.to_echo(), opaque=tampered_opaque),
         payload={},
     )
 
-    rejected = await configured.verify(tampered.to_authorization())
-    assert isinstance(rejected, ComposedChallenges)
-    assert method.intent.settlements == 0
+    rejected = await configured(http_request(tampered.to_authorization()))
+    assert isinstance(rejected, PaymentRequired)
+    assert method.settlements == 0
 
 
 @pytest.mark.asyncio
 async def test_compose_rejects_unusable_authorization_without_settlement() -> None:
     first = MockMethod("first")
     second = MockMethod("second")
-    server = Mpp.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="shared-secret",
     )
     configured = server.compose(
-        (first, {"amount": "1.00"}),
-        (second, {"amount": "2.00"}),
+        ("first/charge", {"amount": "1.00"}),
+        ("second/charge", {"amount": "2.00"}),
     )
-    unpaid = await configured.verify(None)
-    assert isinstance(unpaid, ComposedChallenges)
-    first_challenge = unpaid.challenges[0]
+    first_challenge = challenges(await configured(http_request()))[0]
     unusable = [
         "Bearer token",
         "Payment not-base64!!",
@@ -514,39 +500,37 @@ async def test_compose_rejects_unusable_authorization_without_settlement() -> No
     ]
 
     for authorization in unusable:
-        rejected = await configured.verify(authorization)
-        assert isinstance(rejected, ComposedChallenges)
-        assert len(rejected.challenges) == 2
+        rejected = await configured(http_request(authorization))
+        assert len(challenges(rejected)) == 2
 
-    assert first.intent.settlements == 0
-    assert second.intent.settlements == 0
+    assert first.settlements == 0
+    assert second.settlements == 0
 
 
 @pytest.mark.asyncio
 async def test_repeated_offers_keep_body_hmac_and_route_scope_bindings() -> None:
     method = MockMethod("first")
-    server = Mpp.create(method=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
     failures: list[dict[str, Any]] = []
     server.on_payment_failed(failures.append)
     body_calls = 0
 
-    def body(request: MockRequest) -> bytes:
+    def body(request: Any) -> bytes:
         nonlocal body_calls
         body_calls += 1
         assert request.body is not None
         return request.body
 
     configured = server.compose(
-        (method, {"amount": "1.00"}),
-        (method, {"amount": "2.00"}),
-        body=body,
+        ("first/charge", {"amount": "1.00", "body": body}),
+        ("first/charge", {"amount": "2.00", "body": body}),
     )
-    request = MockRequest(path="/paid", route="/paid", body=b"bound body")
-    unpaid = await configured.verify(None, request)
-    assert isinstance(unpaid, ComposedChallenges)
-    assert [item.request["amount"] for item in unpaid.challenges] == ["100", "200"]
+    url = "https://api.example.com/paid"
+    request = http_request(url=url, route="/paid", body=b"bound body")
+    unpaid = challenges(await configured(request))
+    assert [item.request["amount"] for item in unpaid] == ["100", "200"]
     assert body_calls == 1
-    selected = credential(unpaid.challenges[1])
+    selected = credential(unpaid[1])
 
     forged = Credential(
         challenge=Challenge.create(
@@ -554,25 +538,31 @@ async def test_repeated_offers_keep_body_hmac_and_route_scope_bindings() -> None
             realm="api.example.com",
             method="first",
             intent="charge",
-            request=unpaid.challenges[1].request,
-            expires=unpaid.challenges[1].expires,
-            digest=unpaid.challenges[1].digest,
+            request=unpaid[1].request,
+            expires=unpaid[1].expires,
+            digest=unpaid[1].digest,
         ).to_echo(),
         payload={},
     )
     rejected = [
-        (forged, request),
-        (selected, MockRequest(path="/paid", route="/paid", body=b"wrong body")),
-        (selected, MockRequest(path="/other", route="/other", body=b"bound body")),
+        (forged, url, "/paid", b"bound body"),
+        (selected, url, "/paid", b"wrong body"),
+        (selected, "https://api.example.com/other", "/other", b"bound body"),
     ]
-    for submitted, submitted_request in rejected:
-        result = await configured.verify(submitted.to_authorization(), submitted_request)
-        assert isinstance(result, ComposedChallenges)
+    for submitted, submitted_url, route, submitted_body in rejected:
+        result = await configured(
+            http_request(
+                submitted.to_authorization(), url=submitted_url, route=route, body=submitted_body
+            )
+        )
+        assert isinstance(result, PaymentRequired)
 
-    paid = await configured.verify(selected.to_authorization(), request)
-    assert not isinstance(paid, ComposedChallenges)
-    assert paid[1].reference == "first"
-    assert method.intent.settlements == 1
+    paid = await configured(
+        http_request(selected.to_authorization(), url=url, route="/paid", body=b"bound body")
+    )
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "first"
+    assert method.settlements == 1
     assert len(failures) == 3
 
 
@@ -580,26 +570,30 @@ async def test_repeated_offers_keep_body_hmac_and_route_scope_bindings() -> None
 async def test_requires_auth_compose_advertises_and_accepts_payment_authorization() -> None:
     first = MockMethod("first")
     second = MockMethod("second")
-    server = Mpp.create(
-        methods=[first, second],
+    server = Mpp(
+        methods=[first.server, second.server],
         realm="api.example.com",
         secret_key="secret",
         requires_auth=True,
     )
     configured = server.compose(
-        (first, {"amount": "1.00"}),
-        (second, {"amount": "1.00"}),
+        ("first/charge", {"amount": "1.00"}),
+        ("second/charge", {"amount": "1.00"}),
     )
 
-    unpaid = await configured.verify("Bearer app-token")
-    assert isinstance(unpaid, ComposedChallenges)
-    assert all(challenge.header == "Payment-Authorization" for challenge in unpaid.challenges)
+    unpaid = challenges(await configured(http_request("Bearer app-token")))
+    assert all(item.header == "Payment-Authorization" for item in unpaid)
     assert all(
-        'header="Payment-Authorization"' in challenge.to_www_authenticate(server.realm)
-        for challenge in unpaid.challenges
+        'header="Payment-Authorization"' in item.to_www_authenticate(server.realm)
+        for item in unpaid
     )
 
-    paid = await configured.verify(credential(unpaid.challenges[1]).to_authorization())
-    assert not isinstance(paid, ComposedChallenges)
-    assert paid[1].reference == "second"
-    assert second.intent.settlements == 1
+    paid = await configured(
+        http_request(
+            "Bearer app-token",
+            payment_authorization=credential(unpaid[1]).to_authorization(),
+        )
+    )
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "second"
+    assert second.settlements == 1

@@ -13,7 +13,8 @@ from pytest_httpx import HTTPXMock
 
 from mpp import ChallengeEcho, Credential, Receipt
 from mpp._canonical import canonical_b64url
-from mpp.server.decorator import _set_response_header, get_request_url, x402_input
+from mpp.server import PaymentVerified
+from mpp.server.decorator import get_request_url, x402_input
 from mpp.x402 import (
     PAYMENT_SIGNATURE_HEADER,
     FacilitatorError,
@@ -434,21 +435,28 @@ class TestServerHelpers:
             def __init__(self) -> None:
                 self.headers: dict[str, str] = {}
 
+        echo = ChallengeEcho(
+            id="hmac-id", realm="r", method="tempo", intent="charge", request="e30"
+        )
+        verified = PaymentVerified(
+            credential=Credential(challenge=echo, payload={}),
+            receipt=Receipt.success("0xabc", method="tempo"),
+        )
         response = Response()
-        _set_response_header(response, "PAYMENT-RESPONSE", "value")
-        assert response.headers == {"PAYMENT-RESPONSE": "value"}
-        _set_response_header(response, "PAYMENT-RESPONSE", "other")
-        assert response.headers == {"PAYMENT-RESPONSE": "value"}
+        response.headers["Payment-Receipt"] = "value"
+        verified.with_receipt(response)
+        assert response.headers["Payment-Receipt"] == "value"
+        assert response.headers["Cache-Control"] == "private"
 
         # Plain data and read-only headers are left alone.
         data = {"payer": PAYER}
-        _set_response_header(data, "PAYMENT-RESPONSE", "value")
+        assert verified.with_receipt(data) == {"payer": PAYER}
         assert data == {"payer": PAYER}
 
         class ReadOnly:
             headers = ("a", "b")
 
-        _set_response_header(ReadOnly(), "PAYMENT-RESPONSE", "value")
+        verified.with_receipt(ReadOnly())
 
 
 class TestRouteBinding:

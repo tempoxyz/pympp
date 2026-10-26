@@ -16,7 +16,6 @@ from mpp.methods.tempo._defaults import fee_tokens_for_chain as _fee_tokens_for_
 from mpp.methods.tempo.account import TempoAccount as _TempoAccount
 from mpp.methods.tempo.client import TempoMethod as _TempoMethod
 from mpp.methods.tempo.client import TransactionError as _TransactionError
-from mpp.methods.tempo.client import tempo as _tempo
 from mpp.methods.tempo.intents import ChargeIntent as _ChargeIntent
 from mpp.methods.tempo.intents import SenderValidation as _SenderValidation
 from mpp.methods.tempo.intents import Transfer as _Transfer
@@ -24,6 +23,8 @@ from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
 from mpp.methods.tempo.relay import Relay as _Relay
 from mpp.methods.tempo.relay import RelayErrorCode as _RelayErrorCode
+from mpp.methods.tempo.schemas import ChargeInput as _ChargeInput
+from mpp.methods.tempo.schemas import ChargePayload as _ChargePayload
 from mpp.methods.tempo.schemas import Split as _Split
 
 PkhSource = _PkhSource
@@ -42,7 +43,6 @@ fee_tokens_for_chain = _fee_tokens_for_chain
 TempoAccount = _TempoAccount
 TempoMethod = _TempoMethod
 TransactionError = _TransactionError
-tempo = _tempo
 ChargeIntent = _ChargeIntent
 SenderValidation = _SenderValidation
 Transfer = _Transfer
@@ -50,4 +50,6 @@ ValidateSender = _ValidateSender
 get_transfers = _get_transfers
 Relay = _Relay
 RelayErrorCode = _RelayErrorCode
+ChargeInput = _ChargeInput
+ChargePayload = _ChargePayload
 Split = _Split

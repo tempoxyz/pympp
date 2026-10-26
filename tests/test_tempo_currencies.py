@@ -14,7 +14,7 @@ import rlp
 
 import mpp.methods.tempo as tempo_exports
 from mpp import Challenge, Credential, Receipt
-from mpp.errors import InternalPaymentError
+from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo import (
     CHAIN_ID,
     MACH,
@@ -26,14 +26,15 @@ from mpp.methods.tempo import (
     default_currencies_for_chain,
     default_currency_for_chain,
     fee_tokens_for_chain,
-    tempo,
 )
+from mpp.methods.tempo import client as tempo_client
+from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._defaults import (
     DEFAULT_ACCEPTED_CURRENCIES,
     DEFAULT_CURRENCIES,
     FEE_TOKENS,
 )
-from mpp.methods.tempo.client import TempoMethod
+from mpp.methods.tempo.client import TempoMethod, _tempo_method
 from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY, POLICY_BY_CHAIN_ID, Policy
 from mpp.methods.tempo.intents import (
     TRANSFER_WITH_MEMO_TOPIC,
@@ -42,15 +43,29 @@ from mpp.methods.tempo.intents import (
 )
 from mpp.methods.tempo.schemas import ChargeRequest
 from mpp.runtime import PaymentRuntime
-from mpp.server import ComposedChallenges, Intent, Mpp, VerifiableIntent
-from mpp.server.intent import VerificationError
-from tests import MockRequest, internal_cause, make_bound_credential
+from mpp.server import (
+    Mpp,
+    PaymentRequired,
+    PaymentVerified,
+    ServerMethod,
+    pay,
+)
+from mpp.server.method import VerifyContext
+from tests import (
+    MockRequest,
+    challenges,
+    http_request,
+    internal_cause,
+    make_bound_credential,
+)
+from tests import server_method as raw_server_method
 
 REALM = "api.example.com"
 SECRET = "test-secret"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 OTHER_TOKEN = "0x20c0000000000000000000000000000000000001"
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+ACCOUNT = TempoAccount.from_key(TEST_PRIVATE_KEY)
 
 
 def swap_case(address: str) -> str:
@@ -72,37 +87,41 @@ class RecordingIntent:
         return Receipt.success(f"paid-{request['currency']}")
 
 
-class OtherMethod:
+def other_method() -> ServerMethod:
     """Minimal second payment method for multi-method composition."""
-
-    name = "other"
-    currency = "usd"
-    recipient = "acct_123"
-    decimals = 2
-
-    def __init__(self) -> None:
-        self.intent = RecordingIntent()
-        self.intents: Mapping[str, Intent | VerifiableIntent] = {"charge": self.intent}
-
-    async def create_credential(self, challenge: Challenge) -> Credential:
-        raise NotImplementedError
-
-
-def server_method(**kwargs: Any) -> tuple[TempoMethod, RecordingIntent]:
     intent = RecordingIntent()
-    method = tempo(intents={"charge": intent}, recipient=RECIPIENT, **kwargs)
-    return method, intent
+
+    async def verify(context: VerifyContext) -> Receipt:
+        return await intent.verify(context.credential, context.challenge.request)
+
+    return raw_server_method(
+        name="other", request={"currency": "usd", "recipient": "acct_123"}, verify=verify
+    )
+
+
+def server_method(**kwargs: Any) -> tuple[list[ServerMethod], RecordingIntent]:
+    """Tempo charge server methods whose settlement is recorded instead of run."""
+    intent = RecordingIntent()
+
+    async def verify(context: VerifyContext) -> Receipt:
+        return await intent.verify(context.credential, context.challenge.request)
+
+    methods = tempo_server.charge(recipient=RECIPIENT, **kwargs)
+    return [replace(m, validate=None, broadcast=None, verify=verify) for m in methods], intent
 
 
 def create_server(method: Any = None, **kwargs: Any) -> Mpp:
-    return Mpp.create(method=method, realm=REALM, secret_key=SECRET, **kwargs)
+    return Mpp(methods=method, realm=REALM, secret_key=SECRET, **kwargs)
+
+
+async def charge(server: Mpp, authorization: str | None, amount: str, **options: Any) -> Any:
+    return await server.charge(amount=amount, **options)(http_request(authorization))
 
 
 def challenges_of(result: Any) -> tuple[Challenge, ...]:
     if isinstance(result, Challenge):
         return (result,)
-    assert isinstance(result, ComposedChallenges), result
-    return result.challenges
+    return tuple(challenges(result))
 
 
 def currencies_of(result: Any) -> list[str]:
@@ -110,7 +129,8 @@ def currencies_of(result: Any) -> list[str]:
 
 
 def pay_with(challenge: Challenge) -> str:
-    return Credential(challenge=challenge.to_echo(), payload={}).to_authorization()
+    payload = {"type": "hash", "hash": "0x" + "ab" * 32}
+    return Credential(challenge=challenge.to_echo(), payload=payload).to_authorization()
 
 
 def response_challenges(response: Any) -> list[Challenge]:
@@ -197,13 +217,17 @@ class TestDefaults:
 
 
 # ──────────────────────────────────────────────────────────────────
-# tempo(currencies=...) configuration
+# currencies=... configuration
 # ──────────────────────────────────────────────────────────────────
+
+
+def config(**kwargs: Any) -> TempoMethod:
+    return _tempo_method(recipient=RECIPIENT, **kwargs)
 
 
 class TestFactory:
     def test_mainnet_defaults(self) -> None:
-        method, _ = server_method()
+        method = config()
         assert method.chain_id == CHAIN_ID
         assert method.currencies == (OUSD, USDC)
         # The singular default (and client behavior) is unchanged.
@@ -211,71 +235,71 @@ class TestFactory:
         assert method._currency_explicit is False
 
     def test_moderato_defaults(self) -> None:
-        method, _ = server_method(chain_id=TESTNET_CHAIN_ID)
+        method = config(chain_id=TESTNET_CHAIN_ID)
         assert method.currencies == (OUSD, PATH_USD)
         assert method.currency == PATH_USD
         assert method._currency_explicit is False
 
     def test_rpc_url_does_not_infer_the_chain(self) -> None:
         # The factory never queries the RPC; an unset chain_id means mainnet.
-        method, _ = server_method(rpc_url="https://rpc.moderato.tempo.xyz")
+        method = config(rpc_url="https://rpc.moderato.tempo.xyz")
         assert method.chain_id == CHAIN_ID
         assert method.currencies == (OUSD, USDC)
 
     def test_explicit_chain_id_beats_rpc_url(self) -> None:
-        method, _ = server_method(chain_id=TESTNET_CHAIN_ID, rpc_url="https://rpc.tempo.xyz")
+        method = config(chain_id=TESTNET_CHAIN_ID, rpc_url="https://rpc.tempo.xyz")
         assert method.chain_id == TESTNET_CHAIN_ID
         assert method.currencies == (OUSD, PATH_USD)
 
     @pytest.mark.parametrize("chain_id", [None, 31337])
     def test_unknown_chain_keeps_single_legacy_default(self, chain_id: int | None) -> None:
-        method, _ = server_method(chain_id=chain_id, rpc_url="http://localhost:8545")
+        method = config(chain_id=chain_id, rpc_url="http://localhost:8545")
         assert method.currencies == (PATH_USD,)
         assert method.currency == PATH_USD
 
     def test_explicit_list_replaces_defaults_and_preserves_order(self) -> None:
-        method, _ = server_method(currencies=[PATH_USD, USDC])
+        method = config(currencies=[PATH_USD, USDC])
         assert method.currencies == (PATH_USD, USDC)
         assert method.currency == PATH_USD
         assert method._currency_explicit is True
 
     def test_explicit_list_ignores_chain_defaults(self) -> None:
-        method, _ = server_method(chain_id=TESTNET_CHAIN_ID, currencies=(USDC, OUSD))
+        method = config(chain_id=TESTNET_CHAIN_ID, currencies=(USDC, OUSD))
         assert method.currencies == (USDC, OUSD)
 
     def test_single_element_list(self) -> None:
-        method, _ = server_method(currencies=[USDC])
+        method = config(currencies=[USDC])
         assert method.currencies == (USDC,)
         assert method.currency == USDC
 
     def test_any_iterable_sequence_is_accepted(self) -> None:
-        method, _ = server_method(currencies=cast(Any, iter([OUSD, USDC])))
+        method = config(currencies=cast(Any, iter([OUSD, USDC])))
         assert method.currencies == (OUSD, USDC)
 
     def test_legacy_currency_restricts_to_one(self) -> None:
-        method, _ = server_method(currency=USDC)
+        method = config(currency=USDC)
         assert method.currencies == (USDC,)
         assert method.currency == USDC
         assert method._currency_explicit is True
 
     def test_legacy_currency_is_not_validated(self) -> None:
         # Preserves existing behavior for non-address currency identifiers.
-        method, _ = server_method(currency="0xUsdc")
+        method = config(currency="0xUsdc")
         assert method.currencies == ("0xUsdc",)
 
     def test_currency_and_currencies_are_mutually_exclusive(self) -> None:
         with pytest.raises(ValueError, match="not both"):
-            server_method(currency=USDC, currencies=[OUSD])
+            config(currency=USDC, currencies=[OUSD])
         with pytest.raises(ValueError, match="not both"):
-            server_method(currency=USDC, currencies=[])
+            config(currency=USDC, currencies=[])
 
     @pytest.mark.parametrize("empty", [[], ()])
     def test_empty_list_is_rejected(self, empty: Any) -> None:
         with pytest.raises(ValueError, match="at least one currency"):
-            server_method(currencies=empty)
+            config(currencies=empty)
 
     def test_mixed_case_duplicates_are_removed_preserving_first(self) -> None:
-        method, _ = server_method(
+        method = config(
             currencies=[OUSD, swap_case(OUSD), USDC, OUSD.lower(), USDC.lower(), PATH_USD]
         )
         assert method.currencies == (OUSD, USDC, PATH_USD)
@@ -295,11 +319,11 @@ class TestFactory:
     )
     def test_invalid_address_is_rejected(self, invalid: Any) -> None:
         with pytest.raises(ValueError, match="Invalid Tempo currency address"):
-            server_method(currencies=[OUSD, invalid])
+            config(currencies=[OUSD, invalid])
 
     def test_bare_string_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="not a string"):
-            server_method(currencies=cast(Any, OUSD))
+            config(currencies=cast(Any, OUSD))
 
     def test_direct_dataclass_construction_offers_only_currency(self) -> None:
         method = TempoMethod(currency=USDC, recipient=RECIPIENT)
@@ -315,26 +339,27 @@ class TestChallenges:
     @pytest.mark.asyncio
     async def test_mainnet_offers_ousd_then_usdc(self) -> None:
         method, _ = server_method()
-        result = await create_server(method).charge(None, "0.50")
+        result = await charge(create_server(method), None, "0.50")
 
-        assert isinstance(result, ComposedChallenges)
+        assert isinstance(result, PaymentRequired)
         assert currencies_of(result) == [OUSD, USDC]
-        for challenge in result.challenges:
+        for challenge in challenges_of(result):
             assert challenge.method == "tempo"
             assert challenge.intent == "charge"
             assert challenge.realm == REALM
             assert challenge.request == {
+                "_mppx_scope": {"http_method": "GET", "resource": "/resource"},
                 "amount": "500000",
                 "currency": challenge.request["currency"],
                 "recipient": RECIPIENT,
                 "methodDetails": {"chainId": CHAIN_ID},
             }
-        assert len({challenge.id for challenge in result.challenges}) == 2
+        assert len({challenge.id for challenge in challenges_of(result)}) == 2
 
     @pytest.mark.asyncio
     async def test_moderato_offers_ousd_then_path_usd(self) -> None:
         method, _ = server_method(chain_id=TESTNET_CHAIN_ID)
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
         assert currencies_of(result) == [OUSD, PATH_USD]
         assert all(
@@ -345,48 +370,48 @@ class TestChallenges:
     @pytest.mark.asyncio
     async def test_unknown_chain_issues_one_plain_challenge(self) -> None:
         method, _ = server_method(chain_id=31337, rpc_url="http://localhost:8545")
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == PATH_USD
 
     @pytest.mark.asyncio
     async def test_legacy_currency_issues_one_plain_challenge(self) -> None:
         method, _ = server_method(currency=USDC)
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == USDC
 
     @pytest.mark.asyncio
     async def test_single_element_list_issues_one_plain_challenge(self) -> None:
         method, _ = server_method(currencies=[OUSD])
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == OUSD
 
     @pytest.mark.asyncio
     async def test_explicit_order_is_the_offer_order(self) -> None:
         method, _ = server_method(currencies=[PATH_USD, OUSD, USDC])
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
         assert currencies_of(result) == [PATH_USD, OUSD, USDC]
 
     @pytest.mark.asyncio
     async def test_per_request_currency_override_issues_one_challenge(self) -> None:
         method, _ = server_method()
-        result = await create_server(method).charge(None, "1", currency=PATH_USD)
+        result = await charge(create_server(method), None, "1", currency=PATH_USD)
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == PATH_USD
 
     @pytest.mark.asyncio
     async def test_methods_list_expands_currencies_before_other_methods(self) -> None:
         method, _ = server_method()
-        other = OtherMethod()
-        server = Mpp.create(methods=[method, other], realm=REALM, secret_key=SECRET)
-        result = await server.charge(None, "1")
+        other = other_method()
+        server = Mpp(methods=[method, other], realm=REALM, secret_key=SECRET)
+        result = await charge(server, None, "1")
 
         challenges = challenges_of(result)
         assert [(c.method, c.request["currency"]) for c in challenges] == [
@@ -398,17 +423,19 @@ class TestChallenges:
     @pytest.mark.asyncio
     async def test_single_method_list_returns_all_currency_challenges(self) -> None:
         method, _ = server_method()
-        server = Mpp.create(methods=[method], realm=REALM, secret_key=SECRET)
+        server = Mpp(methods=[method], realm=REALM, secret_key=SECRET)
 
-        assert currencies_of(await server.charge(None, "1")) == [OUSD, USDC]
+        assert currencies_of(await charge(server, None, "1")) == [OUSD, USDC]
 
     @pytest.mark.asyncio
     async def test_explicit_compose_expands_unless_offer_sets_currency(self) -> None:
         method, _ = server_method()
         server = create_server(method)
 
-        expanded = await server.compose((method, {"amount": "1"})).verify(None)
-        pinned = await server.compose((method, {"amount": "1", "currency": USDC})).verify(None)
+        expanded = await server.compose((server.tempo.charge, {"amount": "1"}))(http_request())
+        pinned = await server.compose((server.tempo.charge, {"amount": "1", "currency": USDC}))(
+            http_request()
+        )
 
         assert currencies_of(expanded) == [OUSD, USDC]
         assert currencies_of(pinned) == [USDC]
@@ -416,7 +443,7 @@ class TestChallenges:
     @pytest.mark.asyncio
     async def test_can_offer_filters_each_currency_offer(self) -> None:
         method, _ = server_method(can_offer=lambda request: request["currency"] != OUSD)
-        result = await create_server(method).charge(None, "1")
+        result = await charge(create_server(method), None, "1")
 
         assert currencies_of(result) == [USDC]
 
@@ -425,7 +452,7 @@ class TestChallenges:
         method, _ = server_method()
         server = create_server(method)
 
-        @server.pay(amount="0.25")
+        @pay(server.charge(amount="0.25"))
         async def endpoint(_request: MockRequest, credential: Credential, receipt: Receipt) -> Any:
             return {"reference": receipt.reference, "currency": credential.challenge.id}
 
@@ -440,7 +467,7 @@ class TestChallenges:
         method, _ = server_method()
         server = create_server(method)
 
-        @server.pay(amount="0.25", currency=USDC)
+        @pay(server.charge(amount="0.25", currency=USDC))
         async def endpoint(_request: MockRequest, credential: Credential, receipt: Receipt) -> Any:
             return receipt.reference
 
@@ -454,7 +481,7 @@ class TestChallenges:
         created: list[Any] = []
         server.on_challenge_created(created.append)
 
-        await server.charge(None, "1")
+        await charge(server, None, "1")
 
         assert [event["challenge"].request["currency"] for event in created] == [OUSD, USDC]
 
@@ -472,12 +499,12 @@ class TestVerification:
     ) -> None:
         method, intent = server_method()
         server = create_server(method)
-        unpaid = challenges_of(await server.charge(None, "0.50"))
+        unpaid = challenges_of(await charge(server, None, "0.50"))
 
-        paid = await server.charge(pay_with(unpaid[index]), "0.50")
+        paid = await charge(server, pay_with(unpaid[index]), "0.50")
 
-        assert not isinstance(paid, Challenge | ComposedChallenges)
-        credential, receipt = paid
+        assert isinstance(paid, PaymentVerified)
+        credential, receipt = paid.credential, paid.receipt
         assert receipt.reference == f"paid-{currency}"
         assert credential.challenge.id == unpaid[index].id
         assert [request["currency"] for request in intent.requests] == [currency]
@@ -486,11 +513,11 @@ class TestVerification:
     async def test_moderato_path_usd_credential_verifies(self) -> None:
         method, intent = server_method(chain_id=TESTNET_CHAIN_ID)
         server = create_server(method)
-        unpaid = challenges_of(await server.charge(None, "1"))
+        unpaid = challenges_of(await charge(server, None, "1"))
 
-        paid = await server.charge(pay_with(unpaid[1]), "1")
+        paid = await charge(server, pay_with(unpaid[1]), "1")
 
-        assert not isinstance(paid, Challenge | ComposedChallenges)
+        assert isinstance(paid, PaymentVerified)
         assert intent.requests[0]["currency"] == PATH_USD
 
     @pytest.mark.asyncio
@@ -510,22 +537,22 @@ class TestVerification:
             realm=REALM,
         )
 
-        result = await server.charge(forged.to_authorization(), "0.50")
+        result = await charge(server, forged.to_authorization(), "0.50")
 
-        assert isinstance(result, ComposedChallenges | Challenge)
+        assert isinstance(result, PaymentRequired)
         assert intent.requests == []
 
     @pytest.mark.asyncio
     async def test_credential_for_override_currency_is_rejected_on_default_route(self) -> None:
         method, intent = server_method()
         server = create_server(method)
-        override = await server.charge(None, "0.50", currency=PATH_USD)
-        assert isinstance(override, Challenge)
+        override = await charge(server, None, "0.50", currency=PATH_USD)
+        [override] = challenges_of(override)
 
-        result = await server.charge(pay_with(override), "0.50")
+        result = await charge(server, pay_with(override), "0.50")
 
         # Existing compose routing re-challenges with the first offer only.
-        assert isinstance(result, ComposedChallenges)
+        assert isinstance(result, PaymentRequired)
         assert currencies_of(result) == [OUSD]
         assert intent.requests == []
 
@@ -533,11 +560,11 @@ class TestVerification:
     async def test_default_credential_is_rejected_on_override_route(self) -> None:
         method, intent = server_method()
         server = create_server(method)
-        unpaid = challenges_of(await server.charge(None, "0.50"))
+        unpaid = challenges_of(await charge(server, None, "0.50"))
 
-        result = await server.charge(pay_with(unpaid[0]), "0.50", currency=USDC)
+        result = await charge(server, pay_with(unpaid[0]), "0.50", currency=USDC)
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == USDC
         assert intent.requests == []
 
@@ -545,23 +572,23 @@ class TestVerification:
     async def test_per_request_override_credential_verifies(self) -> None:
         method, intent = server_method()
         server = create_server(method)
-        override = await server.charge(None, "0.50", currency=PATH_USD)
-        assert isinstance(override, Challenge)
+        override = await charge(server, None, "0.50", currency=PATH_USD)
+        [override] = challenges_of(override)
 
-        paid = await server.charge(pay_with(override), "0.50", currency=PATH_USD)
+        paid = await charge(server, pay_with(override), "0.50", currency=PATH_USD)
 
-        assert not isinstance(paid, Challenge | ComposedChallenges)
+        assert isinstance(paid, PaymentVerified)
         assert intent.requests[0]["currency"] == PATH_USD
 
     @pytest.mark.asyncio
     async def test_credential_is_rejected_after_currency_removed_from_config(self) -> None:
         method, _ = server_method()
-        unpaid = challenges_of(await create_server(method).charge(None, "0.50"))
+        unpaid = challenges_of(await charge(create_server(method), None, "0.50"))
         restricted, intent = server_method(currencies=[OUSD])
 
-        result = await create_server(restricted).charge(pay_with(unpaid[1]), "0.50")
+        result = await charge(create_server(restricted), pay_with(unpaid[1]), "0.50")
 
-        assert isinstance(result, Challenge)
+        [result] = challenges_of(result)
         assert result.request["currency"] == OUSD
         assert intent.requests == []
 
@@ -570,7 +597,7 @@ class TestVerification:
         method, intent = server_method()
         server = create_server(method)
 
-        @server.pay(amount="0.25")
+        @pay(server.charge(amount="0.25"))
         async def endpoint(_request: MockRequest, credential: Credential, receipt: Receipt) -> Any:
             return receipt.reference
 
@@ -614,11 +641,10 @@ class TestEndToEnd:
     async def test_signed_transfer_validates_against_its_offer(
         self, index: int, currency: str
     ) -> None:
-        server = create_server(tempo(intents={"charge": ChargeIntent()}, recipient=RECIPIENT))
-        offers = challenges_of(await server.charge(None, "0.50"))
-        client = tempo(
+        server = create_server(tempo_server.charge(recipient=RECIPIENT))
+        offers = challenges_of(await charge(server, None, "0.50"))
+        client = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
-            intents={"charge": ChargeIntent()},
         )
 
         credential = await _sign(client, offers[index])
@@ -629,11 +655,10 @@ class TestEndToEnd:
 
     @pytest.mark.asyncio
     async def test_signed_transfer_is_rejected_against_another_offer(self) -> None:
-        server = create_server(tempo(intents={"charge": ChargeIntent()}, recipient=RECIPIENT))
-        offers = challenges_of(await server.charge(None, "0.50"))
-        client = tempo(
+        server = create_server(tempo_server.charge(recipient=RECIPIENT))
+        offers = challenges_of(await charge(server, None, "0.50"))
+        client = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
-            intents={"charge": ChargeIntent()},
         )
         usdc_credential = await _sign(client, offers[1])
         ousd_credential = await _sign(client, offers[0])
@@ -657,25 +682,28 @@ class TestClientSelection:
     @pytest.fixture
     async def offers(self) -> tuple[Challenge, ...]:
         method, _ = server_method()
-        return challenges_of(await create_server(method).charge(None, "1"))
+        return challenges_of(await charge(create_server(method), None, "1"))
 
     def test_default_client_picks_the_first_offer(self, offers: tuple[Challenge, ...]) -> None:
-        client = tempo(intents={"charge": ChargeIntent()})
+        client = tempo_client.charge(account=ACCOUNT)
         # No balance check: a default client takes the first matching offer (OUSD).
-        assert PaymentRuntime([client]).match_challenge(offers) == (offers[0], client)
+        runtime = PaymentRuntime([client])
+        assert runtime.match_challenge(offers) == (offers[0], runtime.methods[0])
 
     def test_client_currency_selects_the_matching_offer(
         self, offers: tuple[Challenge, ...]
     ) -> None:
-        client = tempo(intents={"charge": ChargeIntent()}, currency=USDC)
-        assert PaymentRuntime([client]).match_challenge(offers) == (offers[1], client)
+        client = tempo_client.charge(account=ACCOUNT, currency=USDC)
+        runtime = PaymentRuntime([client])
+        assert runtime.match_challenge(offers) == (offers[1], runtime.methods[0])
 
     def test_client_currencies_accept_any_listed_offer(self, offers: tuple[Challenge, ...]) -> None:
-        client = tempo(intents={"charge": ChargeIntent()}, currencies=[PATH_USD, swap_case(USDC)])
-        assert PaymentRuntime([client]).match_challenge(offers) == (offers[1], client)
+        client = tempo_client.charge(account=ACCOUNT, currencies=[PATH_USD, swap_case(USDC)])
+        runtime = PaymentRuntime([client])
+        assert runtime.match_challenge(offers) == (offers[1], runtime.methods[0])
 
     def test_client_without_an_offered_currency_fails(self, offers: tuple[Challenge, ...]) -> None:
-        client = tempo(intents={"charge": ChargeIntent()}, currencies=[PATH_USD, OTHER_TOKEN])
+        client = tempo_client.charge(account=ACCOUNT, currencies=[PATH_USD, OTHER_TOKEN])
         with pytest.raises(ValueError, match="No compatible payment method"):
             PaymentRuntime([client]).match_challenge(offers)
 
@@ -690,16 +718,15 @@ PRE_CHANGE_DEFAULTS = {
 class TestClientDefaultsUnchanged:
     @pytest.mark.parametrize("chain_id", [CHAIN_ID, TESTNET_CHAIN_ID])
     def test_client_default_currency_matches_main(self, chain_id: int) -> None:
-        client = tempo(
+        client = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=chain_id,
-            intents={"charge": ChargeIntent()},
         )
         assert client.currency == PRE_CHANGE_DEFAULTS[chain_id]
         assert client._currency_explicit is False
 
     def test_client_default_currency_without_chain_id_matches_main(self) -> None:
-        client = tempo(account=TempoAccount.from_key(TEST_PRIVATE_KEY), intents={})
+        client = _tempo_method(account=TempoAccount.from_key(TEST_PRIVATE_KEY))
         assert client.currency == PRE_CHANGE_DEFAULTS[CHAIN_ID]
 
 
@@ -785,8 +812,8 @@ async def _fake_client_rpc(chain_id: int, gas_price: int = 1) -> Any:
 
 
 def sponsored_server(rpc: FakeRpc, chain_id: int = CHAIN_ID, **kwargs: Any) -> Mpp:
-    method = tempo(
-        intents={"charge": ChargeIntent(http_client=cast(Any, rpc))},
+    method = tempo_server.charge(
+        http_client=cast(Any, rpc),
         recipient=RECIPIENT,
         chain_id=chain_id,
         fee_payer=TempoAccount.from_key(FEE_PAYER_KEY),
@@ -805,16 +832,12 @@ def charge_request(chain_id: int | None = CHAIN_ID) -> ChargeRequest:
 
 
 def sponsor_intent(chain_id: int | None = CHAIN_ID, **kwargs: Any) -> ChargeIntent:
-    intent = ChargeIntent()
-    rpc = {} if chain_id in (CHAIN_ID, TESTNET_CHAIN_ID) else {"rpc_url": "http://x"}
-    tempo(
-        intents={"charge": intent},
-        chain_id=chain_id,
-        fee_payer=TempoAccount.from_key(FEE_PAYER_KEY),
-        **rpc,
-        **kwargs,
+    rpc: dict[str, Any] = (
+        {"chain_id": chain_id}
+        if chain_id in (CHAIN_ID, TESTNET_CHAIN_ID)
+        else {"rpc_url": "http://x"}
     )
-    return intent
+    return ChargeIntent(fee_payer=TempoAccount.from_key(FEE_PAYER_KEY), **rpc, **kwargs)
 
 
 class TestSponsoredFeeToken:
@@ -834,15 +857,14 @@ class TestSponsoredFeeToken:
     ) -> None:
         rpc = FakeRpc()
         server = sponsored_server(rpc, chain_id)
-        offers = challenges_of(await server.charge(None, "0.50", fee_payer=True))
+        offers = challenges_of(await charge(server, None, "0.50", fee_payer=True))
         assert [c.request["currency"] for c in offers] == list(
             default_currencies_for_chain(chain_id)
         )
         assert all(c.request["methodDetails"]["feePayer"] is True for c in offers)
-        client = tempo(
+        client = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
             chain_id=chain_id,
-            intents={"charge": ChargeIntent()},
         )
         with (
             patch(
@@ -855,10 +877,10 @@ class TestSponsoredFeeToken:
         balance, _ = balances(funded)
 
         with patch("mpp.methods.tempo.intents._tip20_balance", new=balance):
-            paid = await server.charge(credential.to_authorization(), "0.50", fee_payer=True)
+            paid = await charge(server, credential.to_authorization(), "0.50", fee_payer=True)
 
-        assert not isinstance(paid, Challenge | ComposedChallenges)
-        assert paid[1].status == "success"
+        assert isinstance(paid, PaymentVerified)
+        assert paid.receipt.status == "success"
         assert rpc.methods == ["tempo_simulateV1", "eth_sendRawTransactionSync"]
         assert rpc.broadcast is not None
         assert "0x" + rpc.broadcast[4][0][0].hex() == OUSD.lower()
@@ -869,8 +891,8 @@ class TestSponsoredFeeToken:
     async def test_sponsored_defaults_offer_both_currencies(self) -> None:
         rpc = FakeRpc()
         for chain_id in (CHAIN_ID, TESTNET_CHAIN_ID):
-            result = await sponsored_server(rpc, chain_id).charge(None, "1", fee_payer=True)
-            assert isinstance(result, ComposedChallenges)
+            result = await charge(sponsored_server(rpc, chain_id), None, "1", fee_payer=True)
+            assert isinstance(result, PaymentRequired)
             assert currencies_of(result) == list(default_currencies_for_chain(chain_id))
 
     @pytest.mark.asyncio
@@ -973,7 +995,7 @@ class TestSponsoredFeeToken:
 
     def test_fee_token_requires_local_fee_payer(self) -> None:
         with pytest.raises(ValueError, match="local fee_payer"):
-            tempo(intents={}, fee_token=USDC)
+            _tempo_method(fee_token=USDC)
 
     @pytest.mark.parametrize(
         "kwargs,match",
@@ -986,15 +1008,14 @@ class TestSponsoredFeeToken:
     )
     def test_fee_token_configuration_is_validated(self, kwargs: dict[str, Any], match: str) -> None:
         with pytest.raises(ValueError, match=match):
-            tempo(intents={}, fee_payer=TempoAccount.from_key(FEE_PAYER_KEY), **kwargs)
+            _tempo_method(fee_payer=TempoAccount.from_key(FEE_PAYER_KEY), **kwargs)
 
     def test_fee_token_configuration_is_stored(self) -> None:
-        method = tempo(
-            intents={},
+        method = _tempo_method(
             fee_payer=TempoAccount.from_key(FEE_PAYER_KEY),
             fee_token=USDC,
             allowed_fee_tokens=(PATH_USD, USDC),
         )
         assert method.fee_token == USDC
         assert method.allowed_fee_tokens == (PATH_USD, USDC)
-        assert tempo(intents={}).allowed_fee_tokens is None
+        assert _tempo_method().allowed_fee_tokens is None

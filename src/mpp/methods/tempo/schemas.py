@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
+
+from mpp._units import parse_units
+from mpp.methods import Method
 
 
 class Split(BaseModel):
@@ -98,3 +101,66 @@ class TransactionCredentialPayload(BaseModel):
 
 
 CredentialPayload = HashCredentialPayload | TransactionCredentialPayload
+
+
+class ChargeInput(BaseModel):
+    """Route input for a Tempo charge, serialized to its wire :class:`ChargeRequest`.
+
+    ``amount`` is a decimal string converted to base units with ``decimals``;
+    ``splits`` are already in base units. ``chain_id``, ``fee_payer`` and
+    ``splits`` serialize under ``methodDetails``; ``extra`` is string metadata
+    embedded in the request.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    amount: str
+    currency: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+    recipient: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+    decimals: int = 6
+    chain_id: int | None = Field(default=None, alias="chainId")
+    fee_payer: bool = Field(default=False, alias="feePayer")
+    splits: list[Split] | None = None
+    external_id: str | None = Field(default=None, alias="externalId")
+    extra: dict[str, str] | None = None
+
+    @model_validator(mode="after")
+    def _check(self) -> ChargeInput:
+        parse_units(self.amount, self.decimals)
+        if self.splits and self.fee_payer:
+            raise ValueError("splits and fee_payer cannot be used together")
+        if any(is_fixed_attribution_memo(split.memo) for split in self.splits or ()):
+            raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
+        return self
+
+    @model_serializer
+    def _wire(self) -> dict[str, Any]:
+        details: dict[str, Any] = {}
+        if self.splits:
+            details["splits"] = [split.model_dump(exclude_none=True) for split in self.splits]
+        if self.fee_payer:
+            details["feePayer"] = True
+        if self.chain_id is not None:
+            details["chainId"] = self.chain_id
+        wire: dict[str, Any] = {
+            "amount": str(parse_units(self.amount, self.decimals)),
+            "currency": self.currency,
+            "recipient": self.recipient,
+        }
+        if self.external_id is not None:
+            wire["externalId"] = self.external_id
+        if self.extra is not None:
+            wire["extra"] = dict(self.extra)
+        if details:
+            wire["methodDetails"] = details
+        return wire
+
+
+class ChargePayload(RootModel[Annotated[CredentialPayload, Field(discriminator="type")]]):
+    """Charge credential payload: a pushed transaction ``hash`` or a signed ``transaction``."""
+
+
+charge: Method[ChargeInput, ChargePayload] = Method(
+    name="tempo", intent="charge", request_model=ChargeInput, payload_model=ChargePayload
+)
+"""The Tempo charge method: a one-time TIP-20 transfer."""

@@ -8,31 +8,30 @@ Usage:
     python server_manual.py
 
 Environment:
-    TEMPO_RPC_URL: Tempo RPC endpoint (default: https://rpc.testnet.tempo.xyz/)
+    TEMPO_RPC_URL: Tempo RPC endpoint (default: https://rpc.moderato.tempo.xyz)
     DESTINATION_ADDRESS: Payment recipient address (required)
     MCP_PORT: Port for SSE server (default: 8000)
+    FEE_PAYER_KEY: Private key of an account that sponsors clients' gas (optional)
+    MPP_SECRET_KEY: Secret that signs challenges (required)
 """
 
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import uvicorn
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
-from mcp.types import TextContent, Tool
+from mcp.types import CallToolRequest, CallToolResult, ServerResult, TextContent, Tool
 from starlette.applications import Starlette
 from starlette.routing import Route
 
-from mpp.extensions.mcp import (
-    MCPChallenge,
-    PaymentRequiredError,
-    verify_or_challenge,
-)
-from mpp.methods.tempo import ChargeIntent
+from mpp.extensions.mcp import PaymentRequiredError, verify_or_challenge
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import server as tempo
 from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID, TESTNET_RPC_URL
+from mpp.server import Mpp
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", TESTNET_RPC_URL)
 DESTINATION = os.environ.get("DESTINATION_ADDRESS", "")
@@ -41,7 +40,21 @@ PORT = int(os.environ.get("MCP_PORT", "8000"))
 if not DESTINATION:
     raise ValueError("DESTINATION_ADDRESS environment variable is required")
 
-intent = ChargeIntent(rpc_url=RPC_URL)
+# Optional: set FEE_PAYER_KEY to sponsor gas for clients.
+fee_payer_key = os.environ.get("FEE_PAYER_KEY")
+fee_payer = TempoAccount.from_key(fee_payer_key) if fee_payer_key else None
+
+mpp = Mpp(
+    methods=tempo.charge(
+        chain_id=TESTNET_CHAIN_ID,
+        rpc_url=RPC_URL,
+        currency=PATH_USD,
+        recipient=DESTINATION,
+        fee_payer=fee_payer,
+    ),
+    realm="echo.example.com",
+    secret_key=os.environ["MPP_SECRET_KEY"],
+)
 server = Server("paid-echo-server-manual")
 sse = SseServerTransport("/messages/")
 
@@ -75,12 +88,11 @@ async def list_tools() -> list[Tool]:
     ]
 
 
-@server.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+async def call_tool(name: str, arguments: dict[str, Any]) -> CallToolResult:
     """Handle tool calls with manual payment verification."""
     if name == "echo":
         message = arguments.get("message", "")
-        return [TextContent(type="text", text=f"Echo: {message}")]
+        return CallToolResult(content=[TextContent(type="text", text=f"Echo: {message}")])
 
     elif name == "premium_echo":
         message = arguments.get("message", "")
@@ -98,43 +110,48 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 else dict(request_context.meta)
             )
 
-        expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
-        if expires.endswith("+00:00"):
-            expires = expires[:-6] + "Z"
-
-        request = {
-            "amount": "100",
-            "currency": PATH_USD,
-            "recipient": DESTINATION,
-            "expires": expires,
-            "methodDetails": {"chainId": TESTNET_CHAIN_ID, "feePayer": True},
-        }
-
         result = await verify_or_challenge(
+            mpp.charge(
+                amount="0.0001",
+                description="Premium echo service",
+                fee_payer=fee_payer is not None,
+            ),
             tool=name,
-            secret_key=os.environ["MPP_SECRET_KEY"],
             meta=meta_dict,
-            intent=intent,
-            request=request,
-            realm="echo.example.com",
-            description="Premium echo service",
         )
 
-        if isinstance(result, MCPChallenge):
-            raise PaymentRequiredError(challenges=[result])
+        if isinstance(result, list):
+            raise PaymentRequiredError(challenges=result)
 
         credential, receipt = result
         payer = credential.source
         tx = receipt.reference
-        return [
-            TextContent(
-                type="text",
-                text=f"✨ Premium Echo ✨: {message} (paid by {payer}, tx: {tx})",
-            )
-        ]
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=f"✨ Premium Echo ✨: {message} (paid by {payer}, tx: {tx})",
+                )
+            ],
+            # The client reads the receipt from the result's _meta.
+            _meta=receipt.to_meta(),
+        )
 
     else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        return CallToolResult(content=[TextContent(type="text", text=f"Unknown tool: {name}")])
+
+
+async def handle_call_tool(request: CallToolRequest) -> ServerResult:
+    """Route tools/call to call_tool().
+
+    Registered directly instead of with ``@server.call_tool()``: that decorator
+    turns every exception into an ``isError`` tool result, which would drop the
+    ``-32042`` error PaymentRequiredError sends for the client to pay.
+    """
+    return ServerResult(await call_tool(request.params.name, request.params.arguments or {}))
+
+
+server.request_handlers[CallToolRequest] = handle_call_tool
 
 
 class SSEApp:

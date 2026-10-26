@@ -1,6 +1,8 @@
-"""Stripe payment method for client-side credential creation.
+"""Stripe charge for clients.
 
-Implements the charge client method using Stripe's Shared Payment Token (SPT) flow.
+:func:`charge` returns the :class:`~mpp.runtime.ClientMethod` that pays Stripe
+charge challenges with Shared Payment Tokens (SPTs); :class:`StripeMethod`
+implements its credential creation.
 """
 
 from __future__ import annotations
@@ -8,19 +10,11 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from functools import wraps
-from typing import TYPE_CHECKING, Any, ParamSpec
-from warnings import warn
+from dataclasses import dataclass
+from typing import Any
 
 from mpp import Challenge, Credential
-from mpp.methods import CanOfferFn, PaymentSuccessHandler
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from mpp import Credential as CredentialType
-    from mpp.server.intent import Intent, VerifiableIntent
+from mpp.runtime import ClientMethod, CredentialParams
 
 
 @dataclass(frozen=True)
@@ -55,70 +49,12 @@ CreateTokenFn = Callable[[OnChallengeParameters], Awaitable[str]]
 
 @dataclass
 class StripeMethod:
-    """Stripe payment method implementation.
-
-    Handles client-side credential creation for Stripe SPT payments.
-    """
+    """Creates Stripe SPT credentials. Create it with :func:`charge`."""
 
     name: str = "stripe"
     create_token: CreateTokenFn | None = None
     payment_method: str | None = None
     external_id: str | None = None
-    currency: str | None = None
-    decimals: int = 2
-    recipient: str | None = None
-    network_id: str | None = None
-    payment_method_types: list[str] = field(default_factory=lambda: ["card"])
-    _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
-    can_offer: CanOfferFn | None = field(default=None, kw_only=True)
-    on_payment_success: PaymentSuccessHandler | None = field(default=None, kw_only=True)
-    metadata: dict[str, str] | None = field(default=None, kw_only=True)
-
-    @property
-    def intents(self) -> dict[str, Intent | VerifiableIntent]:
-        """Available intents for this method."""
-        return self._intents
-
-    def prepare_intent(
-        self, intent: Intent | VerifiableIntent, input: dict[str, Any]
-    ) -> tuple[Intent | VerifiableIntent, dict[str, Any]]:
-        from mpp.methods.stripe.intents import ChargeIntent
-        from mpp.methods.stripe.payment_intent_options import prepare_options
-
-        if "payment_intent_options" not in input:
-            return intent, input
-        if not isinstance(intent, ChargeIntent):
-            raise TypeError("payment_intent_options requires Stripe ChargeIntent")
-        options = prepare_options(input.pop("payment_intent_options"))
-        return intent.with_payment_intent_options(options), input
-
-    def transform_request(
-        self, request: dict[str, Any], credential: CredentialType | None
-    ) -> dict[str, Any]:
-        """Inject Stripe-specific methodDetails into the challenge request.
-
-        Called by ``Mpp`` before challenge creation to add ``networkId``
-        and ``paymentMethodTypes`` to the request's ``methodDetails``.
-        """
-        method_details = dict(request.get("methodDetails", {}))
-        if self.network_id and "networkId" in method_details:
-            if method_details["networkId"] != self.network_id:
-                raise ValueError("networkId does not match configured spt() network_id")
-        if self.network_id:
-            method_details["networkId"] = self.network_id
-        if self.payment_method_types and "paymentMethodTypes" in method_details:
-            if method_details["paymentMethodTypes"] != self.payment_method_types:
-                raise ValueError(
-                    "paymentMethodTypes does not match configured spt() payment_method_types"
-                )
-        if self.payment_method_types:
-            method_details["paymentMethodTypes"] = self.payment_method_types
-        if self.metadata is not None:
-            method_details["metadata"] = self.metadata
-        request = {**request, "methodDetails": method_details}
-        if self.external_id and "externalId" not in request:
-            request["externalId"] = self.external_id
-        return request
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
@@ -143,7 +79,7 @@ class StripeMethod:
 
         payment_method = self.payment_method
         if not payment_method:
-            raise ValueError("payment_method is required (pass to spt() or via context)")
+            raise ValueError("payment_method is required")
 
         amount = str(request.get("amount", ""))
         currency = str(request.get("currency", ""))
@@ -202,97 +138,37 @@ def _parse_iso_timestamp(iso_str: str) -> float:
     return dt.timestamp()
 
 
-# ──────────────────────────────────────────────────────────────────
-# Factory
-# ──────────────────────────────────────────────────────────────────
-
-
-def spt(
-    intents: Mapping[str, Intent | VerifiableIntent],
-    create_token: CreateTokenFn | None = None,
-    payment_method: str | None = None,
+def charge(
+    *,
+    create_token: CreateTokenFn,
+    payment_method: str,
     external_id: str | None = None,
-    currency: str | None = None,
-    decimals: int = 2,
-    recipient: str | None = None,
-    network_id: str | None = None,
-    payment_method_types: list[str] | None = None,
-    can_offer: CanOfferFn | None = None,
-    on_payment_success: PaymentSuccessHandler | None = None,
-    metadata: dict[str, str] | None = None,
-) -> StripeMethod:
-    """Create a Stripe payment method.
+) -> ClientMethod:
+    """Create the client method that pays Stripe charge challenges.
 
     Args:
-        intents: Intents to register (e.g. ``{"charge": ChargeIntent(...)}``)
-        create_token: Callback to create an SPT (client-side).
-            Receives :class:`OnChallengeParameters` and returns the SPT string.
-        payment_method: Default Stripe payment method ID (e.g. ``"pm_card_visa"``).
-        external_id: Optional authenticated external reference ID.
-            Included in the challenge request as ``externalId`` so token grant
-            code can forward it to Stripe seller scoping. Clients echo the
-            challenge's ``externalId`` in the credential payload, falling back
-            to this value when the challenge has none.
-        currency: Default ISO currency code (e.g. ``"usd"``).
-        decimals: Decimal places for the currency (default: 2 for USD cents).
-        recipient: Optional default recipient.
-        network_id: Stripe Business Network profile ID. Included in
-            challenge ``methodDetails.networkId``.
-        payment_method_types: Stripe payment method types (default: ``["card"]``).
-            Included in challenge ``methodDetails.paymentMethodTypes``.
-        can_offer: Optional callback that filters this method's composed offers.
-        on_payment_success: Optional callback invoked after successful verification.
-        metadata: Optional Stripe metadata included in the challenge request.
-
-    Returns:
-        A configured :class:`StripeMethod` instance.
+        create_token: Callback that creates an SPT, usually through your
+            backend. Receives :class:`OnChallengeParameters` and returns the SPT.
+        payment_method: Stripe payment method ID (e.g. ``"pm_card_visa"``).
+        external_id: External reference echoed in credentials for challenges
+            that carry no ``externalId``.
 
     Example:
-        from mpp.methods.stripe import spt, ChargeIntent
+        from mpp.client import Mpp
+        from mpp.methods.stripe import client as stripe
 
-        # Server
-        method = spt(
-            network_id="bn_...",
-            payment_method_types=["card"],
-            currency="usd",
-            decimals=2,
-            intents={"charge": ChargeIntent(secret_key="sk_...")},
-        )
-
-        # Client
-        method = spt(
-            create_token=my_spt_proxy,
-            payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_...")},
-        )
+        async with Client(
+            methods=[stripe.charge(create_token=create_spt, payment_method="pm_card_visa")]
+        ) as client:
+            response = await client.get("https://api.example.com/resource")
     """
+    from mpp.methods.stripe.schemas import charge as definition
+
     method = StripeMethod(
-        create_token=create_token,
-        payment_method=payment_method,
-        external_id=external_id,
-        currency=currency,
-        decimals=decimals,
-        recipient=recipient,
-        network_id=network_id,
-        payment_method_types=payment_method_types or ["card"],
-        can_offer=can_offer,
-        on_payment_success=on_payment_success,
-        metadata=metadata,
+        create_token=create_token, payment_method=payment_method, external_id=external_id
     )
-    method._intents = dict(intents)
-    return method
 
+    async def create_credential(params: CredentialParams) -> str:
+        return (await method.create_credential(params.challenge)).to_authorization()
 
-_P = ParamSpec("_P")
-
-
-def _deprecated_alias(func: Callable[_P, StripeMethod]) -> Callable[_P, StripeMethod]:
-    @wraps(func)
-    def alias(*args: _P.args, **kwargs: _P.kwargs) -> StripeMethod:
-        warn("stripe() is deprecated; use spt()", DeprecationWarning, stacklevel=2)
-        return func(*args, **kwargs)
-
-    return alias
-
-
-stripe = _deprecated_alias(spt)
+    return ClientMethod(method=definition, create_credential=create_credential)

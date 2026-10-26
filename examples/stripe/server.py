@@ -14,22 +14,21 @@ import random
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from mpp import Challenge
-from mpp.methods.stripe import ChargeIntent, spt
-from mpp.server import Mpp
+from mpp import Credential, Receipt
+from mpp.methods.stripe import server as stripe
+from mpp.server import Mpp, pay
 
 app = FastAPI(title="Stripe Fortune Server")
 
 SECRET_KEY = os.environ["STRIPE_SECRET_KEY"]
 
-server = Mpp.create(
-    method=spt(
+server = Mpp(
+    methods=stripe.charge(
+        secret_key=SECRET_KEY,
         network_id=os.environ.get("STRIPE_NETWORK_ID", "internal"),
         payment_method_types=["card"],
         currency="usd",
-        decimals=2,
         recipient=os.environ.get("STRIPE_ACCOUNT", "acct_default"),
-        intents={"charge": ChargeIntent(secret_key=SECRET_KEY)},
     ),
 )
 
@@ -84,25 +83,10 @@ async def create_spt(request: Request):
 
 
 @app.get("/api/fortune")
-async def fortune(request: Request):
+@pay(server.charge(amount="1"))
+async def fortune(request: Request, credential: Credential, receipt: Receipt):
     """Paid endpoint — returns a fortune for $1.00."""
-    result = await server.charge(
-        authorization=request.headers.get("Authorization"),
-        amount="1",
-    )
-
-    if isinstance(result, Challenge):
-        return JSONResponse(
-            status_code=402,
-            content={"error": "Payment required"},
-            headers={"WWW-Authenticate": result.to_www_authenticate(server.realm)},
-        )
-
-    credential, receipt = result
-    return {
-        "fortune": random.choice(FORTUNES),
-        "receipt": receipt.reference,
-    }
+    return JSONResponse({"fortune": random.choice(FORTUNES), "receipt": receipt.reference})
 
 
 if __name__ == "__main__":

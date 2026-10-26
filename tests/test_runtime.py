@@ -9,7 +9,8 @@ import pytest
 
 from mpp import Challenge, Credential, InvalidChallengeError, PaymentExpiredError
 from mpp.events import EventDispatcher
-from mpp.runtime import PaymentRuntime
+from mpp.methods import Method
+from mpp.runtime import ClientMethod, CredentialParams, PaymentRuntime
 
 
 def challenge(
@@ -30,33 +31,41 @@ def challenge(
 
 
 class MockMethod:
-    name = "tempo"
+    """Records the event loops its client method creates credentials on."""
 
-    def __init__(self, *intents: str) -> None:
-        self.intents = dict.fromkeys(intents or ("charge",), True)
+    def __init__(self, intent: str = "charge", *, name: str = "tempo") -> None:
         self.currency: str | None = None
-        self._currency_explicit = True
         self.loops: list[asyncio.AbstractEventLoop] = []
+        self.client = ClientMethod(
+            method=Method(name=name, intent=intent, request_model=dict, payload_model=dict),
+            create_credential=self._create_credential,
+            can_handle_challenge=self._can_handle_challenge,
+        )
 
-    async def create_credential(self, challenge: Challenge) -> Credential:
+    def _can_handle_challenge(self, challenge: Challenge) -> bool:
+        offered = challenge.request.get("currency")
+        return self.currency is None or (
+            isinstance(offered, str) and offered.lower() == self.currency.lower()
+        )
+
+    async def _create_credential(self, params: CredentialParams) -> str:
         self.loops.append(asyncio.get_running_loop())
-        return Credential(challenge=challenge.to_echo(), payload={"ok": True})
+        return Credential(
+            challenge=params.challenge.to_echo(), payload={"ok": True}
+        ).to_authorization()
 
 
 def test_matching_preserves_transport_selection() -> None:
-    class StripeMethod(MockMethod):
-        name = "stripe"
-
     first_tempo = MockMethod()
     last_tempo = MockMethod()
-    stripe = StripeMethod("subscription")
-    runtime = PaymentRuntime([first_tempo, stripe, last_tempo])
+    stripe = MockMethod("subscription", name="stripe")
+    runtime = PaymentRuntime([first_tempo.client, stripe.client, last_tempo.client])
     offered = [
         challenge("stripe", method="stripe", intent="subscription"),
         challenge("tempo", intent="unsupported"),
     ]
 
-    assert runtime.match_challenge(offered) == (offered[0], stripe)
+    assert runtime.match_challenge(offered) == (offered[0], runtime.methods[1])
     with pytest.raises(ValueError, match="No compatible payment method"):
         runtime.match_challenge([offered[1]])
     with pytest.raises(ValueError, match="No compatible payment method"):
@@ -65,25 +74,25 @@ def test_matching_preserves_transport_selection() -> None:
 
 def test_matching_skips_unsupported_intent_before_supported_challenge() -> None:
     method = MockMethod("charge")
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
     offered = [
         challenge("unsupported", intent="session"),
         challenge("supported", intent="charge"),
     ]
 
-    assert runtime.match_challenge(offered) == (offered[1], method)
+    assert runtime.match_challenge(offered) == (offered[1], runtime.methods[0])
 
 
 def test_matching_skips_currency_rejected_by_configured_method() -> None:
     method = MockMethod("charge")
     method.currency = "0xUsdc"
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
     offered = [
         challenge("machine-usd", currency="0xMachineUsd"),
         challenge("usdc", currency="0xUSDC"),
     ]
 
-    assert runtime.match_challenge(offered) == (offered[1], method)
+    assert runtime.match_challenge(offered) == (offered[1], runtime.methods[0])
     with pytest.raises(ValueError, match="No compatible payment method"):
         runtime.match_challenge(offered[:1])
 
@@ -93,42 +102,24 @@ def test_matching_considers_each_same_key_method_currency_constraint() -> None:
     usdc_method.currency = "0xUsdc"
     machine_usd_method = MockMethod("charge")
     machine_usd_method.currency = "0xMachineUsd"
-    runtime = PaymentRuntime([usdc_method, machine_usd_method])
+    runtime = PaymentRuntime([usdc_method.client, machine_usd_method.client])
 
     usdc_challenge = challenge("usdc", currency="0xUSDC")
     machine_usd_challenge = challenge("machine-usd", currency="0xMACHINEUSD")
 
-    assert runtime.match_challenge([usdc_challenge]) == (usdc_challenge, usdc_method)
+    assert runtime.match_challenge([usdc_challenge]) == (usdc_challenge, runtime.methods[0])
     assert runtime.match_challenge([machine_usd_challenge]) == (
         machine_usd_challenge,
-        machine_usd_method,
+        runtime.methods[1],
     )
 
 
-def test_matching_ignores_implicit_currency_default() -> None:
+def test_matching_accepts_any_currency_without_currency_pin() -> None:
     method = MockMethod("charge")
-    method.currency = "0xUsdc"
-    method._currency_explicit = False
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
     offered = challenge("machine-usd", currency="0xMachineUsd")
 
-    assert runtime.match_challenge([offered]) == (offered, method)
-
-
-def test_matching_preserves_legacy_methods_without_intent_metadata() -> None:
-    class LegacyMethod:
-        name = "tempo"
-
-        async def create_credential(self, challenge: Challenge) -> Credential:
-            raise NotImplementedError
-
-    method = LegacyMethod()
-    offered = [
-        challenge("unsupported", intent="session"),
-        challenge("supported", intent="charge"),
-    ]
-
-    assert PaymentRuntime([method]).match_challenge(offered) == (offered[1], method)
+    assert runtime.match_challenge([offered]) == (offered, runtime.methods[0])
 
 
 def test_preserves_falsey_event_dispatcher() -> None:
@@ -144,11 +135,11 @@ def test_preserves_falsey_event_dispatcher() -> None:
 async def test_credential_creation_and_events_use_caller_loop() -> None:
     loop = asyncio.get_running_loop()
     method = MockMethod()
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
     event_loops: list[asyncio.AbstractEventLoop] = []
     runtime.events.on("*", lambda _event: event_loops.append(asyncio.get_running_loop()))
 
-    credential = await runtime.create_credential(challenge(), method)
+    credential = await runtime.create_credential(challenge(), method.client)
 
     assert credential.payload == {"ok": True}
     assert method.loops == [loop]
@@ -159,13 +150,13 @@ async def test_challenge_handler_can_supply_credential() -> None:
     method = MockMethod()
     supplied = Credential(challenge=challenge("supplied").to_echo(), payload={"event": True})
     created: list[dict[str, Any]] = []
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
     runtime.events.on("challenge.received", lambda _payload: supplied)
     runtime.events.on("credential.created", created.append)
 
     result = await runtime.create_credential(
         challenge("requested"),
-        method,
+        method.client,
         event_payload={
             "challenge": "cannot override",
             "challenges": [challenge("offered")],
@@ -182,12 +173,12 @@ async def test_challenge_handler_can_supply_credential() -> None:
 
 async def test_credential_creation_validates_method() -> None:
     method = MockMethod()
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
 
     with pytest.raises(ValueError, match="not installed"):
-        await runtime.create_credential(challenge(), MockMethod())
+        await runtime.create_credential(challenge(), MockMethod().client)
     with pytest.raises(ValueError, match="does not support"):
-        await runtime.create_credential(challenge(method="stripe"), method)
+        await runtime.create_credential(challenge(method="stripe"), method.client)
 
     assert method.loops == []
 
@@ -195,10 +186,10 @@ async def test_credential_creation_validates_method() -> None:
 async def test_credential_creation_rejects_mismatched_currency() -> None:
     method = MockMethod()
     method.currency = "0xUsdc"
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
 
-    with pytest.raises(ValueError, match="currency '0xUsdc' does not support '0xMachineUsd'"):
-        await runtime.create_credential(challenge(currency="0xMachineUsd"), method)
+    with pytest.raises(ValueError, match="does not accept this challenge"):
+        await runtime.create_credential(challenge(currency="0xMachineUsd"), method.client)
 
     assert method.loops == []
 
@@ -216,9 +207,9 @@ async def test_credential_creation_rejects_invalid_expiry(
     error: type[Exception],
 ) -> None:
     method = MockMethod()
-    runtime = PaymentRuntime([method])
+    runtime = PaymentRuntime([method.client])
 
     with pytest.raises(error):
-        await runtime.create_credential(challenge(expires=expires), method)
+        await runtime.create_credential(challenge(expires=expires), method.client)
 
     assert method.loops == []

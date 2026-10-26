@@ -139,6 +139,7 @@ class ChargeIntent:
         self,
         credential: Credential,
         request: dict[str, Any],
+        payment_intent_options: PaymentIntentInput = None,
     ) -> Receipt:
         """Verify a Stripe charge credential.
 
@@ -148,6 +149,8 @@ class ChargeIntent:
         Args:
             credential: The payment credential from the client.
             request: The original payment request parameters.
+            payment_intent_options: Private PaymentIntent input, resolved
+                immediately before the PaymentIntent is created.
 
         Returns:
             A receipt indicating success.
@@ -157,14 +160,6 @@ class ChargeIntent:
             PaymentExpiredError: If the challenge has expired.
             PaymentActionRequiredError: If 3DS or other action is needed.
         """
-        return await self._verify(credential, request, None)
-
-    def with_payment_intent_options(self, options: PaymentIntentInput) -> _PreparedChargeIntent:
-        return _PreparedChargeIntent(self, options)
-
-    async def _verify(
-        self, credential: Credential, request: dict[str, Any], options_input: PaymentIntentInput
-    ) -> Receipt:
         challenge = credential.challenge
 
         if challenge.expires:
@@ -197,7 +192,7 @@ class ChargeIntent:
             raise VerificationFailedError("Invalid credential payload: empty spt")
 
         user_metadata = parsed_request.methodDetails.metadata
-        payment_options = await resolve_options(options_input, credential, request)
+        payment_options = await resolve_options(payment_intent_options, credential, request)
         resolved_metadata = merge_metadata(credential, user_metadata, payment_options)
 
         if self._client is not None:
@@ -335,16 +330,3 @@ class ChargeIntent:
             "status": result["status"],
             "replayed": _is_idempotent_replay(response.headers),
         }
-
-
-class _PreparedChargeIntent:
-    """An SPT attempt sharing its owner's client and resource lifecycle."""
-
-    name = "charge"
-
-    def __init__(self, owner: ChargeIntent, options: PaymentIntentInput) -> None:
-        self._owner = owner
-        self._options = options
-
-    async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
-        return await self._owner._verify(credential, request, self._options)

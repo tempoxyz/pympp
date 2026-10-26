@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import base64
-import inspect
 import math
 import time
-import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
@@ -25,11 +23,14 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationFailedError,
 )
-from mpp.methods.stripe import ChargeIntent, StripeMethod, spt, stripe
+from mpp.methods.stripe import ChargeIntent, StripeMethod
+from mpp.methods.stripe import server as stripe_server
 from mpp.methods.stripe._defaults import MACHINE_PAYMENTS_API_VERSION
 from mpp.methods.stripe.client import OnChallengeParameters
 from mpp.methods.stripe.intents import _resolve_payment_intents
 from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload
+from mpp.server import Mpp, ServerMethod
+from tests import challenges, http_request
 
 # ──────────────────────────────────────────────────────────────────
 # Schema tests
@@ -112,15 +113,11 @@ def _make_challenge(**overrides: Any) -> Challenge:
     return Challenge(**defaults)
 
 
-def test_stripe_is_deprecated_signature_preserving_alias():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", DeprecationWarning)
-        spt(intents={})
-    with pytest.warns(DeprecationWarning, match=r"use spt\(\)"):
-        method = stripe(intents={})
-    assert spt.__name__ == "spt"
-    assert isinstance(method, StripeMethod)
-    assert inspect.signature(stripe) == inspect.signature(spt)
+async def _wire(method: ServerMethod, **options: Any) -> dict[str, Any]:
+    """Return the wire request of the challenge ``method`` issues for route ``options``."""
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    [issued] = challenges(await server.charge(**options)(http_request()))
+    return issued.request
 
 
 class TestStripeMethod:
@@ -135,10 +132,9 @@ class TestStripeMethod:
             assert params.payment_method == "pm_card_visa"
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge()
@@ -154,10 +150,9 @@ class TestStripeMethod:
             assert params.external_id == "order-42"
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge(
@@ -192,11 +187,10 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
             external_id=fallback,
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
         request: dict[str, Any] = {
             "amount": "150",
@@ -212,9 +206,8 @@ class TestStripeMethod:
 
     @pytest.mark.asyncio
     async def test_create_credential_no_create_token_raises(self):
-        method = spt(
+        method = StripeMethod(
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge()
@@ -226,9 +219,8 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge()
@@ -242,10 +234,9 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge(
@@ -265,10 +256,9 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge(
@@ -291,10 +281,9 @@ class TestStripeMethod:
         async def fake_create_token(params: OnChallengeParameters) -> str:
             return "spt_test_abc"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge(
@@ -311,63 +300,45 @@ class TestStripeMethod:
         with pytest.raises(ValueError, match="externalId is reserved"):
             await method.create_credential(challenge)
 
-    def test_transform_request(self):
-        method = spt(
+    async def test_transform_request(self):
+        method = stripe_server.charge(
             external_id="order-42",
             network_id="bn_test",
             payment_method_types=["card"],
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+            secret_key="sk_test_123",
         )
 
-        request = {"amount": "150", "currency": "usd"}
-        result = method.transform_request(request, None)
+        result = await _wire(method, amount="1.50", currency="usd")
 
         assert result["externalId"] == "order-42"
         assert result["methodDetails"]["networkId"] == "bn_test"
         assert result["methodDetails"]["paymentMethodTypes"] == ["card"]
 
-    def test_transform_request_rejects_network_id_override(self):
-        method = spt(
+    async def test_transform_request_rejects_network_id_override(self):
+        method = stripe_server.charge(
             network_id="bn_default",
             payment_method_types=["card"],
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+            secret_key="sk_test_123",
         )
 
-        request = {
-            "amount": "150",
-            "currency": "usd",
-            "methodDetails": {"networkId": "bn_override"},
-        }
+        with pytest.raises(ValueError, match="network_id does not match the configured value"):
+            await _wire(method, amount="1.50", currency="usd", network_id="bn_override")
 
-        with pytest.raises(ValueError, match="networkId does not match configured"):
-            method.transform_request(request, None)
-
-    def test_transform_request_rejects_payment_method_types_override(self):
-        method = spt(
+    async def test_transform_request_rejects_payment_method_types_override(self):
+        method = stripe_server.charge(
             network_id="bn_test",
             payment_method_types=["card"],
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
+            secret_key="sk_test_123",
         )
 
-        request = {
-            "amount": "150",
-            "currency": "usd",
-            "methodDetails": {"paymentMethodTypes": ["sepa_debit"]},
-        }
-
-        with pytest.raises(ValueError, match="paymentMethodTypes does not match configured"):
-            method.transform_request(request, None)
+        with pytest.raises(
+            ValueError, match="payment_method_types does not match the configured value"
+        ):
+            await _wire(method, amount="1.50", currency="usd", payment_method_types=["sepa_debit"])
 
     def test_method_name(self):
-        method = spt(
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
-        )
+        method = stripe_server.charge(network_id="bn_test", secret_key="sk_test_123")
         assert method.name == "stripe"
-
-    def test_intents(self):
-        intent = ChargeIntent(secret_key="sk_test_123")
-        method = spt(intents={"charge": intent})
-        assert method.intents["charge"] is intent
 
     @pytest.mark.asyncio
     async def test_expires_at_from_challenge(self):
@@ -378,10 +349,9 @@ class TestStripeMethod:
             recorded_params.append(params)
             return "spt_test"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         expires = (datetime.now(UTC) + timedelta(hours=2)).isoformat()
@@ -400,10 +370,9 @@ class TestStripeMethod:
             recorded_params.append(params)
             return "spt_test"
 
-        method = spt(
+        method = StripeMethod(
             create_token=fake_create_token,
             payment_method="pm_card_visa",
-            intents={"charge": ChargeIntent(secret_key="sk_test_123")},
         )
 
         challenge = _make_challenge(expires=None)
@@ -973,42 +942,34 @@ class TestChargeIntentLifecycle:
 
 
 # ──────────────────────────────────────────────────────────────────
-# Integration: spt() factory
+# Integration: server charge() factory
 # ──────────────────────────────────────────────────────────────────
 
 
 class TestStripeFactory:
-    def test_defaults(self):
-        method = spt(
-            intents={"charge": ChargeIntent(secret_key="sk_test")},
-        )
+    async def test_defaults(self):
+        method = stripe_server.charge(network_id="bn_test", secret_key="sk_test")
         assert method.name == "stripe"
-        assert method.decimals == 2
-        assert method.payment_method_types == ["card"]
-        assert method.currency is None
+        assert method.defaults is None  # no default currency
+        request = await _wire(method, amount="1.50", currency="usd")
+        assert request["amount"] == "150"  # 2 decimals
+        assert request["methodDetails"]["paymentMethodTypes"] == ["card"]
 
-    def test_custom_params(self):
-        method = spt(
-            intents={"charge": ChargeIntent(secret_key="sk_test")},
+    async def test_custom_params(self):
+        method = stripe_server.charge(
+            secret_key="sk_test",
             currency="eur",
             decimals=0,
             network_id="bn_custom",
             payment_method_types=["card", "sepa_debit"],
             recipient="acct_123",
         )
-        assert method.currency == "eur"
-        assert method.decimals == 0
-        assert method.network_id == "bn_custom"
-        assert method.payment_method_types == ["card", "sepa_debit"]
-        assert method.recipient == "acct_123"
-
-    def test_no_secret_key_param(self):
-        """Factory no longer accepts secret_key (removed per review)."""
-        with pytest.raises(TypeError):
-            spt(
-                intents={"charge": ChargeIntent(secret_key="sk_test")},
-                secret_key="sk_test",  # type: ignore[call-arg]
-            )
+        request = await _wire(method, amount="150")
+        assert request["currency"] == "eur"
+        assert request["amount"] == "150"  # 0 decimals
+        assert request["methodDetails"]["networkId"] == "bn_custom"
+        assert request["methodDetails"]["paymentMethodTypes"] == ["card", "sepa_debit"]
+        assert request["recipient"] == "acct_123"
 
 
 @pytest.mark.parametrize("backend", ["sdk", "http"])

@@ -14,16 +14,9 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     VerificationFailedError,
 )
-from mpp.server import (
-    Intent,
-    Mpp,
-    Validation,
-    VerifiableIntent,
-    broadcast_credential,
-    validate_credential,
-    verify_or_challenge,
-)
-from tests import make_bound_credential, make_credential
+from mpp.server import Mpp, ServerMethod, ValidateContext, Validation, VerifyContext
+from mpp.server.verify import verify_or_challenge
+from tests import make_bound_credential, server_method
 
 
 class VerifiableCharge:
@@ -46,19 +39,28 @@ class VerifiableCharge:
         return Receipt.success("verifiable-reference")
 
 
-class FakeMethod:
-    name = "tempo"
+CURRENCY = "0x20c0000000000000000000000000000000000000"
+RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 
-    def __init__(self, charge: VerifiableCharge) -> None:
-        self.intents: dict[str, Intent | VerifiableIntent] = {"charge": charge}
 
-    async def create_credential(self, challenge: Challenge) -> Credential:  # pragma: no cover
-        raise NotImplementedError
+def charge_method(charge: VerifiableCharge, **kwargs: Any) -> ServerMethod:
+    """Serve the hooks of a charge, which receive the wire request, as a ServerMethod."""
+
+    async def validate(context: ValidateContext) -> Validation:
+        return await charge.validate(context.credential, context.challenge.request)
+
+    async def broadcast(context: VerifyContext) -> Receipt:
+        return await charge.broadcast(context.credential, context.challenge.request)
+
+    return server_method(validate=validate, broadcast=broadcast, **kwargs)
 
 
 def _server(intent: VerifiableCharge | None = None) -> Mpp:
-    return Mpp.create(
-        method=FakeMethod(intent or VerifiableCharge()),
+    return Mpp(
+        methods=charge_method(
+            intent or VerifiableCharge(),
+            request={"currency": CURRENCY, "recipient": RECIPIENT},
+        ),
         realm="api.example.com",
         secret_key="test-secret",
     )
@@ -67,17 +69,19 @@ def _server(intent: VerifiableCharge | None = None) -> Mpp:
 def _bound(request: dict[str, Any] | None = None, **kwargs: Any) -> Credential:
     kwargs.setdefault("realm", "api.example.com")
     kwargs.setdefault("secret_key", "test-secret")
-    return make_bound_credential(payload={}, request=request or {}, **kwargs)
+    return make_bound_credential(payload={}, request=_wire(request), **kwargs)
+
+
+def _wire(request: dict[str, Any] | None) -> dict[str, Any]:
+    if not request:
+        return {}
+    return {"currency": CURRENCY, "recipient": RECIPIENT, **request}
 
 
 @pytest.mark.asyncio
 async def test_validation_is_non_mutating() -> None:
     intent = VerifiableCharge()
-    result = await validate_credential(
-        intent=intent,
-        credential=make_credential(payload={}),
-        request={"amount": "1000"},
-    )
+    result = await _server(intent).validate_credential(_bound({"amount": "1000"}))
 
     assert result.details == {"mode": "pull"}
     assert intent.calls == ["validate"]
@@ -86,11 +90,7 @@ async def test_validation_is_non_mutating() -> None:
 @pytest.mark.asyncio
 async def test_broadcast_revalidates_before_terminal_hook() -> None:
     intent = VerifiableCharge()
-    receipt = await broadcast_credential(
-        intent=intent,
-        credential=make_credential(payload={}),
-        request={},
-    )
+    receipt = await _server(intent).broadcast_credential(_bound())
 
     assert receipt.reference == "verifiable-reference"
     assert intent.calls == ["validate", "broadcast"]
@@ -100,26 +100,17 @@ async def test_broadcast_revalidates_before_terminal_hook() -> None:
 async def test_legacy_intent_falls_back_to_verify() -> None:
     calls: list[str] = []
 
-    class LegacyCharge:
-        name = "charge"
+    async def verify(context: VerifyContext) -> Receipt:
+        calls.append("verify")
+        return Receipt.success("legacy-reference")
 
-        async def verify(self, credential: Credential, request: dict) -> Receipt:
-            calls.append("verify")
-            return Receipt.success("legacy-reference")
-
-    legacy = LegacyCharge()
-    with pytest.raises(VerificationFailedError, match="non-mutating"):
-        await validate_credential(
-            intent=legacy,
-            credential=make_credential(payload={}),
-            request={},
-        )
-
-    receipt = await broadcast_credential(
-        intent=legacy,
-        credential=make_credential(payload={}),
-        request={},
+    legacy = Mpp(
+        methods=server_method(verify=verify), realm="api.example.com", secret_key="test-secret"
     )
+    with pytest.raises(VerificationFailedError, match="non-mutating"):
+        await legacy.validate_credential(_bound())
+
+    receipt = await legacy.broadcast_credential(_bound())
     assert receipt.reference == "legacy-reference"
     assert receipt.payer is None
     assert calls == ["verify"]
@@ -134,7 +125,7 @@ async def test_route_uses_verifiable_lifecycle() -> None:
     result = await verify_or_challenge(
         authorization=credential.to_authorization(),
         intent=intent,
-        request=request,
+        request=_wire(request),
         realm="api.example.com",
         secret_key="test-secret",
     )
@@ -154,7 +145,7 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
     validation = await server.validate_credential(credential.to_authorization(), request=request)
     receipt = await server.broadcast_credential(credential, intent="charge", request=request)
 
-    assert validation.request == request
+    assert validation.request == _wire(request)
     assert receipt.reference == "verifiable-reference"
     assert intent.calls == ["validate", "validate", "broadcast"]
 
@@ -182,7 +173,7 @@ async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> Non
     assert payload["intent"] == "charge"
     assert payload["method"] == "tempo"
     assert payload["receipt"] == receipt
-    assert payload["request"] == request
+    assert payload["request"] == _wire(request)
 
 
 @pytest.mark.asyncio
@@ -214,7 +205,7 @@ async def test_verified_payer_reaches_success_path(
     route = await verify_or_challenge(
         authorization=credential.to_authorization(),
         intent=intent,
-        request=request,
+        request=_wire(request),
         realm="api.example.com",
         secret_key="test-secret",
     )
@@ -250,7 +241,7 @@ async def test_bound_broadcast_emits_failures() -> None:
         assert payload["intent"] == "charge"
         assert payload["method"] == "tempo"
         assert isinstance(payload["error"], VerificationFailedError)
-        assert payload["request"] == request
+        assert payload["request"] == _wire(request)
     assert intent.calls == ["validate"]
 
 
@@ -283,15 +274,8 @@ async def test_bound_broadcast_emits_preparation_failures(
 
 @pytest.mark.asyncio
 async def test_invalid_intent_has_a_typed_failure() -> None:
-    class InvalidCharge:
-        name = "charge"
-
-    with pytest.raises(VerificationFailedError, match="verification or broadcast"):
-        await broadcast_credential(
-            intent=InvalidCharge(),  # type: ignore[arg-type]
-            credential=make_credential(payload={}),
-            request={},
-        )
+    with pytest.raises(TypeError, match="requires verify or broadcast"):
+        server_method()
 
 
 @pytest.mark.asyncio
@@ -350,7 +334,7 @@ async def test_mpp_contextless_lifecycle_uses_authenticated_echo(operation: str)
     result = await getattr(_server(), operation)(credential)
 
     if operation == "validate_credential":
-        assert result.request == {"amount": "1000"}
+        assert result.request == _wire({"amount": "1000"})
     else:
         assert result.reference == "verifiable-reference"
 
@@ -457,8 +441,4 @@ async def test_invalid_validation_result_is_rejected() -> None:
             return {}  # type: ignore[return-value]
 
     with pytest.raises(VerificationFailedError, match="invalid validation result"):
-        await validate_credential(
-            intent=InvalidVerifiable(),
-            credential=make_credential(payload={}),
-            request={},
-        )
+        await _server(InvalidVerifiable()).validate_credential(_bound())

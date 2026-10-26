@@ -5,21 +5,16 @@ frameworks where tool params are unpacked as **kwargs.
 
 For other MCP server implementations, use verify_or_challenge() directly:
 
-    from mpp.extensions.mcp import (
-        MCPChallenge,
-        PaymentRequiredError,
-        verify_or_challenge,
-    )
+    from mpp.extensions.mcp import PaymentRequiredError, verify_or_challenge
 
     async def handle_tool(params: dict):
         result = await verify_or_challenge(
+            mpp.charge(amount="0.01"),
             tool="expensive_tool",
             meta=params.get("_meta"),
-            intent=intent,
-            request={"amount": "1000"},
         )
-        if isinstance(result, MCPChallenge):
-            raise PaymentRequiredError(challenges=[result])
+        if isinstance(result, list):
+            raise PaymentRequiredError(challenges=result)
         credential, receipt = result
         # ... execute tool
 """
@@ -27,39 +22,23 @@ For other MCP server implementations, use verify_or_challenge() directly:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
 from functools import wraps
-from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar
 
 from mpp.extensions.mcp.errors import PaymentRequiredError
-from mpp.extensions.mcp.types import MCPChallenge
-from mpp.extensions.mcp.verify import (
-    DEFAULT_CHALLENGE_TTL,
-)
-from mpp.extensions.mcp.verify import (
-    verify_or_challenge as mcp_verify_or_challenge,
-)
-from mpp.server._defaults import detect_realm, detect_secret_key
-
-if TYPE_CHECKING:
-    from mpp.server.intent import Intent, VerifiableIntent
+from mpp.extensions.mcp.verify import verify_or_challenge as mcp_verify_or_challenge
+from mpp.server import ComposedHandler
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
-RequestParamsType = dict[str, Any] | Callable[..., dict[str, Any]]
+HandlerType = ComposedHandler | Callable[..., ComposedHandler]
 
 
 def pay(
+    handler: HandlerType,
     *,
-    intent: Intent | VerifiableIntent,
-    request: RequestParamsType,
-    realm: str | None = None,
-    secret_key: str | None = None,
-    method: str | None = None,
     tool: str,
-    expires_in: timedelta = DEFAULT_CHALLENGE_TTL,
-    description: str | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorator to require payment for an MCP tool (FastMCP-style).
 
@@ -70,7 +49,7 @@ def pay(
     Handles the full 402 challenge flow:
     1. Extracts _meta from kwargs
     2. Checks for org.paymentauth/credential in _meta
-    3. If missing or invalid, raises PaymentRequiredError with challenge
+    3. If missing or invalid, raises PaymentRequiredError with the challenges
     4. If valid, verifies credential and injects credential + receipt into handler
 
     The decorated function receives two additional keyword arguments:
@@ -78,37 +57,24 @@ def pay(
     - receipt: MCPReceipt confirming the payment
 
     Args:
-        intent: The payment intent to verify against.
-        request: Payment request params - either a static dict or a callable
-            that takes **kwargs and returns the params.
-        realm: Protection space identifier for the challenge.
-            Auto-detected from environment if omitted.
-        secret_key: Server secret for HMAC-bound challenge IDs.
-            Auto-detected from MPP_SECRET_KEY env var if omitted.
+        handler: A configured payment handler of a server ``Mpp``, such as
+            ``mpp.charge(amount="0.01")``, or a callable taking the tool's arguments
+            and returning one (for pricing that depends on the call).
         tool: Explicit stable identity, unique to this paid tool within the realm.
             Use the registered MCP tool name, including for generated handlers.
-        method: Payment method name (defaults to "tempo").
-        expires_in: Challenge validity duration (default: 5 minutes).
-        description: Human-readable description of what the payment is for.
 
     Example:
+        mpp = Mpp(methods=tempo.charge(recipient="0x..."))
+
         @mcp.tool()
-        @pay(
-            tool="expensive_tool",
-            intent=ChargeIntent(),
-            request={"amount": "1000", "currency": "0x...", "recipient": "0x..."},
-        )
+        @pay(mpp.charge(amount="0.01"), tool="expensive_tool")
         async def expensive_tool(query: str, *, credential, receipt) -> str:
             return f"Result for {query}, paid by {credential.source}"
 
-        # With dynamic request params:
+        # With dynamic pricing:
         @mcp.tool()
-        @pay(
-            tool="dynamic_pricing",
-            intent=ChargeIntent(),
-            request=lambda query, **kw: {"amount": str(len(query) * 10), ...},
-        )
-        async def dynamic_pricing(query: str, *, credential, receipt) -> str:
+        @pay(lambda query, **kw: mpp.charge(amount=f"{len(query) * 0.01:.2f}"), tool="dynamic")
+        async def dynamic(query: str, *, credential, receipt) -> str:
             return f"Result for {query}"
 
     Raises:
@@ -118,41 +84,24 @@ def pay(
     """
     if not isinstance(tool, str) or not tool.strip():
         raise ValueError("tool must be a non-empty stable identifier")
-    resolved_realm = realm if realm is not None else detect_realm()
-    resolved_secret_key = secret_key if secret_key is not None else detect_secret_key()
-    method_name = method or "tempo"
 
     def decorator(
-        handler: Callable[P, Awaitable[R]],
+        fn: Callable[P, Awaitable[R]],
     ) -> Callable[P, Awaitable[R]]:
-        @wraps(handler)
+        @wraps(fn)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             meta: dict[str, Any] | None = kwargs.pop("_meta", None)  # type: ignore[arg-type]
 
-            if callable(request):
-                request_params = request(*args, **kwargs)
-            else:
-                request_params = request
+            route = handler if isinstance(handler, ComposedHandler) else handler(*args, **kwargs)
+            result = await mcp_verify_or_challenge(route, tool=tool, meta=meta)
 
-            result = await mcp_verify_or_challenge(
-                meta=meta,
-                intent=intent,
-                request=request_params,
-                realm=resolved_realm,
-                secret_key=resolved_secret_key,
-                tool=tool,
-                method=method_name,
-                expires_in=expires_in,
-                description=description,
-            )
-
-            if isinstance(result, MCPChallenge):
-                raise PaymentRequiredError(challenges=[result])
+            if isinstance(result, list):
+                raise PaymentRequiredError(challenges=result)
 
             credential, receipt = result
             kwargs["credential"] = credential
             kwargs["receipt"] = receipt
-            return await handler(*args, **kwargs)
+            return await fn(*args, **kwargs)
 
         return wrapper
 

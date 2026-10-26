@@ -1,7 +1,6 @@
-"""EVM charge intent: EIP-3009 authorizations for MPP and x402 clients.
+"""EVM charge: EIP-3009 authorizations for MPP and x402 clients.
 
-Port of mppx's ``src/evm/server/Charge.ts`` and the x402 path in
-``src/x402/server/EvmCharge.ts``. One intent verifies both native
+``charge`` defines the ``evm/charge`` method. One intent verifies both native
 Payment-auth ``evm/charge`` credentials and x402 ``exact`` payloads, and
 settles either through an x402 facilitator or a custom ``settle`` hook.
 """
@@ -16,9 +15,10 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from eth_utils.address import to_checksum_address
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from mpp import Credential, Receipt
 from mpp._did import parse_pkh_source
@@ -29,6 +29,7 @@ from mpp.errors import (
     InvalidPayloadError,
     VerificationFailedError,
 )
+from mpp.methods import Method
 from mpp.methods.evm._eip3009 import (
     authorization_domain,
     challenge_hash,
@@ -117,7 +118,7 @@ def _fallback_store() -> _ClaimCache:
             "evm.charge has no store configured and is using an in-memory store. Replay "
             "protection is scoped to this process, so an authorization accepted by one "
             "worker or replica can be submitted again through another. Pass a shared "
-            "store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) when running "
+            "store (e.g. mpp.stores.RedisStore) via evm.charge(store=...) when running "
             "more than one instance."
         )
     return _ClaimCache()
@@ -178,6 +179,57 @@ def _parse_authorization_payload(payload: Any) -> dict[str, Any]:
     return dict(payload)
 
 
+class AuthorizationPayload(BaseModel):
+    """The native ``authorization`` credential payload: a signed EIP-3009 transfer."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    type: Literal["authorization"]
+    from_: str = Field(alias="from")
+    to: str
+    value: str
+    valid_after: str = Field(alias="validAfter")
+    valid_before: str = Field(alias="validBefore")
+    nonce: str
+    signature: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check(cls, data: Any) -> dict[str, Any]:
+        return _parse_authorization_payload(data)
+
+
+class MethodDetails(BaseModel):
+    """EVM details of a charge request."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    chain_id: StrictInt = Field(alias="chainId")
+    credential_types: list[StrictStr] = Field(alias="credentialTypes")
+    decimals: StrictInt
+
+
+class ChargeRequest(BaseModel):
+    """The wire ``evm/charge`` request: atomic amount and checksummed addresses."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    amount: str = Field(pattern=r"^[0-9]{1,78}$")
+    currency: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    recipient: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
+    method_details: MethodDetails = Field(alias="methodDetails")
+    extra: dict[str, str] | None = None
+
+
+charge: Method[ChargeRequest, AuthorizationPayload] = Method(
+    name="evm",
+    intent="charge",
+    request_model=ChargeRequest,
+    payload_model=AuthorizationPayload,
+)
+"""The native Payment-auth ``evm/charge`` method."""
+
+
 def _timestamp(value: str | None) -> int:
     """Return an ISO 8601 instant as Unix seconds, or 0 when absent or invalid."""
     if not value:
@@ -217,7 +269,6 @@ class ChargeIntent:
             credentials may also run to their challenge's expiry.
         store: Optional store that claims each authorization before
             settlement so concurrent requests can't settle it twice.
-            ``Mpp.create(store=...)`` wires it automatically.
     """
 
     name = "charge"

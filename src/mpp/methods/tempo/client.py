@@ -1,6 +1,7 @@
-"""Tempo payment methods for client-side credential creation.
+"""Tempo charge for clients.
 
-Implements the charge (TempoMethod) client method.
+:func:`charge` returns the :class:`~mpp.runtime.ClientMethod` that pays Tempo
+charge challenges; :class:`TempoMethod` implements its credential creation.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import PaymentExpiredError
-from mpp.methods import CanOfferFn, PaymentSuccessHandler
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -31,11 +31,10 @@ from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from mpp.methods.tempo.account import TempoAccount
-    from mpp.methods.tempo.relay import Relay
-    from mpp.server.intent import Intent, VerifiableIntent
+    from mpp.runtime import ClientMethod
 
 
 # Tempo AA (type-0x76) transactions have higher intrinsic gas than legacy txs
@@ -79,17 +78,8 @@ class TransactionError(Exception):
 class TempoMethod:
     """Tempo payment method implementation.
 
-    Handles client-side credential creation for Tempo payments.
-
-    Example:
-        from mpp.methods.tempo import tempo, TempoAccount
-
-        account = TempoAccount.from_key("0x...")
-        method = tempo(account=account, rpc_url="https://rpc.tempo.xyz")
-
-        # Use with client
-        from mpp.client import get
-        response = await get("https://api.example.com", methods=[method])
+    Handles client-side credential creation for Tempo payments. Create it with
+    :func:`charge`, which wraps it in a client method.
     """
 
     name: str = "tempo"
@@ -102,9 +92,6 @@ class TempoMethod:
     recipient: str | None = None
     decimals: int = 6
     client_id: str | None = None
-    _intents: dict[str, Intent | VerifiableIntent] = field(default_factory=dict)
-    can_offer: CanOfferFn | None = field(default=None, kw_only=True)
-    on_payment_success: PaymentSuccessHandler | None = field(default=None, kw_only=True)
     # Accepted currencies in offer order. With more than one, servers issue one
     # charge offer per currency unless a request overrides ``currency``.
     currencies: tuple[str, ...] = field(default=(), kw_only=True)
@@ -165,11 +152,6 @@ class TempoMethod:
         if self.currencies:
             return self.currencies
         return () if self.currency is None else (self.currency,)
-
-    @property
-    def intents(self) -> dict[str, Intent | VerifiableIntent]:
-        """Available intents for this method."""
-        return self._intents
 
     async def _get_chain_id(self, rpc_url: str) -> int:
         """Fetch the chain ID once per RPC URL and reuse it for later requests."""
@@ -673,8 +655,7 @@ def _expiring_valid_before(expires: str | None) -> int:
 # ──────────────────────────────────────────────────────────────────
 
 
-def tempo(
-    intents: Mapping[str, Intent | VerifiableIntent],
+def _tempo_method(
     account: TempoAccount | None = None,
     fee_payer: TempoAccount | None = None,
     chain_id: int | None | object = _CHAIN_ID_UNSET,
@@ -684,9 +665,6 @@ def tempo(
     recipient: str | None = None,
     decimals: int = 6,
     client_id: str | None = None,
-    relay: Relay | None = None,
-    can_offer: CanOfferFn | None = None,
-    on_payment_success: PaymentSuccessHandler | None = None,
     currencies: Sequence[str] | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
@@ -696,10 +674,9 @@ def tempo(
     expected_recipients: Sequence[str] | None = None,
     allowed_chain_ids: Sequence[int] | None = None,
 ) -> TempoMethod:
-    """Create a Tempo payment method.
+    """Resolve and validate Tempo charge configuration shared by clients and servers.
 
     Args:
-        intents: Intents to register (e.g. charge).
         account: Account for signing transactions (client-side).
         fee_payer: Account for co-signing sponsored transactions
             (server-side). When set, the server signs with domain
@@ -719,9 +696,6 @@ def tempo(
             enforced when paying; use ``expected_recipients`` for that.
         decimals: Token decimal places for amount conversion (default: 6).
         client_id: Optional client identity for attribution memos.
-        relay: Optional server-side Tempo API relay for the charge intent.
-        can_offer: Optional callback that filters this method's composed offers.
-        on_payment_success: Optional callback invoked after successful verification.
         currencies: Ordered currency addresses a server accepts. Servers issue
             one charge offer per currency, in order. Replaces the defaults:
             OUSD then USDC.e on mainnet, OUSD then pathUSD on Moderato, and
@@ -767,22 +741,6 @@ def tempo(
 
     Returns:
         A configured TempoMethod instance.
-
-    Example:
-        from mpp.methods.tempo import ChargeIntent, TempoAccount
-
-        # Server with fee payer — sponsors gas for clients
-        method = tempo(
-            chain_id=42431,
-            fee_payer=TempoAccount.from_env("FEE_PAYER_KEY"),
-            intents={"charge": ChargeIntent()},
-        )
-
-        # Client
-        method = tempo(
-            account=TempoAccount.from_key("0x..."),
-            intents={"charge": ChargeIntent()},
-        )
     """
     chain_id_explicit = chain_id is not _CHAIN_ID_UNSET
     resolved_chain_id: int | None
@@ -851,27 +809,91 @@ def tempo(
         max_amount_decimals=max_amount_decimals,
         expected_recipients=resolved_expected_recipients,
         allowed_chain_ids=allowed_chain_ids,
-        can_offer=can_offer,
-        on_payment_success=on_payment_success,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
     method._chain_id_explicit = chain_id_explicit
     method._currency_explicit = currency_explicit
     method._rpc_url_explicit = rpc_url_explicit
-    for intent in intents.values():
-        if hasattr(intent, "rpc_url") and intent.rpc_url is None:  # type: ignore[union-attr]
-            intent.rpc_url = rpc_url  # type: ignore[union-attr]
-        if hasattr(intent, "_method"):
-            intent._method = method  # type: ignore[union-attr]
-    configured_intents = dict(intents)
-    if relay is not None:
-        charge = configured_intents.get("charge")
-        if charge is None:
-            raise ValueError("relay requires a charge intent")
-        configured_intents["charge"] = relay.configure(charge)
-    method._intents = configured_intents
     return method
+
+
+def charge(
+    *,
+    account: TempoAccount,
+    chain_id: int | None | object = _CHAIN_ID_UNSET,
+    rpc_url: str | None = None,
+    root_account: str | None = None,
+    currency: str | None = None,
+    currencies: Sequence[str] | None = None,
+    client_id: str | None = None,
+    max_atomic_amount: int | str | None = None,
+    max_amount: str | Decimal | None = None,
+    max_amount_decimals: int | None = None,
+    expected_recipients: Sequence[str] | None = None,
+    allowed_chain_ids: Sequence[int] | None = None,
+) -> ClientMethod:
+    """Create the client method that pays Tempo charge challenges.
+
+    It signs a TIP-20 transfer (type ``0x76`` transaction with an expiring nonce)
+    for each challenge it accepts. Options are described on :func:`_tempo_method`:
+    ``currency``/``currencies`` pin the currencies it pays, and the charge policy
+    (``max_atomic_amount``, ``max_amount``, ``expected_recipients``,
+    ``allowed_chain_ids`` and the ``chain_id``/``rpc_url`` pin) skips other
+    challenges during selection and rejects them before signing.
+
+    Example:
+        from mpp.client import Mpp
+        from mpp.methods.tempo import TempoAccount
+        from mpp.methods.tempo import client as tempo
+
+        account = TempoAccount.from_key("0x...")
+        async with Mpp(methods=[tempo.charge(account=account)]) as client:
+            response = await client.get("https://api.example.com/resource")
+    """
+    return _client_method(
+        _tempo_method(
+            account=account,
+            chain_id=chain_id,
+            rpc_url=rpc_url,
+            root_account=root_account,
+            currency=currency,
+            currencies=currencies,
+            client_id=client_id,
+            max_atomic_amount=max_atomic_amount,
+            max_amount=max_amount,
+            max_amount_decimals=max_amount_decimals,
+            expected_recipients=expected_recipients,
+            allowed_chain_ids=allowed_chain_ids,
+        )
+    )
+
+
+def _client_method(method: TempoMethod) -> ClientMethod:
+    """Wrap a configured :class:`TempoMethod` as the Tempo charge client method.
+
+    Challenges in currencies other than the pinned ones are not selected.
+    """
+    from mpp.methods.tempo.schemas import charge as definition
+    from mpp.runtime import ClientMethod, CredentialParams
+
+    pinned = {pin.lower() for pin in method._pinned_currencies()}
+
+    async def create_credential(params: CredentialParams) -> str:
+        return (await method.create_credential(params.challenge)).to_authorization()
+
+    def can_handle_challenge(challenge: Challenge) -> bool:
+        currency = challenge.request.get("currency")
+        if pinned and not (isinstance(currency, str) and currency.lower() in pinned):
+            return False
+        return method.can_handle_challenge(challenge)
+
+    return ClientMethod(
+        method=definition,
+        create_credential=create_credential,
+        can_handle_challenge=can_handle_challenge,
+        transaction_hash=method.transaction_hash,
+    )
 
 
 def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:

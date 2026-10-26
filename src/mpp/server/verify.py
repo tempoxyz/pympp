@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import secrets
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import rfc8785
 
@@ -29,19 +30,38 @@ from mpp.errors import (
     PaymentOutcomeUnknownError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
-from mpp.server.intent import broadcast_credential
 from mpp.x402._server import X402Input, X402Intent, x402_credential
 
 DEFAULT_EXPIRES_MINUTES = 5
 
 if TYPE_CHECKING:
-    from mpp.server.intent import Intent, VerifiableIntent
+    from mpp._validation import Validation
+
+
+class Intent(Protocol):
+    """Verification hooks for one intent: ``verify``, or ``validate`` and ``broadcast``."""
+
+    name: str
+
+
+async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) -> Receipt:
+    """Run ``validate`` then ``broadcast`` when the intent has them, else ``verify``.
+
+    The validation's ``payer`` is copied to the receipt unless it already has one.
+    """
+    if hasattr(intent, "broadcast"):
+        validation: Validation = await intent.validate(credential, request)
+        receipt: Receipt = await intent.broadcast(credential, request)
+        if validation.payer is not None and receipt.payer is None:
+            receipt = replace(receipt, payer=validation.payer)
+        return receipt
+    return await intent.verify(credential, request)
 
 
 async def verify_or_challenge(
     *,
     authorization: str | None,
-    intent: Intent | VerifiableIntent,
+    intent: Intent,
     request: dict[str, Any],
     realm: str,
     secret_key: str,
@@ -202,11 +222,7 @@ async def verify_or_challenge(
             request_b64=credential.challenge.request,
         )
         try:
-            receipt = await broadcast_credential(
-                intent=intent,
-                credential=credential,
-                request=request,
-            )
+            receipt = await _settle(intent, credential, request)
         except (InternalPaymentError, PaymentOutcomeUnknownError) as error:
             # The payment may have landed; a retryable 402 would invite a second one.
             await emit_failure(error, submitted_challenge, credential)
@@ -309,11 +325,7 @@ async def verify_or_challenge(
 
     submitted_challenge = _challenge_from_echo(echo, echo_request, echo_opaque)
     try:
-        receipt = await broadcast_credential(
-            intent=intent,
-            credential=credential,
-            request=request,
-        )
+        receipt = await _settle(intent, credential, request)
     except (InternalPaymentError, PaymentOutcomeUnknownError) as error:
         # The payment may have landed; a retryable 402 would invite a second one.
         await emit_failure(error, submitted_challenge, credential)

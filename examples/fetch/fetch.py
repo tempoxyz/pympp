@@ -6,8 +6,9 @@ import asyncio
 import os
 import sys
 
-from mpp.client import Client
-from mpp.methods.tempo import ChargeIntent, TempoAccount, tempo
+from mpp.client import Mpp
+from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,14 +55,14 @@ async def run(args: argparse.Namespace) -> int:
     account = TempoAccount.from_key(key)
 
     rpc_url = args.rpc_url or os.environ.get("TEMPO_RPC_URL")
-    method = tempo(account=account, rpc_url=rpc_url or "https://rpc.tempo.xyz", intents={"charge": ChargeIntent()})
+    method = tempo.charge(account=account, rpc_url=rpc_url or "https://rpc.tempo.xyz")
 
     headers = {}
     for h in args.header:
         key, _, value = h.partition(":")
         headers[key.strip()] = value.strip()
 
-    async with Client(methods=[method]) as client:
+    async with Mpp(methods=[method]) as mpp, mpp.client() as client:
         response = await client.request(
             args.method,
             args.url,

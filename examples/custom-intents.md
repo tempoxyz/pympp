@@ -1,6 +1,6 @@
-# Custom Intents
+# Custom Methods
 
-Creating custom payment intents for different payment methods.
+Defining your own payment method for servers and clients.
 
 ## Dependencies
 
@@ -11,125 +11,101 @@ dependencies = [
 ]
 ```
 
-## Intent Protocol
+## Method Definition
 
-Intents verify credentials and return receipts. Any class implementing this protocol works:
-
-```python
-from mpp import Credential, Receipt
-from mpp.server import VerificationError
-
-class MyIntent:
-    name = "charge"
-
-    async def verify(self, credential: Credential, request: dict) -> Receipt:
-        # Validate the payment
-        if not await self.validate_payment(credential, request):
-            raise VerificationError("Payment invalid")
-
-        return Receipt(
-            status="success",
-            timestamp=datetime.now(UTC).isoformat(),
-            reference="tx_123",
-        )
-
-    async def validate_payment(self, credential: Credential, request: dict) -> bool:
-        # Your validation logic here
-        return True
-```
-
-## Function-Based Intent
-
-Use the `@intent` decorator for simpler cases:
+A `Method` names the method and intent on the wire and validates route input
+(`request_model`, serialized to the wire request) and credential payloads
+(`payload_model`):
 
 ```python
-from mpp import Credential, Receipt
-from mpp.server import intent
+from pydantic import BaseModel
 
-@intent(name="charge")
-async def my_charge(credential: Credential, request: dict) -> Receipt:
-    # Validate and process payment
-    return Receipt.success(reference="tx_123")
+from mpp.methods import Method
+
+
+class ChargeRequest(BaseModel):
+    amount: str
+    currency: str
+
+
+class ChargePayload(BaseModel):
+    payment_intent_id: str
+
+
+charge = Method(
+    name="stripe-pi", intent="charge", request_model=ChargeRequest, payload_model=ChargePayload
+)
 ```
 
-## Stripe Intent Example
+## Server Method
+
+A `ServerMethod` adds the server hooks: `verify` (validation and settlement in
+one), or a non-mutating `validate` and a terminal `broadcast`. Hooks receive the
+parsed credential and the wire request the challenge carried:
 
 ```python
 import stripe
-from mpp import Credential, Receipt
-from mpp.server import InternalPaymentError, VerificationError
 
-class StripeChargeIntent:
-    name = "charge"
+from mpp import Receipt
+from mpp.server import InternalPaymentError, ServerMethod, VerificationError, VerifyContext
 
-    def __init__(self, api_key: str):
-        stripe.api_key = api_key
 
-    async def verify(self, credential: Credential, request: dict) -> Receipt:
-        try:
-            # Verify the payment intent
-            payment_intent = stripe.PaymentIntent.retrieve(
-                credential.payload["payment_intent_id"]
-            )
+async def verify(context: VerifyContext) -> Receipt:
+    request = context.challenge.request
+    try:
+        payment_intent = stripe.PaymentIntent.retrieve(
+            context.credential.payload.payment_intent_id
+        )
+    except stripe.error.StripeError as e:
+        # Not a bad credential: answer 5xx instead of asking the client to pay again.
+        raise InternalPaymentError() from e
+    if payment_intent.status != "succeeded":
+        raise VerificationError("Payment not completed")
+    if payment_intent.amount != int(request["amount"]):
+        raise VerificationError("Amount mismatch")
+    return Receipt.success(reference=payment_intent.id, method="stripe-pi")
 
-            if payment_intent.status != "succeeded":
-                raise VerificationError("Payment not completed")
 
-            if payment_intent.amount != int(request["amount"]):
-                raise VerificationError("Amount mismatch")
-
-            return Receipt(
-                status="success",
-                timestamp=payment_intent.created,
-                reference=payment_intent.id,
-            )
-        except stripe.error.StripeError as e:
-            # Not a bad credential: answer 5xx instead of asking the client to pay again.
-            raise InternalPaymentError() from e
+method = ServerMethod(method=charge, verify=verify, defaults={"currency": "usd"})
 ```
 
 ## Usage with Server
 
 ```python
 from fastapi import FastAPI, Request
+
 from mpp import Credential, Receipt
-from mpp.server import pay
+from mpp.server import Mpp, pay
 
 app = FastAPI()
-intent = StripeChargeIntent(api_key="sk_...")
+server = Mpp(methods=[method], realm="api.example.com", secret_key="my-server-secret")
+
 
 @app.get("/resource")
-@pay(
-    intent=intent,
-    request={"amount": "1000", "currency": "usd"},
-    realm="api.example.com",
-    secret_key="my-server-secret",
-)
+@pay(server.charge(amount="1000"))
 async def get_resource(request: Request, credential: Credential, receipt: Receipt):
     return {"data": "paid content"}
 ```
 
-## Multiple Methods
+Pass several methods, such as `[tempo.charge(...), method]`, to offer each of
+them on one route; the client pays the first it supports.
 
-Support multiple payment methods by checking the credential:
+## Client Method
+
+A `ClientMethod` creates the serialized credential for a challenge:
 
 ```python
-from mpp import Credential, Receipt
-from mpp.server import VerificationError
+from mpp import Credential
+from mpp.client import ClientMethod, CredentialParams
 
-class MultiMethodIntent:
-    name = "charge"
 
-    def __init__(self, tempo_rpc: str, stripe_key: str):
-        self.tempo = ChargeIntent(rpc_url=tempo_rpc)
-        self.stripe = StripeChargeIntent(api_key=stripe_key)
+async def create_credential(params: CredentialParams) -> str:
+    payment_intent_id = await confirm_payment(params.challenge.request)
+    return Credential(
+        challenge=params.challenge.to_echo(),
+        payload={"payment_intent_id": payment_intent_id},
+    ).to_authorization()
 
-    async def verify(self, credential: Credential, request: dict) -> Receipt:
-        # Route based on credential source
-        if credential.source.startswith("0x"):
-            return await self.tempo.verify(credential, request)
-        elif credential.source.startswith("cus_"):
-            return await self.stripe.verify(credential, request)
-        else:
-            raise VerificationError("Unknown payment method")
+
+client_method = ClientMethod(method=charge, create_credential=create_credential)
 ```

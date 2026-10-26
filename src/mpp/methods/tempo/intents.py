@@ -11,7 +11,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -69,8 +69,8 @@ def _fallback_store(method: str) -> MemoryStore:
             "%s has no store configured and is using an in-memory store. Replay "
             "protection is scoped to this process, so a credential accepted by one "
             "worker or replica can be accepted again by another, or after a restart. "
-            "Pass a shared store (e.g. mpp.stores.RedisStore) via Mpp.create(store=...) "
-            "or ChargeIntent(store=...) when running more than one instance.",
+            "Pass a shared store (e.g. mpp.stores.RedisStore) via tempo.charge(store=...) "
+            "when running more than one instance.",
             method,
         )
     return MemoryStore(max_entries=10_000)
@@ -776,23 +776,16 @@ class ChargeIntent:
 
     Verifies that a payment transaction matches the requested parameters.
 
-    When used via ``tempo()``, the ``rpc_url`` and ``fee_payer`` are read
-    from the parent method automatically. You can also pass ``rpc_url``
-    directly for standalone use.
+    :func:`mpp.methods.tempo.server.charge` creates and configures one for its
+    server methods. You can also create one directly to verify credentials.
 
     This class manages an HTTP client lifecycle. Use as an async context manager
     for automatic cleanup, or call `aclose()` explicitly when done.
 
     Example:
-        from mpp.methods.tempo import tempo, ChargeIntent
+        from mpp.methods.tempo import ChargeIntent
 
         # chain_id resolves RPC automatically
-        method = tempo(
-            chain_id=42431,
-            intents={"charge": ChargeIntent()},
-        )
-
-        # Or standalone with chain_id
         intent = ChargeIntent(chain_id=42431)
 
         # Or explicit rpc_url (overrides chain_id)
@@ -810,6 +803,9 @@ class ChargeIntent:
         store: Store | None = None,
         validate_sender: ValidateSender | None = None,
         confirmation_timeout: float = DEFAULT_CONFIRMATION_TIMEOUT,
+        fee_payer: TempoAccount | None = None,
+        fee_token: str | None = None,
+        allowed_fee_tokens: Sequence[str] | None = None,
     ) -> None:
         """Initialize the charge intent.
 
@@ -817,7 +813,7 @@ class ChargeIntent:
             chain_id: Tempo chain ID (4217 for mainnet, 42431 for
                 testnet). Resolves the RPC URL automatically.
             rpc_url: Tempo RPC endpoint URL. Overrides ``chain_id``.
-                If neither is set, will be inherited from ``tempo()``.
+                One of them is required to verify credentials.
             http_client: Optional httpx client for making RPC calls.
                 If provided, the caller is responsible for closing it.
             timeout: Request timeout in seconds (default: 30).
@@ -835,22 +831,25 @@ class ChargeIntent:
                 timeout or "already known"), polling for the receipt. Polling
                 also stops once the transaction's ``valid_before`` has passed.
                 Equivalent to mppx's ``confirmationTimeoutMs``.
+            fee_payer: Account that co-signs and broadcasts sponsored
+                (``feePayer``) transactions.
+            fee_token: Token ``fee_payer`` pays gas in; it must be allowed.
+            allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
+                Defaults to :func:`fee_tokens_for_chain` for a local fee payer;
+                restricts an external ``feePayerUrl`` sponsor's token when set.
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
-        self._method = None
+        self.fee_payer = fee_payer
+        self.fee_token = fee_token
+        self.allowed_fee_tokens = None if allowed_fee_tokens is None else tuple(allowed_fee_tokens)
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
         self._store = store
         self._validate_sender = validate_sender
         self._confirmation_timeout = confirmation_timeout
-
-    @property
-    def fee_payer(self) -> TempoAccount | None:
-        """Fee payer account, read from the parent method."""
-        return getattr(self._method, "fee_payer", None) if self._method else None
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -1852,7 +1851,7 @@ class ChargeIntent:
                 fee_payer_url = request.methodDetails.feePayerUrl
                 if not fee_payer_url:
                     raise InternalPaymentError() from RuntimeError(
-                        "No fee payer configured: set feePayer on the tempo() method "
+                        "No fee payer configured: pass fee_payer to tempo.charge() "
                         "or provide a feePayerUrl in methodDetails"
                     )
 
@@ -1884,7 +1883,7 @@ class ChargeIntent:
 
                 # A configured allowlist also restricts the external sponsor's
                 # token choice; without one, the sponsor picks its own token.
-                allowed_fee_tokens = getattr(self._method, "allowed_fee_tokens", None)
+                allowed_fee_tokens = self.allowed_fee_tokens
                 if allowed_fee_tokens is not None:
                     try:
                         sponsored_fee_token = _transaction_fee_token(raw_tx)
@@ -2242,13 +2241,8 @@ class ChargeIntent:
         fee_payer = self.fee_payer
         if fee_payer is None:
             raise InternalPaymentError() from RuntimeError("No fee payer account configured")
-        chain_id = request.methodDetails.chainId
-        if chain_id is None:
-            chain_id = getattr(self._method, "chain_id", None)
-        allowed = getattr(self._method, "allowed_fee_tokens", None) or (
-            fee_tokens_for_chain(chain_id) if chain_id is not None else (PATH_USD,)
-        )
-        configured = getattr(self._method, "fee_token", None)
+        allowed = self.allowed_fee_tokens or fee_tokens_for_chain(request.methodDetails.chainId)
+        configured = self.fee_token
         if configured is not None:
             if configured.lower() not in {token.lower() for token in allowed}:
                 raise InternalPaymentError() from RuntimeError(
