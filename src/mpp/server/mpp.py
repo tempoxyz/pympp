@@ -37,6 +37,7 @@ from mpp.server.method import (
     ServerMethod,
     ValidateContext,
     VerifyContext,
+    resolve,
 )
 from mpp.server.verify import (
     _application_meta,
@@ -311,7 +312,7 @@ class Mpp:
 
         self._events.on(PAYMENT_SUCCESS, dispatch)
 
-    def _prepare_credential(
+    async def _prepare_credential(
         self,
         value: Credential | str,
         *,
@@ -373,9 +374,7 @@ class Mpp:
             wire_scope = False
             for candidate in candidates:
                 try:
-                    expected = _expected_request(candidate, request, parsed=credential)
-                except _AsyncResolveRequestError:
-                    raise
+                    expected = await _expected_request(candidate, request, parsed=credential)
                 except (ValidationError, TypeError, ValueError):
                     # Rejected as route input by the method's resolve_request or model.
                     continue
@@ -488,7 +487,7 @@ class Mpp:
             VerificationFailedError: If the intent does not support
                 non-mutating validation or rejects the credential.
         """
-        prepared, method, input, challenge = self._prepare_credential(
+        prepared, method, input, challenge = await self._prepare_credential(
             credential,
             intent=intent,
             request=request,
@@ -554,7 +553,7 @@ class Mpp:
         """
         parsed = self._parse_credential(credential)
         try:
-            prepared, method, input, challenge = self._prepare_credential(
+            prepared, method, input, challenge = await self._prepare_credential(
                 parsed,
                 intent=intent,
                 request=request,
@@ -607,11 +606,7 @@ class Mpp:
         return receipt
 
 
-class _AsyncResolveRequestError(TypeError):
-    """A method's resolve_request is async where a synchronous one is required."""
-
-
-def _expected_request(
+async def _expected_request(
     method: ServerMethod, request: Mapping[str, Any], *, parsed: Credential
 ) -> dict[str, Any]:
     input = {
@@ -619,14 +614,9 @@ def _expected_request(
         **{key: value for key, value in request.items() if value is not None},
     }
     if method.resolve_request is not None:
-        resolved = method.resolve_request(RequestContext(request=input, credential=parsed))
-        if inspect.isawaitable(resolved):
-            if inspect.iscoroutine(resolved):
-                resolved.close()
-            raise _AsyncResolveRequestError(
-                "validate_credential(request=...) needs a synchronous resolve_request"
-            )
-        input = resolved
+        input = await resolve(
+            method.resolve_request(RequestContext(request=input, credential=parsed))
+        )
     return method.method.normalize_request(input)
 
 

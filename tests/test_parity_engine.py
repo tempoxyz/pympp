@@ -214,12 +214,20 @@ class TestEngineErrors:
         with pytest.raises(MalformedCredentialError):
             await tempo_mpp().broadcast_credential("Payment not-a-credential!!")
 
-    async def test_validate_credential_request_needs_sync_resolve_request(self) -> None:
+    async def test_validate_credential_request_awaits_async_resolve_request(self) -> None:
+        from mpp._validation import Validation
+        from mpp.errors import InvalidChallengeError
+
         async def resolve_request(context: Any) -> dict[str, Any]:
             return context.request
 
-        async def validate(context: Any) -> Any:
-            raise AssertionError("not reached")
+        async def validate(context: Any) -> Validation:
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
+            )
 
         method = replace(
             server_method(broadcast=_verified, validate=validate, request={"amount": "1"}),
@@ -227,10 +235,45 @@ class TestEngineErrors:
         )
         server = Mpp(methods=method, realm=REALM, secret_key=SECRET)
         issued = challenge(await server.charge()(http_request()))
-        with pytest.raises(TypeError, match="synchronous resolve_request"):
-            await server.validate_credential(
-                Credential(challenge=issued.to_echo(), payload={}), request={"amount": "2"}
+        credential = Credential(challenge=issued.to_echo(), payload={})
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await server.validate_credential(credential, request={"amount": "2"})
+        result = await server.validate_credential(credential, request={"amount": "1"})
+        assert result.request["amount"] == "1"
+
+    async def test_broadcast_credential_selects_among_async_resolve_request_methods(
+        self,
+    ) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        settled: list[str] = []
+
+        def configured(recipient: str) -> ServerMethod:
+            async def resolve_request(context: Any) -> dict[str, Any]:
+                if context.request.get("recipient") != recipient:
+                    raise ValueError("recipient is required")
+                return context.request
+
+            async def broadcast(context: Any) -> Receipt:
+                settled.append(recipient)
+                return Receipt.success(recipient)
+
+            return replace(
+                server_method(broadcast=broadcast, request={"amount": "1"}),
+                resolve_request=resolve_request,
             )
+
+        first, second = configured(RECIPIENT), configured(OTHER)
+        server = Mpp(methods=[first, second], realm=REALM, secret_key=SECRET)
+        options = {"amount": "1", "recipient": OTHER}
+        issued = challenge(await server.compose((second, options))(http_request()))
+        credential = authorization(issued)
+        with pytest.raises(InvalidChallengeError, match="pass request= to select one"):
+            await server.broadcast_credential(credential)
+        assert settled == []
+        receipt = await server.broadcast_credential(credential, request=options)
+        assert receipt.reference == OTHER
+        assert settled == [OTHER]
 
     async def test_route_rejects_payloads_the_method_cannot_parse(self) -> None:
         handler = tempo_mpp().charge(amount="1")
@@ -1215,7 +1258,7 @@ class TestOutOfBandSelection:
             for tx_hash, request in ((plain, None), (named, options)):
                 issued = challenge(await server.tempo.charge(**options)(http_request()))
                 credential = authorization(issued, {"type": "hash", "hash": tx_hash})
-                _, method, _, _ = server._prepare_credential(
+                _, method, _, _ = await server._prepare_credential(
                     credential, intent=None, request=request
                 )
                 assert cast(Any, method.defaults)["currency"] == currency
