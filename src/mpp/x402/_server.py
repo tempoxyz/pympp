@@ -109,9 +109,7 @@ class X402Intent(Protocol):
 def _application_meta(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(meta, Mapping):
         return None
-    return {
-        key: value for key, value in meta.items() if key not in ("_mpp_nonce", "_mpp_offer")
-    } or None
+    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
 
 
 def route_requires_binding(

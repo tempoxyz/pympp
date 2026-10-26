@@ -2,15 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import inspect
-import json
-import re
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -48,7 +43,6 @@ from mpp.server.verify import (
     _authenticate_echo,
     _body_digest_error,
     _challenge_from_echo,
-    _offer_tag,
 )
 from mpp.store import Store
 
@@ -222,45 +216,6 @@ class Mpp:
         for method in self.methods:
             keys.setdefault(method.key, []).append(method)
             intents.setdefault(method.intent, []).append(method)
-        # Methods sharing a name and intent may settle through different replay stores:
-        # their challenges carry a tag derived from the issuing method's configuration,
-        # so out-of-band settlement uses exactly the method that issued them, however
-        # the methods are later ordered. A lone method issues no tag, but every method
-        # has one, so a server configured with a subset of the issuer's methods (a
-        # settlement worker, say) still resolves the tagged challenges they issued.
-        self._offer_tags: dict[int, str] = {}
-        self._method_tags: dict[int, str] = {}
-        self._configurations: dict[int, str] = {}
-        occurrences: dict[str, int] = {}
-        unknown: set[str] = set()
-        for method in self.methods:
-            probe = _probe(method)
-            configuration = _configuration_digest(method, probe)
-            if probe is None:
-                # Configuration that cannot be probed is not known to be identical:
-                # such copies get distinct ordinal tags, which only this process's
-                # routes may rely on. Out of band, another process may list them in
-                # another order, so their tags are not resolved by position.
-                unknown.add(configuration)
-            ordinal = occurrences.get(configuration, 0)
-            occurrences[configuration] = ordinal + 1
-            # Identically configured copies get distinct tags so a route never
-            # accepts another copy's challenge; out of band they are ambiguous.
-            tag = configuration if ordinal == 0 else _digest(f"{configuration}:{ordinal}")
-            self._method_tags[id(method)] = tag[:16]
-            self._configurations[id(method)] = configuration
-            if len(keys[method.key]) > 1:
-                self._offer_tags[id(method)] = tag[:16]
-        self._ambiguous = {
-            configuration
-            for configuration, count in occurrences.items()
-            if count > 1 and configuration not in unknown
-        }
-        self._unprobed = {
-            configuration
-            for configuration, count in occurrences.items()
-            if count > 1 and configuration in unknown
-        }
         self._handlers: dict[str, Any] = {
             key: HandlerFactory(self, group) for key, group in keys.items()
         }
@@ -326,45 +281,13 @@ class Mpp:
             elif isinstance(target, HandlerFactory):
                 factory = target if target._server is self else None
             elif isinstance(target, ServerMethod) and target in self.methods:
-                configured = next(
-                    (method for method in self.methods if method is target),
-                    next(method for method in self.methods if method == target),
-                )
-                factory = HandlerFactory(self, [configured])
+                factory = HandlerFactory(self, [target])
             else:
                 factory = None
             if not isinstance(factory, HandlerFactory):
                 raise ValueError(f"payment method is not registered: {target!r}")
             handlers.append(factory(**options))
         return ComposedHandler(*handlers)
-
-    def _offer_tag(self, method: ServerMethod) -> str | None:
-        """The issuing-offer tag of a configured method's challenges, if it needs one."""
-        return self._offer_tags.get(id(method))
-
-    def _method_tag(self, method: ServerMethod) -> str | None:
-        """The configuration tag of a configured method, issued or not."""
-        return self._method_tags.get(id(method))
-
-    def _tagged_method(self, tag: str, echo: Any) -> ServerMethod:
-        """The configured method an echoed issuing-offer tag names."""
-        matching = (
-            [
-                method
-                for method in self.methods
-                if self._method_tag(method) == tag
-                and method.name == echo.method
-                and method.intent == echo.intent
-            ]
-            if _OFFER_TAG_RE.fullmatch(tag)
-            else []
-        )
-        if len(matching) != 1:
-            raise InvalidChallengeError(echo.id, "credential was not issued by a configured method")
-        method = matching[0]
-        if self._configurations[id(method)] in self._ambiguous:
-            raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
-        return method
 
     def _register_payment_success_handler(self, method: ServerMethod) -> None:
         """Forward successful payments to a method's optional callback."""
@@ -430,36 +353,14 @@ class Mpp:
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
-        tag = _offer_tag(echoed_opaque)
-        unprobed = False
-        if tag is not None:
-            # Several configured methods share this name and intent, and may settle
-            # through different replay stores: settle through exactly the one that
-            # issued the challenge.
-            tagged = self._tagged_method(tag, echo)
-            configuration = self._configurations[id(tagged)]
-            if configuration in self._unprobed:
-                # Copies whose configuration cannot be compared are tagged by their
-                # position here, which need not be their position where the challenge
-                # was issued: only the echoed request can tell them apart.
-                if request is None:
-                    raise InvalidChallengeError(
-                        echo.id,
-                        "credential matches several methods whose configuration cannot "
-                        "be compared; pass request= to select one",
-                    )
-                unprobed = True
-                candidates = [
-                    candidate
-                    for candidate in self.methods
-                    if self._configurations[id(candidate)] == configuration
-                ]
-            else:
-                candidates = [tagged]
-
         echoed = _comparable(echoed_request)
         if request is None:
-            method = _select_echoed(candidates, echoed_request)
+            # Methods sharing a name and intent may settle through different replay
+            # stores: without the route's request, never guess which one issued it,
+            # unless they all settle the same way (copies from one configuration).
+            if len(candidates) > 1 and not _settle_alike(candidates):
+                raise InvalidChallengeError(echo.id, _SEVERAL_METHODS)
+            method = _select(candidates, {"currency": echoed_request.get("currency")})[0]
         else:
             # Read `request` as route input first. Only when no method accepts it as
             # route input is it compared as the echoed wire request (the 0.15 form), so an
@@ -468,6 +369,8 @@ class Mpp:
             matching: list[ServerMethod] = []
             scopes: dict[int, Any] = {}
             normalized = False
+            expected_scope: Any = None
+            wire_scope = False
             for candidate in candidates:
                 try:
                     expected = _expected_request(candidate, request, parsed=credential)
@@ -480,25 +383,24 @@ class Mpp:
                 if _comparable(expected) == echoed:
                     matching.append(candidate)
                     scopes[id(candidate)] = expected.get("_mppx_scope")
+            if not normalized and _comparable(request) == echoed:
+                # The wire form matches every candidate alike.
+                matching = list(candidates)
+                expected_scope = request.get("_mppx_scope")
+                wire_scope = True
+            if not matching:
+                raise InvalidChallengeError(echo.id, "credential request does not match")
+            if len(matching) > 1 and not _settle_alike(matching):
+                raise InvalidChallengeError(
+                    echo.id,
+                    "credential matches several configured methods; "
+                    "they cannot be told apart by request",
+                )
+            method = _select(matching, request)[0]
             if normalized:
-                if not matching:
-                    raise InvalidChallengeError(echo.id, "credential request does not match")
-                if unprobed and len(matching) > 1:
-                    raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
-                method = _select_echoed(matching, echoed_request)
                 # Route issuance binds the normalized input's scope, including one the
                 # method's resolve_request derives.
                 expected_scope = scopes[id(method)]
-                wire_scope = False
-            elif _comparable(request) == echoed:
-                if unprobed and len(candidates) > 1:
-                    # The wire form matches every copy alike.
-                    raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
-                method = _select_echoed(candidates, echoed_request)
-                expected_scope = request.get("_mppx_scope")
-                wire_scope = True
-            else:
-                raise InvalidChallengeError(echo.id, "credential request does not match")
             if not _custom_scope_matches(
                 expected_scope, echoed_request.get("_mppx_scope"), wire=wire_scope
             ):
@@ -564,6 +466,8 @@ class Mpp:
                 the echoed wire request itself (base-unit ``amount``,
                 ``methodDetails``). Its ``_mppx_scope``, when given or derived
                 by the method, must match the challenge's custom scope.
+                Required when several configured methods share the credential's
+                name and intent: it must then match exactly one of them.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -629,6 +533,8 @@ class Mpp:
                 the echoed wire request itself (base-unit ``amount``,
                 ``methodDetails``). Its ``_mppx_scope``, when given or derived
                 by the method, must match the challenge's custom scope.
+                Required when several configured methods share the credential's
+                name and intent: it must then match exactly one of them.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -725,48 +631,6 @@ def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in request.items() if key != "_mppx_scope"}
 
 
-_IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
-
-
-def _select_echoed(candidates: Sequence[ServerMethod], echoed: Mapping[str, Any]) -> ServerMethod:
-    """Choose the configured method copy whose configuration matches an untagged echo.
-
-    Only a lone method or a challenge issued without an issuing-offer tag (before
-    tags, or outside this engine) gets here. Copies must agree with the echo's
-    currency and chain; among those left, the copy whose configuration agrees with
-    the rest of the echo wins. A route may override the currency or chain: like route
-    selection, fall back to the copies agreeing on the rest, then to the first copy.
-    """
-    if len(candidates) == 1:
-        return candidates[0]
-    probes = {id(candidate): _probe(candidate) for candidate in candidates}
-    matching: list[ServerMethod] = []
-    use_defaults = True
-    for paths, use_defaults in (
-        (_IDENTITY_PATHS, True),
-        (_IDENTITY_PATHS[:1], True),
-        (_IDENTITY_PATHS[1:], False),
-    ):
-        matching = [
-            candidate
-            for candidate in candidates
-            if _agrees(candidate, probes[id(candidate)], echoed, paths, defaults=use_defaults)
-        ]
-        if matching:
-            overridden = [path for path in _IDENTITY_PATHS if path not in paths]
-            probes = {key: _without(probe, overridden) for key, probe in probes.items()}
-            break
-    if not matching:
-        return candidates[0]
-    narrowed = [
-        candidate
-        for candidate in matching
-        if (probe := probes[id(candidate)]) is not None
-        and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
-    ]
-    return (narrowed or matching)[0]
-
-
 def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     """Whether the application-defined scope a caller expects matches the echoed scope.
 
@@ -785,151 +649,22 @@ def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     return expected == custom or expected == echoed
 
 
-_IDENTICAL_COPIES = (
-    "credential matches several identically configured methods; it cannot be settled out of band"
-)
+def _settle_alike(methods: Sequence[ServerMethod]) -> bool:
+    """Whether methods share their settlement hooks, so any of them settles alike.
 
-_OFFER_TAG_RE = re.compile(r"[0-9a-f]{16}")
-
-
-def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
-
-
-class _UnknownConfiguration(Exception):
-    """A configured value with no process-independent canonical form."""
-
-
-def _canonical(value: Any) -> Any:
-    """A JSON value that is the same in every process for equal configuration.
-
-    Address strings are lowercased, so spelling case does not matter; sets are
-    sorted. Any other value, such as an object whose repr holds a memory address,
-    raises _UnknownConfiguration.
+    Copies one configuration produces, such as one per accepted currency, share their
+    hooks and so their verifier and replay store; separately configured methods don't.
     """
-    if isinstance(value, str):
-        return value.lower() if _ADDRESS_RE.fullmatch(value) else value
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, Mapping):
-        if not all(isinstance(key, str) for key in value):
-            raise _UnknownConfiguration
-        return {key: _canonical(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return sorted((_canonical(item) for item in value), key=_canonical_json)
-    raise _UnknownConfiguration
+    first = methods[0]
+    return all(
+        method.verify is first.verify
+        and method.validate is first.validate
+        and method.broadcast is first.broadcast
+        for method in methods[1:]
+    )
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
-
-
-def _configuration_digest(method: ServerMethod, probe: dict[str, Any] | None) -> str:
-    """A digest of what a method's configuration issues, independent of its position.
-
-    Defaults without a canonical form are left out: the probe then stands for the
-    configuration, and without one the configuration is unknown.
-    """
-    configuration: dict[str, Any] = {"intent": method.intent, "name": method.name}
-    try:
-        configuration["defaults"] = _canonical(dict(method.defaults or {}))
-    except _UnknownConfiguration:
-        configuration["defaults"] = "unknown"
-    if probe is not None:
-        configuration["probe"] = _canonical(probe)
-    return _digest(_canonical_json(configuration))
-
-
-def _probe(method: ServerMethod) -> dict[str, Any] | None:
-    """The wire request a method's configuration produces for a nominal amount."""
-    input: dict[str, Any] = {
-        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
-        "amount": "1",
-    }
-    try:
-        if method.resolve_request is not None:
-            resolved = method.resolve_request(RequestContext(request=input))
-            if inspect.isawaitable(resolved):
-                if inspect.iscoroutine(resolved):
-                    resolved.close()
-                return None
-            input = resolved
-        wire = method.method.normalize_request(input)
-        probe = {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
-        _canonical(probe)
-    except Exception:
-        return None
-    return probe
-
-
-def _without(
-    probe: dict[str, Any] | None, paths: Sequence[tuple[str, ...]]
-) -> dict[str, Any] | None:
-    """A probe without the given paths."""
-    if probe is None or not paths:
-        return probe
-    result = deepcopy(probe)
-    for path in paths:
-        parent = _at(result, path[:-1])
-        if isinstance(parent, dict):
-            parent.pop(path[-1], None)
-    return result
-
-
-def _leaves(value: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
-    paths: list[tuple[str, ...]] = []
-    for key, item in value.items():
-        if isinstance(item, Mapping):
-            paths.extend(_leaves(item, (*prefix, key)))
-        else:
-            paths.append((*prefix, key))
-    return paths
-
-
-_MISSING: Any = object()
-
-
-def _at(value: Any, path: tuple[str, ...]) -> Any:
-    for key in path:
-        if not isinstance(value, Mapping) or key not in value:
-            return _MISSING
-        value = value[key]
-    return value
-
-
-def _agrees(
-    method: ServerMethod,
-    probe: Mapping[str, Any] | None,
-    echoed: Mapping[str, Any],
-    paths: Sequence[tuple[str, ...]],
-    *,
-    defaults: bool = True,
-) -> bool:
-    """Whether the method's defaults and probed configuration agree with the echo."""
-    expected: dict[tuple[str, ...], Any] = {
-        (key,): value
-        for key, value in ((method.defaults or {}) if defaults else {}).items()
-        if value is not None
-    }
-    if probe is not None:
-        expected.update((path, _at(probe, path)) for path in paths)
-    for path, value in expected.items():
-        echoed_value = _at(echoed, path)
-        if value is _MISSING or echoed_value is _MISSING:
-            continue
-        if isinstance(value, str) and isinstance(echoed_value, str):
-            if value.lower() != echoed_value.lower():
-                return False
-        elif value != echoed_value:
-            return False
-    return True
+_SEVERAL_METHODS = "credential matches several configured methods; pass request= to select one"
 
 
 def _flatten(methods: Any) -> tuple[ServerMethod, ...]:
