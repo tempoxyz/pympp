@@ -633,3 +633,33 @@ class TestReviewFixes:
         result = await route(http_request(authorization(issued, payload)))
         assert isinstance(result, PaymentVerified)
         assert len(calls) == 2
+
+    async def test_payment_success_hooks_stay_with_their_configuration(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        first: list[Any] = []
+        second: list[Any] = []
+        methods = [
+            *self._faked(
+                tempo_server.charge(
+                    recipient=RECIPIENT, currencies=[PATH_USD], on_payment_success=first.append
+                ),
+                [],
+            ),
+            *self._faked(
+                tempo_server.charge(
+                    recipient=RECIPIENT, currencies=[USDC], on_payment_success=second.append
+                ),
+                [],
+            ),
+        ]
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        payload = {"type": "hash", "hash": "0x34"}
+        issued = challenge(await server.tempo.charge(amount="1", currency=USDC)(http_request()))
+        await server.broadcast_credential(authorization(issued, payload))
+        assert (len(first), len(second)) == (0, 1)
+        route = server.tempo.charge(amount="1", currency=PATH_USD)
+        issued = challenge(await route(http_request()))
+        result = await route(http_request(authorization(issued, payload)))
+        assert isinstance(result, PaymentVerified)
+        assert (len(first), len(second)) == (1, 1)

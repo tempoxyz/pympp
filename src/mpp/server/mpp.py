@@ -32,6 +32,7 @@ from mpp.events import (
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, _Offer, _validate_options
 from mpp.server.method import (
+    SETTLING_METHOD,
     RequestContext,
     ServerMethod,
     ValidateContext,
@@ -294,9 +295,12 @@ class Mpp:
         self._payment_success_hooks.add(hook)
 
         def dispatch(payload: ServerPaymentSuccessPayload) -> Any:
-            if payload["method"] == method.name and payload["intent"] == method.intent:
-                return handler(payload)
-            return None
+            if payload["method"] != method.name or payload["intent"] != method.intent:
+                return None
+            settling = SETTLING_METHOD.get()
+            if settling is not None and settling.on_payment_success is not handler:
+                return None
+            return handler(payload)
 
         self._events.on(PAYMENT_SUCCESS, dispatch)
 
@@ -532,7 +536,11 @@ class Mpp:
         except Exception as error:
             await self._events.emit(PAYMENT_FAILED, {**context, "error": error})
             raise
-        await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
+        token = SETTLING_METHOD.set(method)
+        try:
+            await self._events.emit(PAYMENT_SUCCESS, {**context, "receipt": receipt})
+        finally:
+            SETTLING_METHOD.reset(token)
         return receipt
 
 

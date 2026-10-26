@@ -24,7 +24,13 @@ from mpp.errors import (
 )
 from mpp.events import PAYMENT_FAILED
 from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
-from mpp.server.method import RequestContext, ServerMethod, VerifyContext, resolve
+from mpp.server.method import (
+    SETTLING_METHOD,
+    RequestContext,
+    ServerMethod,
+    VerifyContext,
+    resolve,
+)
 from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
@@ -163,6 +169,15 @@ class _PreparedOffer:
     ) -> Challenge | tuple[Credential, Receipt]:
         """Verify this offer using its originating server."""
         server = self.offer.server
+        token = SETTLING_METHOD.set(self.offer.method)
+        try:
+            return await self._verify(server, authorization, x402)
+        finally:
+            SETTLING_METHOD.reset(token)
+
+    async def _verify(
+        self, server: Mpp, authorization: str | None, x402: X402Input | None
+    ) -> Challenge | tuple[Credential, Receipt]:
         return await verify_or_challenge(
             authorization=authorization,
             intent=self.intent,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
@@ -17,6 +18,9 @@ if TYPE_CHECKING:
     from mpp.x402._server import X402Intent
 
 T = TypeVar("T")
+
+# The configured method settling the current payment, so success callbacks reach only it.
+SETTLING_METHOD: ContextVar[ServerMethod | None] = ContextVar("mpp_settling_method", default=None)
 
 
 async def resolve(value: T | Awaitable[T]) -> T:
