@@ -105,4 +105,5 @@ def charge(
         can_offer=can_offer,
         on_payment_success=on_payment_success,
         defaults={"currency": currency} if currency is not None else None,
+        credential_options=("payment_intent_options",),
     )

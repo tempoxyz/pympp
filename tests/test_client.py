@@ -420,6 +420,29 @@ class TestPaymentTransport:
         assert retry == expected_retry_timeout.as_dict()
 
     @pytest.mark.asyncio
+    async def test_fetch_uses_httpx_default_timeout(self) -> None:
+        """Mpp.fetch() times out like httpx, and the paid retry gets the read floor."""
+        challenge = Challenge(
+            id="test-id", method="tempo", intent="charge", request={"amount": "1000"}
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        async with Mpp(methods=[MockMethod().client]) as mpp:
+            inner = MockTransport(
+                [
+                    httpx.Response(402, headers={"www-authenticate": www_auth}),
+                    httpx.Response(200),
+                    httpx.Response(200),
+                ]
+            )
+            mpp.payment_transport._inner = inner
+            await mpp.fetch("https://example.com/paid")
+            await mpp.fetch("https://example.com/free", timeout=60.0)
+        first, retry, explicit = (sent.extensions["timeout"] for sent in inner.requests)
+        assert first == httpx.Timeout(5.0).as_dict()
+        assert retry == httpx.Timeout(5.0, read=35.0).as_dict()
+        assert explicit == httpx.Timeout(60.0).as_dict()
+
+    @pytest.mark.asyncio
     async def test_paid_retry_replays_multipart_body(self) -> None:
         """The paid retry must carry the original multipart (files=) body."""
         challenge = Challenge(

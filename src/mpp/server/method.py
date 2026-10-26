@@ -82,6 +82,8 @@ class ServerMethod:
         x402: Lets x402 `exact` clients pay this method's offers.
         use_store: Adopts the `Mpp(store=...)` replay store when the method was
             configured without one of its own.
+        credential_options: Keyword options `Mpp.validate_credential` and
+            `Mpp.broadcast_credential` accept for this method; others are rejected.
     """
 
     method: Method[Any, Any]
@@ -96,6 +98,7 @@ class ServerMethod:
     defaults: Mapping[str, Any] | None = None
     x402: X402Intent | None = None
     use_store: Callable[[Store], None] | None = None
+    credential_options: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.verify is None and self.broadcast is None:

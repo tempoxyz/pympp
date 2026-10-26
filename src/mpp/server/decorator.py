@@ -165,6 +165,9 @@ def _framework_headers(request: Any) -> list[tuple[str, str]]:
 async def _framework_body(request: Any) -> bytes | None:
     try:
         body = getattr(request, "body", None)
+        if body is None and callable(get_data := getattr(request, "get_data", None)):
+            # Flask/werkzeug: get_data() caches the body for the endpoint.
+            body = get_data()
         if callable(body):
             body = body()
         if inspect.isawaitable(body):
@@ -176,8 +179,11 @@ async def _framework_body(request: Any) -> bytes | None:
     return body if isinstance(body, bytes) and body else None
 
 
-async def to_request(request: Any) -> Request:
-    """Convert a framework request (Starlette, FastAPI, Django, Flask) to a :class:`Request`."""
+async def to_request(request: Any, *, read_body: bool = True) -> Request:
+    """Convert a framework request (Starlette, FastAPI, Django, Flask) to a :class:`Request`.
+
+    With ``read_body=False`` the request body stream is left untouched.
+    """
     scope = framework_scope(request)
     url = get_request_url(request)
     if url is None:
@@ -187,7 +193,7 @@ async def to_request(request: Any) -> Request:
         scope.get("http_method", "GET"),
         url,
         headers=_framework_headers(request),
-        body=await _framework_body(request),
+        body=await _framework_body(request) if read_body else None,
         route=scope.get("route"),
     )
 
@@ -264,7 +270,9 @@ def pay(
                     f"Missing request argument '{request_param_name}'. "
                     "The decorated handler must receive a request object as its first argument."
                 )
-            result = await handler(await to_request(request_obj))
+            # Read the body only for an offer whose ``body`` option reads the request.
+            read_body = getattr(handler, "needs_request_body", True)
+            result = await handler(await to_request(request_obj, read_body=read_body))
             if isinstance(result, PaymentRequired):
                 return to_framework_response(result.challenge)
             response = await endpoint(request_obj, result.credential, result.receipt)

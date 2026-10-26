@@ -332,6 +332,46 @@ class TestFrameworkAdapters:
 
         assert (await to_request(TextRequest())).body == b"text"
 
+    async def test_pay_reads_the_body_only_when_an_offer_needs_it(self) -> None:
+        from mpp.server import pay
+
+        reads: list[str] = []
+
+        class StarletteRequest:
+            headers: dict[str, str] = {}
+            method = "POST"
+            path = "/paid"
+
+            async def body(self) -> bytes:
+                reads.append("body")
+                return b"{}"
+
+        async def endpoint(request: Any, credential: Any, receipt: Any) -> dict[str, str]:
+            return {}
+
+        server = tempo_mpp()
+        await pay(server.charge(amount="1"))(endpoint)(StarletteRequest())
+        await pay(server.charge(amount="1", body=b"{}"))(endpoint)(StarletteRequest())
+        assert reads == []
+        handler = server.charge(amount="1", body=lambda request: request.body or b"")
+        assert handler.needs_request_body
+        await pay(handler)(endpoint)(StarletteRequest())
+        assert reads == ["body"]
+
+    async def test_flask_style_requests_read_get_data(self) -> None:
+        from mpp.server.decorator import to_request
+
+        class FlaskRequest:
+            headers = {"a": "b"}
+            method = "POST"
+            path = "/paid"
+
+            def get_data(self) -> bytes:
+                return b'{"q": 1}'
+
+        assert (await to_request(FlaskRequest())).body == b'{"q": 1}'
+        assert (await to_request(FlaskRequest(), read_body=False)).body is None
+
     def test_responses_without_starlette(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from mpp.server.decorator import to_framework_response
 
@@ -445,3 +485,151 @@ class TestMcpProblemBodies:
 
         with pytest.raises(PaymentVerificationError):
             await self._run(Response(403, body=b"[]"))
+
+
+class TestReviewFixes:
+    """Regressions for the PR #339 review findings."""
+
+    @staticmethod
+    def _faked(methods: list[ServerMethod], seen: list[str]) -> list[ServerMethod]:
+        """Copies of tempo methods whose hooks record their currency instead of calling RPC."""
+        from mpp._validation import Validation
+
+        def hooks(currency: str) -> dict[str, Any]:
+            async def validate(context: Any) -> Validation:
+                seen.append(currency)
+                return Validation(
+                    credential=context.credential,
+                    details=None,
+                    intent="charge",
+                    request=context.challenge.request,
+                )
+
+            async def broadcast(context: Any) -> Receipt:
+                return Receipt.success("0x" + "ab" * 32)
+
+            return {"validate": validate, "broadcast": broadcast}
+
+        return [
+            replace(method, **hooks(cast(Any, method.defaults)["currency"])) for method in methods
+        ]
+
+    async def test_validate_credential_picks_the_currency_copy_that_issued_it(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        methods = self._faked(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD, USDC]), seen
+        )
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.tempo.charge(amount="1", currency=USDC)(http_request()))
+        await server.validate_credential(authorization(issued, {"type": "hash", "hash": "0x12"}))
+        assert seen == [USDC]
+
+    async def test_validate_credential_rejects_ambiguous_or_unknown_copies(self) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        seen: list[str] = []
+        first, second = (
+            self._faked(tempo_server.charge(recipient=recipient, currency=CURRENCY), seen)[0]
+            for recipient in (RECIPIENT, OTHER)
+        )
+        server = Mpp(methods=[first, second], realm=REALM, secret_key=SECRET)
+        payload = {"type": "hash", "hash": "0x12"}
+        # A route recipient matching neither configuration leaves both copies.
+        issued = challenge(
+            await server.compose((first, {"amount": "1", "recipient": "0x" + "33" * 20}))(
+                http_request()
+            )
+        )
+        with pytest.raises(InvalidChallengeError, match="several configured methods"):
+            await server.validate_credential(authorization(issued, payload))
+        # The configured recipient selects its copy.
+        issued = challenge(await server.compose((second, {"amount": "1"}))(http_request()))
+        await server.validate_credential(authorization(issued, payload))
+        assert seen == [CURRENCY]
+        other = Mpp(
+            methods=self._faked(
+                tempo_server.charge(recipient=RECIPIENT, currency="0x" + "44" * 20), seen
+            )
+            + [first],
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        foreign = Challenge.create(
+            secret_key=SECRET,
+            realm=REALM,
+            method="tempo",
+            intent="charge",
+            request={**issued.request, "currency": "0x" + "55" * 20},
+            expires=issued.expires,
+        )
+        with pytest.raises(InvalidChallengeError, match="does not match a configured method"):
+            await other.validate_credential(authorization(foreign, payload))
+
+    async def test_unknown_credential_options_are_rejected(self) -> None:
+        from mpp.errors import VerificationFailedError
+        from mpp.methods.stripe import server as stripe_server
+
+        seen: list[str] = []
+        server = Mpp(
+            methods=self._faked(tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY), seen),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        issued = challenge(await server.charge(amount="1")(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0x12"})
+        with pytest.raises(TypeError, match="unsupported method option: bogus"):
+            await server.validate_credential(credential, bogus=1)
+        with pytest.raises(TypeError, match="unsupported method option: payment_intent_options"):
+            await server.broadcast_credential(credential, payment_intent_options={})
+        assert seen == []
+
+        stripe = Mpp(
+            methods=stripe_server.charge(secret_key="sk_test", network_id="bn_1", currency="usd"),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        issued = challenge(await stripe.charge(amount="0.50")(http_request()))
+        credential = authorization(issued, {"spt": "spt_test"})
+        with pytest.raises(VerificationFailedError, match="non-mutating"):
+            await stripe.validate_credential(credential, payment_intent_options={})
+        with pytest.raises(TypeError, match="unsupported method option: bogus"):
+            await stripe.validate_credential(credential, bogus=1)
+
+    async def test_explicit_none_route_options_keep_method_defaults(self) -> None:
+        seen: list[str] = []
+        methods = self._faked(tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY), seen)
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(amount="1", currency=None)(http_request()))
+        assert issued.request["currency"] == CURRENCY
+        composed = server.compose((methods[0], {"amount": "1", "currency": None}))
+        assert challenge(await composed(http_request())).request["currency"] == CURRENCY
+        await server.validate_credential(
+            authorization(issued, {"type": "hash", "hash": "0x12"}),
+            request={"amount": "1", "currency": None},
+            meta=None,
+        )
+        assert seen == [CURRENCY]
+
+    async def test_payment_success_hook_runs_once_per_payment(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        calls: list[Any] = []
+        methods = self._faked(
+            tempo_server.charge(
+                recipient=RECIPIENT, currencies=[PATH_USD, USDC], on_payment_success=calls.append
+            ),
+            [],
+        )
+        assert len(methods) == 2
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        payload = {"type": "hash", "hash": "0x12"}
+        issued = challenge(await server.tempo.charge(amount="1", currency=USDC)(http_request()))
+        await server.broadcast_credential(authorization(issued, payload))
+        assert len(calls) == 1
+        route = server.tempo.charge(amount="1", currency=PATH_USD)
+        issued = challenge(await route(http_request()))
+        result = await route(http_request(authorization(issued, payload)))
+        assert isinstance(result, PaymentVerified)
+        assert len(calls) == 2

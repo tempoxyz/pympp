@@ -62,6 +62,7 @@ def with_payment_intent_input(
         method=replace(definition, request_model=request_model),
         verify=verify if method.verify is not None else None,
         broadcast=broadcast if method.broadcast is not None else None,
+        credential_options=(*method.credential_options, "payment_intent_options"),
     )
 
 

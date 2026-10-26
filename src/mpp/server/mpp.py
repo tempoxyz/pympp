@@ -124,7 +124,11 @@ def _check_input(method: ServerMethod, options: Mapping[str, Any]) -> None:
 
     input = {
         **(method.defaults or {}),
-        **{key: value for key, value in options.items() if key not in ROUTE_OPTION_KEYS},
+        **{
+            key: value
+            for key, value in options.items()
+            if key not in ROUTE_OPTION_KEYS and value is not None
+        },
     }
     if method.resolve_request is not None:
         if inspect.iscoroutinefunction(method.resolve_request):
@@ -195,6 +199,7 @@ class Mpp:
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
         self._events = EventDispatcher()
+        self._payment_success_hooks: set[tuple[str, str, int]] = set()
         for method in self.methods:
             self._register_payment_success_handler(method)
 
@@ -281,6 +286,12 @@ class Mpp:
         handler = method.on_payment_success
         if handler is None:
             return
+        # Copies of one configured method (such as one per accepted currency) share
+        # their callback: register it once so each payment calls it once.
+        hook = (method.name, method.intent, id(handler))
+        if hook in self._payment_success_hooks:
+            return
+        self._payment_success_hooks.add(hook)
 
         def dispatch(payload: ServerPaymentSuccessPayload) -> Any:
             if payload["method"] == method.name and payload["intent"] == method.intent:
@@ -331,8 +342,9 @@ class Mpp:
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
-        method = candidates[0]
-        if request is not None:
+        if request is None:
+            method = _select_echoed(candidates, echoed_request, echo.id)
+        else:
             echoed = {key: value for key, value in echoed_request.items() if key != "_mppx_scope"}
             matching = [
                 candidate
@@ -342,6 +354,9 @@ class Mpp:
             if not matching:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
             method = matching[0]
+        unsupported = sorted(set(method_options or {}) - set(method.credential_options))
+        if unsupported:
+            raise TypeError(f"unsupported method option: {unsupported[0]}")
 
         if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
             expected_meta = None if meta is _CONTEXT_UNSET else meta
@@ -524,7 +539,10 @@ class Mpp:
 def _expected_request(
     method: ServerMethod, request: Mapping[str, Any], *, parsed: Credential
 ) -> dict[str, Any]:
-    input = {**(method.defaults or {}), **request}
+    input = {
+        **(method.defaults or {}),
+        **{key: value for key, value in request.items() if value is not None},
+    }
     if method.resolve_request is not None:
         resolved = method.resolve_request(RequestContext(request=input, credential=parsed))
         if inspect.isawaitable(resolved):
@@ -534,6 +552,114 @@ def _expected_request(
         input = resolved
     wire = method.method.normalize_request(input)
     return {key: value for key, value in wire.items() if key != "_mppx_scope"}
+
+
+_IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
+
+
+def _select_echoed(
+    candidates: Sequence[ServerMethod], echoed: Mapping[str, Any], challenge_id: str
+) -> ServerMethod:
+    """Choose the configured method copy whose configuration issued an echoed request.
+
+    Copies of one method (such as one per currency, or per chain) must agree with
+    the echo's currency and chain; among those left, the copy whose configuration
+    agrees with the rest of the echo wins. Copies left with different
+    configurations are ambiguous.
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    probes = {id(candidate): _probe(candidate) for candidate in candidates}
+    matching = [
+        candidate
+        for candidate in candidates
+        if _agrees(candidate, probes[id(candidate)], echoed, _IDENTITY_PATHS)
+    ]
+    if not matching:
+        raise InvalidChallengeError(
+            challenge_id, "credential request does not match a configured method"
+        )
+    if len(matching) > 1:
+        narrowed = [
+            candidate
+            for candidate in matching
+            if (probe := probes[id(candidate)]) is not None
+            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)))
+        ]
+        matching = narrowed or matching
+    if len(matching) > 1:
+        configs = [probes[id(candidate)] for candidate in matching]
+        if configs[0] is None or any(config != configs[0] for config in configs):
+            raise InvalidChallengeError(
+                challenge_id,
+                "credential matches several configured methods; pass request= to select one",
+            )
+    return matching[0]
+
+
+def _probe(method: ServerMethod) -> dict[str, Any] | None:
+    """The wire request a method's configuration produces for a nominal amount."""
+    input: dict[str, Any] = {
+        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
+        "amount": "1",
+    }
+    try:
+        if method.resolve_request is not None:
+            resolved = method.resolve_request(RequestContext(request=input))
+            if inspect.isawaitable(resolved):
+                if inspect.iscoroutine(resolved):
+                    resolved.close()
+                return None
+            input = resolved
+        wire = method.method.normalize_request(input)
+    except Exception:
+        return None
+    return {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+
+
+def _leaves(value: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = []
+    for key, item in value.items():
+        if isinstance(item, Mapping):
+            paths.extend(_leaves(item, (*prefix, key)))
+        else:
+            paths.append((*prefix, key))
+    return paths
+
+
+_MISSING: Any = object()
+
+
+def _at(value: Any, path: tuple[str, ...]) -> Any:
+    for key in path:
+        if not isinstance(value, Mapping) or key not in value:
+            return _MISSING
+        value = value[key]
+    return value
+
+
+def _agrees(
+    method: ServerMethod,
+    probe: Mapping[str, Any] | None,
+    echoed: Mapping[str, Any],
+    paths: Sequence[tuple[str, ...]],
+) -> bool:
+    """Whether the method's defaults and probed configuration agree with the echo."""
+    expected: dict[tuple[str, ...], Any] = {
+        (key,): value for key, value in (method.defaults or {}).items() if value is not None
+    }
+    if probe is not None:
+        expected.update((path, _at(probe, path)) for path in paths)
+    for path, value in expected.items():
+        echoed_value = _at(echoed, path)
+        if value is _MISSING or echoed_value is _MISSING:
+            continue
+        if isinstance(value, str) and isinstance(echoed_value, str):
+            if value.lower() != echoed_value.lower():
+                return False
+        elif value != echoed_value:
+            return False
+    return True
 
 
 def _flatten(methods: Any) -> tuple[ServerMethod, ...]:

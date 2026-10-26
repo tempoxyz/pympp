@@ -623,7 +623,7 @@ class Mpp:
     ) -> httpx.Response:
         """Send a request, paying a 402 challenge with a configured method."""
         if self._client is None:
-            self._client = httpx.AsyncClient(transport=self.payment_transport, timeout=None)
+            self._client = httpx.AsyncClient(transport=self.payment_transport)
         return await self._client.request(method, url, **kwargs)
 
     async def aclose(self) -> None:

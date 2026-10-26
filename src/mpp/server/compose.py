@@ -214,7 +214,11 @@ async def _prepare_offer(
 ) -> _PreparedOffer:
     """Resolve an offer's wire request, expiry and body for this call."""
     method = offer.method
-    options = {key: value for key, value in offer.options.items() if key not in ROUTE_OPTION_KEYS}
+    options = {
+        key: value
+        for key, value in offer.options.items()
+        if key not in ROUTE_OPTION_KEYS and value is not None
+    }
     input = {**(method.defaults or {}), **options}
     if method.resolve_request is not None:
         input = await resolve(
@@ -292,6 +296,11 @@ class ComposedHandler:
         handler._offers = tuple(offers)
         handler._composed = composed
         return handler
+
+    @property
+    def needs_request_body(self) -> bool:
+        """Whether an offer's ``body`` option is a callable reading the request."""
+        return any(callable(offer.options.get("body")) for offer in self._offers)
 
     @property
     def methods(self) -> tuple[ServerMethod, ...]:
