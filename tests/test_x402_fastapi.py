@@ -15,12 +15,15 @@ from x402.schemas.hooks import SkipHandlerDirective, SkipHandlerResult
 from x402.server import x402ResourceServer
 
 from mpp import Challenge, Receipt
+from mpp.errors import InternalPaymentError
 from mpp.methods.evm import BASE_SEPOLIA_USDC
+from mpp.methods.evm.intents import _ClaimCache
 from mpp.x402 import (
     PAYMENT_REQUIRED_HEADER,
     PAYMENT_RESPONSE_HEADER,
     decode_payment_required,
 )
+from mpp.x402._negotiator import Negotiator
 from mpp.x402.fastapi import payment_middleware
 from tests.x402_harness import hd_account, sign_native, sign_x402_payment
 
@@ -210,3 +213,99 @@ def test_requires_a_strong_secret_key() -> None:
     server = x402ResourceServer(Facilitator())  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="32 bytes"):
         payment_middleware(ROUTES, server, secret_key="short")
+
+
+class PaywallProvider:
+    def generate_html(self, payment_required: Any, config: Any = None) -> str:
+        return "<html>custom paywall</html>"
+
+
+async def test_paywall_provider_serves_unpaid_browser_requests() -> None:
+    facilitator = Facilitator()
+    server = x402ResourceServer(facilitator)  # type: ignore[arg-type]
+    server.register(NETWORK, ExactEvmScheme())  # type: ignore[arg-type]
+    app = FastAPI()
+    app.middleware("http")(
+        payment_middleware(
+            ROUTES,
+            server,
+            secret_key=SECRET_KEY,
+            paywall_provider=PaywallProvider(),  # type: ignore[arg-type]
+        )
+    )
+    headers = {"Accept": "text/html", "User-Agent": "Mozilla/5.0"}
+    async with client(app) as http:
+        response = await http.get("/paid", headers=headers)
+    assert response.status_code == 402
+    assert response.text == "<html>custom paywall</html>"
+
+
+async def test_missing_raw_path_falls_back_to_the_url_path() -> None:
+    app = create_app(Facilitator())
+
+    async def without_raw_path(scope: Any, receive: Any, send: Any) -> None:
+        await app(dict(scope, raw_path=None), receive, send)
+
+    async with client(without_raw_path) as http:  # type: ignore[arg-type]
+        assert (await http.get("/free")).json() == {"free": True}
+        assert (await http.get("/paid")).status_code == 402
+
+
+async def test_failed_verify_call_releases_the_authorization() -> None:
+    facilitator = Facilitator()
+    verify = facilitator.verify
+    failures = [RuntimeError("facilitator timed out")]
+
+    async def flaky_verify(payload: Any, requirements: Any) -> VerifyResponse:
+        if failures:
+            facilitator.calls.append("verify")
+            raise failures.pop()
+        return await verify(payload, requirements)
+
+    facilitator.verify = flaky_verify  # type: ignore[method-assign]
+    app = create_app(facilitator)
+    async with client(app) as http:
+        unpaid = await http.get("/paid")
+        challenge = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+        credential = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
+        headers = {"Authorization": credential.to_authorization()}
+        assert (await http.get("/paid", headers=headers)).status_code == 402
+        response = await http.get("/paid", headers=headers)
+    assert response.status_code == 200
+    assert facilitator.calls == ["verify", "verify", "settle"]
+
+
+async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() -> None:
+    facilitator = Facilitator()
+
+    async def pending(payload: Any, requirements: Any) -> SettleResponse:
+        facilitator.calls.append("settle")
+        return SettleResponse(
+            success=False,
+            error_reason="settlement_pending",
+            transaction=TRANSACTION,
+            network=NETWORK,
+            payer=payer.address,
+        )
+
+    facilitator.settle = pending  # type: ignore[method-assign]
+    app = create_app(facilitator)
+    async with client(app) as http:
+        unpaid = await http.get("/paid")
+        challenge = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+        credential = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
+        headers = {"Authorization": credential.to_authorization()}
+        # Raised like the native facilitator path: a 500, never a retryable 402.
+        with pytest.raises(InternalPaymentError):
+            await http.get("/paid", headers=headers)
+        calls = list(facilitator.calls)
+        replayed = await http.get("/paid", headers=headers)
+    assert replayed.status_code == 403
+    assert "settle" in calls
+    assert facilitator.calls == calls
+    assert app.state.handled == 0
+
+
+def test_default_store_expires_claims() -> None:
+    server = x402ResourceServer(Facilitator())  # type: ignore[arg-type]
+    assert isinstance(Negotiator(ROUTES, server, secret_key=SECRET_KEY).store, _ClaimCache)

@@ -72,6 +72,7 @@ def payment_middleware(
         secret_key=secret_key,
         realm=realm,
         paywall_config=paywall_config,
+        paywall_provider=paywall_provider,
         store=store,
     )
     # The negotiator syncs with the facilitator on the first protected request,
@@ -86,7 +87,7 @@ def payment_middleware(
         )
         context = HTTPRequestContext(
             adapter=FastAPIAdapter(request),
-            path=request.scope["raw_path"].decode("ascii").split("?")[0],
+            path=_raw_path(request),
             decoded_path=_route_path(request),
             method=request.method,
             payment_header=x402_credential(mpp_request),
@@ -102,6 +103,14 @@ def payment_middleware(
         return _to_starlette(result.response)
 
     return middleware
+
+
+def _raw_path(request: StarletteRequest) -> str:
+    """The percent-encoded request path, or the decoded one when ASGI omits ``raw_path``."""
+    raw_path = request.scope.get("raw_path")
+    if isinstance(raw_path, bytes) and raw_path:
+        return raw_path.decode("latin-1").split("?")[0]
+    return request.url.path
 
 
 def _route_path(request: StarletteRequest) -> str:

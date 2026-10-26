@@ -24,19 +24,19 @@ from x402.http.types import (
     RoutesConfig,
 )
 from x402.http.utils import decode_payment_required_header
-from x402.http.x402_http_server import x402HTTPResourceServer
+from x402.http.x402_http_server import PaywallProvider, x402HTTPResourceServer
 from x402.schemas import PaymentPayload, PaymentRequired, PaymentRequirements
 from x402.schemas.hooks import SkipHandlerDirective
 from x402.server import x402ResourceServer
 
 from mpp import _expires
-from mpp.errors import VerificationFailedError
+from mpp.errors import InternalPaymentError, VerificationFailedError
 from mpp.methods.evm import server as evm
 from mpp.methods.evm.client import AuthorizationConfig
-from mpp.methods.evm.intents import Authorization
+from mpp.methods.evm.intents import Authorization, _fallback_store
 from mpp.server.http import PaymentVerified, Request, Response, make_headers
 from mpp.server.mpp import Mpp
-from mpp.store import MemoryStore, Store
+from mpp.store import Store
 from mpp.x402._types import EIP3009, PAYMENT_REQUIRED_HEADER, PAYMENT_SIGNATURE_HEADER
 
 LEGACY_PAYMENT_SIGNATURE_HEADER = "X-PAYMENT"
@@ -70,8 +70,10 @@ class Negotiator:
         secret_key: Secret binding MPP challenge IDs (at least 32 bytes).
         realm: MPP challenge realm. Detected from the environment if omitted.
         paywall_config: Optional x402 paywall configuration.
+        paywall_provider: Optional x402 paywall provider for unpaid browser requests.
         store: Store claiming MPP authorizations before settlement, shared by every
-            worker and replica. Defaults to an in-process store.
+            worker and replica. Defaults to an in-process store whose claims expire
+            with their authorization.
     """
 
     def __init__(
@@ -82,6 +84,7 @@ class Negotiator:
         secret_key: str,
         realm: str | None = None,
         paywall_config: PaywallConfig | None = None,
+        paywall_provider: PaywallProvider | None = None,
         store: Store | None = None,
     ) -> None:
         if len(secret_key.encode()) < 32:
@@ -90,8 +93,10 @@ class Negotiator:
         self.secret_key = secret_key
         self.realm = realm
         self.paywall_config = paywall_config
-        self.store: Store = store if store is not None else MemoryStore()
+        self.store: Store = store if store is not None else _fallback_store()
         self.http_server = x402HTTPResourceServer(server, routes)
+        if paywall_provider is not None:
+            self.http_server.register_paywall_provider(paywall_provider)
         self._initialized = False
 
     async def negotiate(self, request: Request, context: HTTPRequestContext) -> Negotiation:
@@ -272,12 +277,16 @@ async def _settle(
         resource=payment_required.resource,
     )
     transport = HTTPTransportContext(request=context)
-    verified = await server.verify_payment(
-        payment,
-        requirement,
-        declared_extensions=payment_required.extensions,
-        transport_context=transport,
-    )
+    try:
+        verified = await server.verify_payment(
+            payment,
+            requirement,
+            declared_extensions=payment_required.extensions,
+            transport_context=transport,
+        )
+    except Exception as error:
+        # Nothing was broadcast: release the claim so the authorization isn't lost.
+        raise VerificationFailedError("x402 verification failed") from error
     if not verified.is_valid:
         raise VerificationFailedError(
             verified.verify.invalid_message
@@ -291,6 +300,10 @@ async def _settle(
         transport_context=transport,
     )
     if not settled.success:
+        if settled.error_reason == "settlement_pending":
+            # The transfer was broadcast and may still confirm: keep the claim and
+            # answer without a retry challenge so the payer isn't charged twice.
+            raise InternalPaymentError() from RuntimeError("x402 settlement is pending")
         raise VerificationFailedError(
             settled.error_message or settled.error_reason or "x402 settlement failed"
         )
