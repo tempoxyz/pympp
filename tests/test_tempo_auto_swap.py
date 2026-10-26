@@ -9,8 +9,13 @@ import pytest
 import rlp
 
 from mpp import Challenge
-from mpp.methods.tempo import CHAIN_ID, OUSD, PATH_USD, USDC, TempoAccount
-from mpp.methods.tempo.client import AutoSwap, InsufficientFundsError, _tempo_method
+from mpp.methods.tempo import CHAIN_ID, OUSD, PATH_USD, TESTNET_CHAIN_ID, USDC, TempoAccount
+from mpp.methods.tempo.client import (
+    AutoSwap,
+    InsufficientFundsError,
+    TransactionError,
+    _tempo_method,
+)
 from mpp.methods.tempo.intents import STABLECOIN_DEX, _validate_normalized_calls
 from mpp.methods.tempo.schemas import ChargeRequest
 
@@ -20,12 +25,17 @@ CURRENCY = "0x20c0000000000000000000000000000000000001"
 AMOUNT = 1_000_000
 
 
-def challenge() -> Challenge:
+# With a 1_000_000 gas limit, this gas price makes the fee 1_000 token units.
+GAS_PRICE = 10**9
+FEE = 1_000
+
+
+def challenge(currency: str = CURRENCY) -> Challenge:
     return Challenge(
         id="auto-swap",
         method="tempo",
         intent="charge",
-        request={"amount": str(AMOUNT), "currency": CURRENCY, "recipient": RECIPIENT},
+        request={"amount": str(AMOUNT), "currency": currency, "recipient": RECIPIENT},
     )
 
 
@@ -33,10 +43,16 @@ async def sign(
     auto_swap: bool | AutoSwap,
     balances: dict[str, int],
     quotes: dict[str, int | Exception],
+    *,
+    chain_id: int = CHAIN_ID,
+    currency: str = CURRENCY,
+    gas_estimates: list[list[dict[str, str]]] | None = None,
+    batch_gas: int = 200_000,
+    signed_fields: list[Any] | None = None,
 ) -> tuple[list[tuple[str, int, str]], str]:
     """Sign a charge and return its calls as (to, value, data) and its fee token."""
     method = _tempo_method(
-        account=ACCOUNT, chain_id=CHAIN_ID, rpc_url="https://rpc.test", auto_swap=auto_swap
+        account=ACCOUNT, chain_id=chain_id, rpc_url="https://rpc.test", auto_swap=auto_swap
     )
     lowered = {token.lower(): value for token, value in balances.items()}
     quoted_amounts: list[int] = []
@@ -52,7 +68,11 @@ async def sign(
             if isinstance(quote, Exception):
                 raise quote
             return hex(quote)
-        return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[name]
+        if name == "eth_estimateGas":
+            if gas_estimates is not None:
+                gas_estimates.append(params[0]["calls"])
+            return hex(batch_gas)
+        return {"eth_chainId": hex(chain_id), "eth_gasPrice": hex(GAS_PRICE)}[name]
 
     async def fake_balance(_url: str, token: str, address: str) -> int:
         assert address == ACCOUNT.address
@@ -63,11 +83,13 @@ async def sign(
         patch("mpp.methods.tempo.client._tip20_balance", side_effect=fake_balance),
         patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
     ):
-        credential = await method.create_credential(challenge())
-    # Every quote asks for the payer's shortfall in the charge currency.
-    shortfall = AMOUNT - lowered.get(CURRENCY.lower(), 0)
-    assert all(amount == shortfall for amount in quoted_amounts)
+        credential = await method.create_credential(challenge(currency))
+    # The first quote asks for the payer's shortfall in the charge currency.
+    shortfall = AMOUNT - lowered.get(currency.lower(), 0)
+    assert quoted_amounts[:1] in ([], [shortfall])
     fields = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
+    if signed_fields is not None:
+        signed_fields.extend(fields)
     calls = [
         ("0x" + to.hex(), int.from_bytes(value, "big"), "0x" + data.hex())
         for to, value, data in fields[4]
@@ -174,3 +196,65 @@ async def test_balance_must_cover_the_slippage_adjusted_input() -> None:
 
     assert calls[0][0] == USDC.lower()
     assert word(calls[0][2], 1) == word(calls[1][2], 3) == 1_010_000
+
+
+@pytest.mark.asyncio
+async def test_gas_limit_is_estimated_for_the_whole_swap_batch() -> None:
+    estimates: list[list[dict[str, str]]] = []
+    fields: list[Any] = []
+    calls, _ = await sign(
+        True,
+        {PATH_USD: 2_000_000},
+        {PATH_USD: 1_000_000},
+        gas_estimates=estimates,
+        batch_gas=1_500_000,
+        signed_fields=fields,
+    )
+
+    # One estimate covers approve, swap and transfer, so the limit exceeds the default.
+    assert [[call["to"] for call in batch] for batch in estimates] == [[to for to, _, _ in calls]]
+    # The signed gas limit (field 3) is the batch estimate plus headroom.
+    assert int.from_bytes(fields[3], "big") == 1_505_000
+
+
+@pytest.mark.asyncio
+async def test_fee_token_excludes_the_balance_the_swap_spends() -> None:
+    # pathUSD covers the swap's slippage maximum exactly, so the fee comes from USDC.e.
+    max_amount_in = 1_010_000
+    calls, fee_token = await sign(True, {PATH_USD: max_amount_in, USDC: FEE}, {PATH_USD: 1_000_000})
+
+    assert calls[0][0] == PATH_USD.lower()
+    assert fee_token == USDC.lower()
+
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await sign(True, {PATH_USD: max_amount_in + FEE - 1}, {PATH_USD: 1_000_000})
+
+
+@pytest.mark.asyncio
+async def test_fee_token_excludes_held_currency_the_payment_spends() -> None:
+    # Half the pathUSD charge is held and committed to the transfer: USDC.e pays the fee.
+    held = AMOUNT // 2
+    calls, fee_token = await sign(
+        True, {PATH_USD: held, USDC: 2_000_000}, {USDC: held}, currency=PATH_USD
+    )
+
+    assert calls[0][0] == USDC.lower()
+    assert word(calls[1][2], 2) == AMOUNT - held
+    assert fee_token == USDC.lower()
+
+
+@pytest.mark.asyncio
+async def test_buys_the_fee_when_the_held_currency_is_the_only_fee_token() -> None:
+    # On Moderato only pathUSD pays fees, so the swap also buys the fee it takes.
+    held = AMOUNT // 2
+    calls, fee_token = await sign(
+        True,
+        {PATH_USD: held, USDC: 2_000_000},
+        {USDC: held + FEE},
+        chain_id=TESTNET_CHAIN_ID,
+        currency=PATH_USD,
+    )
+
+    assert calls[0][0] == USDC.lower()
+    assert word(calls[1][2], 2) == AMOUNT - held + FEE
+    assert fee_token == PATH_USD.lower()

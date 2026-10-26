@@ -255,22 +255,37 @@ class TempoMethod:
         chain_id: int,
         rpc_url: str,
         required_balance: int,
+        reserved: dict[str, int] | None = None,
     ) -> str:
-        """Return a stablecoin that can cover the transaction fee."""
+        """Return a stablecoin that can cover the transaction fee.
+
+        ``reserved`` maps lowercase token addresses to balance the transaction's
+        calls already spend, which is not available for fees.
+        """
         for token in fee_tokens_for_chain(chain_id):
+            spent = (reserved or {}).get(token.lower(), 0)
             try:
-                if await _tip20_balance(rpc_url, token, account) >= required_balance:
+                if await _tip20_balance(rpc_url, token, account) - spent >= required_balance:
                     return token
             except Exception:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
     async def _find_swap_calls(
-        self, *, account: str, amount_out: int, token_out: str, rpc_url: str
-    ) -> list[tuple[str, str]]:
+        self,
+        *,
+        account: str,
+        amount_out: int,
+        token_out: str,
+        rpc_url: str,
+        fee_headroom: int = 0,
+    ) -> tuple[list[tuple[str, str]], dict[str, int]]:
         """Return ``(to, data)`` approve and swap calls that top ``token_out`` up to ``amount_out``.
 
-        Returns no calls when ``account`` already holds enough ``token_out``.
+        Also returns the balance each token's calls spend, keyed by lowercase
+        address. ``fee_headroom`` buys that much more ``token_out`` so the
+        payer's existing balance can pay the transaction fee. Returns no calls
+        when ``account`` already holds enough ``token_out``.
 
         Raises:
             InsufficientFundsError: When no fallback currency can fund the swap.
@@ -289,10 +304,10 @@ class TempoMethod:
             return_exceptions=True,
         )
         held = 0 if isinstance(target, BaseException) else target
-        if held >= amount_out:
-            return []
+        if held >= amount_out + fee_headroom:
+            return [], {}
         # Buy only the shortfall; the payer's existing balance covers the rest.
-        deficit = amount_out - held
+        deficit = amount_out + fee_headroom - held
         slippage_bps = math.floor(self.auto_swap.slippage * 100 + 0.5)
         for token_in, balance in zip(candidates, balances, strict=True):
             if isinstance(balance, BaseException) or balance <= 0:
@@ -311,7 +326,7 @@ class TempoMethod:
             # The swap may spend up to the slippage-adjusted maximum.
             if balance < max_amount_in:
                 continue
-            return [
+            calls = [
                 (token_in, f"0x{APPROVE_SELECTOR}" + _abi_words(STABLECOIN_DEX, max_amount_in)),
                 (
                     STABLECOIN_DEX,
@@ -319,6 +334,11 @@ class TempoMethod:
                     + _abi_words(token_in, token_out, deficit, max_amount_in),
                 ),
             ]
+            spent = {
+                token_in.lower(): max_amount_in,
+                token_out.lower(): max(0, amount_out - deficit),
+            }
+            return calls, spent
         raise InsufficientFundsError(token_out)
 
     def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
@@ -614,15 +634,17 @@ class TempoMethod:
         # sender, not the access key address.
         sender = self.root_account if self.root_account else self.account.address
 
+        transfer_calls = calls_tuple
         swapping = False
+        swap_spent: dict[str, int] = {}
         if self.auto_swap is not None:
-            swap_calls = await self._find_swap_calls(
+            swap_calls, swap_spent = await self._find_swap_calls(
                 account=sender, amount_out=int(amount), token_out=currency, rpc_url=resolved_rpc
             )
             swapping = bool(swap_calls)
             calls_tuple = (
                 *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
-                *calls_tuple,
+                *transfer_calls,
             )
 
         chain_id = await self._get_chain_id(resolved_rpc)
@@ -641,9 +663,28 @@ class TempoMethod:
 
         gas_limit = DEFAULT_GAS_LIMIT
         try:
-            if splits:
+            if swapping:
+                # Estimate the whole batch: the transfers alone run before the swap funds them.
+                batch = [
+                    {
+                        "to": "0x" + bytes(c.to).hex(),
+                        "value": hex(c.value),
+                        "data": "0x" + c.data.hex(),
+                    }
+                    for c in calls_tuple
+                ]
+                estimated = int(
+                    await _rpc_call(
+                        resolved_rpc,
+                        "eth_estimateGas",
+                        [{"from": sender, "calls": batch}, "latest"],
+                    ),
+                    16,
+                )
+                gas_limit = max(gas_limit, estimated + 5_000)
+            elif splits:
                 total_estimated = 0
-                for c in calls_tuple[2 if swapping else 0 :]:
+                for c in calls_tuple:
                     total_estimated += await estimate_gas(
                         resolved_rpc, sender, currency, c.data.hex()
                     )
@@ -665,12 +706,38 @@ class TempoMethod:
                     (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
                     // ATTODOLLARS_PER_MICRODOLLAR,
                 )
-                fee_token = await self._resolve_supported_fee_token(
-                    account=sender,
-                    chain_id=chain_id,
-                    rpc_url=resolved_rpc,
-                    required_balance=required_balance,
-                )
+                try:
+                    fee_token = await self._resolve_supported_fee_token(
+                        account=sender,
+                        chain_id=chain_id,
+                        rpc_url=resolved_rpc,
+                        required_balance=required_balance,
+                        reserved=swap_spent,
+                    )
+                except TransactionError:
+                    if not swapping or currency.lower() not in (
+                        t.lower() for t in fee_tokens_for_chain(chain_id)
+                    ):
+                        raise
+                    # The payment spends all the currency the payer holds: buy the fee too.
+                    swap_calls, swap_spent = await self._find_swap_calls(
+                        account=sender,
+                        amount_out=int(amount),
+                        token_out=currency,
+                        rpc_url=resolved_rpc,
+                        fee_headroom=required_balance,
+                    )
+                    calls_tuple = (
+                        *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
+                        *transfer_calls,
+                    )
+                    fee_token = await self._resolve_supported_fee_token(
+                        account=sender,
+                        chain_id=chain_id,
+                        rpc_url=resolved_rpc,
+                        required_balance=required_balance,
+                        reserved=swap_spent,
+                    )
 
         tx = TempoTransaction.create(
             chain_id=chain_id,

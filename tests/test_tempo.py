@@ -3842,6 +3842,47 @@ class TestCosignAsFeePayer:
         with pytest.raises(VerificationError, match="malformed swap call data"):
             intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
 
+    def test_cosign_rejects_swap_amount_over_uint128(self) -> None:
+        """Should reject swap amounts the uint128 DEX ABI cannot represent."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        too_large = 2**128
+        raw_tx = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to="0x0000000000000000000000000000000000000003",
+                    value=0,
+                    data=self._encode_approve_data(STABLECOIN_DEX, too_large),
+                ),
+                Call.create(
+                    to=STABLECOIN_DEX,
+                    value=0,
+                    data=self._encode_swap_data(
+                        "0x0000000000000000000000000000000000000003",
+                        "0x20c0000000000000000000000000000000000000",
+                        1000000,
+                        too_large,
+                    ),
+                ),
+                Call.create(
+                    to="0x20c0000000000000000000000000000000000000",
+                    value=0,
+                    data=self._encode_transfer_data(
+                        "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00", 1000000
+                    ),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency="0x20c0000000000000000000000000000000000000",
+            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+        )
+
+        with pytest.raises(VerificationError, match="malformed swap call data"):
+            intent._cosign_as_fee_payer(raw_tx, request.currency, request=request)
+
     def test_cosign_rejects_gas_over_policy(self) -> None:
         """Should reject sponsored transactions above the gas limit policy."""
         intent = self._make_intent()
