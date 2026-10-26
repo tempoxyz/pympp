@@ -279,13 +279,15 @@ class TempoMethod:
         token_out: str,
         rpc_url: str,
         fee_headroom: int = 0,
+        token_in: str | None = None,
     ) -> tuple[list[tuple[str, str]], dict[str, int]]:
         """Return ``(to, data)`` approve and swap calls that top ``token_out`` up to ``amount_out``.
 
         Also returns the balance each token's calls spend, keyed by lowercase
         address. ``fee_headroom`` buys that much more ``token_out`` so the
-        payer's existing balance can pay the transaction fee. Returns no calls
-        when ``account`` already holds enough ``token_out``.
+        payer's existing balance can pay the transaction fee. ``token_in``
+        limits the swap to that one fallback currency. Returns no calls when
+        ``account`` already holds enough ``token_out``.
 
         Raises:
             InsufficientFundsError: When no fallback currency can fund the swap.
@@ -297,7 +299,12 @@ class TempoMethod:
         )
 
         assert self.auto_swap is not None
-        candidates = [t for t in self.auto_swap.currencies() if t.lower() != token_out.lower()]
+        candidates = [
+            t
+            for t in self.auto_swap.currencies()
+            if t.lower() != token_out.lower()
+            and (token_in is None or t.lower() == token_in.lower())
+        ]
         target, *balances = await asyncio.gather(
             _tip20_balance(rpc_url, token_out, account),
             *(_tip20_balance(rpc_url, token, account) for token in candidates),
@@ -749,6 +756,27 @@ class TempoMethod:
                         required_balance=required_balance,
                         reserved=swap_spent,
                     )
+                    if fee_token.lower() != currency.lower():
+                        # The rebuild freed another fee token: buy only the payment from
+                        # the same token_in, since the swap may not exceed the charge.
+                        swap_calls, swap_spent = await self._find_swap_calls(
+                            account=sender,
+                            amount_out=int(amount),
+                            token_out=currency,
+                            rpc_url=resolved_rpc,
+                            token_in=swap_calls[0][0],
+                        )
+                        calls_tuple = (
+                            *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
+                            *transfer_calls,
+                        )
+                        fee_token = await self._resolve_supported_fee_token(
+                            account=sender,
+                            chain_id=chain_id,
+                            rpc_url=resolved_rpc,
+                            required_balance=required_balance,
+                            reserved=swap_spent,
+                        )
 
         tx = TempoTransaction.create(
             chain_id=chain_id,

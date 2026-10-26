@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -42,7 +43,7 @@ def challenge(currency: str = CURRENCY) -> Challenge:
 async def sign(
     auto_swap: bool | AutoSwap,
     balances: dict[str, int],
-    quotes: dict[str, int | Exception],
+    quotes: dict[str, int | Exception | Callable[[int], int]],
     *,
     chain_id: int = CHAIN_ID,
     currency: str = CURRENCY,
@@ -72,6 +73,8 @@ async def sign(
             quote = {t.lower(): q for t, q in quotes.items()}[token_in]
             if isinstance(quote, Exception):
                 raise quote
+            if callable(quote):
+                quote = quote(quoted_amounts[-1])
             return hex(quote)
         if name == "eth_estimateGas":
             if gas_estimates is not None:
@@ -263,6 +266,29 @@ async def test_buys_the_fee_when_the_held_currency_is_the_only_fee_token() -> No
     assert calls[0][0] == USDC.lower()
     assert word(calls[1][2], 2) == AMOUNT - held + FEE
     assert fee_token == PATH_USD.lower()
+
+
+@pytest.mark.asyncio
+async def test_fee_headroom_swap_never_buys_more_than_the_charge() -> None:
+    # pathUSD covers the payment's swap but not the swap that also buys the fee, so the
+    # fee rebuild moves to OUSD. That frees pathUSD to pay the fee, so the swap buys only
+    # the charge: the server rejects a swap output above the payment.
+    def one_to_one(amount: int) -> int:
+        return amount
+
+    calls, fee_token = await sign(
+        AutoSwap(token_in=[PATH_USD, OUSD]),
+        {PATH_USD: 1_010_000 + FEE // 2, OUSD: 2_000_000},
+        {PATH_USD: one_to_one, OUSD: one_to_one},
+        currency=USDC,
+    )
+
+    assert calls[0][0] == OUSD.lower()
+    assert word(calls[1][2], 2) == AMOUNT
+    assert fee_token == PATH_USD.lower()
+    request = ChargeRequest(amount=str(AMOUNT), currency=USDC, recipient=RECIPIENT)
+    normalized = [(to, value, data.removeprefix("0x")) for to, value, data in calls]
+    assert len(_validate_normalized_calls(normalized, request)) == 1
 
 
 @pytest.mark.asyncio
