@@ -23,9 +23,9 @@ jobs:
       - name: Install changelogs
         run: |
           mkdir -p "$HOME/.local/bin"
-          curl -fsSL "https://github.com/wevm/changelogs-rs/releases/download/changelogs%400.6.3/changelogs-linux-amd64" \
+          curl -fsSL "https://github.com/tempoxyz/changelogs/releases/download/v0.11.0/changelogs-linux-amd64" \
             -o "$HOME/.local/bin/changelogs"
-          echo "d4168ee68b612224a26a39e86bfd2c923ac3dd2de12ee43d2bb65a5ea19df6b6  $HOME/.local/bin/changelogs" | sha256sum -c
+          echo "eefb2decb9dea1e09f8a9a3935d76dfd501a8bbd3b823dd913132bbaf8e1c0dd  $HOME/.local/bin/changelogs" | sha256sum -c
           chmod +x "$HOME/.local/bin/changelogs"
       - name: Generate changelog
         env:
