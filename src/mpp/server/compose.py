@@ -322,8 +322,15 @@ class ComposedHandler:
 
     @property
     def needs_request_body(self) -> bool:
-        """Whether an offer's ``body`` option is a callable reading the request."""
-        return any(callable(offer.options.get("body")) for offer in self._offers)
+        """Whether an offer reads the request body.
+
+        True when an offer's ``body`` option is a callable reading the request, or its
+        method's ``resolve_request`` reads it (:attr:`ServerMethod.needs_request_body`).
+        """
+        return any(
+            callable(offer.options.get("body")) or offer.method.needs_request_body
+            for offer in self._offers
+        )
 
     @property
     def methods(self) -> tuple[ServerMethod, ...]:

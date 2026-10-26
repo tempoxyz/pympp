@@ -22,12 +22,16 @@ HeadersInput: TypeAlias = httpx.Headers | Mapping[str, str] | Sequence[tuple[str
 
 
 def make_headers(headers: HeadersInput = None) -> httpx.Headers:
-    """Build case-insensitive, multi-value headers."""
+    """Build case-insensitive, multi-value headers.
+
+    String values are latin-1 encoded, as HTTP servers decode header bytes, so any
+    header a framework accepted round-trips.
+    """
     if isinstance(headers, httpx.Headers):
-        return httpx.Headers(headers.multi_items())
+        return httpx.Headers(headers.raw, encoding=headers.encoding)
     if isinstance(headers, Mapping):
-        return httpx.Headers(list(headers.items()))
-    return httpx.Headers(list(headers or ()))
+        return httpx.Headers(list(headers.items()), encoding="latin-1")
+    return httpx.Headers(list(headers or ()), encoding="latin-1")
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -73,8 +77,11 @@ class Request:
         scope = {"http_method": self.method}
         if self.route:
             scope["route"] = self.route
-        if url.path:
-            scope["resource"] = url.path
+        # The percent-encoded path: decoding would merge distinct paths, such as
+        # /a%2Fb and /a/b, into one signed scope.
+        resource = url.raw_path.split(b"?", 1)[0].decode("ascii")
+        if resource:
+            scope["resource"] = resource
         query = url.query.decode("latin-1")
         if query:
             scope["query"] = query

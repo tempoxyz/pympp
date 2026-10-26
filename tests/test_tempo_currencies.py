@@ -648,7 +648,7 @@ class TestEndToEnd:
         )
 
         credential = await _sign(client, offers[index])
-        validation = await server.validate_credential(credential)
+        validation = await server.validate_credential(credential, request={"amount": "0.50"})
 
         assert validation.request["currency"] == currency
         assert validation.details["mode"] == "pull"
@@ -670,7 +670,7 @@ class TestEndToEnd:
         )
 
         with pytest.raises(VerificationError):
-            await server.validate_credential(mismatched)
+            await server.validate_credential(mismatched, request={"amount": "0.50"})
 
 
 # ──────────────────────────────────────────────────────────────────

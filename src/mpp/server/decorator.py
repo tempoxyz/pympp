@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import httpx
+
 from mpp.server.http import PaymentRequired, Request, Response
 from mpp.x402._server import X402Input
 from mpp.x402._types import PAYMENT_SIGNATURE_HEADER
@@ -53,7 +55,20 @@ def get_request_url(request: Any) -> str | None:
     if url is None:
         return None
     text = str(url)
-    return text if text.startswith(("http://", "https://")) else None
+    if not text.startswith(("http://", "https://")):
+        return None
+    # Starlette rebuilds the URL from the decoded path; take the path from ASGI raw_path
+    # so encoded delimiters such as %2F stay distinct from the characters they encode.
+    scope = getattr(request, "scope", None)
+    raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
+    if isinstance(raw_path, bytes) and raw_path:
+        try:
+            parsed = httpx.URL(text)
+            query = parsed.query
+            text = str(parsed.copy_with(raw_path=raw_path + (b"?" + query if query else b"")))
+        except (httpx.InvalidURL, UnicodeError):
+            pass
+    return text
 
 
 def x402_input(request: Any) -> X402Input | None:
@@ -91,7 +106,9 @@ def framework_scope(request: Any) -> dict[str, str]:
                         if isinstance(matched_path, str) and matched_path:
                             scope["route"] = matched_path
                         break
-        path = raw_scope.get("path")
+        # ASGI raw_path keeps percent-encoding, so distinct paths keep distinct scopes.
+        path = raw_scope.get("raw_path")
+        path = path.decode("latin-1") if isinstance(path, bytes) else raw_scope.get("path")
         if isinstance(path, str) and path:
             scope["resource"] = path
         query_string = raw_scope.get("query_string")

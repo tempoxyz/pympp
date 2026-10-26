@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping, Sequence
-from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -38,6 +37,7 @@ from mpp.server.method import (
     ServerMethod,
     ValidateContext,
     VerifyContext,
+    resolve,
 )
 from mpp.server.verify import (
     _application_meta,
@@ -113,11 +113,18 @@ def _select(methods: Sequence[ServerMethod], options: Mapping[str, Any]) -> list
         method
         for method in methods
         if not any(
-            options.get(key) is not None and options[key] != value
+            options.get(key) is not None and not _same(key, options[key], value)
             for key, value in (method.defaults or {}).items()
         )
     ]
     return selected or [methods[0]]
+
+
+def _same(key: str, value: Any, other: Any) -> bool:
+    """Whether two option values agree; currency addresses compare case-insensitively."""
+    if key == "currency" and isinstance(value, str) and isinstance(other, str):
+        return value.lower() == other.lower()
+    return value == other
 
 
 def _check_input(method: ServerMethod, options: Mapping[str, Any]) -> None:
@@ -305,7 +312,7 @@ class Mpp:
 
         self._events.on(PAYMENT_SUCCESS, dispatch)
 
-    def _prepare_credential(
+    async def _prepare_credential(
         self,
         value: Credential | str,
         *,
@@ -349,33 +356,54 @@ class Mpp:
 
         echoed = _comparable(echoed_request)
         if request is None:
-            method = _select_echoed(candidates, echoed_request, echo.id)
+            # Methods sharing a name and intent may settle through different replay
+            # stores: without the route's request, never guess which one issued it,
+            # unless they all settle the same way (copies from one configuration).
+            if len(candidates) > 1 and not _settle_alike(candidates):
+                raise InvalidChallengeError(echo.id, _SEVERAL_METHODS)
+            method = _select(candidates, {"currency": echoed_request.get("currency")})[0]
         else:
             # Read `request` as route input first. Only when no method accepts it as
             # route input is it compared as the echoed wire request (the 0.15 form), so an
             # input that reads both ways, such as `amount` in display or base units, is
             # always checked in its stricter route-input reading.
             matching: list[ServerMethod] = []
+            scopes: dict[int, Any] = {}
             normalized = False
+            expected_scope: Any = None
+            wire_scope = False
             for candidate in candidates:
                 try:
-                    expected = _expected_request(candidate, request, parsed=credential)
-                except _AsyncResolveRequestError:
-                    raise
+                    expected = await _expected_request(candidate, request, parsed=credential)
                 except (ValidationError, TypeError, ValueError):
                     # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True
-                if expected == echoed:
+                if _comparable(expected) == echoed:
                     matching.append(candidate)
-            if normalized:
-                if not matching:
-                    raise InvalidChallengeError(echo.id, "credential request does not match")
-                method = matching[0]
-            elif _comparable(request) == echoed:
-                method = _select_echoed(candidates, echoed_request, echo.id)
-            else:
+                    scopes[id(candidate)] = expected.get("_mppx_scope")
+            if not normalized and _comparable(request) == echoed:
+                # The wire form matches every candidate alike.
+                matching = list(candidates)
+                expected_scope = request.get("_mppx_scope")
+                wire_scope = True
+            if not matching:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
+            if len(matching) > 1 and not _settle_alike(matching):
+                raise InvalidChallengeError(
+                    echo.id,
+                    "credential matches several configured methods; "
+                    "they cannot be told apart by request",
+                )
+            method = _select(matching, request)[0]
+            if normalized:
+                # Route issuance binds the normalized input's scope, including one the
+                # method's resolve_request derives.
+                expected_scope = scopes[id(method)]
+            if not _custom_scope_matches(
+                expected_scope, echoed_request.get("_mppx_scope"), wire=wire_scope
+            ):
+                raise InvalidChallengeError(echo.id, "credential scope does not match")
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
             raise TypeError(f"unsupported method option: {unsupported[0]}")
@@ -435,7 +463,12 @@ class Mpp:
                 request to match. Accepts either the route input (such as
                 ``{"amount": "0.50"}``, normalized like a route's options) or
                 the echoed wire request itself (base-unit ``amount``,
-                ``methodDetails``; ``_mppx_scope`` is ignored).
+                ``methodDetails``). Its ``_mppx_scope``, when given or derived
+                by the method, must match the challenge's custom scope.
+                Required when several separately configured methods share the
+                credential's name and intent: it must then match exactly one of
+                them. Copies from one configuration, such as one ``tempo.charge()``
+                per accepted currency, share a verifier and settle without it.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -454,7 +487,7 @@ class Mpp:
             VerificationFailedError: If the intent does not support
                 non-mutating validation or rejects the credential.
         """
-        prepared, method, input, challenge = self._prepare_credential(
+        prepared, method, input, challenge = await self._prepare_credential(
             credential,
             intent=intent,
             request=request,
@@ -499,7 +532,12 @@ class Mpp:
                 request to match. Accepts either the route input (such as
                 ``{"amount": "0.50"}``, normalized like a route's options) or
                 the echoed wire request itself (base-unit ``amount``,
-                ``methodDetails``; ``_mppx_scope`` is ignored).
+                ``methodDetails``). Its ``_mppx_scope``, when given or derived
+                by the method, must match the challenge's custom scope.
+                Required when several separately configured methods share the
+                credential's name and intent: it must then match exactly one of
+                them. Copies from one configuration, such as one ``tempo.charge()``
+                per accepted currency, share a verifier and settle without it.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -515,7 +553,7 @@ class Mpp:
         """
         parsed = self._parse_credential(credential)
         try:
-            prepared, method, input, challenge = self._prepare_credential(
+            prepared, method, input, challenge = await self._prepare_credential(
                 parsed,
                 intent=intent,
                 request=request,
@@ -568,11 +606,7 @@ class Mpp:
         return receipt
 
 
-class _AsyncResolveRequestError(TypeError):
-    """A method's resolve_request is async where a synchronous one is required."""
-
-
-def _expected_request(
+async def _expected_request(
     method: ServerMethod, request: Mapping[str, Any], *, parsed: Credential
 ) -> dict[str, Any]:
     input = {
@@ -580,15 +614,10 @@ def _expected_request(
         **{key: value for key, value in request.items() if value is not None},
     }
     if method.resolve_request is not None:
-        resolved = method.resolve_request(RequestContext(request=input, credential=parsed))
-        if inspect.isawaitable(resolved):
-            if inspect.iscoroutine(resolved):
-                resolved.close()
-            raise _AsyncResolveRequestError(
-                "validate_credential(request=...) needs a synchronous resolve_request"
-            )
-        input = resolved
-    return _comparable(method.method.normalize_request(input))
+        input = await resolve(
+            method.resolve_request(RequestContext(request=input, credential=parsed))
+        )
+    return method.method.normalize_request(input)
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
@@ -596,141 +625,41 @@ def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in request.items() if key != "_mppx_scope"}
 
 
-_IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
+def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
+    """Whether the application-defined scope a caller expects matches the echoed scope.
 
-
-def _select_echoed(
-    candidates: Sequence[ServerMethod], echoed: Mapping[str, Any], challenge_id: str
-) -> ServerMethod:
-    """Choose the configured method copy whose configuration issued an echoed request.
-
-    Copies of one method (such as one per currency, or per chain) must agree with
-    the echo's currency and chain; among those left, the copy whose configuration
-    agrees with the rest of the echo wins. Copies left with different
-    configurations are ambiguous.
+    Route issuance binds the method input's ``_mppx_scope`` under the signed scope's
+    ``custom`` key next to engine route fields. Route input (``wire=False``) names
+    the custom scope itself, compared as it is; a wire request (``wire=True``) names a
+    whole signed scope, whose ``custom`` key is compared. Engine route fields are not
+    checked, and a caller naming no scope checks none.
     """
-    if len(candidates) == 1:
-        return candidates[0]
-    probes = {id(candidate): _probe(candidate) for candidate in candidates}
-    matching: list[ServerMethod] = []
-    # A route may override the currency or chain: like route selection, fall back to
-    # the copies agreeing on the rest, then to the first copy. Overridden fields no
-    # longer tell copies apart.
-    for paths, use_defaults in (
-        (_IDENTITY_PATHS, True),
-        (_IDENTITY_PATHS[:1], True),
-        (_IDENTITY_PATHS[1:], False),
-    ):
-        matching = [
-            candidate
-            for candidate in candidates
-            if _agrees(candidate, probes[id(candidate)], echoed, paths, defaults=use_defaults)
-        ]
-        if matching:
-            overridden = [path for path in _IDENTITY_PATHS if path not in paths]
-            probes = {key: _without(probe, overridden) for key, probe in probes.items()}
-            break
-    if not matching:
-        return candidates[0]
-    if len(matching) > 1:
-        narrowed = [
-            candidate
-            for candidate in matching
-            if (probe := probes[id(candidate)]) is not None
-            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
-        ]
-        matching = narrowed or matching
-    if len(matching) > 1:
-        configs = [probes[id(candidate)] for candidate in matching]
-        if configs[0] is None or any(config != configs[0] for config in configs):
-            raise InvalidChallengeError(
-                challenge_id,
-                "credential matches several configured methods; pass request= to select one",
-            )
-    return matching[0]
+    if expected is None:
+        return True
+    custom = echoed.get("custom") if isinstance(echoed, Mapping) else None
+    if wire:
+        return isinstance(expected, Mapping) and expected.get("custom") == custom
+    # A method whose model passes the whole wire through names the whole signed scope.
+    return expected == custom or expected == echoed
 
 
-def _probe(method: ServerMethod) -> dict[str, Any] | None:
-    """The wire request a method's configuration produces for a nominal amount."""
-    input: dict[str, Any] = {
-        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
-        "amount": "1",
-    }
-    try:
-        if method.resolve_request is not None:
-            resolved = method.resolve_request(RequestContext(request=input))
-            if inspect.isawaitable(resolved):
-                if inspect.iscoroutine(resolved):
-                    resolved.close()
-                return None
-            input = resolved
-        wire = method.method.normalize_request(input)
-    except Exception:
-        return None
-    return {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+def _settle_alike(methods: Sequence[ServerMethod]) -> bool:
+    """Whether methods share their settlement hooks, so any of them settles alike.
+
+    Copies one configuration produces, such as one per accepted currency, share their
+    hooks and so their verifier and replay store; separately configured methods don't.
+    Hooks compare with ``==``, so bound methods of one object (``intent.verify``) count as shared.
+    """
+    first = methods[0]
+    return all(
+        method.verify == first.verify
+        and method.validate == first.validate
+        and method.broadcast == first.broadcast
+        for method in methods[1:]
+    )
 
 
-def _without(
-    probe: dict[str, Any] | None, paths: Sequence[tuple[str, ...]]
-) -> dict[str, Any] | None:
-    """A probe without the given paths."""
-    if probe is None or not paths:
-        return probe
-    result = deepcopy(probe)
-    for path in paths:
-        parent = _at(result, path[:-1])
-        if isinstance(parent, dict):
-            parent.pop(path[-1], None)
-    return result
-
-
-def _leaves(value: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
-    paths: list[tuple[str, ...]] = []
-    for key, item in value.items():
-        if isinstance(item, Mapping):
-            paths.extend(_leaves(item, (*prefix, key)))
-        else:
-            paths.append((*prefix, key))
-    return paths
-
-
-_MISSING: Any = object()
-
-
-def _at(value: Any, path: tuple[str, ...]) -> Any:
-    for key in path:
-        if not isinstance(value, Mapping) or key not in value:
-            return _MISSING
-        value = value[key]
-    return value
-
-
-def _agrees(
-    method: ServerMethod,
-    probe: Mapping[str, Any] | None,
-    echoed: Mapping[str, Any],
-    paths: Sequence[tuple[str, ...]],
-    *,
-    defaults: bool = True,
-) -> bool:
-    """Whether the method's defaults and probed configuration agree with the echo."""
-    expected: dict[tuple[str, ...], Any] = {
-        (key,): value
-        for key, value in ((method.defaults or {}) if defaults else {}).items()
-        if value is not None
-    }
-    if probe is not None:
-        expected.update((path, _at(probe, path)) for path in paths)
-    for path, value in expected.items():
-        echoed_value = _at(echoed, path)
-        if value is _MISSING or echoed_value is _MISSING:
-            continue
-        if isinstance(value, str) and isinstance(echoed_value, str):
-            if value.lower() != echoed_value.lower():
-                return False
-        elif value != echoed_value:
-            return False
-    return True
+_SEVERAL_METHODS = "credential matches several configured methods; pass request= to select one"
 
 
 def _flatten(methods: Any) -> tuple[ServerMethod, ...]:
