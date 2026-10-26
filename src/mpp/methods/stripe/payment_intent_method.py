@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import Annotated, Any
@@ -11,7 +12,7 @@ from pydantic import AfterValidator, BaseModel, Field, create_model
 from mpp import Credential, Receipt
 from mpp.methods.stripe.analytics import merge_metadata
 from mpp.methods.stripe.payment_intent_options import prepare_options, resolve_options
-from mpp.server.method import ServerMethod, VerifyContext
+from mpp.server.method import RequestContext, ServerMethod, VerifyContext
 
 RecordPayment = Callable[
     [Credential, dict[str, Any], Receipt, dict[str, Any], dict[str, str]], Awaitable[None]
@@ -60,10 +61,38 @@ def with_payment_intent_input(
     return replace(
         method,
         method=replace(definition, request_model=request_model),
+        resolve_request=_without_options(method.resolve_request),
         verify=verify if method.verify is not None else None,
         broadcast=broadcast if method.broadcast is not None else None,
         credential_options=(*method.credential_options, "payment_intent_options"),
     )
+
+
+def _without_options(
+    resolve: Callable[[RequestContext], dict[str, Any] | Awaitable[dict[str, Any]]] | None,
+) -> Callable[[RequestContext], dict[str, Any] | Awaitable[dict[str, Any]]] | None:
+    """Hide ``payment_intent_options`` from the rail's own request resolution."""
+    if resolve is None:
+        return None
+    key = "payment_intent_options"
+
+    def split(context: RequestContext) -> tuple[RequestContext, dict[str, Any]]:
+        request = dict(context.request)
+        extra = {key: request.pop(key)} if key in request else {}
+        return replace(context, request=request), extra
+
+    def resolve_request(context: RequestContext) -> dict[str, Any] | Awaitable[dict[str, Any]]:
+        inner, extra = split(context)
+        resolved = resolve(inner)
+        if not inspect.isawaitable(resolved):
+            return {**resolved, **extra}
+
+        async def merge(pending: Awaitable[dict[str, Any]]) -> dict[str, Any]:
+            return {**await pending, **extra}
+
+        return merge(resolved)
+
+    return resolve_request
 
 
 def _native(credential: Credential) -> Credential:
