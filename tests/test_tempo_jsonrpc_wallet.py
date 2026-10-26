@@ -1,15 +1,18 @@
 """Tests for paying Tempo charges with a JSON-RPC wallet account."""
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from mpp import Challenge
+from mpp.errors import PaymentOutcomeUnknownError
 from mpp.methods.tempo import JsonRpcAccount
 from mpp.methods.tempo import client as tempo
 from mpp.methods.tempo._rpc import RpcError
-from mpp.methods.tempo._wallet import send_calls_sync
+from mpp.methods.tempo._wallet import CallsStatusError, send_calls_sync
 from mpp.methods.tempo.client import _tempo_method
 from mpp.runtime import CredentialParams
 
@@ -17,6 +20,10 @@ WALLET = "0x00000000000000000000000000000000000000aa"
 CURRENCY = "0x20c0000000000000000000000000000000000000"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 TX_HASH = "0x" + "ab" * 32
+
+
+def _expires_in(seconds: float) -> str:
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
 
 
 def _challenge(**method_details: Any) -> Challenge:
@@ -32,6 +39,7 @@ def _challenge(**method_details: Any) -> Challenge:
         },
         realm="api.example.com",
         request_b64="e30",
+        expires=_expires_in(300),
     )
 
 
@@ -365,3 +373,87 @@ def test_transaction_hash_reads_push_credential() -> None:
     )
 
     assert _tempo_method(account=JsonRpcAccount(WALLET)).transaction_hash(credential) == TX_HASH
+
+
+def _with_expires(challenge: Challenge, expires: str | None) -> Challenge:
+    return Challenge(
+        id=challenge.id,
+        method=challenge.method,
+        intent=challenge.intent,
+        request=challenge.request,
+        realm=challenge.realm,
+        request_b64=challenge.request_b64,
+        expires=expires,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires", [None, "not-a-date"])
+async def test_push_refuses_a_challenge_without_valid_expires(expires: str | None) -> None:
+    wallet = FakeWallet()
+
+    with pytest.raises(ValueError, match="no valid expires"):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _with_expires(_challenge(), expires))
+    assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+async def test_push_rechecks_expiry_after_fee_token_resolution() -> None:
+    import time
+
+    from mpp.errors import PaymentExpiredError
+    from mpp.methods.tempo._defaults import OUSD
+
+    wallet = FakeWallet()
+    challenge = _with_expires(_challenge(), _expires_in(20))
+    challenge.request["currency"] = OUSD
+    clock = {"offset": 0.0}
+
+    async def slow_balance(*args: Any, **kwargs: Any) -> int:
+        clock["offset"] = 10.0  # The balance lookups take 10s.
+        return 10**6
+
+    with (
+        patch("mpp.methods.tempo.client._tip20_balance", new=slow_balance),
+        patch(
+            "mpp.methods.tempo.client.time",
+            new=SimpleNamespace(time=lambda: time.time() + clock["offset"]),
+        ),
+        pytest.raises(PaymentExpiredError),
+    ):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_status_failure_after_sending_is_an_unknown_outcome(fallback: bool) -> None:
+    unavailable = RpcError({"code": -32603, "message": "Internal error"})
+    if fallback:
+        wallet = FakeWallet(
+            wallet_sendCalls=RpcError({"code": -32601, "message": "Method not found"}),
+            eth_sendTransaction=TX_HASH,
+            eth_getTransactionReceipt=unavailable,
+        )
+    else:
+        wallet = FakeWallet(wallet_sendCalls="bundle-7", wallet_getCallsStatus=unavailable)
+
+    with (
+        patch("mpp.methods.tempo._wallet._STATUS_RETRY_COUNT", 0),
+        pytest.raises(PaymentOutcomeUnknownError) as error,
+    ):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+    assert error.value.transaction_hash == (TX_HASH if fallback else None)
+    assert isinstance(error.value.cause, CallsStatusError)
+    assert error.value.cause.id == (TX_HASH if fallback else "bundle-7")
+
+
+@pytest.mark.asyncio
+async def test_push_refuses_a_malformed_recipient() -> None:
+    wallet = FakeWallet()
+    challenge = _challenge()
+    challenge.request["recipient"] = "0x1234"
+
+    with pytest.raises(ValueError, match="Invalid recipient address"):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert wallet.requests == []

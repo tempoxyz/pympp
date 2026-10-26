@@ -38,13 +38,23 @@ _FALLBACK_DETAILS = (
 class WaitForCallsStatusTimeoutError(TimeoutError):
     """A sent call bundle was not confirmed in time."""
 
-    def __init__(self, bundle_id: str) -> None:
+    def __init__(self, bundle_id: str, *, transaction_hash: str | None = None) -> None:
         super().__init__(
             f'Timed out while waiting for call bundle with id "{bundle_id}" to be confirmed.'
         )
         # The wallet already sent the calls: the bundle ID (or transaction hash
         # on the `eth_sendTransaction` fallback) lets the caller find the payment.
         self.id = bundle_id
+        self.transaction_hash = transaction_hash
+
+
+class CallsStatusError(RuntimeError):
+    """A call bundle was sent, but reading its status failed after retries."""
+
+    def __init__(self, bundle_id: str, *, transaction_hash: str | None = None) -> None:
+        super().__init__(f'Failed to read the status of sent call bundle with id "{bundle_id}".')
+        self.id = bundle_id
+        self.transaction_hash = transaction_hash
 
 
 def rpc_calls(calls: Sequence[Call]) -> list[dict[str, str]]:
@@ -105,7 +115,11 @@ async def send_calls_sync(
         call = {**params["calls"][0], **({"feeToken": fee_token} if fee_token else {})}
         tx_hash = await _send_transaction(request, address, chain_id, call)
         return await _wait(
-            lambda: _transaction_status(request, tx_hash), tx_hash, polling_interval, timeout
+            lambda: _transaction_status(request, tx_hash),
+            tx_hash,
+            polling_interval,
+            timeout,
+            transaction_hash=tx_hash,
         )
     bundle_id = response if isinstance(response, str) else str(response["id"])
     return await _wait(
@@ -113,7 +127,14 @@ async def send_calls_sync(
     )
 
 
-async def _wait(get_status: Any, bundle_id: str, polling_interval: float, timeout: float) -> Any:
+async def _wait(
+    get_status: Any,
+    bundle_id: str,
+    polling_interval: float,
+    timeout: float,
+    *,
+    transaction_hash: str | None = None,
+) -> Any:
     try:
         async with asyncio.timeout(timeout):
             while True:
@@ -122,7 +143,12 @@ async def _wait(get_status: Any, bundle_id: str, polling_interval: float, timeou
                     return status
                 await asyncio.sleep(polling_interval)
     except TimeoutError as error:
-        raise WaitForCallsStatusTimeoutError(bundle_id) from error
+        raise WaitForCallsStatusTimeoutError(
+            bundle_id, transaction_hash=transaction_hash
+        ) from error
+    except Exception as error:
+        # Keep the ID of calls the wallet already sent.
+        raise CallsStatusError(bundle_id, transaction_hash=transaction_hash) from error
 
 
 async def _with_retry(get_status: Any) -> dict[str, Any]:

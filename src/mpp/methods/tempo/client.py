@@ -15,7 +15,7 @@ from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from mpp import Challenge, Credential
-from mpp.errors import PaymentExpiredError
+from mpp.errors import PaymentExpiredError, PaymentOutcomeUnknownError
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -423,10 +423,14 @@ class TempoMethod:
         expected_chain_id: int | None,
     ) -> Credential:
         """Pay in push mode: the wallet sends the transfer calls and returns their hash."""
-        from mpp.methods.tempo._wallet import send_calls_sync
+        from mpp.methods.tempo._wallet import (
+            CallsStatusError,
+            WaitForCallsStatusTimeoutError,
+            send_calls_sync,
+        )
 
         # A sent transfer cannot be recalled, so leave time to confirm it and present it.
-        _assert_challenge_time_left(challenge.expires, "Push-mode")
+        _assert_challenge_time_left(challenge.expires, "Push-mode", required=True)
         request = challenge.request
         chain_id = await self._get_chain_id(self.rpc_url)
         if expected_chain_id is not None and chain_id != expected_chain_id:
@@ -443,15 +447,23 @@ class TempoMethod:
                 account=wallet.address, chain_id=chain_id, rpc_url=self.rpc_url, required_balance=1
             )
             capabilities = {"feeToken": fee_token}
-        status = await send_calls_sync(
-            self._wallet_request(wallet),
-            address=wallet.address,
-            chain_id=chain_id,
-            calls=calls,
-            capabilities=capabilities,
-            experimental_fallback=len(calls) == 1,
-            force_atomic=len(calls) > 1,
-        )
+        # The RPC round trips above take time too: check again just before paying.
+        _assert_challenge_time_left(challenge.expires, "Push-mode", required=True)
+        try:
+            status = await send_calls_sync(
+                self._wallet_request(wallet),
+                address=wallet.address,
+                chain_id=chain_id,
+                calls=calls,
+                capabilities=capabilities,
+                experimental_fallback=len(calls) == 1,
+                force_atomic=len(calls) > 1,
+            )
+        except (CallsStatusError, WaitForCallsStatusTimeoutError) as error:
+            # The wallet already sent the payment, which may still settle.
+            raise PaymentOutcomeUnknownError(
+                challenge, error, transaction_hash=error.transaction_hash
+            ) from error
         receipts = status["receipts"]
         hashes = list(dict.fromkeys(str(r.get("transactionHash") or "").lower() for r in receipts))
         if status["statusCode"] != 200:
@@ -690,6 +702,7 @@ class TempoMethod:
         Selector: 0xa9059cbb = keccak256("transfer(address,uint256)")[:4]
         """
         selector = "a9059cbb"
+        _check_recipient(to)
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         return f"0x{selector}{to_padded}{amount_padded}"
@@ -702,6 +715,7 @@ class TempoMethod:
         )[:4]
         """
         selector = "95777d59"
+        _check_recipient(to)
         to_padded = to[2:].lower().zfill(64)
         amount_padded = hex(amount)[2:].zfill(64)
         memo_clean = memo[2:] if memo.startswith("0x") else memo
@@ -710,6 +724,12 @@ class TempoMethod:
         if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
             raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _check_recipient(to: str) -> None:
+    """Refuse a recipient that is not a 20-byte address, rather than zero-pad it."""
+    if not isinstance(to, str) or not _ADDRESS_RE.fullmatch(to):
+        raise ValueError(f"Invalid recipient address: {to!r}")
 
 
 def _transaction_request(tx: TempoTransaction, sender: str) -> dict[str, object]:
@@ -763,17 +783,22 @@ def _fee_payer_envelope(raw_tx: str, sender: str) -> str:
     return "0x78" + rlp.encode(fields).hex()
 
 
-def _assert_challenge_time_left(expires: str | None, kind: str) -> None:
+def _assert_challenge_time_left(expires: str | None, kind: str, *, required: bool = False) -> None:
     """Refuse a challenge too close to expiry to pay before the server rejects it.
 
     Raises ``PaymentExpiredError`` before paying, so the HTTP transport returns the
-    402 for the caller to retry.
+    402 for the caller to retry. With ``required``, a challenge without a valid
+    ``expires`` is refused too, since servers reject its credential.
     """
-    if not expires:
-        return
     try:
-        challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+        challenge_expiry = datetime.fromisoformat(
+            (expires or "").replace("Z", "+00:00")
+        ).timestamp()
     except ValueError:
+        if required:
+            raise ValueError(
+                f"{kind} challenge has no valid expires; the server would reject its credential"
+            ) from None
         return
     if challenge_expiry - time.time() < MIN_REMAINING_VALIDITY_SECONDS:
         raise PaymentExpiredError(expires) from ValueError(
