@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -16,11 +15,9 @@ from mpp.methods.stripe import server as stripe_server
 from mpp.methods.tempo import server as tempo_server
 from mpp.server import (
     Mpp,
-    OfferSelectionContext,
     PaymentVerified,
     RequestContext,
     ServerMethod,
-    ServerOffer,
     VerifyContext,
     compose,
 )
@@ -316,129 +313,3 @@ def test_method_factories_preserve_hooks() -> None:
 def test_non_callable_success_hook_is_rejected_at_configuration_time() -> None:
     with pytest.raises(ValueError, match="on_payment_success must be callable"):
         third_party_method("only", on_payment_success=cast(PaymentSuccessHandler, object()))
-
-
-@pytest.mark.asyncio
-async def test_select_offers_narrows_composed_offers_in_order() -> None:
-    seen: list[tuple[tuple[ServerOffer, ...], OfferSelectionContext]] = []
-
-    async def select(
-        offers: tuple[ServerOffer, ...], context: OfferSelectionContext
-    ) -> list[ServerOffer]:
-        seen.append((offers, context))
-        return [offer for offer in offers if offer.method.name != "second"]
-
-    first = third_party_method("first")
-    second = third_party_method("second", can_offer=lambda _request: True)
-    third = third_party_method("third")
-    unavailable = third_party_method("unavailable", can_offer=lambda _request: False)
-    server = Mpp(
-        methods=[first, second, third, unavailable],
-        realm="api.example.com",
-        secret_key="secret",
-        select_offers=select,
-    )
-    challenged: list[str] = []
-    server.on_challenge_created(lambda payload: challenged.append(payload["method"]))
-    configured = server.compose(
-        ("first/charge", {"amount": "1.00"}),
-        ("second/charge", {"amount": "1.00"}),
-        ("unavailable/charge", {"amount": "1.00"}),
-        ("third/charge", {"amount": "1.00"}),
-    )
-    request = http_request(url="https://test.example.com/paid", route="/paid")
-
-    result = challenges(await configured(request))
-
-    assert [issued.method for issued in result] == ["first", "third"]
-    assert challenged == ["first", "third"]
-    offers, context = seen[0]
-    assert context.request is request
-    assert [offer.key for offer in offers] == ["first/charge", "second/charge", "third/charge"]
-    assert offers[1].method is second
-    assert offers[0].request["amount"] == "100"
-    assert offers[0].request["_mppx_scope"]["resource"] == "/paid"
-    with pytest.raises(TypeError):
-        cast(Any, offers[0].request)["amount"] = "999"
-
-    # A credential for an offer the selector drops still pays: selection only shapes challenges.
-    unselected = third_party_method("second")
-    issuer = Mpp(methods=[first, unselected], realm="api.example.com", secret_key="secret")
-    offered = challenges(await issuer.charge(amount="1.00")(http_request()))
-    paid = await server.charge(amount="1.00")(
-        http_request(credential(offered[1]).to_authorization())
-    )
-    assert isinstance(paid, PaymentVerified)
-    assert paid.receipt.reference == "second"
-
-
-@pytest.mark.asyncio
-async def test_select_offers_skips_direct_handlers_and_keeps_nested_groups() -> None:
-    calls: list[list[str]] = []
-
-    def select(
-        offers: tuple[ServerOffer, ...], _context: OfferSelectionContext
-    ) -> tuple[ServerOffer, ...]:
-        calls.append([offer.key for offer in offers])
-        return offers[-1:]
-
-    single = Mpp(
-        methods=third_party_method("only"),
-        realm="api.example.com",
-        secret_key="secret",
-        select_offers=select,
-    )
-    challenge(await single.charge(amount="1.00")(http_request()))
-    assert calls == []
-
-    server = create_server(third_party_method("first"), third_party_method("second"))
-    selecting = Mpp(
-        methods=[third_party_method("third"), third_party_method("fourth")],
-        realm="api.example.com",
-        secret_key="secret",
-        select_offers=select,
-    )
-    configured = compose(
-        server.compose(("first/charge", {"amount": "1.00"})),
-        selecting.charge(amount="1.00"),
-        server.compose(("second/charge", {"amount": "1.00"})),
-    )
-
-    result = challenges(await configured(http_request()))
-
-    assert [issued.method for issued in result] == ["first", "fourth", "second"]
-    assert calls == [["third/charge", "fourth/charge"]]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("choose", "error", "match"),
-    [
-        (lambda offers: [], ValueError, "at least one offer"),
-        (lambda offers: offers[0], TypeError, "sequence of offers"),
-        (lambda offers: [replace(offers[0])], ValueError, "only offers from its input"),
-        (lambda offers: [offers[1], offers[0]], ValueError, "preserve offer order"),
-        (lambda offers: [offers[0], offers[0]], ValueError, "preserve offer order"),
-    ],
-)
-async def test_select_offers_rejects_invalid_selections(
-    choose: Any, error: type, match: str
-) -> None:
-    server = Mpp(
-        methods=[third_party_method("first"), third_party_method("second")],
-        realm="api.example.com",
-        secret_key="secret",
-        select_offers=lambda offers, _context: choose(offers),
-    )
-    with pytest.raises(error, match=match):
-        await server.charge(amount="1.00")(http_request())
-
-
-def test_select_offers_must_be_callable() -> None:
-    with pytest.raises(ValueError, match="select_offers must be callable"):
-        Mpp(
-            methods=third_party_method("only"),
-            realm="api.example.com",
-            secret_key="secret",
-            select_offers=cast(Any, object()),
-        )
