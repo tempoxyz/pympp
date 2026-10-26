@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from mpp.errors import VerificationError
+from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo import SponsorBudget
 from mpp.methods.tempo import sponsor_budget as budget_module
 from mpp.store import CompareAndSetStore, MemoryStore
@@ -177,8 +177,10 @@ async def test_duplicate_and_foreign_owner_are_refused() -> None:
     store = MemoryStore()
     budget = SponsorBudget()
     reservation = await reserve(store, budget, "0x01")
-    with pytest.raises(VerificationError, match="already has a budget reservation"):
+    # An earlier attempt may have broadcast it: never a retryable 402.
+    with pytest.raises(InternalPaymentError) as raised:
         await reserve(store, budget, "0x01")
+    assert "already has a budget reservation" in str(raised.value.__cause__)
     stale = budget_module.Reservation(reservation.key, reservation.id, "someone-else")
     assert not await budget_module.transition(store, stale, "pending")
     assert not await budget_module.release(store, stale)
@@ -190,8 +192,9 @@ async def test_duplicate_and_foreign_owner_are_refused() -> None:
 async def test_incompatible_state_is_refused() -> None:
     store = MemoryStore()
     await store.put(KEY, json.dumps({"version": 2}))
-    with pytest.raises(VerificationError, match="incompatible state"):
+    with pytest.raises(InternalPaymentError) as raised:
         await reserve(store, SponsorBudget(), "0x01")
+    assert "incompatible state" in str(raised.value.__cause__)
 
 
 class BytesStore:
@@ -318,3 +321,23 @@ async def test_redis_without_eval_reports_compare_and_set_unsupported() -> None:
     client.eval.side_effect = NoPermissionError("no permissions to run the 'eval' command")
     with pytest.raises(NotImplementedError):
         await RedisStore(client).compare_and_set("k", None, "v")
+
+
+@pytest.mark.asyncio
+async def test_prepared_lease_starts_after_slow_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = MemoryStore()
+    budget = SponsorBudget()
+    pending = await reserve(store, budget, "0x01")
+    assert await budget_module.transition(store, pending, "pending")
+    clock = [int(time.time() * 1000)]
+    monkeypatch.setattr(budget_module, "_now_ms", lambda: clock[0])
+
+    async def slow_lookup(_tx_hash: str) -> bool:
+        clock[0] += 31_000
+        return False
+
+    await reserve(store, budget, "0x02", expires_in_ms=600_000, is_settled=slow_lookup)
+    # The lease runs from when the reservation was written, so it is still live.
+    assert (await reservations(store))["0x02"]["leaseUntil"] > clock[0]

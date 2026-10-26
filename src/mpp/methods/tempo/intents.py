@@ -2210,10 +2210,13 @@ class ChargeIntent:
             or valid_before is None
         ):
             return None, None
-        expires_at = valid_before * 1000
-        wait_until = expires_at
+        # The transaction can still be included for a short grace after
+        # valid_before, so it stays reserved until then.
+        expires_at = int((valid_before + VALID_BEFORE_GRACE) * 1000)
+        wait_until = valid_before * 1000
         if challenge_expires_at is not None:
-            wait_until = min(wait_until, int(challenge_expires_at * 1000))
+            # Round up, so a wait that runs out has the challenge expired too.
+            wait_until = min(wait_until, math.ceil(challenge_expires_at * 1000))
 
         async def is_settled(tx_hash: str) -> bool:
             return await self._get_transaction_receipt(client, tx_hash) is not None

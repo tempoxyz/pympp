@@ -56,6 +56,7 @@ from mpp.methods.tempo.intents import (
     TRANSFER_TOPIC,
     TRANSFER_WITH_MEMO_SELECTOR,
     TRANSFER_WITH_MEMO_TOPIC,
+    VALID_BEFORE_GRACE,
     ChargeIntent,
     _is_ambiguous_broadcast_error,
     _match_single_transfer_calldata,
@@ -4468,6 +4469,10 @@ class TestCosignAsFeePayer:
         (entry,) = json.loads(state)["reservations"].values()
         assert entry["phase"] == "pending"
         assert entry["transactionHash"] == _raw_transaction_hash(signed)
+        # It can still be included for a short grace after valid_before.
+        valid_before = _transaction_valid_before(signed)
+        assert valid_before is not None
+        assert entry["expiresAt"] == (valid_before + VALID_BEFORE_GRACE) * 1000
 
     @pytest.mark.asyncio
     async def test_sponsor_budget_wait_precedes_simulation(self):

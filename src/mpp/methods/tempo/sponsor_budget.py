@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeVar
 
-from mpp.errors import VerificationError
+from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
 from mpp.store import CompareAndSetStore, MemoryStore
 
@@ -229,9 +229,11 @@ async def reserve(
     """Reserve ``fee`` against the sponsor's budget, waiting (without writing) for room.
 
     Raises:
-        VerificationError: When the fee can never fit, no room frees up before
-            ``wait_until``, the store holds incompatible state, or the
-            transaction already has a reservation.
+        VerificationError: When the fee can never fit or no room frees up
+            before ``wait_until``.
+        InternalPaymentError: When the store holds incompatible state, or the
+            transaction already has a reservation (an earlier attempt may
+            have broadcast it, so the client must not be asked to pay again).
     """
     if fee > budget.max_in_flight_total_fee:
         raise VerificationError("Sponsored transaction fee exceeds the aggregate sponsor budget")
@@ -246,9 +248,7 @@ async def reserve(
             )
         await _reconcile(store, key, is_settled)
 
-        def change(
-            current: dict[str, Any] | None, now: int = now
-        ) -> tuple[str, dict[str, Any] | None]:
+        def change(current: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
             if current is None:
                 return "invalid", None
             if reservation.id in current:
@@ -264,7 +264,9 @@ async def reserve(
                 reservation.id: {
                     "expiresAt": expires_at,
                     "fee": str(fee),
-                    "leaseUntil": min(expires_at, now + _PREPARED_LEASE_MS),
+                    # Reconciliation can be slow: start the lease from the
+                    # time of the write, not of the loop's first check.
+                    "leaseUntil": min(expires_at, _now_ms() + _PREPARED_LEASE_MS),
                     "owner": reservation.owner,
                     "phase": "prepared",
                     "transactionHash": transaction_hash,
@@ -275,8 +277,12 @@ async def reserve(
             case "reserved":
                 return reservation
             case "invalid":
-                raise VerificationError("Sponsor budget store contains incompatible state")
+                raise InternalPaymentError() from RuntimeError(
+                    "Sponsor budget store contains incompatible state"
+                )
             case "duplicate":
-                raise VerificationError("Sponsored transaction already has a budget reservation")
+                raise InternalPaymentError() from RuntimeError(
+                    "Sponsored transaction already has a budget reservation"
+                )
         await asyncio.sleep(min(poll_interval, wait_until - now) / 1000)
         poll_interval = min(poll_interval * 2, _MAX_POLL_INTERVAL_MS)
