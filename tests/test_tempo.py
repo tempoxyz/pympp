@@ -4469,6 +4469,87 @@ class TestCosignAsFeePayer:
         assert entry["phase"] == "pending"
         assert entry["transactionHash"] == _raw_transaction_hash(signed)
 
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_wait_precedes_simulation(self):
+        from mpp.methods.tempo import sponsor_budget
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        calls: list[str] = []
+        real_reserve = sponsor_budget.reserve
+
+        async def reserve(*args, **kwargs):
+            calls.append("reserve")
+            return await real_reserve(*args, **kwargs)
+
+        async def simulate(*args, **kwargs):
+            calls.append("simulate")
+
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock(side_effect=simulate)),
+            patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
+        ):
+            await intent.verify(credential, request)
+        # State can change while waiting for budget: simulate right before the send.
+        assert calls == ["reserve", "simulate"]
+
+    def test_sponsor_budget_fallback_is_shared_across_intents(self):
+        class PlainStore:
+            async def get(self, key):
+                return None
+
+            async def put(self, key, value):
+                pass
+
+            async def delete(self, key):
+                pass
+
+            async def put_if_absent(self, key, value):
+                return True
+
+        first = self._make_intent()
+        second = ChargeIntent(
+            rpc_url="https://rpc.test", fee_payer=first.fee_payer, fee_token=PATH_USD
+        )
+        first._store = PlainStore()
+        second._store = PlainStore()
+        fallback = first._sponsor_budget_store()
+        assert fallback is not None
+        assert second._sponsor_budget_store() is fallback
+
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_falls_back_when_store_cannot_compare_and_set(self):
+        from mpp.methods.tempo import sponsor_budget
+        from mpp.store import CompareAndSetStore
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def no_eval(key, expected, value):
+            raise NotImplementedError("Redis server refused EVAL")
+
+        store.compare_and_set = no_eval  # type: ignore[method-assign]
+        assert isinstance(store, CompareAndSetStore)
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        reserve = AsyncMock(side_effect=sponsor_budget.reserve)
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(sponsor_budget, "reserve", reserve),
+        ):
+            await intent.verify(credential, request)
+        # The budget moved to the process-scoped store instead of failing the charge.
+        assert reserve.await_args is not None
+        assert reserve.await_args.args[0] is sponsor_budget.process_store()
+        assert intent._sponsor_budget_store() is sponsor_budget.process_store()
+        intent._http_client.post.assert_awaited()
+
     def _cosign_payload(self, intent: ChargeIntent) -> dict:
         currency = "0x20c0000000000000000000000000000000000000"
         raw_tx = self._build_client_tx(currency=currency)

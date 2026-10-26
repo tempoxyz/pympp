@@ -18,6 +18,15 @@ CHAIN_ID = 42431
 KEY = f"mpp:charge:sponsor-budget:{CHAIN_ID}:{SPONSOR.lower()}"
 
 
+@pytest.fixture(autouse=True)
+def _clear_receipt_checks() -> None:
+    clear_receipt_checks()
+
+
+def clear_receipt_checks() -> None:
+    getattr(budget_module, "_receipt_checked_at", {}).clear()
+
+
 async def never_settled(_tx_hash: str) -> bool:
     return False
 
@@ -183,3 +192,129 @@ async def test_incompatible_state_is_refused() -> None:
     await store.put(KEY, json.dumps({"version": 2}))
     with pytest.raises(VerificationError, match="incompatible state"):
         await reserve(store, SponsorBudget(), "0x01")
+
+
+class BytesStore:
+    """A conforming store that returns bytes and compares the expected value literally."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        await asyncio.sleep(0)
+        return self.data.get(key)
+
+    async def put(self, key: str, value: str | bytes) -> None:
+        self.data[key] = value.encode() if isinstance(value, str) else value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    async def put_if_absent(self, key: str, value: str | bytes) -> bool:
+        if key in self.data:
+            return False
+        await self.put(key, value)
+        return True
+
+    async def compare_and_set(self, key: str, expected: object, value: str | None) -> bool:
+        if self.data.get(key) != expected:
+            return False
+        if value is None:
+            self.data.pop(key, None)
+        else:
+            self.data[key] = value.encode()
+        return True
+
+
+@pytest.mark.asyncio
+async def test_byte_returning_store_updates_existing_state() -> None:
+    store = BytesStore()
+    budget = SponsorBudget()
+    first = await asyncio.wait_for(reserve(store, budget, "0x01"), 1)
+    second = await asyncio.wait_for(reserve(store, budget, "0x02"), 1)
+    assert await asyncio.wait_for(budget_module.release(store, first), 1)
+    assert await asyncio.wait_for(budget_module.release(store, second), 1)
+    assert store.data == {}
+
+
+@pytest.mark.asyncio
+async def test_sqlite_noop_compare_and_set_commits_pruning() -> None:
+    pytest.importorskip("aiosqlite")
+    from mpp.stores.sqlite import SQLiteStore
+
+    async with await SQLiteStore.create(":memory:") as store:
+        await store._db.execute(
+            "INSERT INTO kv (key, value, expires_at) VALUES ('old', 'x', ?)", (time.time() - 1,)
+        )
+        await store._db.commit()
+        assert await store.compare_and_set("k", None, None)
+        assert not store._db.in_transaction
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_a_reservation_that_moved_on_since_its_snapshot() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget()
+    reservation = await reserve(store, budget, "0x01")
+    raw = await store.get(KEY)
+    assert raw is not None
+    stale = json.loads(raw)
+    stale["reservations"]["0x01"]["leaseUntil"] = 0
+    # The owner moves to broadcasting after the reconciler read its snapshot.
+    assert await budget_module.transition(store, reservation, "broadcasting")
+    real_get = store.get
+
+    async def snapshot_get(key: str) -> object:
+        store.get = real_get  # type: ignore[method-assign]
+        return json.dumps(stale)
+
+    store.get = snapshot_get  # type: ignore[method-assign]
+    await budget_module._reconcile(store, KEY, never_settled)
+    assert (await reservations(store))["0x01"]["phase"] == "broadcasting"
+
+
+@pytest.mark.asyncio
+async def test_waiters_share_bounded_receipt_lookups() -> None:
+    store = MemoryStore()
+    pending = 20
+    budget = SponsorBudget(max_in_flight_reservations=pending)
+    for i in range(pending):
+        reservation = await reserve(store, budget, f"0x{i:02x}")
+        assert await budget_module.transition(store, reservation, "pending")
+    clear_receipt_checks()
+    calls = 0
+    active = 0
+    peak = 0
+
+    async def slow_unsettled(_tx_hash: str) -> bool:
+        nonlocal active, calls, peak
+        calls += 1
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return False
+
+    waiters = [
+        reserve(store, budget, f"0xff{i}", wait_ms=300, is_settled=slow_unsettled) for i in range(5)
+    ]
+    results = await asyncio.gather(*waiters, return_exceptions=True)
+    assert all(isinstance(result, VerificationError) for result in results)
+    # Each pending transaction is looked up once per interval, whatever the waiters.
+    assert calls == pending
+    assert peak <= 8
+
+
+@pytest.mark.asyncio
+async def test_redis_without_eval_reports_compare_and_set_unsupported() -> None:
+    pytest.importorskip("redis")
+    from unittest.mock import AsyncMock
+
+    from redis.exceptions import NoPermissionError
+
+    from mpp.stores.redis import RedisStore
+
+    client = AsyncMock()
+    client.eval.side_effect = NoPermissionError("no permissions to run the 'eval' command")
+    with pytest.raises(NotImplementedError):
+        await RedisStore(client).compare_and_set("k", None, "v")

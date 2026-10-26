@@ -95,14 +95,26 @@ class RedisStore:
         return result is not None
 
     async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
-        """Atomic conditional write in a Lua script; requires Redis server >= 6.0."""
-        result = await self._redis.eval(
-            _COMPARE_AND_SET,
-            1,
-            self._key(key),
-            "0" if expected is None else "1",
-            "" if expected is None else expected,
-            "0" if value is None else "1",
-            "" if value is None else value,
-        )
+        """Atomic conditional write in a Lua script; requires Redis server >= 6.0 and EVAL.
+
+        Raises:
+            NotImplementedError: When the server refuses the script, for example
+                because ACLs deny scripting or a proxy lacks EVAL.
+        """
+        try:
+            result = await self._redis.eval(
+                _COMPARE_AND_SET,
+                1,
+                self._key(key),
+                "0" if expected is None else "1",
+                "" if expected is None else expected,
+                "0" if value is None else "1",
+                "" if value is None else value,
+            )
+        except Exception as error:
+            from redis.exceptions import ResponseError
+
+            if isinstance(error, ResponseError):
+                raise NotImplementedError("Redis server refused EVAL") from error
+            raise
         return bool(result)

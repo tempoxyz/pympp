@@ -133,6 +133,7 @@ class SQLiteStore:
         """Atomic conditional write: one SQL statement keyed on the current value."""
         await self._prune_expired(time.time())
         if expected is None and value is None:
+            await self._db.commit()
             return await self.get(key) is None
         if expected is None:
             cursor = await self._db.execute(

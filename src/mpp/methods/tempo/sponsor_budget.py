@@ -21,11 +21,26 @@ from typing import Any, Final, Literal, TypeVar
 
 from mpp.errors import VerificationError
 from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
-from mpp.store import CompareAndSetStore
+from mpp.store import CompareAndSetStore, MemoryStore
 
 _INITIAL_POLL_INTERVAL_MS: Final = 10
 _MAX_POLL_INTERVAL_MS: Final = 250
 _PREPARED_LEASE_MS: Final = 30_000
+# Waiters share receipt lookups: each pending transaction is checked at most
+# once per interval per process, with a bounded number of lookups at a time.
+_RECEIPT_CHECK_INTERVAL_MS: Final = 1_000
+_MAX_CONCURRENT_RECEIPT_CHECKS: Final = 8
+
+_receipt_checked_at: dict[tuple[str, str], int] = {}
+_process_store: MemoryStore | None = None
+
+
+def process_store() -> MemoryStore:
+    """Return the in-process store shared by every charge without a shared one."""
+    global _process_store
+    if _process_store is None:
+        _process_store = MemoryStore()
+    return _process_store
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -97,10 +112,7 @@ async def _update(
     """Apply ``change`` atomically; it returns a result and the new reservations, if any."""
     while True:
         raw = await store.get(key)
-        if isinstance(raw, bytes):
-            # Compare the text this module wrote, whatever the store returns.
-            raw = raw.decode()
-        result, reservations = change(_decode(raw))
+        result, reservations = change(_decode(raw.decode() if isinstance(raw, bytes) else raw))
         if reservations is None:
             return result
         value = (
@@ -110,16 +122,23 @@ async def _update(
         )
         if await store.compare_and_set(key, raw, value):
             return result
+        # Stores that return bytes may compare either the bytes or the text they
+        # were given; both stand for the same document.
+        if isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value):
+            return result
 
 
 async def _mutate_owned(
     store: CompareAndSetStore,
     reservation: Reservation,
     mutate: Callable[[dict[str, Any]], dict[str, Any] | None],
+    unless: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
     def change(current: dict[str, Any] | None) -> tuple[bool, dict[str, Any] | None]:
         entry = (current or {}).get(reservation.id)
         if not isinstance(entry, dict) or entry.get("owner") != reservation.owner:
+            return False, None
+        if unless is not None and unless(entry):
             return False, None
         assert current is not None
         reservations = dict(current)
@@ -147,30 +166,50 @@ async def release(store: CompareAndSetStore, reservation: Reservation) -> bool:
     return await _mutate_owned(store, reservation, lambda _: None)
 
 
+def _is_stale(entry: dict[str, Any], now: int) -> bool:
+    return entry["expiresAt"] <= now or (
+        entry["phase"] == "prepared" and entry["leaseUntil"] <= now
+    )
+
+
 async def _reconcile(store: CompareAndSetStore, key: str, is_settled: IsSettled) -> None:
     """Release expired reservations, stale prepared leases and settled broadcasts."""
-    current = _decode(await store.get(key))
+    raw = await store.get(key)
+    current = _decode(raw.decode() if isinstance(raw, bytes) else raw)
     if not current:
         return
     now = _now_ms()
+    for checked, at in list(_receipt_checked_at.items()):
+        if at + _RECEIPT_CHECK_INTERVAL_MS <= now:
+            del _receipt_checked_at[checked]
+    lookups = asyncio.Semaphore(_MAX_CONCURRENT_RECEIPT_CHECKS)
 
     async def reconcile_one(id: str, entry: dict[str, Any]) -> None:
         reservation = Reservation(key, id, entry["owner"])
-        if entry["expiresAt"] <= now or (
-            entry["phase"] == "prepared" and entry["leaseUntil"] <= now
-        ):
-            await release(store, reservation)
+        if _is_stale(entry, now):
+            # The snapshot may be old: release only while the entry is still
+            # stale, never one its owner has since moved on to broadcasting.
+            await _mutate_owned(
+                store, reservation, lambda _: None, unless=lambda e: not _is_stale(e, now)
+            )
             return
         # A broadcasting owner has not published its outcome yet; releasing it
         # here would race its own transition to pending.
         if entry["phase"] != "pending":
             return
+        checked = (key, id)
+        if checked in _receipt_checked_at:
+            return
+        _receipt_checked_at[checked] = now
         try:
-            settled = await is_settled(entry["transactionHash"])
+            async with lookups:
+                settled = await is_settled(entry["transactionHash"])
         except Exception:
             return
         if settled:
-            await release(store, reservation)
+            await _mutate_owned(
+                store, reservation, lambda _: None, unless=lambda e: e["phase"] != "pending"
+            )
 
     await asyncio.gather(*(reconcile_one(id, entry) for id, entry in current.items()))
 

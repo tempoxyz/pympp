@@ -858,7 +858,7 @@ class ChargeIntent:
         self._sponsor_budget = (
             None if sponsor_budget is False else sponsor_budget or _sponsor_budget.SponsorBudget()
         )
-        self._sponsor_budget_fallback: MemoryStore | None = None
+        self._sponsor_budget_shared = True
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -1776,7 +1776,7 @@ class ChargeIntent:
         legacy_record = False
         sponsored_fee: int | None = None
         reservation: _sponsor_budget.Reservation | None = None
-        budget_store = self._sponsor_budget_store()
+        budget_store: CompareAndSetStore | None = None
         client_store_key: str | None = None
         recovery_expires_at = (
             datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
@@ -1970,24 +1970,19 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
+                # Waiting for sponsor budget can take a while, so simulate after it:
+                # the sponsor must not pay gas for a transaction that now reverts.
+                budget_store, reservation = await self._reserve_sponsor_budget(
+                    client, raw_tx, sponsored_fee, request, recovery_expires_at
+                )
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
-                # The store reservation and simulation can take a while: recheck
-                # the sponsored window right before submission.
+                # The store reservation, budget wait and simulation can take a
+                # while: recheck the sponsored window right before submission.
                 prior = await self._check_sponsored_validity(
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
                     return prior
-                reservation = await self._reserve_sponsor_budget(
-                    client, budget_store, raw_tx, sponsored_fee, request, recovery_expires_at
-                )
-                # Waiting for sponsor budget can take a while too.
-                if reservation is not None:
-                    prior = await self._check_sponsored_validity(
-                        client, raw_tx, broadcast_key, request, challenge_id, realm
-                    )
-                    if prior is not None:
-                        return prior
 
             # The send and any receipt recovery share one confirmation deadline.
             # The send may use at most two thirds of it, leaving the rest for
@@ -2185,27 +2180,27 @@ class ChargeIntent:
             return None
         if budget.store is not None:
             return budget.store
-        if isinstance(self._store, CompareAndSetStore):
+        if self._sponsor_budget_shared and isinstance(self._store, CompareAndSetStore):
             return self._store
-        if self._sponsor_budget_fallback is None:
+        if self._sponsor_budget_shared:
+            self._sponsor_budget_shared = False
             logger.warning(
                 "tempo.charge's store has no compare_and_set, so the sponsor budget is "
                 "scoped to this process. Pass SponsorBudget(store=...) with a shared store."
             )
-            self._sponsor_budget_fallback = MemoryStore()
-        return self._sponsor_budget_fallback
+        return _sponsor_budget.process_store()
 
     async def _reserve_sponsor_budget(
         self,
         client: Any,
-        store: CompareAndSetStore | None,
         raw_tx: str,
         fee: int | None,
         request: ChargeRequest,
         challenge_expires_at: float | None,
-    ) -> _sponsor_budget.Reservation | None:
+    ) -> tuple[CompareAndSetStore | None, _sponsor_budget.Reservation | None]:
         """Reserve a locally sponsored transaction's fee before it is broadcast."""
         budget = self._sponsor_budget
+        store = self._sponsor_budget_store()
         valid_before = _transaction_valid_before(raw_tx)
         if (
             budget is None
@@ -2214,7 +2209,7 @@ class ChargeIntent:
             or fee is None
             or valid_before is None
         ):
-            return None
+            return None, None
         expires_at = valid_before * 1000
         wait_until = expires_at
         if challenge_expires_at is not None:
@@ -2223,17 +2218,33 @@ class ChargeIntent:
         async def is_settled(tx_hash: str) -> bool:
             return await self._get_transaction_receipt(client, tx_hash) is not None
 
-        return await _sponsor_budget.reserve(
-            store,
-            budget,
-            chain_id=request.methodDetails.chainId,
-            sponsor=self.fee_payer.address,
-            transaction_hash=_raw_transaction_hash(raw_tx),
-            fee=fee,
-            expires_at=expires_at,
-            wait_until=wait_until,
-            is_settled=is_settled,
-        )
+        sponsor = self.fee_payer.address
+        while True:
+            try:
+                reservation = await _sponsor_budget.reserve(
+                    store,
+                    budget,
+                    chain_id=request.methodDetails.chainId,
+                    sponsor=sponsor,
+                    transaction_hash=_raw_transaction_hash(raw_tx),
+                    fee=fee,
+                    expires_at=expires_at,
+                    wait_until=wait_until,
+                    is_settled=is_settled,
+                )
+                return store, reservation
+            except NotImplementedError:
+                # A replay store without usable compare-and-set (such as Redis
+                # denying EVAL) keeps working with a process-scoped budget.
+                if budget.store is not None or not self._sponsor_budget_shared:
+                    raise
+                self._sponsor_budget_shared = False
+                logger.warning(
+                    "tempo.charge's store cannot compare_and_set, so the sponsor budget "
+                    "is scoped to this process. Pass SponsorBudget(store=...) with a "
+                    "shared store that supports it."
+                )
+                store = _sponsor_budget.process_store()
 
     async def _check_sponsored_validity(
         self,
