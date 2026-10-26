@@ -229,7 +229,7 @@ class TestEngineErrors:
         issued = challenge(await server.charge()(http_request()))
         with pytest.raises(TypeError, match="synchronous resolve_request"):
             await server.validate_credential(
-                Credential(challenge=issued.to_echo(), payload={}), request={"amount": "1"}
+                Credential(challenge=issued.to_echo(), payload={}), request={"amount": "2"}
             )
 
     async def test_route_rejects_payloads_the_method_cannot_parse(self) -> None:
@@ -564,8 +564,9 @@ class TestReviewFixes:
             request={**issued.request, "currency": "0x" + "55" * 20},
             expires=issued.expires,
         )
-        with pytest.raises(InvalidChallengeError, match="does not match a configured method"):
-            await other.validate_credential(authorization(foreign, payload))
+        # A currency no copy is configured with (a route override) falls back to the first.
+        await other.validate_credential(authorization(foreign, payload))
+        assert seen[-1] == "0x" + "44" * 20
 
     async def test_unknown_credential_options_are_rejected(self) -> None:
         from mpp.errors import VerificationFailedError
@@ -663,3 +664,68 @@ class TestReviewFixes:
         result = await route(http_request(authorization(issued, payload)))
         assert isinstance(result, PaymentVerified)
         assert (len(first), len(second)) == (1, 1)
+
+    async def test_broadcast_credential_settles_route_currency_or_chain_overrides(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        methods = self._faked(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD, USDC]), seen
+        )
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        payload = {"type": "hash", "hash": "0x12"}
+        routes = [
+            server.tempo.charge(amount="1", currency="0x" + "33" * 20),
+            server.tempo.charge(amount="1", currency=USDC, chain_id=42431),
+            server.tempo.charge(amount="1", currency="0x" + "33" * 20, chain_id=42431),
+        ]
+        for route in routes:
+            issued = challenge(await route(http_request()))
+            receipt = await server.broadcast_credential(authorization(issued, payload))
+            assert receipt.status == "success"
+        # The chain override still settles with the USDC copy that issued it.
+        assert seen == [PATH_USD, USDC, PATH_USD]
+
+    async def test_credential_request_accepts_route_input_or_wire_request(self) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        seen: list[str] = []
+        methods = self._faked(tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY), seen)
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(amount="1")(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0x12"})
+        wire = {key: value for key, value in issued.request.items() if key != "_mppx_scope"}
+        assert wire["amount"] == "1000000"
+        await server.validate_credential(credential, request={"amount": "1"})
+        await server.validate_credential(credential, request=wire)
+        await server.validate_credential(credential, request=dict(issued.request))
+        receipt = await server.broadcast_credential(credential, request=wire)
+        assert receipt.status == "success"
+        assert seen == [CURRENCY] * 4
+        for mismatched in ({**wire, "amount": "2000000"}, {**wire, "recipient": OTHER}):
+            with pytest.raises(InvalidChallengeError, match="request does not match"):
+                await server.validate_credential(credential, request=mismatched)
+            with pytest.raises(InvalidChallengeError, match="request does not match"):
+                await server.broadcast_credential(credential, request=mismatched)
+        assert seen == [CURRENCY] * 4
+
+    async def test_mcp_tools_can_be_paid_when_requires_auth(self) -> None:
+        from mpp.extensions.mcp import MCPCredential, verify_or_challenge
+
+        server = Mpp(
+            methods=server_method(request={"amount": "1"}, verify=_verified),
+            realm=REALM,
+            secret_key=SECRET,
+            requires_auth=True,
+        )
+        handler = server.charge()
+        issued = await verify_or_challenge(handler, tool="search")
+        assert isinstance(issued, list)
+        [mcp_challenge] = issued
+        credential = MCPCredential(challenge=mcp_challenge, payload={})
+        result = await verify_or_challenge(handler, tool="search", meta=credential.to_meta())
+        assert isinstance(result, tuple)
+        assert result[1].status == "success"
+        # HTTP routes still bind the credential header.
+        http = challenge(await handler(http_request()))
+        assert http.header == "Payment-Authorization"

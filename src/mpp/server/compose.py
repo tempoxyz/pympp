@@ -55,6 +55,9 @@ BodyType = str | bytes | dict[str, Any]
 BodyParamsType = BodyType | Callable[[Request], BodyType | Awaitable[BodyType]] | None
 ROUTE_OPTION_KEYS = frozenset({"body", "description", "expires", "expires_in", "meta"})
 
+MCP_URL_PREFIX = "mcp:"
+"""URL prefix of MCP tool calls, which carry credentials in _meta, not an HTTP field."""
+
 
 @dataclass
 class ComposedChallenges:
@@ -151,6 +154,7 @@ class _PreparedOffer:
     request: dict[str, Any]
     expires: str | None
     body: BodyType | None
+    header: str | None = None
 
     async def is_available(self) -> bool:
         """Return whether the method wants to advertise this prepared offer."""
@@ -190,7 +194,7 @@ class _PreparedOffer:
             expires=self.expires,
             body=self.body,
             events=server._events,
-            header=server.credential_header,
+            header=self.header,
             unique_challenges=server.unique_challenges,
             x402=x402,
         )
@@ -259,7 +263,11 @@ async def _prepare_offer(
         if inspect.isawaitable(value):
             value = await value
         call.bodies[key] = value
-    prepared = _PreparedOffer(offer, _intent(method, input), wire, expires, call.bodies[key])
+    # MCP tool calls carry credentials in _meta, not an HTTP field: bind no header.
+    header = None if request.url.startswith(MCP_URL_PREFIX) else offer.server.credential_header
+    prepared = _PreparedOffer(
+        offer, _intent(method, input), wire, expires, call.bodies[key], header
+    )
     call.prepared.append(prepared)
     return prepared
 

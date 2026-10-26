@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -346,15 +347,19 @@ class Mpp:
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
 
-        if request is None:
+        echoed = _comparable(echoed_request)
+        if request is None or _comparable(request) == echoed:
+            # No request, or the echoed wire request itself (the 0.15 form).
             method = _select_echoed(candidates, echoed_request, echo.id)
         else:
-            echoed = {key: value for key, value in echoed_request.items() if key != "_mppx_scope"}
-            matching = [
-                candidate
-                for candidate in candidates
-                if _expected_request(candidate, request, parsed=credential) == echoed
-            ]
+            try:
+                matching = [
+                    candidate
+                    for candidate in candidates
+                    if _expected_request(candidate, request, parsed=credential) == echoed
+                ]
+            except ValidationError as error:
+                raise InvalidChallengeError(echo.id, "credential request does not match") from error
             if not matching:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
             method = matching[0]
@@ -414,7 +419,10 @@ class Mpp:
             intent: If provided, also require the credential to be bound to
                 this intent name.
             request: If provided, also require the credential's echoed
-                request to match these request parameters.
+                request to match. Accepts either the route input (such as
+                ``{"amount": "0.50"}``, normalized like a route's options) or
+                the echoed wire request itself (base-unit ``amount``,
+                ``methodDetails``; ``_mppx_scope`` is ignored).
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -475,7 +483,10 @@ class Mpp:
             intent: If provided, also require the credential to be bound to
                 this intent name.
             request: If provided, also require the credential's echoed
-                request to match these request parameters.
+                request to match. Accepts either the route input (such as
+                ``{"amount": "0.50"}``, normalized like a route's options) or
+                the echoed wire request itself (base-unit ``amount``,
+                ``methodDetails``; ``_mppx_scope`` is ignored).
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -558,8 +569,12 @@ def _expected_request(
                 resolved.close()
             raise TypeError("validate_credential(request=...) needs a synchronous resolve_request")
         input = resolved
-    wire = method.method.normalize_request(input)
-    return {key: value for key, value in wire.items() if key != "_mppx_scope"}
+    return _comparable(method.method.normalize_request(input))
+
+
+def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
+    """A wire request without the route scope the engine binds into it."""
+    return {key: value for key, value in request.items() if key != "_mppx_scope"}
 
 
 _IDENTITY_PATHS = (("currency",), ("methodDetails", "chainId"))
@@ -578,21 +593,32 @@ def _select_echoed(
     if len(candidates) == 1:
         return candidates[0]
     probes = {id(candidate): _probe(candidate) for candidate in candidates}
-    matching = [
-        candidate
-        for candidate in candidates
-        if _agrees(candidate, probes[id(candidate)], echoed, _IDENTITY_PATHS)
-    ]
+    matching: list[ServerMethod] = []
+    # A route may override the currency or chain: like route selection, fall back to
+    # the copies agreeing on the rest, then to the first copy. Overridden fields no
+    # longer tell copies apart.
+    for paths, use_defaults in (
+        (_IDENTITY_PATHS, True),
+        (_IDENTITY_PATHS[:1], True),
+        (_IDENTITY_PATHS[1:], False),
+    ):
+        matching = [
+            candidate
+            for candidate in candidates
+            if _agrees(candidate, probes[id(candidate)], echoed, paths, defaults=use_defaults)
+        ]
+        if matching:
+            overridden = [path for path in _IDENTITY_PATHS if path not in paths]
+            probes = {key: _without(probe, overridden) for key, probe in probes.items()}
+            break
     if not matching:
-        raise InvalidChallengeError(
-            challenge_id, "credential request does not match a configured method"
-        )
+        return candidates[0]
     if len(matching) > 1:
         narrowed = [
             candidate
             for candidate in matching
             if (probe := probes[id(candidate)]) is not None
-            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)))
+            and _agrees(candidate, probe, echoed, tuple(_leaves(probe)), defaults=use_defaults)
         ]
         matching = narrowed or matching
     if len(matching) > 1:
@@ -625,6 +651,20 @@ def _probe(method: ServerMethod) -> dict[str, Any] | None:
     return {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
 
 
+def _without(
+    probe: dict[str, Any] | None, paths: Sequence[tuple[str, ...]]
+) -> dict[str, Any] | None:
+    """A probe without the given paths."""
+    if probe is None or not paths:
+        return probe
+    result = deepcopy(probe)
+    for path in paths:
+        parent = _at(result, path[:-1])
+        if isinstance(parent, dict):
+            parent.pop(path[-1], None)
+    return result
+
+
 def _leaves(value: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
     paths: list[tuple[str, ...]] = []
     for key, item in value.items():
@@ -651,10 +691,14 @@ def _agrees(
     probe: Mapping[str, Any] | None,
     echoed: Mapping[str, Any],
     paths: Sequence[tuple[str, ...]],
+    *,
+    defaults: bool = True,
 ) -> bool:
     """Whether the method's defaults and probed configuration agree with the echo."""
     expected: dict[tuple[str, ...], Any] = {
-        (key,): value for key, value in (method.defaults or {}).items() if value is not None
+        (key,): value
+        for key, value in ((method.defaults or {}) if defaults else {}).items()
+        if value is not None
     }
     if probe is not None:
         expected.update((path, _at(probe, path)) for path in paths)

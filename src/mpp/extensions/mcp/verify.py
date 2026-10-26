@@ -48,11 +48,12 @@ from mpp.extensions.mcp.errors import (
 )
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.server import ComposedHandler, PaymentVerified, Request
+from mpp.server.compose import MCP_URL_PREFIX
 
 TOOL_ROUTE_PREFIX = "tool:"
 """Prefix of the route bound into a paid tool's challenges (``"tool:<name>"``)."""
 
-_TOOL_CALL_URL = "mcp:tools/call"
+_TOOL_CALL_URL = f"{MCP_URL_PREFIX}tools/call"
 
 
 async def verify_or_challenge(
