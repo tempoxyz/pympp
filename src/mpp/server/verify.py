@@ -545,7 +545,7 @@ NONCE_META_KEY = "_mpp_nonce"
 """Reserved opaque key: a random issuance nonce, so identical challenges never collide."""
 
 OFFER_META_KEY = "_mpp_offer"
-"""Reserved opaque key: the index in Mpp.methods of the configured method that issued
+"""Reserved opaque key: a tag derived from the configuration of the method that issued
 a challenge, set when several configured methods share its name and intent."""
 
 RESERVED_META_KEYS = frozenset({NONCE_META_KEY, OFFER_META_KEY})

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
+import re
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -219,12 +222,24 @@ class Mpp:
             keys.setdefault(method.key, []).append(method)
             intents.setdefault(method.intent, []).append(method)
         # Methods sharing a name and intent may settle through different replay stores:
-        # their challenges carry the issuing method's index, so out-of-band settlement
-        # uses exactly the method that issued them. A lone method issues no tag.
-        self._offer_tags: dict[int, str] = {
-            id(method): str(index)
-            for index, method in enumerate(self.methods)
-            if len(keys[method.key]) > 1
+        # their challenges carry a tag derived from the issuing method's configuration,
+        # so out-of-band settlement uses exactly the method that issued them, however
+        # the methods are later ordered. A lone method issues no tag.
+        self._offer_tags: dict[int, str] = {}
+        self._configurations: dict[int, str] = {}
+        occurrences: dict[str, int] = {}
+        for method in self.methods:
+            if len(keys[method.key]) > 1:
+                configuration = _configuration_digest(method)
+                ordinal = occurrences.get(configuration, 0)
+                occurrences[configuration] = ordinal + 1
+                # Identically configured copies get distinct tags so a route never
+                # accepts another copy's challenge; out of band they are ambiguous.
+                tag = configuration if ordinal == 0 else _digest(f"{configuration}:{ordinal}")
+                self._offer_tags[id(method)] = tag[:16]
+                self._configurations[id(method)] = configuration
+        self._ambiguous = {
+            configuration for configuration, count in occurrences.items() if count > 1
         }
         self._handlers: dict[str, Any] = {
             key: HandlerFactory(self, group) for key, group in keys.items()
@@ -309,16 +324,26 @@ class Mpp:
 
     def _tagged_method(self, tag: str, echo: Any) -> ServerMethod:
         """The configured method an echoed issuing-offer tag names."""
-        method = None
-        if tag.isdigit() and str(int(tag)) == tag and int(tag) < len(self.methods):
-            method = self.methods[int(tag)]
-        if (
-            method is None
-            or self._offer_tag(method) != tag
-            or method.name != echo.method
-            or method.intent != echo.intent
-        ):
+        matching = (
+            [
+                method
+                for method in self.methods
+                if self._offer_tag(method) == tag
+                and method.name == echo.method
+                and method.intent == echo.intent
+            ]
+            if _OFFER_TAG_RE.fullmatch(tag)
+            else []
+        )
+        if len(matching) != 1:
             raise InvalidChallengeError(echo.id, "credential was not issued by a configured method")
+        method = matching[0]
+        if self._configurations[id(method)] in self._ambiguous:
+            raise InvalidChallengeError(
+                echo.id,
+                "credential matches several identically configured methods; "
+                "it cannot be settled out of band",
+            )
         return method
 
     def _register_payment_success_handler(self, method: ServerMethod) -> None:
@@ -422,12 +447,16 @@ class Mpp:
                 # Route issuance binds the normalized input's scope, including one the
                 # method's resolve_request derives.
                 expected_scope = scopes[id(method)]
+                wire_scope = False
             elif _comparable(request) == echoed:
                 method = _select_echoed(candidates, echoed_request)
                 expected_scope = request.get("_mppx_scope")
+                wire_scope = True
             else:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
-            if not _custom_scope_matches(expected_scope, echoed_request.get("_mppx_scope")):
+            if not _custom_scope_matches(
+                expected_scope, echoed_request.get("_mppx_scope"), wire=wire_scope
+            ):
                 raise InvalidChallengeError(echo.id, "credential scope does not match")
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
@@ -693,29 +722,41 @@ def _select_echoed(candidates: Sequence[ServerMethod], echoed: Mapping[str, Any]
     return (narrowed or matching)[0]
 
 
-_ENGINE_SCOPE_KEYS = frozenset({"custom", "http_method", "query", "resource", "route"})
-
-
-def _custom_scope_matches(expected: Any, echoed: Any) -> bool:
+def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     """Whether the application-defined scope a caller expects matches the echoed scope.
 
     Route issuance binds the method input's ``_mppx_scope`` under the signed scope's
-    ``custom`` key next to engine route fields. A caller names either the custom scope
-    itself (route input) or a whole signed scope (wire request), whose ``custom`` key is
-    compared. Engine route fields are not checked, and a caller naming no scope
-    checks none.
+    ``custom`` key next to engine route fields. Route input (``wire=False``) names
+    the custom scope itself, compared as it is; a wire request (``wire=True``) names a
+    whole signed scope, whose ``custom`` key is compared. Engine route fields are not
+    checked, and a caller naming no scope checks none.
     """
     if expected is None:
         return True
     custom = echoed.get("custom") if isinstance(echoed, Mapping) else None
-    if expected == custom:
-        return True
-    return (
-        isinstance(expected, Mapping)
-        and "http_method" in expected
-        and set(expected) <= _ENGINE_SCOPE_KEYS
-        and expected.get("custom") == custom
-    )
+    if wire:
+        return isinstance(expected, Mapping) and expected.get("custom") == custom
+    return expected == custom
+
+
+_OFFER_TAG_RE = re.compile(r"[0-9a-f]{16}")
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _configuration_digest(method: ServerMethod) -> str:
+    """A digest of what a method's configuration issues, independent of its position."""
+    configuration: dict[str, Any] = {
+        "defaults": dict(method.defaults or {}),
+        "intent": method.intent,
+        "name": method.name,
+    }
+    probe = _probe(method)
+    if probe is not None:
+        configuration["probe"] = probe
+    return _digest(json.dumps(configuration, sort_keys=True, separators=(",", ":"), default=str))
 
 
 def _probe(method: ServerMethod) -> dict[str, Any] | None:
