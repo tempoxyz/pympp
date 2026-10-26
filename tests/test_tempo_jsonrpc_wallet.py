@@ -329,7 +329,7 @@ async def test_push_refuses_a_challenge_about_to_expire() -> None:
 
     wallet = FakeWallet()
     challenge = _challenge()
-    expires = (datetime.now(UTC) + timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
+    expires = (datetime.now(UTC) + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
     challenge = Challenge(
         id=challenge.id,
         method=challenge.method,
@@ -339,6 +339,31 @@ async def test_push_refuses_a_challenge_about_to_expire() -> None:
         request_b64=challenge.request_b64,
         expires=expires,
     )
+
+    with pytest.raises(PaymentExpiredError):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+async def test_push_pays_a_short_lived_unsponsored_challenge() -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls={"id": "bundle-short"},
+        wallet_getCallsStatus={"status": 200, "receipts": [{"transactionHash": TX_HASH}]},
+    )
+    challenge = _with_expires(_challenge(), _expires_in(10))
+
+    credential = await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+
+    assert credential.payload == {"type": "hash", "hash": TX_HASH}
+
+
+@pytest.mark.asyncio
+async def test_push_keeps_the_cosign_floor_for_a_sponsored_challenge() -> None:
+    from mpp.errors import PaymentExpiredError
+
+    wallet = FakeWallet()
+    challenge = _with_expires(_challenge(feePayer=True), _expires_in(10))
 
     with pytest.raises(PaymentExpiredError):
         await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
@@ -410,7 +435,7 @@ async def test_push_rechecks_expiry_after_fee_token_resolution() -> None:
     clock = {"offset": 0.0}
 
     async def slow_balance(*args: Any, **kwargs: Any) -> int:
-        clock["offset"] = 10.0  # The balance lookups take 10s.
+        clock["offset"] = 19.0  # The balance lookups take 19s.
         return 10**6
 
     with (

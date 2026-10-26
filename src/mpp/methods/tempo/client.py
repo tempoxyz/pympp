@@ -53,6 +53,10 @@ EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 # Tempo's expiring-nonce cap (300s since T11; it was 30s before).
 EXPIRING_NONCE_VALID_BEFORE_SECS = 60
 FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated alias.
+# Remaining challenge validity an unsponsored push payment needs before the
+# wallet sends it: only a margin for presenting the credential. The 15s
+# MIN_REMAINING_VALIDITY_SECONDS floor applies only to fee-sponsored challenges.
+PUSH_MIN_REMAINING_VALIDITY_SECONDS = 2
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
@@ -386,6 +390,7 @@ class TempoMethod:
                 memo=memo,
                 splits=splits,
                 expected_chain_id=expected_chain_id,
+                sponsored=bool(use_fee_payer),
             )
         if use_fee_payer:
             _assert_sponsored_challenge_time_left(challenge.expires)
@@ -421,6 +426,7 @@ class TempoMethod:
         memo: str,
         splits: list[dict] | None,
         expected_chain_id: int | None,
+        sponsored: bool = False,
     ) -> Credential:
         """Pay in push mode: the wallet sends the transfer calls and returns their hash."""
         from mpp.methods.tempo._wallet import (
@@ -430,7 +436,13 @@ class TempoMethod:
         )
 
         # A sent transfer cannot be recalled, so leave time to confirm it and present it.
-        _assert_challenge_time_left(challenge.expires, "Push-mode", required=True)
+        # Only a fee-sponsored challenge needs the sponsor's cosign floor.
+        min_seconds = (
+            MIN_REMAINING_VALIDITY_SECONDS if sponsored else PUSH_MIN_REMAINING_VALIDITY_SECONDS
+        )
+        _assert_challenge_time_left(
+            challenge.expires, "Push-mode", required=True, min_seconds=min_seconds
+        )
         request = challenge.request
         chain_id = await self._get_chain_id(self.rpc_url)
         if expected_chain_id is not None and chain_id != expected_chain_id:
@@ -448,7 +460,9 @@ class TempoMethod:
             )
             capabilities = {"feeToken": fee_token}
         # The RPC round trips above take time too: check again just before paying.
-        _assert_challenge_time_left(challenge.expires, "Push-mode", required=True)
+        _assert_challenge_time_left(
+            challenge.expires, "Push-mode", required=True, min_seconds=min_seconds
+        )
         try:
             status = await send_calls_sync(
                 self._wallet_request(wallet),
@@ -783,8 +797,14 @@ def _fee_payer_envelope(raw_tx: str, sender: str) -> str:
     return "0x78" + rlp.encode(fields).hex()
 
 
-def _assert_challenge_time_left(expires: str | None, kind: str, *, required: bool = False) -> None:
-    """Refuse a challenge too close to expiry to pay before the server rejects it.
+def _assert_challenge_time_left(
+    expires: str | None,
+    kind: str,
+    *,
+    required: bool = False,
+    min_seconds: float = MIN_REMAINING_VALIDITY_SECONDS,
+) -> None:
+    """Refuse a challenge with less than ``min_seconds`` of validity left.
 
     Raises ``PaymentExpiredError`` before paying, so the HTTP transport returns the
     402 for the caller to retry. With ``required``, a challenge without a valid
@@ -800,10 +820,9 @@ def _assert_challenge_time_left(expires: str | None, kind: str, *, required: boo
                 f"{kind} challenge has no valid expires; the server would reject its credential"
             ) from None
         return
-    if challenge_expiry - time.time() < MIN_REMAINING_VALIDITY_SECONDS:
+    if challenge_expiry - time.time() < min_seconds:
         raise PaymentExpiredError(expires) from ValueError(
-            f"{kind} challenge expires in less than "
-            f"{MIN_REMAINING_VALIDITY_SECONDS} seconds; request a new challenge"
+            f"{kind} challenge expires in less than {min_seconds} seconds; request a new challenge"
         )
 
 
