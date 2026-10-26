@@ -143,6 +143,8 @@ class MachinePayments:
         connect: ConnectSettlement | None = None,
     ) -> None:
         stripe_intents._resolve_payment_intents(client)
+        if connect is not None and not isinstance(connect, ConnectSettlement):
+            raise TypeError("create() connect must be a ConnectSettlement or None")
         if not callable(getattr(store, "put_if_absent", None)):
             raise ValueError("create() requires a shared atomic `store` for replay protection")
         tempo_address = deposit_addresses.get("tempo") if deposit_addresses is not None else None
@@ -174,8 +176,8 @@ def create(
 
     ``store`` is the atomic replay store shared by every server instance; Tempo
     charges use it to reject replayed transaction hashes across replicas.
-    ``connect`` routes SPT charges and recorded Tempo payments to a Stripe
-    Connect account.
+    ``connect`` is a static ``ConnectSettlement`` that routes SPT charges and
+    recorded Tempo payments to a Stripe Connect account.
     """
     return MachinePayments(
         network_id=network_id,

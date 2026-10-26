@@ -175,6 +175,14 @@ async def test_secret_key_path_hides_stripe_error_with_settlement() -> None:
     assert "HTTP 400" in str(error.value)
 
 
+def test_create_rejects_a_connect_resolver() -> None:
+    with pytest.raises(TypeError, match="ConnectSettlement"):
+        make_payments(
+            deposit_addresses={"tempo": "0x" + "1" * 40},
+            connect=lambda _: SETTLEMENT,
+        )
+
+
 def test_tempo_is_not_offered_when_connect_cannot_record_the_amount() -> None:
     connect = ConnectSettlement(application_fee_amount=50)
     _, payments = make_payments(deposit_addresses={"tempo": "0x" + "1" * 40}, connect=connect)
