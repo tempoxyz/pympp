@@ -4377,7 +4377,97 @@ class TestCosignAsFeePayer:
         assert len(sends) == 1
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         assert await store.get(marker) == sends[0]
-        assert list(store._data) == [marker]
+        # The unknown submission also keeps its fee reserved against the sponsor budget.
+        budget = [key for key in store._data if key.startswith("mpp:charge:sponsor-budget:")]
+        assert sorted(store._data) == sorted([marker, *budget])
+        assert len(budget) == 1
+
+    def _sponsor_budget_key(self, intent: ChargeIntent) -> str:
+        assert intent.fee_payer is not None
+        return f"mpp:charge:sponsor-budget:{TESTNET_CHAIN_ID}:{intent.fee_payer.address.lower()}"
+
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_at_capacity_refuses_before_broadcast(self):
+        from mpp.methods.tempo import SponsorBudget, sponsor_budget
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        intent._sponsor_budget = budget = SponsorBudget(max_in_flight_reservations=1)
+        assert intent.fee_payer is not None
+        now = int(time.time() * 1000)
+        await sponsor_budget.reserve(
+            store,
+            budget,
+            chain_id=TESTNET_CHAIN_ID,
+            sponsor=intent.fee_payer.address,
+            transaction_hash="0x" + "11" * 32,
+            fee=1,
+            expires_at=now + 60_000,
+            wait_until=now + 60_000,
+            is_settled=AsyncMock(return_value=False),
+        )
+        expires = (datetime.now(UTC) + timedelta(seconds=0.2)).isoformat()
+        credential = replace(credential, challenge=replace(credential.challenge, expires=expires))
+        intent._http_client = AsyncMock()
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            pytest.raises(InternalPaymentError) as raised,
+        ):
+            await intent.verify(credential, request)
+        # The challenge expired while waiting, so the refusal is not a retryable 402.
+        assert "waiting for sponsor budget" in str(internal_cause(raised.value))
+        intent._http_client.post.assert_not_awaited()
+        state = await store.get(self._sponsor_budget_key(intent))
+        assert state is not None
+        assert len(json.loads(state)["reservations"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_is_released_after_settlement(self):
+        from mpp.methods.tempo import sponsor_budget
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        reserve = AsyncMock(side_effect=sponsor_budget.reserve)
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(sponsor_budget, "reserve", reserve),
+        ):
+            await intent.verify(credential, request)
+        assert reserve.await_args is not None
+        assert reserve.await_args.kwargs["fee"] > 0
+        assert await store.get(self._sponsor_budget_key(intent)) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_sponsor_budget_keeps_unknown_broadcast_reserved(self, enabled):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        if not enabled:
+            intent = ChargeIntent(
+                rpc_url="https://rpc.test",
+                fee_payer=intent.fee_payer,
+                fee_token=PATH_USD,
+                store=store,
+                sponsor_budget=False,
+            )
+        intent._confirmation_timeout = 0.01
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=httpx.ReadTimeout("unknown")))
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(intent, "_get_transaction_receipt", AsyncMock(return_value=None)),
+            pytest.raises(InternalPaymentError),
+        ):
+            await intent.verify(credential, request)
+        state = await store.get(self._sponsor_budget_key(intent))
+        if not enabled:
+            assert state is None
+            return
+        assert state is not None
+        (entry,) = json.loads(state)["reservations"].values()
+        assert entry["phase"] == "pending"
+        assert entry["transactionHash"] == _raw_transaction_hash(signed)
 
     def _cosign_payload(self, intent: ChargeIntent) -> dict:
         currency = "0x20c0000000000000000000000000000000000000"

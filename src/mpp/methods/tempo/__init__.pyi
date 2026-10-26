@@ -26,6 +26,7 @@ from mpp.methods.tempo.relay import RelayErrorCode as _RelayErrorCode
 from mpp.methods.tempo.schemas import ChargeInput as _ChargeInput
 from mpp.methods.tempo.schemas import ChargePayload as _ChargePayload
 from mpp.methods.tempo.schemas import Split as _Split
+from mpp.methods.tempo.sponsor_budget import SponsorBudget as _SponsorBudget
 
 PkhSource = _PkhSource
 parse_pkh_source = _parse_pkh_source
@@ -53,3 +54,4 @@ RelayErrorCode = _RelayErrorCode
 ChargeInput = _ChargeInput
 ChargePayload = _ChargePayload
 Split = _Split
+SponsorBudget = _SponsorBudget

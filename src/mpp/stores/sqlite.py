@@ -129,6 +129,27 @@ class SQLiteStore:
         _validate_expiry(expires_at)
         return await self._put_if_absent(key, value, expires_at)
 
+    async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
+        """Atomic conditional write: one SQL statement keyed on the current value."""
+        await self._prune_expired(time.time())
+        if expected is None and value is None:
+            return await self.get(key) is None
+        if expected is None:
+            cursor = await self._db.execute(
+                "INSERT OR IGNORE INTO kv (key, value, expires_at) VALUES (?, ?, ?)",
+                (key, value, NO_TTL_EXPIRES_AT),
+            )
+        elif value is None:
+            cursor = await self._db.execute(
+                "DELETE FROM kv WHERE key = ? AND value = ?", (key, expected)
+            )
+        else:
+            cursor = await self._db.execute(
+                "UPDATE kv SET value = ? WHERE key = ? AND value = ?", (value, key, expected)
+            )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
     async def _put_if_absent(self, key: str, value: Any, expires_at: float) -> bool:
         now = time.time()
         await self._prune_expired(now)

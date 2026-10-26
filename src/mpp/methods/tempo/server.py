@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp.methods.tempo.client import _CHAIN_ID_UNSET, _tempo_method
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from mpp.methods import CanOfferFn, PaymentSuccessHandler
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.relay import Relay
+    from mpp.methods.tempo.sponsor_budget import SponsorBudget
     from mpp.store import Store
 
 __all__ = ["charge"]
@@ -45,6 +46,7 @@ def charge(
     fee_payer: TempoAccount | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
+    sponsor_budget: SponsorBudget | Literal[False] | None = None,
     store: Store | None = None,
     validate_sender: ValidateSender | None = None,
     http_client: httpx.AsyncClient | None = None,
@@ -72,6 +74,9 @@ def charge(
         fee_payer: Account that co-signs and broadcasts sponsored transactions.
         fee_token: Token ``fee_payer`` pays gas in. Requires ``fee_payer``.
         allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
+        sponsor_budget: Caps the fees ``fee_payer`` has in flight across every
+            process sharing it (default: ``SponsorBudget()`` on ``store``).
+            Pass ``False`` only when it is enforced elsewhere.
         store: Replay store for transaction hashes. Use a shared store across
             replicas; defaults to a per-process in-memory store.
         validate_sender: Authorizes a hash-credential sender that differs from
@@ -104,6 +109,7 @@ def charge(
         fee_payer=fee_payer,
         fee_token=config.fee_token,
         allowed_fee_tokens=config.allowed_fee_tokens,
+        sponsor_budget=sponsor_budget,
     )
     verifier: Any = intent if relay is None else relay.configure(intent)
 

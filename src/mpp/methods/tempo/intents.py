@@ -30,6 +30,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
+from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
@@ -40,7 +41,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
-from mpp.store import ExpiringStore, MemoryStore, Store
+from mpp.store import CompareAndSetStore, ExpiringStore, MemoryStore, Store
 
 if TYPE_CHECKING:
     import httpx
@@ -806,6 +807,7 @@ class ChargeIntent:
         fee_payer: TempoAccount | None = None,
         fee_token: str | None = None,
         allowed_fee_tokens: Sequence[str] | None = None,
+        sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None,
     ) -> None:
         """Initialize the charge intent.
 
@@ -837,6 +839,9 @@ class ChargeIntent:
             allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
                 Defaults to :func:`fee_tokens_for_chain` for a local fee payer;
                 restricts an external ``feePayerUrl`` sponsor's token when set.
+            sponsor_budget: Caps the fees ``fee_payer`` has in flight (default:
+                :class:`~mpp.methods.tempo.sponsor_budget.SponsorBudget` on the
+                replay store). Pass ``False`` only when it is enforced elsewhere.
         """
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
@@ -850,6 +855,10 @@ class ChargeIntent:
         self._store = store
         self._validate_sender = validate_sender
         self._confirmation_timeout = confirmation_timeout
+        self._sponsor_budget = (
+            None if sponsor_budget is False else sponsor_budget or _sponsor_budget.SponsorBudget()
+        )
+        self._sponsor_budget_fallback: MemoryStore | None = None
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -1765,6 +1774,9 @@ class ChargeIntent:
         broadcast_key: str | None = None
         reconciling = False
         legacy_record = False
+        sponsored_fee: int | None = None
+        reservation: _sponsor_budget.Reservation | None = None
+        budget_store = self._sponsor_budget_store()
         client_store_key: str | None = None
         recovery_expires_at = (
             datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
@@ -1784,6 +1796,7 @@ class ChargeIntent:
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
+                sponsored_fee = max_fee
                 prior_transaction: Any = None
                 if self._store is not None:
                     client_hash = _raw_transaction_hash(raw_tx).lower()
@@ -1965,6 +1978,16 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
+                reservation = await self._reserve_sponsor_budget(
+                    client, budget_store, raw_tx, sponsored_fee, request, recovery_expires_at
+                )
+                # Waiting for sponsor budget can take a while too.
+                if reservation is not None:
+                    prior = await self._check_sponsored_validity(
+                        client, raw_tx, broadcast_key, request, challenge_id, realm
+                    )
+                    if prior is not None:
+                        return prior
 
             # The send and any receipt recovery share one confirmation deadline.
             # The send may use at most two thirds of it, leaving the rest for
@@ -2003,6 +2026,14 @@ class ChargeIntent:
                         "Earlier submission of this transaction has an unknown outcome"
                     )
                 raise PaymentExpiredError(expires)
+            if (
+                reservation is not None
+                and budget_store is not None
+                and not await _sponsor_budget.transition(budget_store, reservation, "broadcasting")
+            ):
+                raise VerificationError(
+                    "Sponsor budget reservation ownership was lost before broadcast"
+                )
             broadcast_attempted = True
             outcome_unknown = True
             try:
@@ -2134,6 +2165,75 @@ class ChargeIntent:
             ):
                 raise InternalPaymentError() from err
             raise
+        finally:
+            if reservation is not None and budget_store is not None:
+                try:
+                    # A transaction that may still land keeps its fee reserved
+                    # until a receipt is observed or it expires.
+                    if outcome_unknown and not verified:
+                        await _sponsor_budget.transition(budget_store, reservation, "pending")
+                    else:
+                        await _sponsor_budget.release(budget_store, reservation)
+                except Exception:
+                    # The reservation expires on its own; the settlement outcome wins.
+                    logger.exception("Sponsor budget cleanup failed")
+
+    def _sponsor_budget_store(self) -> CompareAndSetStore | None:
+        """Return the store holding the local fee payer's in-flight budget, if enforced."""
+        budget = self._sponsor_budget
+        if budget is None or self.fee_payer is None:
+            return None
+        if budget.store is not None:
+            return budget.store
+        if isinstance(self._store, CompareAndSetStore):
+            return self._store
+        if self._sponsor_budget_fallback is None:
+            logger.warning(
+                "tempo.charge's store has no compare_and_set, so the sponsor budget is "
+                "scoped to this process. Pass SponsorBudget(store=...) with a shared store."
+            )
+            self._sponsor_budget_fallback = MemoryStore()
+        return self._sponsor_budget_fallback
+
+    async def _reserve_sponsor_budget(
+        self,
+        client: Any,
+        store: CompareAndSetStore | None,
+        raw_tx: str,
+        fee: int | None,
+        request: ChargeRequest,
+        challenge_expires_at: float | None,
+    ) -> _sponsor_budget.Reservation | None:
+        """Reserve a locally sponsored transaction's fee before it is broadcast."""
+        budget = self._sponsor_budget
+        valid_before = _transaction_valid_before(raw_tx)
+        if (
+            budget is None
+            or store is None
+            or self.fee_payer is None
+            or fee is None
+            or valid_before is None
+        ):
+            return None
+        expires_at = valid_before * 1000
+        wait_until = expires_at
+        if challenge_expires_at is not None:
+            wait_until = min(wait_until, int(challenge_expires_at * 1000))
+
+        async def is_settled(tx_hash: str) -> bool:
+            return await self._get_transaction_receipt(client, tx_hash) is not None
+
+        return await _sponsor_budget.reserve(
+            store,
+            budget,
+            chain_id=request.methodDetails.chainId,
+            sponsor=self.fee_payer.address,
+            transaction_hash=_raw_transaction_hash(raw_tx),
+            fee=fee,
+            expires_at=expires_at,
+            wait_until=wait_until,
+            is_settled=is_settled,
+        )
 
     async def _check_sponsored_validity(
         self,
