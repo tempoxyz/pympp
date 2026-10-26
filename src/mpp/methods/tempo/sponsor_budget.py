@@ -250,8 +250,14 @@ async def reserve(
         def change(current: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
             if current is None:
                 return "invalid", None
-            if reservation.id in current:
-                return "duplicate", None
+            existing = current.get(reservation.id)
+            if existing is not None:
+                if not _is_stale(existing, _now_ms()):
+                    return "duplicate", None
+                # An earlier attempt left this entry behind (its release
+                # failed): drop it in this same write so it never blocks a
+                # retry of the same transaction.
+                current = {k: v for k, v in current.items() if k != reservation.id}
             total = sum(int(entry["fee"]) for entry in current.values())
             if (
                 len(current) >= budget.max_in_flight_reservations

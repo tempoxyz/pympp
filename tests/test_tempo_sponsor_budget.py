@@ -189,6 +189,25 @@ async def test_duplicate_and_foreign_owner_are_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_entry_of_the_same_transaction_does_not_block_a_retry() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget()
+    # An earlier attempt whose release failed left its prepared entry behind.
+    earlier = await reserve(store, budget, "0x01")
+    raw = await store.get(KEY)
+    assert raw is not None
+    state = json.loads(raw)
+    state["reservations"]["0x01"]["leaseUntil"] = 0
+    await store.put(KEY, json.dumps(state))
+    # The budget has room, so no reconciliation runs: the retry replaces it.
+    retry = await reserve(store, budget, "0x01")
+    assert retry.owner != earlier.owner
+    assert (await reservations(store))["0x01"]["owner"] == retry.owner
+    assert not await budget_module.release(store, earlier)
+    assert await budget_module.release(store, retry)
+
+
+@pytest.mark.asyncio
 async def test_incompatible_state_is_refused() -> None:
     store = MemoryStore()
     await store.put(KEY, json.dumps({"version": 2}))
