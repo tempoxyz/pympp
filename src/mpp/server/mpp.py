@@ -30,7 +30,7 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
-from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
+from mpp.server.compose import ComposedHandler, _Offer, _validate_options
 from mpp.server.method import (
     SETTLING_METHOD,
     RequestContext,
@@ -78,11 +78,9 @@ class HandlerFactory:
         methods = _select(self.methods, options)
         for method in methods:
             _check_input(method, options)
-        composed = self._server._compose_implicit or len(methods) > 1
-        selection = object() if composed and self._server.select_offers is not None else None
         return ComposedHandler._from_offers(
-            [_Offer(self._server, method, dict(options), selection) for method in methods],
-            composed=composed,
+            [_Offer(self._server, method, dict(options)) for method in methods],
+            composed=self._server._compose_implicit or len(methods) > 1,
         )
 
 
@@ -179,7 +177,6 @@ class Mpp:
         store: Store | None = None,
         requires_auth: bool = False,
         unique_challenges: bool = True,
-        select_offers: SelectOffers | None = None,
     ) -> None:
         """Initialize the payment engine.
 
@@ -196,11 +193,6 @@ class Mpp:
                 ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
                 to all replicas; enable afterward to prevent fixed-expiry collisions.
-            select_offers: Chooses which of a composed handler's available offers to
-                advertise, given them in order as :class:`~mpp.server.ServerOffer`
-                values and an :class:`~mpp.server.OfferSelectionContext`. It returns a
-                non-empty, ordered subset of them. Credentials addressing an offer
-                bypass it; x402 payments must pay a selected offer.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
@@ -213,9 +205,6 @@ class Mpp:
         self.realm = detect_realm() if realm is None else realm
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges
-        if select_offers is not None and not callable(select_offers):
-            raise ValueError("select_offers must be callable")
-        self.select_offers = select_offers
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
         self._events = EventDispatcher()
@@ -299,17 +288,7 @@ class Mpp:
             if not isinstance(factory, HandlerFactory):
                 raise ValueError(f"payment method is not registered: {target!r}")
             handlers.append(factory(**options))
-        if self.select_offers is None:
-            return ComposedHandler(*handlers)
-        selection = object()
-        return ComposedHandler._from_offers(
-            [
-                replace(offer, selection=selection)
-                for handler in handlers
-                for offer in handler._offers
-            ],
-            composed=True,
-        )
+        return ComposedHandler(*handlers)
 
     def _register_payment_success_handler(self, method: ServerMethod) -> None:
         """Forward successful payments to a method's optional callback."""
