@@ -38,7 +38,7 @@ from mpp.methods.tempo._defaults import (
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_EXPORTS = {
-    "mpp.methods.tempo.account": ("TempoAccount",),
+    "mpp.methods.tempo.account": ("JsonRpcAccount", "TempoAccount"),
     "mpp.methods.tempo.client": ("TempoMethod", "TransactionError"),
     "mpp.methods.tempo.intents": (
         "ChargeIntent",

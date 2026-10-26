@@ -6,11 +6,15 @@ Wraps eth-account for key management and signing operations.
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from eth_account.signers.local import LocalAccount
+
+WalletRequest = Callable[[str, list[Any]], Awaitable[Any]]
+"""Sends one JSON-RPC request (method, params) to a wallet and returns its result."""
 
 
 @dataclass(frozen=True)
@@ -99,3 +103,24 @@ class TempoAccount:
 
         signed = self._account.unsafe_sign_hash(msg_hash)  # type: ignore[arg-type]
         return signed.r.to_bytes(32, "big") + signed.s.to_bytes(32, "big") + bytes([signed.v])
+
+
+@dataclass(frozen=True)
+class JsonRpcAccount:
+    """An account whose wallet holds the key and signs over JSON-RPC.
+
+    Charges paid with it prefer push mode: the wallet submits the transfer with
+    EIP-5792 ``wallet_sendCalls`` (falling back to ``eth_sendTransaction`` for a
+    single call). A pull-only challenge is signed with ``eth_signTransaction``.
+
+    Example:
+        account = JsonRpcAccount("0x...", request=wallet_request)
+
+    Args:
+        address: The wallet account's address.
+        request: Sends a JSON-RPC request to the wallet. Defaults to the charge's
+            ``rpc_url``, for a node that manages the account.
+    """
+
+    address: str
+    request: WalletRequest | None = None

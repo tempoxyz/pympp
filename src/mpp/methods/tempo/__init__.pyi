@@ -13,6 +13,7 @@ from mpp.methods.tempo._defaults import (
 from mpp.methods.tempo._defaults import default_currency_for_chain as _default_currency_for_chain
 from mpp.methods.tempo._defaults import escrow_contract_for_chain as _escrow_contract_for_chain
 from mpp.methods.tempo._defaults import fee_tokens_for_chain as _fee_tokens_for_chain
+from mpp.methods.tempo.account import JsonRpcAccount as _JsonRpcAccount
 from mpp.methods.tempo.account import TempoAccount as _TempoAccount
 from mpp.methods.tempo.client import TempoMethod as _TempoMethod
 from mpp.methods.tempo.client import TransactionError as _TransactionError
@@ -40,6 +41,7 @@ default_currencies_for_chain = _default_currencies_for_chain
 default_currency_for_chain = _default_currency_for_chain
 escrow_contract_for_chain = _escrow_contract_for_chain
 fee_tokens_for_chain = _fee_tokens_for_chain
+JsonRpcAccount = _JsonRpcAccount
 TempoAccount = _TempoAccount
 TempoMethod = _TempoMethod
 TransactionError = _TransactionError

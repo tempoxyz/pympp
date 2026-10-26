@@ -28,10 +28,13 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
+from mpp.methods.tempo.account import JsonRpcAccount, WalletRequest
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from pytempo import Call, TempoTransaction
 
     from mpp.methods.tempo.account import TempoAccount
     from mpp.runtime import ClientMethod
@@ -83,7 +86,7 @@ class TempoMethod:
     """
 
     name: str = "tempo"
-    account: TempoAccount | None = None
+    account: TempoAccount | JsonRpcAccount | None = None
     fee_payer: TempoAccount | None = None
     root_account: str | None = None
     rpc_url: str = RPC_URL
@@ -363,19 +366,28 @@ class TempoMethod:
         if expected_chain_id is None:
             expected_chain_id = _challenge_chain_id(request)
         method_details = request.get("methodDetails", {})
-        use_fee_payer = (
-            method_details.get("feePayer", False) if isinstance(method_details, dict) else False
-        )
-        if use_fee_payer:
-            _assert_sponsored_challenge_time_left(challenge.expires)
-
+        if not isinstance(method_details, dict):
+            method_details = {}
+        use_fee_payer = method_details.get("feePayer", False)
         memo = encode_attribution(
             challenge_id=challenge.id,
             server_id=challenge.realm,
             client_id=self.client_id,
         )
+        splits = method_details.get("splits")
 
-        splits = method_details.get("splits") if isinstance(method_details, dict) else None
+        # A JSON-RPC wallet prefers push mode: the wallet submits the calls.
+        supported_modes = method_details.get("supportedModes") or ["pull", "push"]
+        if isinstance(self.account, JsonRpcAccount) and "push" in supported_modes:
+            return await self._send_with_wallet(
+                self.account,
+                challenge,
+                memo=memo,
+                splits=splits,
+                expected_chain_id=expected_chain_id,
+            )
+        if use_fee_payer:
+            _assert_sponsored_challenge_time_left(challenge.expires)
 
         rpc_url = self.rpc_url
         raw_tx, chain_id = await self._build_tempo_transfer(
@@ -399,6 +411,63 @@ class TempoMethod:
             payload={"type": "transaction", "signature": raw_tx},
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
+
+    async def _send_with_wallet(
+        self,
+        wallet: JsonRpcAccount,
+        challenge: Challenge,
+        *,
+        memo: str,
+        splits: list[dict] | None,
+        expected_chain_id: int | None,
+    ) -> Credential:
+        """Pay in push mode: the wallet sends the transfer calls and returns their hash."""
+        from mpp.methods.tempo._wallet import send_calls_sync
+
+        request = challenge.request
+        chain_id = await self._get_chain_id(self.rpc_url)
+        if expected_chain_id is not None and chain_id != expected_chain_id:
+            raise TransactionError(
+                f"Chain ID mismatch: RPC returned {chain_id}, "
+                f"expected {expected_chain_id} from client policy"
+            )
+        calls = self._transfer_calls(
+            request["amount"], request["currency"], request["recipient"], memo, splits
+        )
+        capabilities = None
+        if request["currency"].lower() in (MACH.lower(), OUSD.lower()):
+            fee_token = await self._resolve_supported_fee_token(
+                account=wallet.address, chain_id=chain_id, rpc_url=self.rpc_url, required_balance=1
+            )
+            capabilities = {"feeToken": fee_token}
+        status = await send_calls_sync(
+            self._wallet_request(wallet),
+            address=wallet.address,
+            chain_id=chain_id,
+            calls=calls,
+            capabilities=capabilities,
+            experimental_fallback=len(calls) == 1,
+            force_atomic=len(calls) > 1,
+        )
+        receipts = status["receipts"]
+        tx_hash = receipts[0].get("transactionHash") if receipts else None
+        if not tx_hash:
+            raise TransactionError("No transaction receipt returned.")
+        return Credential(
+            challenge=challenge.to_echo(),
+            payload={"type": "hash", "hash": tx_hash},
+            source=f"did:pkh:eip155:{chain_id}:{wallet.address}",
+        )
+
+    def _wallet_request(self, wallet: JsonRpcAccount) -> WalletRequest:
+        """Return where a wallet's requests go: its own transport, else the charge's RPC."""
+        if wallet.request is not None:
+            return wallet.request
+
+        async def request(method: str, params: list) -> object:
+            return await _rpc_call(self.rpc_url, method, params)
+
+        return request
 
     def transaction_hash(self, credential: Credential) -> str | None:
         """Return the on-chain hash of a credential's signed 0x76 transaction.
@@ -473,37 +542,15 @@ class TempoMethod:
         Raises:
             TransactionError: If the RPC's chain ID doesn't match expected.
         """
-        from pytempo import Call, TempoTransaction
+        from pytempo import TempoTransaction
 
         if self.account is None:
             raise ValueError("No account configured")
 
         resolved_rpc = rpc_url or self.rpc_url
 
-        gas_estimate_data: str | None = None
-
-        if splits:
-            from mpp.methods.tempo.intents import get_transfers
-            from mpp.methods.tempo.schemas import Split as SplitModel
-
-            parsed_splits = [SplitModel(**s) for s in splits]
-            transfer_list = get_transfers(int(amount), recipient, memo, parsed_splits)
-            call_list = []
-            for t in transfer_list:
-                transfer_memo = "0x" + t.memo.hex() if t.memo is not None else memo
-                if transfer_memo is not None:
-                    td = self._encode_transfer_with_memo(t.recipient, t.amount, transfer_memo)
-                else:
-                    td = self._encode_transfer(t.recipient, t.amount)
-                call_list.append(Call.create(to=currency, value=0, data=td))
-            calls_tuple = tuple(call_list)
-        else:
-            if memo:
-                transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
-            else:
-                transfer_data = self._encode_transfer(recipient, int(amount))
-            calls_tuple = (Call.create(to=currency, value=0, data=transfer_data),)
-            gas_estimate_data = transfer_data
+        calls_tuple = self._transfer_calls(amount, currency, recipient, memo, splits)
+        gas_estimate_data = None if splits else "0x" + calls_tuple[0].data.hex()
 
         # When using an access key, the root account (smart wallet) is the
         # sender, not the access key address.
@@ -568,6 +615,12 @@ class TempoMethod:
             calls=calls_tuple,
         )
 
+        if isinstance(self.account, JsonRpcAccount):
+            raw_tx = await self._wallet_request(self.account)(
+                "eth_signTransaction", [_transaction_request(tx, sender)]
+            )
+            return raw_tx, chain_id
+
         if self.root_account:
             from pytempo import sign_tx_access_key
 
@@ -581,6 +634,38 @@ class TempoMethod:
             return "0x" + encode_fee_payer_envelope(signed_tx).hex(), chain_id
 
         return "0x" + signed_tx.encode().hex(), chain_id
+
+    def _transfer_calls(
+        self,
+        amount: str,
+        currency: str,
+        recipient: str,
+        memo: str | None,
+        splits: list[dict] | None,
+    ) -> tuple[Call, ...]:
+        """Return the TIP-20 transfer calls that pay a charge and its splits."""
+        from pytempo import Call
+
+        if not splits:
+            if memo:
+                transfer_data = self._encode_transfer_with_memo(recipient, int(amount), memo)
+            else:
+                transfer_data = self._encode_transfer(recipient, int(amount))
+            return (Call.create(to=currency, value=0, data=transfer_data),)
+
+        from mpp.methods.tempo.intents import get_transfers
+        from mpp.methods.tempo.schemas import Split as SplitModel
+
+        parsed_splits = [SplitModel(**s) for s in splits]
+        call_list = []
+        for t in get_transfers(int(amount), recipient, memo, parsed_splits):
+            transfer_memo = "0x" + t.memo.hex() if t.memo is not None else memo
+            if transfer_memo is not None:
+                td = self._encode_transfer_with_memo(t.recipient, t.amount, transfer_memo)
+            else:
+                td = self._encode_transfer(t.recipient, t.amount)
+            call_list.append(Call.create(to=currency, value=0, data=td))
+        return tuple(call_list)
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call.
@@ -608,6 +693,31 @@ class TempoMethod:
         if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
             raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _transaction_request(tx: TempoTransaction, sender: str) -> dict[str, object]:
+    """Return a prepared transaction as an `eth_signTransaction` request."""
+    from mpp.methods.tempo._wallet import rpc_calls
+
+    request: dict[str, object] = {
+        "calls": rpc_calls(tx.calls),
+        "chainId": hex(tx.chain_id),
+        "from": sender,
+        "gas": hex(tx.gas_limit),
+        "maxFeePerGas": hex(tx.max_fee_per_gas),
+        "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
+        "nonce": hex(tx.nonce),
+        "nonceKey": hex(tx.nonce_key),
+        "type": "0x76",
+    }
+    if tx.valid_before is not None:
+        request["validBefore"] = hex(tx.valid_before)
+    if tx.fee_token is not None:
+        request["feeToken"] = "0x" + bytes(tx.fee_token).hex()
+    if tx.awaiting_fee_payer:
+        # The fee payer picks the fee token, so the sender does not commit to one.
+        request["feePayer"] = True
+    return request
 
 
 def _assert_sponsored_challenge_time_left(expires: str | None) -> None:
@@ -656,7 +766,7 @@ def _expiring_valid_before(expires: str | None) -> int:
 
 
 def _tempo_method(
-    account: TempoAccount | None = None,
+    account: TempoAccount | JsonRpcAccount | None = None,
     fee_payer: TempoAccount | None = None,
     chain_id: int | None | object = _CHAIN_ID_UNSET,
     rpc_url: str | None = None,
@@ -820,7 +930,7 @@ def _tempo_method(
 
 def charge(
     *,
-    account: TempoAccount,
+    account: TempoAccount | JsonRpcAccount | str,
     chain_id: int | None | object = _CHAIN_ID_UNSET,
     rpc_url: str | None = None,
     root_account: str | None = None,
@@ -850,7 +960,15 @@ def charge(
         account = TempoAccount.from_key("0x...")
         async with Mpp(methods=[tempo.charge(account=account)]) as client:
             response = await client.get("https://api.example.com/resource")
+
+    A :class:`~mpp.methods.tempo.account.JsonRpcAccount` (or its address) pays with a
+    wallet that signs over JSON-RPC: it prefers push mode, sending the transfer with
+    ``wallet_sendCalls``, and signs pull-only challenges with ``eth_signTransaction``.
     """
+    if isinstance(account, str):
+        account = JsonRpcAccount(account)
+    if isinstance(account, JsonRpcAccount) and root_account is not None:
+        raise ValueError("root_account requires a local TempoAccount")
     return _client_method(
         _tempo_method(
             account=account,
