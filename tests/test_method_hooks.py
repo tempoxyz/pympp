@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import UserList
 from dataclasses import replace
 from typing import Any, cast
 
@@ -408,6 +409,20 @@ async def test_select_offers_skips_direct_handlers_and_keeps_nested_groups() -> 
 
     assert [issued.method for issued in result] == ["first", "fourth", "second"]
     assert calls == [["third/charge", "fourth/charge"]]
+
+
+@pytest.mark.asyncio
+async def test_select_offers_accepts_any_sequence() -> None:
+    server = Mpp(
+        methods=[third_party_method("first"), third_party_method("second")],
+        realm="api.example.com",
+        secret_key="secret",
+        select_offers=lambda offers, _context: UserList(offers[1:]),
+    )
+
+    result = challenges(await server.charge(amount="1.00")(http_request()))
+
+    assert [issued.method for issued in result] == ["second"]
 
 
 @pytest.mark.asyncio

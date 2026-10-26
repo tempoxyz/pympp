@@ -487,7 +487,7 @@ class ComposedHandler:
 
         prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
         challenges: list[Challenge] = []
-        for prepared_offer in await self._advertised(prepared, request):
+        for prepared_offer in await self._advertised(prepared, request, call):
             result = await prepared_offer.verify(authorization)
             if not isinstance(result, Challenge):
                 return result
@@ -495,7 +495,7 @@ class ComposedHandler:
         return ComposedChallenges(tuple(challenges))
 
     async def _advertised(
-        self, prepared: Sequence[_PreparedOffer], request: Request
+        self, prepared: Sequence[_PreparedOffer], request: Request, call: _Call
     ) -> list[_PreparedOffer]:
         """The prepared offers to advertise: available ones, then server offer selection."""
         eligible = [offer for offer in prepared if await self._available(offer)]
@@ -509,7 +509,12 @@ class ComposedHandler:
         for group in groups.values():
             kept = {id(offer) for offer in await _select_offers(group, request)}
             dropped.update(id(offer) for offer in group if id(offer) not in kept)
-        return [offer for offer in eligible if id(offer) not in dropped]
+        advertised = [offer for offer in eligible if id(offer) not in dropped]
+        # x402 requirements are looked up by challenge: never from an offer selection dropped.
+        selected = {id(offer.offer) for offer in advertised}
+        unselected = {id(offer.offer) for offer in eligible if id(offer) in dropped} - selected
+        call.prepared = [offer for offer in call.prepared if id(offer.offer) not in unselected]
+        return advertised
 
     async def _verify_x402(
         self,
@@ -523,7 +528,7 @@ class ComposedHandler:
         if not x402_offers:
             return None
         assert x402.payment_signature is not None
-        advertised = await self._advertised(prepared, request)
+        advertised = await self._advertised(prepared, request, call)
         error: Exception
         try:
             payment = decode_payment_signature(x402.payment_signature)
@@ -627,7 +632,7 @@ async def _select_offers(group: Sequence[_PreparedOffer], request: Request) -> l
         for offer in group
     )
     selected = await resolve(select(offers, OfferSelectionContext(request)))
-    if not isinstance(selected, list | tuple):
+    if not isinstance(selected, Sequence) or isinstance(selected, str | bytes):
         raise TypeError("select_offers must return a sequence of offers")
     if not selected:
         raise ValueError("select_offers must select at least one offer")
