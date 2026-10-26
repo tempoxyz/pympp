@@ -932,19 +932,19 @@ class TestReviewFixesRound2:
         assert issued.request["_mppx_scope"]["custom"] == {"account": "invoice:42"}
         credential = authorization(issued)
         wire = dict(issued.request)
-        # This method accepts the wire request as route input, so its whole signed scope
-        # is compared as the custom scope it names, and does not match.
+        # This method accepts the wire request as route input: a scope naming another
+        # custom scope does not match, while the whole signed scope it passes through does.
         for request in (
             {"amount": "1", "_mppx_scope": {"account": "invoice:43"}},
             {**wire, "_mppx_scope": {**wire["_mppx_scope"], "custom": {"account": "invoice:43"}}},
-            wire,
         ):
             with pytest.raises(InvalidChallengeError, match="scope does not match"):
                 await server.broadcast_credential(credential, request=request)
-        # A request naming no scope checks none.
+        # The issued custom scope, the whole signed scope, or no scope at all match.
         for request in (
             {"amount": "1", "_mppx_scope": {"account": "invoice:42"}},
             {"amount": "1"},
+            wire,
         ):
             receipt = await server.broadcast_credential(credential, request=request)
             assert receipt.status == "success"
@@ -1398,3 +1398,75 @@ class TestIssuingOfferTag:
             await server.broadcast_credential(credential, request={"account": "acct_2"})
         receipt = await server.broadcast_credential(credential, request={"account": "acct_1"})
         assert receipt.status == "success"
+
+    async def test_probe_less_methods_settle_out_of_band_through_their_own(self) -> None:
+        from mpp.server import RequestContext
+
+        def resolve_request(context: RequestContext) -> dict[str, Any]:
+            if "recipient" not in context.request:
+                raise ValueError("recipient is required")
+            return dict(context.request)
+
+        def verify(label: str) -> Any:
+            async def hook(context: Any) -> Receipt:
+                return Receipt.success(label)
+
+            return hook
+
+        # Equal name, intent and defaults, but configuration that cannot be probed:
+        # not known to be identical, so each settles through its own method.
+        methods = [
+            server_method(verify=verify(label), resolve_request=resolve_request)
+            for label in ("first", "second")
+        ]
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        for method, recipient, label in (
+            (methods[0], RECIPIENT, "first"),
+            (methods[1], OTHER, "second"),
+        ):
+            options = {"amount": "1", "recipient": recipient}
+            issued = challenge(await server.compose((method, options))(http_request()))
+            credential = authorization(issued)
+            receipt = await server.broadcast_credential(credential)
+            assert receipt.reference == label
+            receipt = await server.broadcast_credential(credential, request=options)
+            assert receipt.reference == label
+
+    async def test_whole_wire_scope_is_accepted_as_route_input(self) -> None:
+        server = raw_mpp()
+        issued = challenge(await server.charge()(http_request()))
+        assert "custom" not in issued.request["_mppx_scope"]
+        # This method's model passes the whole wire request through as route input.
+        receipt = await server.broadcast_credential(
+            authorization(issued), request=dict(issued.request)
+        )
+        assert receipt.status == "success"
+
+    async def test_address_case_does_not_change_the_offer_tag(self) -> None:
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        def upper(address: str) -> str:
+            return "0x" + address[2:].upper()
+
+        seen: list[str] = []
+        issuing = Mpp(
+            methods=tempo_server.charge(recipient=RECIPIENT.lower(), currencies=[PATH_USD, USDC]),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        settling = Mpp(
+            methods=self._stored(
+                tempo_server.charge(recipient=RECIPIENT, currencies=[upper(PATH_USD), upper(USDC)]),
+                MemoryStore(),
+                seen,
+            ),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        for currency, tx_hash in ((PATH_USD, "0xc1"), (USDC, "0xc2")):
+            route = issuing.tempo.charge(amount="1", currency=currency)
+            issued = challenge(await route(http_request()))
+            credential = authorization(issued, {"type": "hash", "hash": tx_hash})
+            receipt = await settling.broadcast_credential(credential)
+            assert receipt.reference == tx_hash
+        assert seen == ["0xc1", "0xc2"]

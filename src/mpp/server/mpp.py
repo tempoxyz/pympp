@@ -228,9 +228,15 @@ class Mpp:
         self._offer_tags: dict[int, str] = {}
         self._configurations: dict[int, str] = {}
         occurrences: dict[str, int] = {}
+        unknown: set[str] = set()
         for method in self.methods:
             if len(keys[method.key]) > 1:
-                configuration = _configuration_digest(method)
+                probe = _probe(method)
+                configuration = _configuration_digest(method, probe)
+                if probe is None:
+                    # Configuration that cannot be probed is not known to be identical:
+                    # such copies get distinct tags and are never ambiguous.
+                    unknown.add(configuration)
                 ordinal = occurrences.get(configuration, 0)
                 occurrences[configuration] = ordinal + 1
                 # Identically configured copies get distinct tags so a route never
@@ -239,7 +245,9 @@ class Mpp:
                 self._offer_tags[id(method)] = tag[:16]
                 self._configurations[id(method)] = configuration
         self._ambiguous = {
-            configuration for configuration, count in occurrences.items() if count > 1
+            configuration
+            for configuration, count in occurrences.items()
+            if count > 1 and configuration not in unknown
         }
         self._handlers: dict[str, Any] = {
             key: HandlerFactory(self, group) for key, group in keys.items()
@@ -736,7 +744,8 @@ def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     custom = echoed.get("custom") if isinstance(echoed, Mapping) else None
     if wire:
         return isinstance(expected, Mapping) and expected.get("custom") == custom
-    return expected == custom
+    # A method whose model passes the whole wire through names the whole signed scope.
+    return expected == custom or expected == echoed
 
 
 _OFFER_TAG_RE = re.compile(r"[0-9a-f]{16}")
@@ -746,16 +755,29 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _configuration_digest(method: ServerMethod) -> str:
+_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+
+
+def _lower_addresses(value: Any) -> Any:
+    """A value with every address string lowercased, so spelling case does not matter."""
+    if isinstance(value, str):
+        return value.lower() if _ADDRESS_RE.fullmatch(value) else value
+    if isinstance(value, Mapping):
+        return {key: _lower_addresses(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_lower_addresses(item) for item in value]
+    return value
+
+
+def _configuration_digest(method: ServerMethod, probe: dict[str, Any] | None) -> str:
     """A digest of what a method's configuration issues, independent of its position."""
     configuration: dict[str, Any] = {
-        "defaults": dict(method.defaults or {}),
+        "defaults": _lower_addresses(dict(method.defaults or {})),
         "intent": method.intent,
         "name": method.name,
     }
-    probe = _probe(method)
     if probe is not None:
-        configuration["probe"] = probe
+        configuration["probe"] = _lower_addresses(probe)
     return _digest(json.dumps(configuration, sort_keys=True, separators=(",", ":"), default=str))
 
 
