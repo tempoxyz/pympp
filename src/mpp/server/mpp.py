@@ -113,16 +113,16 @@ def _select(methods: Sequence[ServerMethod], options: Mapping[str, Any]) -> list
         method
         for method in methods
         if not any(
-            options.get(key) is not None and not _same(options[key], value)
+            options.get(key) is not None and not _same(key, options[key], value)
             for key, value in (method.defaults or {}).items()
         )
     ]
     return selected or [methods[0]]
 
 
-def _same(value: Any, other: Any) -> bool:
-    """Whether two option values agree; strings such as addresses compare case-insensitively."""
-    if isinstance(value, str) and isinstance(other, str):
+def _same(key: str, value: Any, other: Any) -> bool:
+    """Whether two option values agree; currency addresses compare case-insensitively."""
+    if key == "currency" and isinstance(value, str) and isinstance(other, str):
         return value.lower() == other.lower()
     return value == other
 
@@ -623,6 +623,15 @@ def _select_echoed(
     if len(candidates) == 1:
         return candidates[0]
     probes = {id(candidate): _probe(candidate) for candidate in candidates}
+    # A route may override the currency or chain, so any group that accepts the echoed
+    # currency and chain and agrees on the rest could have issued it. Settling through
+    # another group's replay store would let the issuing group accept the payment again.
+    issuers = [candidate for candidate in candidates if _could_issue(candidate, echoed)]
+    if not _one_group(issuers or candidates):
+        raise InvalidChallengeError(
+            challenge_id,
+            "credential matches several configured methods; pass request= to select one",
+        )
     matching: list[ServerMethod] = []
     # A route may override the currency or chain: like route selection, fall back to
     # the copies agreeing on the rest, then to the first copy. Overridden fields no
@@ -670,6 +679,41 @@ def _select_echoed(
                 "credential matches several configured methods; pass request= to select one",
             )
     return matching[0]
+
+
+def _could_issue(method: ServerMethod, echoed: Mapping[str, Any]) -> bool:
+    """Whether a route of this method could have issued the echo, overriding currency or chain."""
+    base: dict[str, Any] = {
+        **{key: value for key, value in (method.defaults or {}).items() if value is not None},
+        "amount": "1",
+    }
+    currency = echoed.get("currency")
+    chain = _at(echoed, ("methodDetails", "chainId"))
+    overrides: list[dict[str, Any]] = []
+    if currency is not None and chain is not _MISSING:
+        overrides.append({"currency": currency, "chain_id": chain})
+    if currency is not None:
+        overrides.append({"currency": currency})
+    if chain is not _MISSING:
+        overrides.append({"chain_id": chain})
+    overrides.append({})
+    for override in overrides:
+        input = {**base, **override}
+        try:
+            if method.resolve_request is not None:
+                resolved = method.resolve_request(RequestContext(request=input))
+                if inspect.isawaitable(resolved):
+                    if inspect.iscoroutine(resolved):
+                        resolved.close()
+                    return True
+                input = resolved
+            wire = method.method.normalize_request(input)
+        except Exception:
+            continue
+        wire = {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+        if _agrees(method, wire, echoed, tuple(_leaves(wire)), defaults=False):
+            return True
+    return False
 
 
 def _one_group(methods: Sequence[ServerMethod]) -> bool:

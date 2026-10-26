@@ -661,7 +661,7 @@ class TestReviewFixes:
             ),
             *self._faked(
                 tempo_server.charge(
-                    recipient=RECIPIENT, currencies=[USDC], on_payment_success=second.append
+                    recipient=OTHER, currencies=[USDC], on_payment_success=second.append
                 ),
                 [],
             ),
@@ -886,6 +886,40 @@ class TestReviewFixesRound2:
         assert isinstance(await route(http_request(credential)), PaymentVerified)
         assert isinstance(await route(http_request(credential)), PaymentRequired)
         assert seen == ["0x12"]
+
+    async def test_currency_override_into_another_group_is_ambiguous(self) -> None:
+        from mpp.errors import InvalidChallengeError
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        first_store, second_store = MemoryStore(), MemoryStore()
+        first = self._stored(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD], store=first_store),
+            first_store,
+            seen,
+        )
+        second = self._stored(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[USDC], store=second_store),
+            second_store,
+            seen,
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+        # The second group's route takes the first group's currency: the echo matches the
+        # first group exactly, but either group could have issued it.
+        route = server.compose((second[0], {"amount": "1", "currency": PATH_USD}))
+        issued = challenge(await route(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0x56"})
+        with pytest.raises(InvalidChallengeError, match="several configured methods"):
+            await server.broadcast_credential(credential)
+        assert seen == []
+        assert isinstance(await route(http_request(credential)), PaymentVerified)
+
+    def test_only_currency_defaults_compare_case_insensitively(self) -> None:
+        upper = server_method(name="plan", request={"amount": "1"}, verify=_verified)
+        upper = replace(upper, defaults={"sku": "PlanA"})
+        lower = replace(upper, defaults={"sku": "plana"})
+        server = Mpp(methods=[upper, lower], realm=REALM, secret_key=SECRET)
+        assert [m.defaults for m in server.plan.charge(sku="PlanA").methods] == [{"sku": "PlanA"}]
 
     async def test_evm_route_currency_selects_its_asset(self) -> None:
         from mpp.methods.evm import BASE_USDC
