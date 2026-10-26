@@ -415,6 +415,43 @@ class TestServer:
         assert (await handler(signed)).status == 402
         assert (await handler(_copy(signed))).status == 401
 
+    async def test_composed_servers_with_stores_over_one_backend_claim_once(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        backend = MemoryStore()
+
+        class Wrapper:
+            async def get(self, key: str) -> Any:
+                return await backend.get(key)
+
+            async def put(self, key: str, value: Any) -> None:
+                await backend.put(key, value)
+
+            async def delete(self, key: str) -> None:
+                await backend.delete(key)
+
+            async def put_if_absent(self, key: str, value: Any) -> bool:
+                return await backend.put_if_absent(key, value)
+
+            async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+                return await backend.put_if_absent_until(key, value, expires_at)
+
+        servers = [
+            Mpp(
+                methods=server_method(request={"amount": "1000"}, verify=_unreachable),
+                realm="api.example.com",
+                secret_key="test-secret",
+                attestation={
+                    "tap": tap.verifier(key_resolver=_resolver(key), nonce_store=Wrapper())
+                },
+            )
+            for _ in range(2)
+        ]
+        handler = compose(servers[0].charge(), servers[1].charge())
+        signed = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
+
+        assert (await handler(signed)).status == 402
+        assert (await handler(_copy(signed))).status == 401
+
     async def test_guard_releases_request_when_verifier_raises(self) -> None:
         class Failing:
             async def verify(self, request: Request) -> Any:

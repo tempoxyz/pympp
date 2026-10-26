@@ -209,15 +209,14 @@ async def verify(
         return Invalid("The HTTP message signature is invalid.")
     key_name = f"{nonce_namespace}:{signature_input.key_id}:{signature_input.nonce}"
     claims = _request_claims(request)
-    claim = (id(nonce_store), key_name)
-    if claim not in claims:
+    if key_name not in claims:
         try:
             claimed = await _try_claim(nonce_store, key_name, signature_input.expires)
         except Exception:
             return Unverified("Replay protection is unavailable.")
         if not claimed:
             return Invalid("The signature nonce has already been used.")
-        claims.add(claim)
+        claims.add(key_name)
     if signature_input.expires <= int(time.time()):
         return Invalid("The signature has expired.")
     return Verified(signature_input)
@@ -253,11 +252,15 @@ def require_expiring_store(store: Store) -> None:
         )
 
 
-_claims: dict[int, set[tuple[int, str]]] = {}
+_claims: dict[int, set[str]] = {}
 
 
-def _request_claims(request: Request) -> set[tuple[int, str]]:
-    """Nonces this request object already claimed, so other verifiers sharing a store accept it."""
+def _request_claims(request: Request) -> set[str]:
+    """Nonces this request object already claimed, so other verifiers checking it accept them.
+
+    Keyed by nonce alone: stores may be distinct objects over one backend, and every
+    verifier checking a request must pass, so one claim covers them all.
+    """
     key = id(request)
     if (claims := _claims.get(key)) is None:
         claims = _claims[key] = set()
