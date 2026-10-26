@@ -7,6 +7,7 @@ charge challenges; :class:`TempoMethod` implements its credential creation.
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -21,7 +22,9 @@ from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     MACH,
     OUSD,
+    PATH_USD,
     RPC_URL,
+    USDC,
     default_currencies_for_chain,
     default_currency_for_chain,
     fee_tokens_for_chain,
@@ -69,6 +72,49 @@ class TransactionError(Exception):
     """
 
 
+class InsufficientFundsError(TransactionError):
+    """The payer lacks the charge currency and no auto-swap route can acquire it."""
+
+    def __init__(self, currency: str) -> None:
+        super().__init__(
+            f"Insufficient funds: no balance in {currency} and no viable swap route from "
+            "fallback currencies."
+        )
+        self.currency = currency
+
+
+# Fallback currencies an auto-swap pays from, in priority order.
+AUTO_SWAP_CURRENCIES: tuple[str, ...] = (PATH_USD, USDC)
+# keccak256("quoteSwapExactAmountOut(address,address,uint128)")[:4]
+_QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR = "1576fa0e"
+
+
+@dataclass(frozen=True)
+class AutoSwap:
+    """Auto-swap options for :func:`charge`.
+
+    Attributes:
+        token_in: Currencies to swap from, in priority order. The default
+            fallback currencies (pathUSD, then USDC.e) are tried after them.
+        slippage: Maximum slippage over the DEX quote, in percent (``1`` = 1%).
+    """
+
+    token_in: Sequence[str] | None = None
+    slippage: float = 1
+
+    def __post_init__(self) -> None:
+        if isinstance(self.token_in, str):
+            raise ValueError("AutoSwap token_in must be a sequence of addresses")
+        if not math.isfinite(self.slippage) or self.slippage < 0:
+            raise ValueError("AutoSwap slippage must be a non-negative percentage")
+
+    def currencies(self) -> tuple[str, ...]:
+        """Return the currencies to swap from, explicit ones first."""
+        explicit = tuple(self.token_in or ())
+        chosen = {token.lower() for token in explicit}
+        return explicit + tuple(t for t in AUTO_SWAP_CURRENCIES if t.lower() not in chosen)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Charge client method
 # ──────────────────────────────────────────────────────────────────
@@ -109,6 +155,9 @@ class TempoMethod:
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     # Chains a client may pay on. ``None`` allows any chain; empty rejects all.
     allowed_chain_ids: Sequence[int] | None = field(default=None, kw_only=True)
+    # Buy the charge currency through the stablecoin DEX when the payer lacks
+    # it. ``None`` disables auto-swap.
+    auto_swap: AutoSwap | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
@@ -215,6 +264,58 @@ class TempoMethod:
             except Exception:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
+
+    async def _find_swap_calls(
+        self, *, account: str, amount_out: int, token_out: str, rpc_url: str
+    ) -> list[tuple[str, str]]:
+        """Return ``(to, data)`` approve and swap calls that buy ``amount_out`` of ``token_out``.
+
+        Returns no calls when ``account`` already holds enough ``token_out``.
+
+        Raises:
+            InsufficientFundsError: When no fallback currency can fund the swap.
+        """
+        from mpp.methods.tempo.intents import (
+            APPROVE_SELECTOR,
+            STABLECOIN_DEX,
+            SWAP_EXACT_AMOUNT_OUT_SELECTOR,
+        )
+
+        assert self.auto_swap is not None
+        candidates = [t for t in self.auto_swap.currencies() if t.lower() != token_out.lower()]
+        target, *balances = await asyncio.gather(
+            _tip20_balance(rpc_url, token_out, account),
+            *(_tip20_balance(rpc_url, token, account) for token in candidates),
+            return_exceptions=True,
+        )
+        if not isinstance(target, BaseException) and target >= amount_out:
+            return []
+        slippage_bps = math.floor(self.auto_swap.slippage * 100 + 0.5)
+        for token_in, balance in zip(candidates, balances, strict=True):
+            if isinstance(balance, BaseException) or balance <= 0:
+                continue
+            quote = {
+                "to": STABLECOIN_DEX,
+                "data": "0x"
+                + _QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR
+                + _abi_words(token_in, token_out, amount_out),
+            }
+            try:
+                quoted = int(await _rpc_call(rpc_url, "eth_call", [quote, "latest"]), 16)
+            except Exception:
+                continue
+            if balance < quoted:
+                continue
+            max_amount_in = quoted + quoted * slippage_bps // 10_000
+            return [
+                (token_in, f"0x{APPROVE_SELECTOR}" + _abi_words(STABLECOIN_DEX, max_amount_in)),
+                (
+                    STABLECOIN_DEX,
+                    f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
+                    + _abi_words(token_in, token_out, amount_out, max_amount_in),
+                ),
+            ]
+        raise InsufficientFundsError(token_out)
 
     def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
         """Reject a challenge whose chain, recipients, amount or split memos violate the policy.
@@ -509,6 +610,17 @@ class TempoMethod:
         # sender, not the access key address.
         sender = self.root_account if self.root_account else self.account.address
 
+        swapping = False
+        if self.auto_swap is not None:
+            swap_calls = await self._find_swap_calls(
+                account=sender, amount_out=int(amount), token_out=currency, rpc_url=resolved_rpc
+            )
+            swapping = bool(swap_calls)
+            calls_tuple = (
+                *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
+                *calls_tuple,
+            )
+
         chain_id = await self._get_chain_id(resolved_rpc)
         gas_price = int(await _rpc_call(resolved_rpc, "eth_gasPrice", []), 16)
         max_priority_fee_per_gas = gas_price
@@ -527,7 +639,7 @@ class TempoMethod:
         try:
             if splits:
                 total_estimated = 0
-                for c in calls_tuple:
+                for c in calls_tuple[2 if swapping else 0 :]:
                     total_estimated += await estimate_gas(
                         resolved_rpc, sender, currency, c.data.hex()
                     )
@@ -541,7 +653,9 @@ class TempoMethod:
         fee_token: str | None = None
         if not awaiting_fee_payer:
             fee_token = currency
-            if currency.lower() in (MACH.lower(), OUSD.lower()):
+            # A swapping payer may not hold the currency before the swap, so
+            # it pays fees in a funded supported stablecoin.
+            if swapping or currency.lower() in (MACH.lower(), OUSD.lower()):
                 required_balance = max(
                     1,
                     (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
@@ -673,6 +787,7 @@ def _tempo_method(
     max_amount_decimals: int | None = None,
     expected_recipients: Sequence[str] | None = None,
     allowed_chain_ids: Sequence[int] | None = None,
+    auto_swap: bool | AutoSwap = False,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
 
@@ -738,6 +853,11 @@ def _tempo_method(
             ``chain_id``/``rpc_url`` pin, a charge must satisfy both. Other
             challenges are skipped during challenge selection and rejected
             before signing. An empty sequence rejects every charge.
+        auto_swap: When the payer lacks the challenge currency, buy it through
+            the Tempo stablecoin DEX from a fallback currency (pathUSD, then
+            USDC.e) in the same transaction. ``True`` uses 1% slippage; pass
+            :class:`AutoSwap` to prepend currencies or change the slippage.
+            Raises :class:`InsufficientFundsError` when no currency can fund it.
 
     Returns:
         A configured TempoMethod instance.
@@ -809,6 +929,7 @@ def _tempo_method(
         max_amount_decimals=max_amount_decimals,
         expected_recipients=resolved_expected_recipients,
         allowed_chain_ids=allowed_chain_ids,
+        auto_swap=AutoSwap() if auto_swap is True else auto_swap or None,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
@@ -832,6 +953,7 @@ def charge(
     max_amount_decimals: int | None = None,
     expected_recipients: Sequence[str] | None = None,
     allowed_chain_ids: Sequence[int] | None = None,
+    auto_swap: bool | AutoSwap = False,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
 
@@ -840,7 +962,8 @@ def charge(
     ``currency``/``currencies`` pin the currencies it pays, and the charge policy
     (``max_atomic_amount``, ``max_amount``, ``expected_recipients``,
     ``allowed_chain_ids`` and the ``chain_id``/``rpc_url`` pin) skips other
-    challenges during selection and rejects them before signing.
+    challenges during selection and rejects them before signing. ``auto_swap``
+    buys a missing charge currency through the stablecoin DEX.
 
     Example:
         from mpp.client import Mpp
@@ -865,6 +988,7 @@ def charge(
             max_amount_decimals=max_amount_decimals,
             expected_recipients=expected_recipients,
             allowed_chain_ids=allowed_chain_ids,
+            auto_swap=auto_swap,
         )
     )
 
@@ -893,6 +1017,14 @@ def _client_method(method: TempoMethod) -> ClientMethod:
         create_credential=create_credential,
         can_handle_challenge=can_handle_challenge,
         transaction_hash=method.transaction_hash,
+    )
+
+
+def _abi_words(*args: str | int) -> str:
+    """ABI-encode static address and uint arguments as hex words."""
+    return "".join(
+        (arg.removeprefix("0x").lower() if isinstance(arg, str) else f"{arg:x}").zfill(64)
+        for arg in args
     )
 
 
