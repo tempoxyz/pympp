@@ -75,6 +75,7 @@ async def verify_or_challenge(
     header: str | None = None,
     unique_challenges: bool = True,
     x402: X402Input | None = None,
+    accepted_offer_tag: str | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -113,6 +114,8 @@ async def verify_or_challenge(
             (:class:`~mpp.x402.X402Intent`) and the request carries no Payment
             credential, its ``PAYMENT-SIGNATURE`` value is bound to this route
             and verified instead.
+        accepted_offer_tag: Internal: the configuration tag of the issuing method. A
+            credential carrying it is accepted even when meta issues no tag.
 
     Returns:
         If no valid Authorization header:
@@ -299,7 +302,9 @@ async def verify_or_challenge(
             credential,
         )
 
-    if _application_meta(echo_opaque) != _route_meta(meta) or not _same_offer(echo_opaque, meta):
+    if _application_meta(echo_opaque) != _route_meta(meta) or not _same_offer(
+        echo_opaque, meta, accepted_offer_tag
+    ):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -573,11 +578,12 @@ def _offer_tag(meta: Any) -> str | None:
     return tag if isinstance(tag, str) else None
 
 
-def _same_offer(echoed: Any, meta: Any) -> bool:
+def _same_offer(echoed: Any, meta: Any, accepted: str | None = None) -> bool:
     """Whether an echoed challenge may have been issued by the offer whose metadata is meta.
 
-    A tagged echo must carry the offer's tag; an untagged one (issued before tags, or
-    by a single configured method) is accepted.
+    A tagged echo must carry the offer's tag, or accepted, its method's configuration
+    tag; an untagged one (issued before tags, or by a single configured method) is
+    accepted.
     """
     tag = _offer_tag(echoed)
-    return tag is None or tag == _offer_tag(meta)
+    return tag is None or tag in (_offer_tag(meta), accepted)

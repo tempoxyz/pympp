@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -224,26 +225,30 @@ class Mpp:
         # Methods sharing a name and intent may settle through different replay stores:
         # their challenges carry a tag derived from the issuing method's configuration,
         # so out-of-band settlement uses exactly the method that issued them, however
-        # the methods are later ordered. A lone method issues no tag.
+        # the methods are later ordered. A lone method issues no tag, but every method
+        # has one, so a server configured with a subset of the issuer's methods (a
+        # settlement worker, say) still resolves the tagged challenges they issued.
         self._offer_tags: dict[int, str] = {}
+        self._method_tags: dict[int, str] = {}
         self._configurations: dict[int, str] = {}
         occurrences: dict[str, int] = {}
         unknown: set[str] = set()
         for method in self.methods:
+            probe = _probe(method)
+            configuration = _configuration_digest(method, probe)
+            if probe is None:
+                # Configuration that cannot be probed is not known to be identical:
+                # such copies get distinct tags and are never ambiguous.
+                unknown.add(configuration)
+            ordinal = occurrences.get(configuration, 0)
+            occurrences[configuration] = ordinal + 1
+            # Identically configured copies get distinct tags so a route never
+            # accepts another copy's challenge; out of band they are ambiguous.
+            tag = configuration if ordinal == 0 else _digest(f"{configuration}:{ordinal}")
+            self._method_tags[id(method)] = tag[:16]
+            self._configurations[id(method)] = configuration
             if len(keys[method.key]) > 1:
-                probe = _probe(method)
-                configuration = _configuration_digest(method, probe)
-                if probe is None:
-                    # Configuration that cannot be probed is not known to be identical:
-                    # such copies get distinct tags and are never ambiguous.
-                    unknown.add(configuration)
-                ordinal = occurrences.get(configuration, 0)
-                occurrences[configuration] = ordinal + 1
-                # Identically configured copies get distinct tags so a route never
-                # accepts another copy's challenge; out of band they are ambiguous.
-                tag = configuration if ordinal == 0 else _digest(f"{configuration}:{ordinal}")
                 self._offer_tags[id(method)] = tag[:16]
-                self._configurations[id(method)] = configuration
         self._ambiguous = {
             configuration
             for configuration, count in occurrences.items()
@@ -330,13 +335,17 @@ class Mpp:
         """The issuing-offer tag of a configured method's challenges, if it needs one."""
         return self._offer_tags.get(id(method))
 
+    def _method_tag(self, method: ServerMethod) -> str | None:
+        """The configuration tag of a configured method, issued or not."""
+        return self._method_tags.get(id(method))
+
     def _tagged_method(self, tag: str, echo: Any) -> ServerMethod:
         """The configured method an echoed issuing-offer tag names."""
         matching = (
             [
                 method
                 for method in self.methods
-                if self._offer_tag(method) == tag
+                if self._method_tag(method) == tag
                 and method.name == echo.method
                 and method.intent == echo.intent
             ]
@@ -758,27 +767,52 @@ def _digest(value: str) -> str:
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
-def _lower_addresses(value: Any) -> Any:
-    """A value with every address string lowercased, so spelling case does not matter."""
+class _UnknownConfiguration(Exception):
+    """A configured value with no process-independent canonical form."""
+
+
+def _canonical(value: Any) -> Any:
+    """A JSON value that is the same in every process for equal configuration.
+
+    Address strings are lowercased, so spelling case does not matter; sets are
+    sorted. Any other value, such as an object whose repr holds a memory address,
+    raises _UnknownConfiguration.
+    """
     if isinstance(value, str):
         return value.lower() if _ADDRESS_RE.fullmatch(value) else value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
     if isinstance(value, Mapping):
-        return {key: _lower_addresses(item) for key, item in value.items()}
+        if not all(isinstance(key, str) for key in value):
+            raise _UnknownConfiguration
+        return {key: _canonical(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_lower_addresses(item) for item in value]
-    return value
+        return [_canonical(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted((_canonical(item) for item in value), key=_canonical_json)
+    raise _UnknownConfiguration
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _configuration_digest(method: ServerMethod, probe: dict[str, Any] | None) -> str:
-    """A digest of what a method's configuration issues, independent of its position."""
-    configuration: dict[str, Any] = {
-        "defaults": _lower_addresses(dict(method.defaults or {})),
-        "intent": method.intent,
-        "name": method.name,
-    }
+    """A digest of what a method's configuration issues, independent of its position.
+
+    Defaults without a canonical form are left out: the probe then stands for the
+    configuration, and without one the configuration is unknown.
+    """
+    configuration: dict[str, Any] = {"intent": method.intent, "name": method.name}
+    try:
+        configuration["defaults"] = _canonical(dict(method.defaults or {}))
+    except _UnknownConfiguration:
+        configuration["defaults"] = "unknown"
     if probe is not None:
-        configuration["probe"] = _lower_addresses(probe)
-    return _digest(json.dumps(configuration, sort_keys=True, separators=(",", ":"), default=str))
+        configuration["probe"] = _canonical(probe)
+    return _digest(_canonical_json(configuration))
 
 
 def _probe(method: ServerMethod) -> dict[str, Any] | None:
@@ -796,9 +830,11 @@ def _probe(method: ServerMethod) -> dict[str, Any] | None:
                 return None
             input = resolved
         wire = method.method.normalize_request(input)
+        probe = {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+        _canonical(probe)
     except Exception:
         return None
-    return {key: value for key, value in wire.items() if key not in ("amount", "_mppx_scope")}
+    return probe
 
 
 def _without(

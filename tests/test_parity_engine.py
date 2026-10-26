@@ -1209,6 +1209,91 @@ class TestIssuingOfferTag:
             await settling.broadcast_credential(credential)
         assert seen == []
 
+    async def test_server_holding_a_subset_settles_the_issuers_tagged_challenges(self) -> None:
+        from mpp.errors import InvalidChallengeError
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        store = MemoryStore()
+        issuing = Mpp(
+            methods=self._stored(
+                tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD, USDC], store=store),
+                store,
+                seen,
+            ),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        subset = self._stored(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[USDC], store=store), store, seen
+        )
+        worker = Mpp(methods=subset, realm=REALM, secret_key=SECRET)
+        # A lone method still issues untagged challenges.
+        assert worker._offer_tag(subset[0]) is None
+        untagged = challenge(await worker.tempo.charge(amount="1")(http_request()))
+        assert "_mpp_offer" not in (untagged.opaque or {})
+
+        route = issuing.tempo.charge(amount="1", currency=USDC)
+        issued = challenge(await route(http_request()))
+        assert "_mpp_offer" in (issued.opaque or {})
+        receipt = await worker.broadcast_credential(
+            authorization(issued, {"type": "hash", "hash": "0xc1"})
+        )
+        assert receipt.reference == "0xc1"
+        issued = challenge(await route(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0xc2"})
+        assert isinstance(
+            await worker.tempo.charge(amount="1")(http_request(credential)), PaymentVerified
+        )
+        assert seen == ["0xc1", "0xc2"]
+
+        issued = challenge(
+            await issuing.tempo.charge(amount="1", currency=PATH_USD)(http_request())
+        )
+        credential = authorization(issued, {"type": "hash", "hash": "0xc3"})
+        with pytest.raises(InvalidChallengeError, match="not issued by a configured method"):
+            await worker.broadcast_credential(credential)
+        assert seen == ["0xc1", "0xc2"]
+
+    def test_configuration_digest_is_process_independent(self) -> None:
+        import os
+        import subprocess
+        from pathlib import Path
+
+        from mpp.server.mpp import _configuration_digest, _flatten
+
+        code = (
+            "from dataclasses import replace\n"
+            "from mpp.methods.tempo import server\n"
+            "from mpp.server.mpp import _configuration_digest, _flatten\n"
+            f"method = _flatten(server.charge(recipient={RECIPIENT!r}, currency={CURRENCY!r}))[0]\n"
+            "tags = frozenset(f'tag-{index}' for index in range(16))\n"
+            "method = replace(method, defaults={**(method.defaults or {}), 'tags': tags})\n"
+            "print(_configuration_digest(method, None))\n"
+        )
+        digests = {
+            subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                check=True,
+                cwd=Path(__file__).resolve().parents[1],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                text=True,
+            ).stdout.strip()
+            for seed in ("1", "2", "3", "4")
+        }
+        assert len(digests) == 1
+
+        # An object whose repr holds a memory address does not enter the digest.
+        method = _flatten(tempo_server.charge(recipient=RECIPIENT, currency=CURRENCY))[0]
+        first, second = (
+            replace(method, defaults={**(method.defaults or {}), "client": object()})
+            for _ in range(2)
+        )
+        assert _configuration_digest(first, None) == _configuration_digest(second, None)
+        probe = {"currency": CURRENCY}
+        assert _configuration_digest(first, probe) == _configuration_digest(second, probe)
+
     async def test_several_single_currency_stripe_charges(self) -> None:
         from mpp.methods.stripe import server as stripe_server
 

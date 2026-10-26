@@ -152,6 +152,11 @@ class _Offer:
         return self.server._offer_tag(self.method)
 
     @property
+    def accepted_tag(self) -> str | None:
+        """The tag of its method's configuration: echoes carrying it are its own."""
+        return self.server._method_tag(self.method)
+
+    @property
     def issued_meta(self) -> dict[str, str] | None:
         """The opaque metadata its challenges bind: the route's meta and the offer tag."""
         tag = self.tag
@@ -206,6 +211,7 @@ class _PreparedOffer:
             method=self.offer.method.name,
             description=self.offer.options.get("description"),
             meta=self.offer.issued_meta,
+            accepted_offer_tag=self.offer.accepted_tag,
             expires=self.expires,
             body=self.body,
             events=server._events,
@@ -575,7 +581,7 @@ class ComposedHandler:
                 else digest is not None and _body_digest.verify(digest, offer.body)
             )
             and _application_meta(echoed_meta) == (offer.offer.meta or None)
-            and _offer_tag(echoed_meta) in (None, offer.offer.tag)
+            and _offer_tag(echoed_meta) in (None, offer.offer.accepted_tag)
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:
