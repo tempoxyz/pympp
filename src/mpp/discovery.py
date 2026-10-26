@@ -219,13 +219,13 @@ def generate(
         ValueError: When a route has no payment offers or names an unknown intent.
     """
     by_key: dict[str, ServerMethod] = {}
-    intent_count: dict[str, int] = {}
+    intent_keys: dict[str, set[str]] = {}
     for method in mpp.methods:
         by_key.setdefault(method.key, method)
-        intent_count[method.intent] = intent_count.get(method.intent, 0) + 1
-    for method in mpp.methods:
-        if intent_count[method.intent] == 1:
-            by_key[method.intent] = method
+        intent_keys.setdefault(method.intent, set()).add(method.key)
+    for intent, keys in intent_keys.items():
+        if len(keys) == 1:
+            by_key[intent] = by_key[next(iter(keys))]
 
     return _document(
         title=mpp.realm if title is None else title,

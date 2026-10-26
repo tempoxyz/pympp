@@ -24,6 +24,7 @@ from tests import challenges, http_request
 
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 OUSD = "0x20c0000000000000000000006a37DA5C996874BE"
+PATH_USD = "0x20c0000000000000000000000000000000000000"
 
 
 class SessionInput(BaseModel):
@@ -137,6 +138,16 @@ def test_intent_route_and_null_amount() -> None:
     assert validate(document) == []
     with pytest.raises(ValueError, match='Unknown intent "stripe/charge"'):
         generate(mpp, [IntentRoute(method="get", path="/x", intent="stripe/charge")])
+
+
+def test_bare_intent_with_multi_currency_tempo_charge() -> None:
+    mpp = _mpp(tempo.charge(recipient=RECIPIENT, currencies=[OUSD, PATH_USD]))
+    document = generate(
+        mpp,
+        [IntentRoute(method="GET", path="/a", intent="charge", options={"amount": "1"})],
+    )
+
+    assert _offers(document, "/a", "get")[0]["currency"] == OUSD
 
 
 def test_generate_proxy() -> None:
