@@ -99,9 +99,10 @@ class TempoPayments:
             recipient=self._recipient,
             can_offer=_minimum_amount(_RAW_UNITS_PER_CENT),
         )
-        return with_payment_intent_input(
+        method = with_payment_intent_input(
             method, self._record_payment, configured_metadata=self._metadata
         )
+        return _validate_connect_first(method, self._connect) if self._connect else method
 
     async def _record_payment(
         self,
@@ -184,4 +185,31 @@ def create(
         deposit_addresses=deposit_addresses,
         metadata=metadata,
         connect=connect,
+    )
+
+
+def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) -> ServerMethod:
+    """Reject a Tempo payment whose recording would fail Stripe Connect validation.
+
+    Recording happens after on-chain settlement, so check the settlement against
+    the cents-denominated recording PaymentIntent before settling.
+    """
+    from dataclasses import replace
+
+    from mpp.methods.stripe.connect import validate_settlement
+    from mpp.methods.stripe.crypto_payment_recorder import recorded_cents
+
+    def guard(terminal: Any) -> Any:
+        async def run(context: Any) -> Any:
+            cents = recorded_cents("tempo", context.challenge.request)
+            if cents >= 1:
+                validate_settlement(connect, cents)
+            return await terminal(context)
+
+        return run
+
+    return replace(
+        method,
+        verify=guard(method.verify) if method.verify is not None else None,
+        broadcast=guard(method.broadcast) if method.broadcast is not None else None,
     )

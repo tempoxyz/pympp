@@ -86,6 +86,11 @@ async def resolve_settlement(
         amount = -1
     if not 0 <= amount <= _MAX_SAFE_INTEGER:
         raise VerificationFailedError("Stripe amount must be a non-negative integer.")
+    return validate_settlement(value, amount)
+
+
+def validate_settlement(value: ConnectSettlement, amount: int) -> ConnectSettlement:
+    """Check ``value`` against a PaymentIntent of ``amount`` smallest currency units."""
     _account(value.stripe_account, "stripe_account")
     _account(value.on_behalf_of, "on_behalf_of")
     _amount(value.application_fee_amount, amount, "application_fee_amount")

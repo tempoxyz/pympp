@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 _NETWORK_DECIMALS = {"tempo": 6, "base": 6, "solana": 6}
 
 
+def recorded_cents(network: str, request: dict[str, Any]) -> int:
+    """USD cents of the PaymentIntent that records ``request``'s on-chain amount."""
+    return int(request["amount"]) // 10 ** (_NETWORK_DECIMALS[network] - 2)
+
+
 async def record_crypto_payment(
     *,
     client: Any,
@@ -32,8 +37,7 @@ async def record_crypto_payment(
     reference = receipt.reference
     options = payment_intent_options or {}
     try:
-        decimals = _NETWORK_DECIMALS[network]
-        cents = int(request["amount"]) // 10 ** (decimals - 2)
+        cents = recorded_cents(network, request)
         if cents < 1:
             return
         analytics = build_analytics(credential) if credential else {"machine_payment": "true"}

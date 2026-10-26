@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -15,6 +16,7 @@ from mpp.methods.stripe import ChargeIntent, ConnectSettlement, PaymentIntentCon
 from mpp.methods.stripe import server as stripe_server
 from mpp.methods.stripe.crypto_payment_recorder import record_crypto_payment
 from mpp.server import Mpp
+from mpp.server.method import VerifyContext
 from tests import challenge, http_request
 from tests.test_stripe import SAMPLE_REQUEST, _make_credential
 from tests.test_stripe_machine_payments import FakeStripeClient, make_payments
@@ -157,3 +159,51 @@ async def test_machine_payments_route_spt_and_recorded_payments() -> None:
         assert {key: params[key] for key in PARAMS} == PARAMS
         assert options["stripe_account"] == "acct_platform_ctx"
     assert "customer" not in recorder.calls[1][0]
+
+
+@pytest.mark.parametrize(
+    "settlement",
+    [
+        ConnectSettlement(application_fee_amount=101),
+        ConnectSettlement(transfer_data=TransferData(destination="acct_seller", amount=101)),
+        ConnectSettlement(stripe_account=""),
+    ],
+)
+async def test_recorded_tempo_payment_validates_connect_before_settlement(
+    monkeypatch: pytest.MonkeyPatch, settlement: ConnectSettlement
+) -> None:
+    import mpp.methods.stripe.payment_intent_method as payment_intent_method
+
+    settled: list[VerifyContext] = []
+
+    async def terminal(context: VerifyContext) -> Receipt:
+        settled.append(context)
+        return Receipt.success("0xtest", method="tempo")
+
+    monkeypatch.setattr(
+        payment_intent_method,
+        "with_payment_intent_input",
+        lambda method, *_args, **_kwargs: replace(method, broadcast=terminal),
+    )
+    _, payments = make_payments(deposit_addresses={"tempo": "0x" + "1" * 40}, connect=settlement)
+    method = payments.tempo.charge()
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+    context = VerifyContext(
+        credential=Credential(challenge=issued.to_echo(), payload={}), request={}, challenge=issued
+    )
+
+    assert method.broadcast is not None
+    with pytest.raises(VerificationFailedError, match="Stripe Connect"):
+        await method.broadcast(context)
+    assert settled == []
+
+    valid = ConnectSettlement(
+        application_fee_amount=100,
+        transfer_data=TransferData(destination="acct_seller", amount=100),
+    )
+    _, payments = make_payments(deposit_addresses={"tempo": "0x" + "1" * 40}, connect=valid)
+    method = payments.tempo.charge()
+    assert method.broadcast is not None
+    await method.broadcast(context)
+    assert len(settled) == 1
