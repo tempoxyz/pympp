@@ -348,21 +348,31 @@ class Mpp:
             raise PaymentExpiredError(echo.expires)
 
         echoed = _comparable(echoed_request)
-        if request is None or _comparable(request) == echoed:
-            # No request, or the echoed wire request itself (the 0.15 form).
+        if request is None:
             method = _select_echoed(candidates, echoed_request, echo.id)
         else:
-            try:
-                matching = [
-                    candidate
-                    for candidate in candidates
-                    if _expected_request(candidate, request, parsed=credential) == echoed
-                ]
-            except ValidationError as error:
-                raise InvalidChallengeError(echo.id, "credential request does not match") from error
-            if not matching:
+            # Read `request` as route input first. Only when no method accepts it as
+            # route input is it compared as the echoed wire request (the 0.15 form), so an
+            # input that reads both ways, such as `amount` in display or base units, is
+            # always checked in its stricter route-input reading.
+            matching: list[ServerMethod] = []
+            normalized = False
+            for candidate in candidates:
+                try:
+                    expected = _expected_request(candidate, request, parsed=credential)
+                except ValidationError:
+                    continue
+                normalized = True
+                if expected == echoed:
+                    matching.append(candidate)
+            if normalized:
+                if not matching:
+                    raise InvalidChallengeError(echo.id, "credential request does not match")
+                method = matching[0]
+            elif _comparable(request) == echoed:
+                method = _select_echoed(candidates, echoed_request, echo.id)
+            else:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
-            method = matching[0]
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
             raise TypeError(f"unsupported method option: {unsupported[0]}")

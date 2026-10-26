@@ -709,6 +709,46 @@ class TestReviewFixes:
                 await server.broadcast_credential(credential, request=mismatched)
         assert seen == [CURRENCY] * 4
 
+    async def test_ambiguous_request_is_checked_as_route_input(self) -> None:
+        from decimal import Decimal
+
+        from pydantic import BaseModel, ConfigDict, field_validator
+
+        from mpp.errors import InvalidChallengeError
+        from mpp.methods import Method
+        from mpp.server import ServerMethod
+
+        class Input(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            amount: str
+            currency: str
+            recipient: str
+
+            @field_validator("amount")
+            @classmethod
+            def to_base_units(cls, value: str) -> str:
+                return str(int(Decimal(value) * 10**6))
+
+        method = ServerMethod(
+            method=Method(name="units", intent="charge", request_model=Input, payload_model=Input),
+            verify=_verified,
+            defaults={"currency": CURRENCY, "recipient": RECIPIENT},
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(amount="0.000001")(http_request()))
+        credential = authorization(
+            issued, {"amount": "1", "currency": CURRENCY, "recipient": RECIPIENT}
+        )
+        wire = {key: value for key, value in issued.request.items() if key != "_mppx_scope"}
+        assert wire == {"amount": "1", "currency": CURRENCY, "recipient": RECIPIENT}
+        # The same dict reads as route input for 1 token: a 1-base-unit credential must not pass.
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await server.validate_credential(credential, request=wire)
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await server.broadcast_credential(credential, request=wire)
+        receipt = await server.broadcast_credential(credential, request={"amount": "0.000001"})
+        assert receipt.status == "success"
+
     async def test_mcp_tools_can_be_paid_when_requires_auth(self) -> None:
         from mpp.extensions.mcp import MCPCredential, verify_or_challenge
 
