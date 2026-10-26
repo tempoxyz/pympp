@@ -360,7 +360,10 @@ class Mpp:
             for candidate in candidates:
                 try:
                     expected = _expected_request(candidate, request, parsed=credential)
-                except ValidationError:
+                except _AsyncResolveRequestError:
+                    raise
+                except (ValidationError, TypeError, ValueError):
+                    # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True
                 if expected == echoed:
@@ -565,6 +568,10 @@ class Mpp:
         return receipt
 
 
+class _AsyncResolveRequestError(TypeError):
+    """A method's resolve_request is async where a synchronous one is required."""
+
+
 def _expected_request(
     method: ServerMethod, request: Mapping[str, Any], *, parsed: Credential
 ) -> dict[str, Any]:
@@ -577,7 +584,9 @@ def _expected_request(
         if inspect.isawaitable(resolved):
             if inspect.iscoroutine(resolved):
                 resolved.close()
-            raise TypeError("validate_credential(request=...) needs a synchronous resolve_request")
+            raise _AsyncResolveRequestError(
+                "validate_credential(request=...) needs a synchronous resolve_request"
+            )
         input = resolved
     return _comparable(method.method.normalize_request(input))
 

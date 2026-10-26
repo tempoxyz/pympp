@@ -749,6 +749,49 @@ class TestReviewFixes:
         receipt = await server.broadcast_credential(credential, request={"amount": "0.000001"})
         assert receipt.status == "success"
 
+    async def test_evm_credential_request_accepts_the_wire_form(self) -> None:
+        from mpp._validation import Validation
+        from mpp.errors import InvalidChallengeError
+
+        async def validate(context: Any) -> Validation:
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
+            )
+
+        async def broadcast(context: Any) -> Receipt:
+            return Receipt.success("0x" + "cd" * 32)
+
+        method = replace(
+            evm_server.charge(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=_settle),
+            validate=validate,
+            broadcast=broadcast,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(amount="1")(http_request()))
+        wire = {key: value for key, value in issued.request.items() if key != "_mppx_scope"}
+        assert "methodDetails" in wire
+        credential = authorization(
+            issued,
+            {
+                "type": "authorization",
+                "from": "0x" + "11" * 20,
+                "to": wire["recipient"],
+                "value": wire["amount"],
+                "validAfter": "0",
+                "validBefore": "9999999999",
+                "nonce": "0x" + "00" * 32,
+                "signature": "0x" + "22" * 65,
+            },
+        )
+        await server.validate_credential(credential, request=wire)
+        receipt = await server.broadcast_credential(credential, request=wire)
+        assert receipt.status == "success"
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await server.validate_credential(credential, request={**wire, "amount": "2"})
+
     async def test_mcp_tools_can_be_paid_when_requires_auth(self) -> None:
         from mpp.extensions.mcp import MCPCredential, verify_or_challenge
 
