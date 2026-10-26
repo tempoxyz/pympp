@@ -130,10 +130,33 @@ typeCheckingMode = "standard"
 include = ["src", "tests"]
 
 [tool.pytest.ini_options]
+# Keeps a bare `pytest` out of mutmut's mutants/ copy of the tests.
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: requires TEMPO_RPC_URL (real Tempo node)",
     "redis: requires REDIS_URL (real Redis instance)",
     "x402_localnet: requires X402_ANVIL_RPC_URL (Anvil node for x402 settlement)",
+]
+
+# Mutation testing of the protocol-critical modules (`make mutation`). Runs
+# nightly and, for changed functions only, on pull requests.
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = [
+    "src/mpp/_body_digest.py",
+    "src/mpp/_parsing.py",
+    "src/mpp/client/transport.py",
+    "src/mpp/methods/tempo/intents.py",
+    "src/mpp/server/compose.py",
+    "src/mpp/server/verify.py",
+]
+pytest_add_cli_args = [
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "-m",
+    "not integration and not redis and not x402_localnet",
+    "--hypothesis-profile=mutmut",
 ]

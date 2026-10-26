@@ -5,10 +5,21 @@ import time
 
 import httpx
 import pytest
+from hypothesis import HealthCheck, settings
 
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo._defaults import PATH_USD
 from mpp.methods.tempo.intents import ChargeIntent
+
+# Selected by [tool.mutmut]: mutmut reruns tests in one process (which trips
+# differing_executors) and times mutants itself, so runs must be deterministic.
+settings.register_profile(
+    "mutmut",
+    database=None,
+    deadline=None,
+    derandomize=True,
+    suppress_health_check=[HealthCheck.differing_executors],
+)
 
 
 @pytest.fixture(scope="session")
