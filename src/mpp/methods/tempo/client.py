@@ -268,7 +268,7 @@ class TempoMethod:
     async def _find_swap_calls(
         self, *, account: str, amount_out: int, token_out: str, rpc_url: str
     ) -> list[tuple[str, str]]:
-        """Return ``(to, data)`` approve and swap calls that buy ``amount_out`` of ``token_out``.
+        """Return ``(to, data)`` approve and swap calls that top ``token_out`` up to ``amount_out``.
 
         Returns no calls when ``account`` already holds enough ``token_out``.
 
@@ -288,8 +288,11 @@ class TempoMethod:
             *(_tip20_balance(rpc_url, token, account) for token in candidates),
             return_exceptions=True,
         )
-        if not isinstance(target, BaseException) and target >= amount_out:
+        held = 0 if isinstance(target, BaseException) else target
+        if held >= amount_out:
             return []
+        # Buy only the shortfall; the payer's existing balance covers the rest.
+        deficit = amount_out - held
         slippage_bps = math.floor(self.auto_swap.slippage * 100 + 0.5)
         for token_in, balance in zip(candidates, balances, strict=True):
             if isinstance(balance, BaseException) or balance <= 0:
@@ -298,21 +301,22 @@ class TempoMethod:
                 "to": STABLECOIN_DEX,
                 "data": "0x"
                 + _QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR
-                + _abi_words(token_in, token_out, amount_out),
+                + _abi_words(token_in, token_out, deficit),
             }
             try:
                 quoted = int(await _rpc_call(rpc_url, "eth_call", [quote, "latest"]), 16)
             except Exception:
                 continue
-            if balance < quoted:
-                continue
             max_amount_in = quoted + quoted * slippage_bps // 10_000
+            # The swap may spend up to the slippage-adjusted maximum.
+            if balance < max_amount_in:
+                continue
             return [
                 (token_in, f"0x{APPROVE_SELECTOR}" + _abi_words(STABLECOIN_DEX, max_amount_in)),
                 (
                     STABLECOIN_DEX,
                     f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
-                    + _abi_words(token_in, token_out, amount_out, max_amount_in),
+                    + _abi_words(token_in, token_out, deficit, max_amount_in),
                 ),
             ]
         raise InsufficientFundsError(token_out)

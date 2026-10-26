@@ -2,4 +2,4 @@
 pympp: minor
 ---
 
-Added `AutoSwap` dataclass and `auto_swap` parameter to `charge()` to automatically swap a missing charge currency through the Tempo stablecoin DEX. Added `PaymentMiddleware` ASGI middleware, `select_offers` hook on `Mpp`, and exported `ServerOffer`, `OfferSelectionContext`, and `SelectOffers` types; also fixed the `SWAP_EXACT_AMOUNT_OUT_SELECTOR` function selector.
+Added `auto_swap` to the Tempo `charge()` client (`True` or an `AutoSwap` with currencies and slippage): when the payer lacks the charge currency, it buys the shortfall through the Tempo stablecoin DEX in the same transaction, or raises `InsufficientFundsError` when no fallback currency can fund it.

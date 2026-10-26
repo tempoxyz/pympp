@@ -39,6 +39,7 @@ async def sign(
         account=ACCOUNT, chain_id=CHAIN_ID, rpc_url="https://rpc.test", auto_swap=auto_swap
     )
     lowered = {token.lower(): value for token, value in balances.items()}
+    quoted_amounts: list[int] = []
 
     async def fake_rpc_call(_url: str, name: str, params: list[Any], **_: Any) -> str:
         if name == "eth_call":
@@ -46,7 +47,7 @@ async def sign(
             data = params[0]["data"]
             assert data.startswith("0x1576fa0e")
             token_in = "0x" + data[10 + 24 : 10 + 64]
-            assert int(data[10 + 128 :], 16) == AMOUNT
+            quoted_amounts.append(int(data[10 + 128 :], 16))
             quote = {t.lower(): q for t, q in quotes.items()}[token_in]
             if isinstance(quote, Exception):
                 raise quote
@@ -63,6 +64,9 @@ async def sign(
         patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
     ):
         credential = await method.create_credential(challenge())
+    # Every quote asks for the payer's shortfall in the charge currency.
+    shortfall = AMOUNT - lowered.get(CURRENCY.lower(), 0)
+    assert all(amount == shortfall for amount in quoted_amounts)
     fields = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
     calls = [
         ("0x" + to.hex(), int.from_bytes(value, "big"), "0x" + data.hex())
@@ -114,7 +118,7 @@ async def test_options_try_explicit_currencies_first_then_defaults() -> None:
     # OUSD's quote fails, pathUSD cannot cover its quote, so USDC.e funds the swap.
     calls, _ = await sign(
         options,
-        {OUSD: 5_000_000, PATH_USD: 999_999, USDC: 1_000_000},
+        {OUSD: 5_000_000, PATH_USD: 999_999, USDC: 2_000_000},
         {OUSD: RuntimeError("no route"), PATH_USD: 1_000_000, USDC: 1_000_000},
     )
 
@@ -147,3 +151,26 @@ def test_explicit_currencies_are_deduplicated_against_defaults() -> None:
 def test_invalid_slippage_is_rejected(slippage: float) -> None:
     with pytest.raises(ValueError, match="slippage"):
         AutoSwap(slippage=slippage)
+
+
+@pytest.mark.asyncio
+async def test_swaps_only_the_missing_amount() -> None:
+    calls, _ = await sign(True, {CURRENCY: AMOUNT - 1, PATH_USD: 2_000_000}, {PATH_USD: 1})
+
+    (_, _, approve), (_, _, swap), (_, _, transfer) = calls
+    assert word(swap, 2) == 1
+    assert word(approve, 1) == word(swap, 3) == 1
+    assert word(transfer, 1) == AMOUNT
+
+
+@pytest.mark.asyncio
+async def test_balance_must_cover_the_slippage_adjusted_input() -> None:
+    # pathUSD covers the quote but not the 1% slippage maximum, so USDC.e funds the swap.
+    calls, _ = await sign(
+        True,
+        {PATH_USD: 1_000_000, USDC: 1_010_000},
+        {PATH_USD: 1_000_000, USDC: 1_000_000},
+    )
+
+    assert calls[0][0] == USDC.lower()
+    assert word(calls[0][2], 1) == word(calls[1][2], 3) == 1_010_000
