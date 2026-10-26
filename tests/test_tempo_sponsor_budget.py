@@ -308,6 +308,58 @@ async def test_waiters_share_bounded_receipt_lookups() -> None:
     assert peak <= 8
 
 
+async def never_answers(_tx_hash: str) -> bool:
+    await asyncio.Event().wait()
+    return False
+
+
+@pytest.mark.asyncio
+async def test_reservation_with_room_skips_receipt_lookups() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget()
+    for i in range(20):
+        reservation = await reserve(store, budget, f"0x{i:02x}")
+        assert await budget_module.transition(store, reservation, "pending")
+    clear_receipt_checks()
+    await asyncio.wait_for(reserve(store, budget, "0xff", is_settled=never_answers), 1)
+    assert "0xff" in await reservations(store)
+
+
+@pytest.mark.asyncio
+async def test_receipt_lookups_never_outlast_the_wait_deadline() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget(max_in_flight_reservations=1)
+    reservation = await reserve(store, budget, "0x01")
+    assert await budget_module.transition(store, reservation, "pending")
+    with pytest.raises(VerificationError, match="expired while waiting"):
+        await asyncio.wait_for(
+            reserve(store, budget, "0x02", wait_ms=100, is_settled=never_answers), 2
+        )
+
+
+@pytest.mark.asyncio
+async def test_redis_transient_errors_are_not_reported_as_unsupported() -> None:
+    pytest.importorskip("redis")
+    from unittest.mock import AsyncMock
+
+    from redis.exceptions import OutOfMemoryError, ReadOnlyError, ResponseError
+
+    from mpp.stores.redis import RedisStore
+
+    client = AsyncMock()
+    for error in (
+        ReadOnlyError("You can't write against a read only replica."),
+        OutOfMemoryError("command not allowed when used memory > 'maxmemory'."),
+        ResponseError("LOADING Redis is loading the dataset in memory"),
+    ):
+        client.eval.side_effect = error
+        with pytest.raises(type(error)):
+            await RedisStore(client).compare_and_set("k", None, "v")
+    client.eval.side_effect = ResponseError("unknown command 'eval', with args beginning with: ")
+    with pytest.raises(NotImplementedError):
+        await RedisStore(client).compare_and_set("k", None, "v")
+
+
 @pytest.mark.asyncio
 async def test_redis_without_eval_reports_compare_and_set_unsupported() -> None:
     pytest.importorskip("redis")
@@ -328,7 +380,7 @@ async def test_prepared_lease_starts_after_slow_reconciliation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = MemoryStore()
-    budget = SponsorBudget()
+    budget = SponsorBudget(max_in_flight_reservations=1)
     pending = await reserve(store, budget, "0x01")
     assert await budget_module.transition(store, pending, "pending")
     clock = [int(time.time() * 1000)]
@@ -336,7 +388,7 @@ async def test_prepared_lease_starts_after_slow_reconciliation(
 
     async def slow_lookup(_tx_hash: str) -> bool:
         clock[0] += 31_000
-        return False
+        return True
 
     await reserve(store, budget, "0x02", expires_in_ms=600_000, is_settled=slow_lookup)
     # The lease runs from when the reservation was written, so it is still live.

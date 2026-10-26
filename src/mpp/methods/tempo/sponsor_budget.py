@@ -246,7 +246,6 @@ async def reserve(
             raise VerificationError(
                 "Sponsored transaction expired while waiting for sponsor budget"
             )
-        await _reconcile(store, key, is_settled)
 
         def change(current: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
             if current is None:
@@ -284,5 +283,13 @@ async def reserve(
                 raise InternalPaymentError() from RuntimeError(
                     "Sponsored transaction already has a budget reservation"
                 )
-        await asyncio.sleep(min(poll_interval, wait_until - now) / 1000)
+        # At capacity: release what has settled or expired, without letting
+        # slow receipt lookups hold the request past its deadline.
+        remaining = wait_until - _now_ms()
+        if remaining > 0:
+            try:
+                await asyncio.wait_for(_reconcile(store, key, is_settled), remaining / 1000)
+            except TimeoutError:
+                pass
+        await asyncio.sleep(max(0, min(poll_interval, wait_until - _now_ms())) / 1000)
         poll_interval = min(poll_interval * 2, _MAX_POLL_INTERVAL_MS)

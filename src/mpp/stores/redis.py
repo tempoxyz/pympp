@@ -36,6 +36,22 @@ return 1
 """
 
 
+def _scripting_unavailable(error: Exception) -> bool:
+    """Whether ``error`` means this server can never run the script.
+
+    Transient replies, such as READONLY during a failover or OOM, do not.
+    """
+    from redis.exceptions import NoPermissionError, ResponseError
+
+    if isinstance(error, NoPermissionError):
+        return True
+    if type(error) is not ResponseError:
+        return False
+    message = str(error).lower()
+    # EVAL missing or denied, or KEEPTTL unsupported (Redis < 6.0).
+    return any(reason in message for reason in ("unknown command", "noperm", "syntax error"))
+
+
 class RedisStore:
     """Async key-value store backed by Redis.
 
@@ -112,9 +128,7 @@ class RedisStore:
                 "" if value is None else value,
             )
         except Exception as error:
-            from redis.exceptions import ResponseError
-
-            if isinstance(error, ResponseError):
+            if _scripting_unavailable(error):
                 raise NotImplementedError("Redis server refused EVAL") from error
             raise
         return bool(result)
