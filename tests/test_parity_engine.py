@@ -548,14 +548,6 @@ class TestReviewFixes:
         issued = challenge(await server.compose((second, {"amount": "1"}))(http_request()))
         await server.validate_credential(authorization(issued, payload))
         assert seen == [CURRENCY]
-        other = Mpp(
-            methods=self._faked(
-                tempo_server.charge(recipient=RECIPIENT, currency="0x" + "44" * 20), seen
-            )
-            + [first],
-            realm=REALM,
-            secret_key=SECRET,
-        )
         foreign = Challenge.create(
             secret_key=SECRET,
             realm=REALM,
@@ -564,9 +556,29 @@ class TestReviewFixes:
             request={**issued.request, "currency": "0x" + "55" * 20},
             expires=issued.expires,
         )
-        # A currency no copy is configured with (a route override) falls back to the first.
+        # A currency no copy is configured with (a route override) falls back to the
+        # first copy of one tempo.charge() call, which share one replay store.
+        other = Mpp(
+            methods=self._faked(
+                tempo_server.charge(recipient=RECIPIENT, currencies=["0x" + "44" * 20, CURRENCY]),
+                seen,
+            ),
+            realm=REALM,
+            secret_key=SECRET,
+        )
         await other.validate_credential(authorization(foreign, payload))
         assert seen[-1] == "0x" + "44" * 20
+        # Copies of separate calls may settle through other stores: no fallback.
+        mixed = Mpp(
+            methods=self._faked(
+                tempo_server.charge(recipient=RECIPIENT, currency="0x" + "44" * 20), seen
+            )
+            + [first],
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        with pytest.raises(InvalidChallengeError, match="several configured methods"):
+            await mixed.validate_credential(authorization(foreign, payload))
 
     async def test_unknown_credential_options_are_rejected(self) -> None:
         from mpp.errors import VerificationFailedError
@@ -812,3 +824,229 @@ class TestReviewFixes:
         # HTTP routes still bind the credential header.
         http = challenge(await handler(http_request()))
         assert http.header == "Payment-Authorization"
+
+
+class TestReviewFixesRound2:
+    """Regressions for the second round of PR #339 review findings."""
+
+    @staticmethod
+    def _stored(
+        methods: list[ServerMethod], store: MemoryStore, seen: list[str]
+    ) -> list[ServerMethod]:
+        """Copies whose broadcast claims the hash in the store, like the Tempo intent."""
+        from mpp._validation import Validation
+        from mpp.errors import VerificationFailedError
+
+        async def validate(context: Any) -> Validation:
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
+            )
+
+        async def broadcast(context: Any) -> Receipt:
+            tx_hash = context.credential.payload.model_dump()["hash"]
+            if not await store.put_if_absent(f"tempo:charge:{tx_hash}", True):
+                raise VerificationFailedError("transaction hash already used")
+            seen.append(tx_hash)
+            return Receipt.success(tx_hash)
+
+        return [replace(method, validate=validate, broadcast=broadcast) for method in methods]
+
+    async def test_broadcast_credential_settles_only_through_the_issuing_group(self) -> None:
+        from mpp.errors import InvalidChallengeError
+        from mpp.methods.tempo import PATH_USD, USDC
+
+        seen: list[str] = []
+        first_store, second_store = MemoryStore(), MemoryStore()
+        first = self._stored(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[PATH_USD], store=first_store),
+            first_store,
+            seen,
+        )
+        second = self._stored(
+            tempo_server.charge(recipient=RECIPIENT, currencies=[USDC], store=second_store),
+            second_store,
+            seen,
+        )
+        server = Mpp(methods=[*first, *second], realm=REALM, secret_key=SECRET)
+        payload = {"type": "hash", "hash": "0x12"}
+        options = {"amount": "1", "currency": "0x" + "33" * 20, "chain_id": 42431}
+        route = server.compose((second[0], options))
+        issued = challenge(await route(http_request()))
+        credential = authorization(issued, payload)
+        # Neither group's configuration tells which issued it: settling through the first
+        # group's store would let the issuing group's route accept the same hash again.
+        with pytest.raises(InvalidChallengeError, match="several configured methods"):
+            await server.broadcast_credential(credential)
+        with pytest.raises(InvalidChallengeError, match="several configured methods"):
+            await server.broadcast_credential(credential, request=options)
+        assert seen == []
+        assert isinstance(await route(http_request(credential)), PaymentVerified)
+        assert isinstance(await route(http_request(credential)), PaymentRequired)
+        assert seen == ["0x12"]
+
+    async def test_evm_route_currency_selects_its_asset(self) -> None:
+        from mpp.methods.evm import BASE_USDC
+
+        server = Mpp(
+            methods=[
+                evm_server.charge(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=_settle),
+                evm_server.charge(currency=BASE_USDC, recipient=RECIPIENT, settle=_settle),
+            ],
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        for currency in (BASE_USDC.address, BASE_USDC.address.lower()):
+            handler = server.evm.charge(amount="1", currency=currency)
+            assert [method.defaults for method in handler.methods] == [
+                {"currency": BASE_USDC.address}
+            ]
+            issued = challenge(await handler(http_request()))
+            assert issued.request["currency"] == BASE_USDC.address
+            assert issued.request["methodDetails"]["chainId"] == BASE_USDC.chain_id
+
+    async def test_broadcast_requires_a_validation_result(self) -> None:
+        from mpp.errors import VerificationFailedError
+
+        broadcasts: list[Any] = []
+
+        async def validate(context: Any) -> Any:
+            return None
+
+        async def broadcast(context: Any) -> Receipt:
+            broadcasts.append(context)
+            return Receipt.success("paid")
+
+        server = raw_mpp(validate=validate, broadcast=broadcast)
+        route = server.charge()
+        issued = challenge(await route(http_request()))
+        with pytest.raises(VerificationFailedError, match="invalid validation result"):
+            await server.broadcast_credential(authorization(issued))
+        result = await route(http_request(authorization(issued)))
+        assert isinstance(result, PaymentRequired)
+        assert broadcasts == []
+
+        from mpp.server.verify import verify_or_challenge
+
+        class Intent:
+            name = "charge"
+
+            async def validate(self, credential: Any, request: Any) -> Any:
+                return None
+
+            async def broadcast(self, credential: Any, request: Any) -> Receipt:
+                broadcasts.append(credential)
+                return Receipt.success("paid")
+
+        options: dict[str, Any] = {
+            "intent": Intent(),
+            "request": {"amount": "1"},
+            "realm": REALM,
+            "secret_key": SECRET,
+            "method": "tempo",
+        }
+        issued = await verify_or_challenge(authorization=None, **options)
+        assert isinstance(issued, Challenge)
+        with pytest.raises(VerificationFailedError, match="invalid validation result"):
+            await verify_or_challenge(authorization=authorization(issued), **options)
+        assert broadcasts == []
+
+    async def test_credential_request_checks_custom_scope(self) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        server = raw_mpp()
+        issued = challenge(
+            await server.charge(_mppx_scope={"account": "invoice:42"})(http_request())
+        )
+        assert issued.request["_mppx_scope"]["custom"] == {"account": "invoice:42"}
+        credential = authorization(issued)
+        wire = dict(issued.request)
+        for request in (
+            {"amount": "1", "_mppx_scope": {"account": "invoice:43"}},
+            {**wire, "_mppx_scope": {**wire["_mppx_scope"], "custom": {"account": "invoice:43"}}},
+        ):
+            with pytest.raises(InvalidChallengeError, match="scope does not match"):
+                await server.broadcast_credential(credential, request=request)
+        # Engine route fields are not compared; a request naming no scope checks none.
+        for request in (
+            {"amount": "1", "_mppx_scope": {"account": "invoice:42"}},
+            {**wire, "_mppx_scope": {**wire["_mppx_scope"], "resource": "/other"}},
+            {"amount": "1"},
+        ):
+            receipt = await server.broadcast_credential(credential, request=request)
+            assert receipt.status == "success"
+
+    def test_signed_resource_keeps_percent_encoding(self) -> None:
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+        from starlette.testclient import TestClient
+
+        from mpp.server import pay
+
+        server = raw_mpp()
+
+        @pay(server.charge())
+        async def endpoint(request: Any, credential: Any, receipt: Any) -> JSONResponse:
+            return JSONResponse({})
+
+        client = TestClient(Starlette(routes=[Route("/files/{name:path}", endpoint)]))
+        resources = {}
+        for path in ("/files/a/b", "/files/a%2Fb", "/files/x", "/files/x%23y", "/files/x%3Fy"):
+            response = client.get(path)
+            issued = Challenge.from_www_authenticate(response.headers["www-authenticate"])
+            resources[path] = issued.request["_mppx_scope"]["resource"]
+        assert resources == {path: path for path in resources}
+        assert Request("GET", "https://h/files/a%2Fb?q=1").scope()["resource"] == "/files/a%2Fb"
+
+    async def test_pay_accepts_non_ascii_header_bytes(self) -> None:
+        from mpp.server import pay
+
+        class StarletteRequest:
+            headers = {"x-name": "caf\xe9"}
+            method = "GET"
+            path = "/paid"
+
+        async def endpoint(request: Any, credential: Any, receipt: Any) -> dict[str, str]:
+            return {}
+
+        result: Any = await pay(raw_mpp().charge())(endpoint)(StarletteRequest())
+        assert result.status_code == 402
+        assert Request("GET", "/", headers={"x-name": "caf\xe9"}).headers["x-name"] == "caf\xe9"
+
+    async def test_pay_reads_the_body_for_methods_that_need_it(self) -> None:
+        from mpp.server import RequestContext, pay
+
+        bodies: list[bytes | None] = []
+
+        def resolve_request(context: RequestContext) -> dict[str, Any]:
+            bodies.append(context.input.body if context.input is not None else None)
+            return context.request
+
+        class StarletteRequest:
+            headers: dict[str, str] = {}
+            method = "POST"
+            path = "/paid"
+
+            async def body(self) -> bytes:
+                return b"{}"
+
+        async def endpoint(request: Any, credential: Any, receipt: Any) -> dict[str, str]:
+            return {}
+
+        server = Mpp(
+            methods=server_method(
+                request={"amount": "1"},
+                verify=_verified,
+                resolve_request=resolve_request,
+                needs_request_body=True,
+            ),
+            realm=REALM,
+            secret_key=SECRET,
+        )
+        handler = server.charge()
+        assert handler.needs_request_body
+        await pay(handler)(endpoint)(StarletteRequest())
+        assert bodies[-1] == b"{}"

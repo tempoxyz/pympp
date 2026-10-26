@@ -120,6 +120,7 @@ def charge(
         broadcast=broadcast,
         resolve_request=config.resolve_request,
         can_offer=can_offer,
+        defaults={"currency": config.currency},
         on_payment_success=on_payment_success,
         x402=intent,
         use_store=use_store,

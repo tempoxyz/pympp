@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mpp._validation import Validation
+from mpp.errors import VerificationFailedError
 from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
 
 if TYPE_CHECKING:
@@ -88,6 +89,11 @@ class ServerMethod:
             configured without one of its own.
         credential_options: Keyword options `Mpp.validate_credential` and
             `Mpp.broadcast_credential` accept for this method; others are rejected.
+        group: Shared by the copies one factory call returns (such as one per
+            currency), which settle through the same configuration and replay store.
+            Out-of-band settlement treats only copies of one group as interchangeable.
+        needs_request_body: Set when `resolve_request` reads `RequestContext.input.body`,
+            so framework decorators such as `pay()` read the request body for it.
     """
 
     method: Method[Any, Any]
@@ -103,6 +109,8 @@ class ServerMethod:
     x402: X402Intent | None = None
     use_store: Callable[[Store], None] | None = None
     credential_options: tuple[str, ...] = ()
+    group: object | None = None
+    needs_request_body: bool = False
 
     def __post_init__(self) -> None:
         if self.verify is None and self.broadcast is None:
@@ -145,6 +153,8 @@ class ServerMethod:
                     operation="broadcast",
                 )
             )
+            if not isinstance(validation, Validation):
+                raise VerificationFailedError("Intent returned an invalid validation result")
         receipt = await self.broadcast(context)
         if validation is not None and validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)

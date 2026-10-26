@@ -6,7 +6,7 @@ import re
 import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 import rfc8785
 
@@ -20,6 +20,7 @@ from mpp import (
 )
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
 from mpp._units import transform_units
+from mpp._validation import Validation
 from mpp.errors import (
     InternalPaymentError,
     InvalidChallengeError,
@@ -28,14 +29,12 @@ from mpp.errors import (
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
+    VerificationFailedError,
 )
 from mpp.events import CHALLENGE_CREATED, PAYMENT_FAILED, PAYMENT_SUCCESS, EventDispatcher
 from mpp.x402._server import X402Input, X402Intent, x402_credential
 
 DEFAULT_EXPIRES_MINUTES = 5
-
-if TYPE_CHECKING:
-    from mpp._validation import Validation
 
 
 class Intent(Protocol):
@@ -50,7 +49,9 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
     The validation's ``payer`` is copied to the receipt unless it already has one.
     """
     if hasattr(intent, "broadcast"):
-        validation: Validation = await intent.validate(credential, request)
+        validation = await intent.validate(credential, request)
+        if not isinstance(validation, Validation):
+            raise VerificationFailedError("Intent returned an invalid validation result")
         receipt: Receipt = await intent.broadcast(credential, request)
         if validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)

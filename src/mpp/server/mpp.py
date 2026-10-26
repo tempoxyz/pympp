@@ -113,11 +113,18 @@ def _select(methods: Sequence[ServerMethod], options: Mapping[str, Any]) -> list
         method
         for method in methods
         if not any(
-            options.get(key) is not None and options[key] != value
+            options.get(key) is not None and not _same(options[key], value)
             for key, value in (method.defaults or {}).items()
         )
     ]
     return selected or [methods[0]]
+
+
+def _same(value: Any, other: Any) -> bool:
+    """Whether two option values agree; strings such as addresses compare case-insensitively."""
+    if isinstance(value, str) and isinstance(other, str):
+        return value.lower() == other.lower()
+    return value == other
 
 
 def _check_input(method: ServerMethod, options: Mapping[str, Any]) -> None:
@@ -371,11 +378,15 @@ class Mpp:
             if normalized:
                 if not matching:
                     raise InvalidChallengeError(echo.id, "credential request does not match")
-                method = matching[0]
+                method = _select_echoed(matching, echoed_request, echo.id)
             elif _comparable(request) == echoed:
                 method = _select_echoed(candidates, echoed_request, echo.id)
             else:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
+            if not _custom_scope_matches(
+                request.get("_mppx_scope"), echoed_request.get("_mppx_scope")
+            ):
+                raise InvalidChallengeError(echo.id, "credential scope does not match")
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
             raise TypeError(f"unsupported method option: {unsupported[0]}")
@@ -631,6 +642,13 @@ def _select_echoed(
             probes = {key: _without(probe, overridden) for key, probe in probes.items()}
             break
     if not matching:
+        # Settle with the first copy only when every copy shares its configuration and
+        # replay store: another group's store would accept the same payment again.
+        if not _one_group(candidates):
+            raise InvalidChallengeError(
+                challenge_id,
+                "credential matches several configured methods; pass request= to select one",
+            )
         return candidates[0]
     if len(matching) > 1:
         narrowed = [
@@ -642,12 +660,47 @@ def _select_echoed(
         matching = narrowed or matching
     if len(matching) > 1:
         configs = [probes[id(candidate)] for candidate in matching]
-        if configs[0] is None or any(config != configs[0] for config in configs):
+        if (
+            configs[0] is None
+            or any(config != configs[0] for config in configs)
+            or not _one_group(matching)
+        ):
             raise InvalidChallengeError(
                 challenge_id,
                 "credential matches several configured methods; pass request= to select one",
             )
     return matching[0]
+
+
+def _one_group(methods: Sequence[ServerMethod]) -> bool:
+    """Whether the methods are copies from one factory call, sharing a replay store."""
+    groups = {id(method.group if method.group is not None else method) for method in methods}
+    return len(groups) == 1
+
+
+_ENGINE_SCOPE_KEYS = frozenset({"custom", "http_method", "query", "resource", "route"})
+
+
+def _custom_scope_matches(expected: Any, echoed: Any) -> bool:
+    """Whether the application-defined scope a caller expects matches the echoed scope.
+
+    Route issuance binds the method input's ``_mppx_scope`` under the signed scope's
+    ``custom`` key next to engine route fields. A caller names either the custom scope
+    itself (route input) or a whole signed scope (wire request), whose ``custom`` key is
+    compared. Engine route fields are not checked, and a caller naming no scope
+    checks none.
+    """
+    if expected is None:
+        return True
+    custom = echoed.get("custom") if isinstance(echoed, Mapping) else None
+    if expected == custom:
+        return True
+    return (
+        isinstance(expected, Mapping)
+        and "http_method" in expected
+        and set(expected) <= _ENGINE_SCOPE_KEYS
+        and expected.get("custom") == custom
+    )
 
 
 def _probe(method: ServerMethod) -> dict[str, Any] | None:

@@ -128,6 +128,7 @@ def charge(
     async def broadcast(context: VerifyContext) -> Receipt:
         return await verifier.broadcast(credential(context), context.challenge.request)
 
+    group = object()
     return [
         ServerMethod(
             method=definition,
@@ -138,6 +139,7 @@ def charge(
             on_payment_success=on_payment_success,
             defaults={"currency": accepted},
             use_store=use_store,
+            group=group,
         )
         for accepted in config.currencies
     ]
