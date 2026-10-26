@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any, TypeAlias
 
+import httpx
+
 from mpp.server.compose import ComposedHandler
 from mpp.server.http import PaymentRequired, Request, Response, make_headers
 
@@ -30,30 +32,43 @@ class _BodyTooLarge(Exception):
     pass
 
 
+class _ClientDisconnected(Exception):
+    pass
+
+
 def _decode(headers: Any) -> list[tuple[str, str]]:
     return [(name.decode("latin-1"), value.decode("latin-1")) for name, value in headers or ()]
 
 
 def _url(scope: Scope, headers: list[tuple[str, str]]) -> str:
     scheme = scope.get("scheme", "http")
-    host = next((value for name, value in headers if name.lower() == "host"), None)
-    if host is None:
+    host: str | None = None
+    port: int | None = None
+    # Take only the host and port from the client's Host header, so it cannot change
+    # the path or query bound into the challenge.
+    header = next((value for name, value in headers if name.lower() == "host"), None)
+    if header:
+        try:
+            parsed = httpx.URL(f"{scheme}://{header}")
+            host, port = parsed.host, parsed.port
+        except (httpx.InvalidURL, UnicodeError):
+            pass
+    if not host:
         server = scope.get("server")
-        if server:
-            name, port = server
-            host = (
-                name if port in (None, {"http": 80, "https": 443}.get(scheme)) else f"{name}:{port}"
-            )
-        else:
-            host = "localhost"
-    # raw_path keeps percent-encoding, so distinct paths keep distinct scopes.
+        host, port = (server[0], server[1]) if server else ("localhost", None)
+    try:
+        url = httpx.URL(scheme=scheme, host=host, port=port)
+    except httpx.InvalidURL:
+        url = httpx.URL(scheme=scheme, host="localhost")
+    query = scope.get("query_string", b"")
+    # raw_path keeps percent-encoding, so distinct paths keep distinct scopes. ASGI's
+    # path already includes root_path.
     raw_path = scope.get("raw_path")
     if raw_path:
-        path = raw_path.decode("latin-1").split("?", 1)[0]
+        url = url.copy_with(raw_path=raw_path.split(b"?", 1)[0] + (b"?" + query if query else b""))
     else:
-        path = scope.get("root_path", "") + scope.get("path", "/")
-    query = scope.get("query_string", b"").decode("latin-1")
-    return f"{scheme}://{host}{path}" + (f"?{query}" if query else "")
+        url = url.copy_with(path=scope.get("path") or "/", query=query or None)
+    return str(url)
 
 
 async def _read_body(receive: Receive, max_body_size: int) -> bytes:
@@ -63,7 +78,7 @@ async def _read_body(receive: Receive, max_body_size: int) -> bytes:
     while more_body:
         message = await receive()
         if message["type"] == "http.disconnect":
-            break
+            raise _ClientDisconnected
         chunk = message.get("body", b"")
         size += len(chunk)
         if size > max_body_size:
@@ -78,10 +93,7 @@ async def _send_response(send: Send, response: Response) -> None:
         {
             "type": "http.response.start",
             "status": response.status,
-            "headers": [
-                (name.encode("latin-1"), value.encode("latin-1"))
-                for name, value in response.headers.multi_items()
-            ],
+            "headers": response.headers.raw,
         }
     )
     await send({"type": "http.response.body", "body": response.body or b""})
@@ -132,6 +144,9 @@ class PaymentMiddleware:
                     send, Response(413, {"Content-Type": "text/plain"}, "Payload Too Large")
                 )
                 return
+            except _ClientDisconnected:
+                # The client is gone: neither verify nor run the app on a partial body.
+                return
             replayed = False
 
             async def replay() -> Message:
@@ -159,13 +174,8 @@ class PaymentMiddleware:
                 response = result.with_receipt(
                     Response(message["status"], make_headers(_decode(message.get("headers"))))
                 )
-                message = {
-                    **message,
-                    "headers": [
-                        (name.encode("latin-1"), value.encode("latin-1"))
-                        for name, value in response.headers.multi_items()
-                    ],
-                }
+                # Raw bytes: the app's header bytes pass through unchanged.
+                message = {**message, "headers": response.headers.raw}
             await send(message)
 
         await self.app(scope, downstream, send_with_receipt)

@@ -91,3 +91,99 @@ async def test_non_http_scopes_pass_through():
     middleware = PaymentMiddleware(inner, mpp.charge(amount="1"))
     await middleware({"type": "websocket"}, None, None)  # type: ignore[arg-type]
     assert seen == ["websocket"]
+
+
+def _scope(**changes):
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/items/1",
+        "query_string": b"",
+        "headers": [],
+        "server": ("testserver", 80),
+    }
+    scope.update(changes)
+    return scope
+
+
+async def _call(middleware, scope, messages=()):
+    pending = list(messages) or [{"type": "http.request", "body": b"", "more_body": False}]
+    sent = []
+
+    async def receive():
+        return pending.pop(0) if pending else {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    await middleware(scope, receive, send)
+    return sent
+
+
+def _challenge(sent):
+    headers = {name.lower(): value for name, value in sent[0]["headers"]}
+    return Challenge.from_www_authenticate(headers[b"www-authenticate"].decode())
+
+
+def _middleware(app=None, **charge):
+    async def default(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    mpp = Mpp(methods=server_method(verify=_paid), realm="example.com", secret_key="secret")
+    return PaymentMiddleware(app or default, mpp.charge(amount="1", **charge))
+
+
+@pytest.mark.asyncio
+async def test_host_header_cannot_change_bound_path():
+    middleware = _middleware()
+    for host in (b"h/items/9#", b"h/items/9?", b"user@h"):
+        sent = await _call(middleware, _scope(headers=[(b"host", host)]))
+        assert _challenge(sent).request["_mppx_scope"]["resource"] == "/items/1"
+
+
+@pytest.mark.asyncio
+async def test_fallback_url_brackets_ipv6_server():
+    sent = await _call(_middleware(), _scope(server=("::1", 8000)))
+    assert _challenge(sent).request["_mppx_scope"]["resource"] == "/items/1"
+
+
+@pytest.mark.asyncio
+async def test_fallback_url_keeps_root_path_once():
+    sent = await _call(_middleware(), _scope(root_path="/api", path="/api/items/1"))
+    assert _challenge(sent).request["_mppx_scope"]["resource"] == "/api/items/1"
+
+
+@pytest.mark.asyncio
+async def test_disconnect_mid_upload_skips_handler_and_app():
+    calls = []
+
+    async def app(scope, receive, send):
+        calls.append(await receive())
+
+    middleware = _middleware(app, body=lambda request: request.body)
+    sent = await _call(
+        middleware,
+        _scope(method="POST"),
+        [{"type": "http.request", "body": b"par", "more_body": True}, {"type": "http.disconnect"}],
+    )
+    assert sent == []
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_paid_response_keeps_non_ascii_header_bytes():
+    async def app(scope, receive, send):
+        headers = [(b"x-name", "café €".encode())]
+        await send({"type": "http.response.start", "status": 200, "headers": headers})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = _middleware(app)
+    issued = _challenge(await _call(middleware, _scope()))
+    authorization = Credential(challenge=issued.to_echo(), payload={}).to_authorization()
+    sent = await _call(middleware, _scope(headers=[(b"authorization", authorization.encode())]))
+    assert sent[0]["status"] == 200
+    headers = {name.lower(): value for name, value in sent[0]["headers"]}
+    assert headers[b"x-name"] == "café €".encode()
+    assert headers[b"payment-receipt"]
