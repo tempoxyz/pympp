@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import re
+import tomllib
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -72,12 +75,14 @@ class Facilitator:
         )
 
 
-def create_app(facilitator: Facilitator, server: x402ResourceServer | None = None) -> FastAPI:
+def create_app(
+    facilitator: Facilitator, server: x402ResourceServer | None = None, routes: Any = ROUTES
+) -> FastAPI:
     server = server or x402ResourceServer(facilitator)  # type: ignore[arg-type]
     server.register(NETWORK, ExactEvmScheme())  # type: ignore[arg-type]
     app = FastAPI()
     app.state.handled = 0
-    app.middleware("http")(payment_middleware(ROUTES, server, secret_key=SECRET_KEY))
+    app.middleware("http")(payment_middleware(routes, server, secret_key=SECRET_KEY))
 
     @app.get("/paid")
     async def paid() -> JSONResponse:
@@ -249,6 +254,35 @@ async def test_missing_raw_path_falls_back_to_the_url_path() -> None:
     async with client(without_raw_path) as http:  # type: ignore[arg-type]
         assert (await http.get("/free")).json() == {"free": True}
         assert (await http.get("/paid")).status_code == 402
+
+
+async def test_encoded_path_delimiters_keep_distinct_challenge_scopes() -> None:
+    facilitator = Facilitator()
+    routes = {"GET /files/*": ROUTES["GET /paid"]}
+    app = create_app(facilitator, routes=routes)
+
+    @app.get("/files/{name:path}")
+    async def files(name: str) -> dict[str, str]:
+        return {"name": name}
+
+    async with client(app) as http:
+        unpaid = await http.get("/files/x%2Fy")
+        challenge = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+        credential = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
+        headers = {"Authorization": credential.to_authorization()}
+        assert (await http.get("/files/x/y", headers=headers)).status_code == 402
+        paid = await http.get("/files/x%2Fy", headers=headers)
+    assert paid.json() == {"name": "x/y"}
+    assert facilitator.calls.count("settle") == 1
+
+
+def test_x402_extra_installs_the_evm_scheme_dependencies() -> None:
+    with open(Path(__file__).parents[1] / "pyproject.toml", "rb") as file:
+        extra = tomllib.load(file)["project"]["optional-dependencies"]["x402"]
+    [x402] = [requirement for requirement in extra if re.match(r"x402\b", requirement)]
+    extras = re.search(r"\[(.*)\]", x402)
+    assert extras is not None
+    assert {"evm", "httpx"} <= {name.strip() for name in extras.group(1).split(",")}
 
 
 async def test_failed_verify_call_releases_the_authorization() -> None:

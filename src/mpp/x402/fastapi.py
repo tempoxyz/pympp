@@ -35,6 +35,7 @@ except ImportError as error:  # pragma: no cover
         f'{error}. Install the "x402" extra to use this module: pip install "pympp[x402]"'
     ) from error
 
+from mpp.server.decorator import get_request_url
 from mpp.server.http import Request, Response
 from mpp.store import Store
 
@@ -82,9 +83,10 @@ def payment_middleware(
     )
 
     async def middleware(request: StarletteRequest, call_next: CallNext) -> StarletteResponse:
-        mpp_request = Request(
-            method=request.method, url=str(request.url), headers=request.headers.items()
-        )
+        # The URL keeps ASGI raw_path's percent-encoding, so /a%2Fb and /a/b get
+        # distinct signed scopes.
+        url = get_request_url(request) or str(request.url)
+        mpp_request = Request(method=request.method, url=url, headers=request.headers.items())
         context = HTTPRequestContext(
             adapter=FastAPIAdapter(request),
             path=_raw_path(request),
