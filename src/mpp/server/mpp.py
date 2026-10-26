@@ -466,8 +466,10 @@ class Mpp:
                 the echoed wire request itself (base-unit ``amount``,
                 ``methodDetails``). Its ``_mppx_scope``, when given or derived
                 by the method, must match the challenge's custom scope.
-                Required when several configured methods share the credential's
-                name and intent: it must then match exactly one of them.
+                Required when several separately configured methods share the
+                credential's name and intent: it must then match exactly one of
+                them. Copies from one configuration, such as one ``tempo.charge()``
+                per accepted currency, share a verifier and settle without it.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -533,8 +535,10 @@ class Mpp:
                 the echoed wire request itself (base-unit ``amount``,
                 ``methodDetails``). Its ``_mppx_scope``, when given or derived
                 by the method, must match the challenge's custom scope.
-                Required when several configured methods share the credential's
-                name and intent: it must then match exactly one of them.
+                Required when several separately configured methods share the
+                credential's name and intent: it must then match exactly one of
+                them. Copies from one configuration, such as one ``tempo.charge()``
+                per accepted currency, share a verifier and settle without it.
             meta: Expected opaque challenge metadata. Supplying any request,
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
@@ -654,12 +658,13 @@ def _settle_alike(methods: Sequence[ServerMethod]) -> bool:
 
     Copies one configuration produces, such as one per accepted currency, share their
     hooks and so their verifier and replay store; separately configured methods don't.
+    Hooks compare with ``==``, so bound methods of one object (``intent.verify``) count as shared.
     """
     first = methods[0]
     return all(
-        method.verify is first.verify
-        and method.validate is first.validate
-        and method.broadcast is first.broadcast
+        method.verify == first.verify
+        and method.validate == first.validate
+        and method.broadcast == first.broadcast
         for method in methods[1:]
     )
 

@@ -1046,6 +1046,42 @@ class TestOutOfBandSelection:
         ]
         return groups[0], groups[1], stores[0], stores[1]
 
+    async def test_copies_sharing_one_intents_bound_methods_settle_alike(self) -> None:
+        from mpp._validation import Validation
+
+        class Intent:
+            def __init__(self) -> None:
+                self.settled: list[str] = []
+
+            async def validate(self, context: Any) -> Validation:
+                return Validation(
+                    credential=context.credential,
+                    details=None,
+                    intent="charge",
+                    request=context.challenge.request,
+                )
+
+            async def broadcast(self, context: Any) -> Receipt:
+                self.settled.append(context.challenge.request["currency"])
+                return Receipt.success("0x" + "ab" * 32)
+
+        intent = Intent()
+        base = server_method(request={"amount": "1"}, verify=_verified)
+        methods = [
+            replace(
+                base,
+                verify=None,
+                validate=intent.validate,
+                broadcast=intent.broadcast,
+                defaults={"currency": currency},
+            )
+            for currency in ("usd", "eur")
+        ]
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(amount="1", currency="eur")(http_request()))
+        await server.broadcast_credential(authorization(issued, {}))
+        assert intent.settled == ["eur"]
+
     async def test_groups_settle_through_the_issuing_group_with_request(self) -> None:
         from mpp.errors import InvalidChallengeError
         from mpp.methods.tempo import PATH_USD, USDC
