@@ -12,9 +12,10 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from mpp import Challenge, Credential
+from mpp._typing import is_dict, is_list
 from mpp.errors import PaymentExpiredError
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
@@ -109,13 +110,15 @@ class TempoMethod:
     expected_recipients: tuple[str, ...] | None = field(default=None, kw_only=True)
     # Chains a client may pay on. ``None`` allows any chain; empty rejects all.
     allowed_chain_ids: Sequence[int] | None = field(default=None, kw_only=True)
-    _cached_chain_ids: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _cached_chain_ids: dict[str, int] = field(
+        default_factory=dict[str, int], init=False, repr=False
+    )
     _chain_id_explicit: bool = field(default=False, init=False, repr=False)
     _currency_explicit: bool = field(default=True, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
     _signing: dict[tuple[str, str], asyncio.Task[Credential]] = field(
-        default_factory=dict, init=False, repr=False
+        default_factory=dict[tuple[str, str], "asyncio.Task[Credential]"], init=False, repr=False
     )
 
     def __post_init__(self) -> None:
@@ -216,7 +219,7 @@ class TempoMethod:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
-    def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
+    def _check_charge_policy(self, request: dict[str, Any], expected_chain_id: int | None) -> None:
         """Reject a challenge whose chain, recipients, amount or split memos violate the policy.
 
         Runs during challenge selection and again before signing.
@@ -254,7 +257,7 @@ class TempoMethod:
                 f"Chain ID not allowed: {chain_id if chain_id is not None else 'unknown'}"
             )
 
-    def _check_amount_caps(self, request: dict) -> None:
+    def _check_amount_caps(self, request: dict[str, Any]) -> None:
         """Reject a challenge above either cap or outside the pinned currencies.
 
         The caps bound ``amount`` (base units, splits included) and only apply to
@@ -279,7 +282,7 @@ class TempoMethod:
         if max_token is not None and amount > max_token:
             raise ValueError("Tempo charge amount exceeds max_amount.")
 
-    def _check_expected_recipients(self, request: dict) -> None:
+    def _check_expected_recipients(self, request: dict[str, Any]) -> None:
         """Reject a primary or split recipient outside ``expected_recipients``."""
         if self.expected_recipients is not None:
             allowed = {recipient.lower() for recipient in self.expected_recipients}
@@ -290,9 +293,9 @@ class TempoMethod:
                     "which is not in the client's expected recipients"
                 )
             method_details = request.get("methodDetails")
-            splits = method_details.get("splits") if isinstance(method_details, dict) else None
+            splits = method_details.get("splits") if is_dict(method_details) else None
             for split in splits or ():
-                split_recipient = split.get("recipient") if isinstance(split, dict) else None
+                split_recipient = split.get("recipient") if is_dict(split) else None
                 if not isinstance(split_recipient, str) or split_recipient.lower() not in allowed:
                     raise ValueError(
                         f"Challenge requests split recipient {split_recipient!r}, "
@@ -363,9 +366,7 @@ class TempoMethod:
         if expected_chain_id is None:
             expected_chain_id = _challenge_chain_id(request)
         method_details = request.get("methodDetails", {})
-        use_fee_payer = (
-            method_details.get("feePayer", False) if isinstance(method_details, dict) else False
-        )
+        use_fee_payer = method_details.get("feePayer", False) if is_dict(method_details) else False
         if use_fee_payer:
             _assert_sponsored_challenge_time_left(challenge.expires)
 
@@ -375,7 +376,7 @@ class TempoMethod:
             client_id=self.client_id,
         )
 
-        splits = method_details.get("splits") if isinstance(method_details, dict) else None
+        splits = method_details.get("splits") if is_dict(method_details) else None
 
         rpc_url = self.rpc_url
         raw_tx, chain_id = await self._build_tempo_transfer(
@@ -407,8 +408,9 @@ class TempoMethod:
         transaction. Sponsored (0x78 fee payer envelope) transactions return
         ``None`` because their final hash depends on the fee payer's co-signature.
         """
-        import rlp
         from eth_hash.auto import keccak
+
+        from mpp.methods.tempo import _rlp as rlp
 
         payload = credential.payload
         raw_tx = payload.get("signature")
@@ -421,9 +423,9 @@ class TempoMethod:
             return None
         # 0x76 || rlp([13 body fields, key_authorization?, sender_signature])
         if (
-            not isinstance(fields, list)
+            not is_list(fields)
             or len(fields) not in (14, 15)
-            or not isinstance(fields[4], list)
+            or not is_list(fields[4])
             or not fields[4]
             or not isinstance(fields[-1], bytes)
             or not fields[-1]
@@ -440,7 +442,7 @@ class TempoMethod:
         rpc_url: str | None = None,
         expected_chain_id: int | None = None,
         awaiting_fee_payer: bool = False,
-        splits: list[dict] | None = None,
+        splits: list[dict[str, Any]] | None = None,
         expires: str | None = None,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
@@ -473,7 +475,8 @@ class TempoMethod:
         Raises:
             TransactionError: If the RPC's chain ID doesn't match expected.
         """
-        from pytempo import Call, TempoTransaction
+        # pytempo ships no type information.
+        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
 
         if self.account is None:
             raise ValueError("No account configured")
@@ -488,7 +491,7 @@ class TempoMethod:
 
             parsed_splits = [SplitModel(**s) for s in splits]
             transfer_list = get_transfers(int(amount), recipient, memo, parsed_splits)
-            call_list = []
+            call_list: list[Call] = []
             for t in transfer_list:
                 transfer_memo = "0x" + t.memo.hex() if t.memo is not None else memo
                 if transfer_memo is not None:
@@ -569,7 +572,8 @@ class TempoMethod:
         )
 
         if self.root_account:
-            from pytempo import sign_tx_access_key
+            # pytempo ships no type information.
+            from pytempo import sign_tx_access_key  # pyright: ignore[reportMissingTypeStubs]
 
             signed_tx = sign_tx_access_key(tx, self.account.private_key, self.root_account)
         else:
@@ -914,10 +918,10 @@ def _resolve_currencies(currencies: Sequence[str]) -> tuple[str, ...]:
     return tuple(resolved)
 
 
-def _challenge_chain_id(request: dict) -> int | None:
+def _challenge_chain_id(request: dict[str, Any]) -> int | None:
     """Return the challenge's numeric ``methodDetails.chainId``, ignoring other values."""
     method_details = request.get("methodDetails")
-    chain_id = method_details.get("chainId") if isinstance(method_details, dict) else None
+    chain_id = method_details.get("chainId") if is_dict(method_details) else None
     if chain_id is None:
         return None
     try:

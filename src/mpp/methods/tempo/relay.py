@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._typing import is_dict
 from mpp._validation import Validation
 from mpp.errors import (
     PaymentError,
@@ -154,7 +155,7 @@ class Relay:
             request.headers.pop("idempotency-key", None)
         response = await client.send(request)
         result = response.json() if response.is_success else None
-        if not isinstance(result, dict) or result.get("success") is not True:
+        if not is_dict(result) or result.get("success") is not True:
             raise _failure(result)
         return result
 
@@ -234,7 +235,7 @@ def _relay_input(credential: Credential, expected_request: dict[str, Any]) -> di
 
 
 def _receipt(value: Any) -> Receipt:
-    if not isinstance(value, dict):
+    if not is_dict(value):
         raise _failure()
     method = value.get("method")
     reference = value.get("reference")
@@ -277,7 +278,7 @@ def _failure(value: Any = None) -> VerificationFailedError | PaymentExpiredError
 
 
 def _error_code(value: Any) -> str | None:
-    if not isinstance(value, dict) or not isinstance(value.get("error"), dict):
+    if not is_dict(value) or not is_dict(value.get("error")):
         return None
     code = value["error"].get("code")
     return code if isinstance(code, str) else None

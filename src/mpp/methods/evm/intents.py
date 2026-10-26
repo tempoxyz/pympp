@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_v
 
 from mpp import Credential, Receipt
 from mpp._did import parse_pkh_source
+from mpp._typing import is_list, is_mapping
 from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
@@ -157,7 +158,7 @@ SettleFn: TypeAlias = Callable[[Authorization], str | Awaitable[str]]
 
 
 def _parse_authorization_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, Mapping):
+    if not is_mapping(payload):
         raise InvalidPayloadError("EVM charge payload must be an object")
     if payload.get("type") != CREDENTIAL_TYPE:
         raise InvalidPayloadError("EVM charge payload type must be 'authorization'")
@@ -313,7 +314,7 @@ class ChargeIntent:
     @staticmethod
     def _chain_id(request: Mapping[str, Any]) -> int:
         details = request.get("methodDetails")
-        chain_id = details.get("chainId") if isinstance(details, Mapping) else None
+        chain_id = details.get("chainId") if is_mapping(details) else None
         if isinstance(chain_id, bool) or not isinstance(chain_id, int):
             raise VerificationFailedError("EVM charge request is missing methodDetails.chainId")
         return chain_id
@@ -399,12 +400,12 @@ class ChargeIntent:
         the authorization is still payable.
         """
         payload = _parse_authorization_payload(credential.payload)
-        details = request.get("methodDetails")
-        details = details if isinstance(details, Mapping) else {}
+        raw_details = request.get("methodDetails")
+        details: Mapping[str, Any] = raw_details if is_mapping(raw_details) else {}
         chain_id = self._chain_id(request)
 
         credential_types = details.get("credentialTypes")
-        if not isinstance(credential_types, list) or CREDENTIAL_TYPE not in credential_types:
+        if not is_list(credential_types) or CREDENTIAL_TYPE not in credential_types:
             raise VerificationFailedError(
                 "EVM authorization credentials are not supported for this challenge"
             )

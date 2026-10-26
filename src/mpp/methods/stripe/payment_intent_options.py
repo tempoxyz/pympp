@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, TypeAlias, TypedDict
 
 from mpp import ChallengeEcho, Credential
+from mpp._typing import is_mapping
 from mpp.errors import BadRequestError
 
 
@@ -50,7 +51,7 @@ PaymentIntentInput: TypeAlias = (
 
 
 def _mapping(value: Any, keys: set[str], name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    if not is_mapping(value):
         raise BadRequestError(f"{name} must be a mapping")
     if value.keys() - keys:
         raise BadRequestError(f"unsupported {name} field")
@@ -84,7 +85,7 @@ def validate_options(value: Any) -> dict[str, Any]:
 
 
 def validate_metadata(value: Any) -> dict[str, str]:
-    if not isinstance(value, Mapping) or any(
+    if not is_mapping(value) or any(
         not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
     ):
         raise BadRequestError("metadata must contain string keys and values")

@@ -33,7 +33,8 @@ async def _rpc_call(
     return result["result"]
 
 
-async def _tip20_balance(
+# Used by client.py and intents.py; pyright only counts uses in this module.
+async def _tip20_balance(  # pyright: ignore[reportUnusedFunction]
     rpc_url: str,
     token: str,
     address: str,

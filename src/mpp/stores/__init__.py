@@ -22,3 +22,8 @@ _LAZY_EXPORTS = {
 
 def __getattr__(name: str) -> Any:
     return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)
+
+
+__all__ = [
+    "MemoryStore",
+]

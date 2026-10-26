@@ -8,7 +8,9 @@ import base64
 import hashlib
 import hmac
 import json
-from typing import Any
+from typing import Any, cast
+
+from mpp._typing import is_dict
 
 _MAX_ARRAY_INDEX = 2**32 - 2
 
@@ -42,7 +44,7 @@ def _js_order(value: Any) -> Any:
     ``JSON.stringify`` emits integer-index keys first in ascending numeric
     order, then the remaining string keys in insertion order.
     """
-    if isinstance(value, dict):
+    if is_dict(value):
         index_items: list[tuple[int, Any, Any]] = []
         other_items: list[tuple[Any, Any]] = []
         for key, item in value.items():
@@ -54,7 +56,8 @@ def _js_order(value: Any) -> Any:
         index_items.sort(key=lambda entry: entry[0])
         return {key: item for _, key, item in index_items} | dict(other_items)
     if isinstance(value, (list, tuple)):
-        return [_js_order(item) for item in value]
+        items = cast("list[Any] | tuple[Any, ...]", value)
+        return [_js_order(item) for item in items]
     return value
 
 

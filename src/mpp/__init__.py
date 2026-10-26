@@ -76,7 +76,7 @@ def advertised_credential_header(header: str | None) -> str | None:
     return name
 
 
-def _b64url_encode(data: str) -> str:
+def _b64url_encode(data: str) -> str:  # pyright: ignore[reportUnusedFunction]  # used by tests
     """Encode a string to base64url without padding."""
     encoded = base64.urlsafe_b64encode(data.encode("utf-8")).decode("ascii")
     return encoded.rstrip("=")
@@ -480,3 +480,55 @@ from . import stores  # noqa: E402
 from .methods import Method  # noqa: E402
 from .runtime import ClientMethod, CredentialParams  # noqa: E402
 from .store import MemoryStore, Store  # noqa: E402
+
+__all__ = [
+    "AUTHORIZATION_HEADER",
+    "BadRequestError",
+    "BodyDigest",
+    "CHALLENGE_CREATED",
+    "CHALLENGE_RECEIVED",
+    "CREDENTIAL_CREATED",
+    "Challenge",
+    "ChallengeEcho",
+    "ClientMethod",
+    "Credential",
+    "CredentialParams",
+    "CredentialReplayedError",
+    "EventDispatcher",
+    "Expires",
+    "InternalPaymentError",
+    "InvalidChallengeError",
+    "InvalidPayloadError",
+    "MalformedCredentialError",
+    "MemoryStore",
+    "Method",
+    "PAYMENT_AUTHORIZATION_HEADER",
+    "PAYMENT_FAILED",
+    "PAYMENT_RESPONSE",
+    "PAYMENT_SUCCESS",
+    "ParseError",
+    "PaymentActionRequiredError",
+    "PaymentError",
+    "PaymentEvent",
+    "PaymentEventName",
+    "PaymentExpiredError",
+    "PaymentInsufficientError",
+    "PaymentMethodUnsupportedError",
+    "PaymentOutcomeUnknownError",
+    "PaymentRequiredError",
+    "Receipt",
+    "Store",
+    "VerificationFailedError",
+    "WILDCARD_EVENT",
+    "advertised_credential_header",
+    "canonical_b64url",
+    "format_authorization",
+    "format_payment_receipt",
+    "format_www_authenticate",
+    "generate_challenge_id",
+    "is_default_credential_header",
+    "parse_authorization",
+    "parse_payment_receipt",
+    "parse_www_authenticate",
+    "stores",
+]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, overload
 from eth_utils.address import to_checksum_address
 
 from mpp import Challenge, Credential
+from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
 from mpp.methods.evm._eip3009 import (
@@ -99,8 +99,8 @@ class _Config:
         recipient = request.get("recipient")
         if not isinstance(recipient, str) or not _ADDRESS_RE.fullmatch(recipient):
             raise ValueError("EVM charge recipient must be an address")
-        raw_details = request.get("methodDetails") or {}
-        if not isinstance(raw_details, Mapping):
+        raw_details: object = request.get("methodDetails") or {}
+        if not is_mapping(raw_details):
             raise ValueError("methodDetails must be an object")
         details = dict(raw_details)
         if details.get("splits"):
@@ -135,7 +135,7 @@ class _Config:
     def _check_challenge(self, challenge: Challenge) -> dict[str, Any]:
         request = challenge.request
         details = request.get("methodDetails")
-        if not isinstance(details, Mapping):
+        if not is_mapping(details):
             raise ValueError("EVM challenge is missing methodDetails")
         if details.get("chainId") != self.chain_id:
             raise ValueError(f"EVM chain ID is not allowed: {details.get('chainId')}")
@@ -143,7 +143,7 @@ class _Config:
         if not isinstance(currency, str) or currency.lower() != self.currency.lower():
             raise ValueError(f"EVM currency is not allowed: {currency}")
         credential_types = details.get("credentialTypes")
-        if not isinstance(credential_types, list) or CREDENTIAL_TYPE not in credential_types:
+        if not is_list(credential_types) or CREDENTIAL_TYPE not in credential_types:
             raise ValueError("EVM authorization is not accepted by this challenge")
         if details.get("splits"):
             raise ValueError("EVM authorization does not support payment splits")

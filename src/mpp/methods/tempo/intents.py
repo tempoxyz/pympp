@@ -23,6 +23,7 @@ from eth_abi.exceptions import DecodingError
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
+from mpp._typing import is_dict, is_list
 from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
@@ -127,7 +128,7 @@ def _assert_remaining_validity(valid_before: int) -> None:
 def _transaction_valid_before(raw_tx: str) -> int | None:
     """Return a Tempo transaction's ``valid_before`` timestamp, if it has one."""
     try:
-        import rlp
+        from mpp.methods.tempo import _rlp as rlp
 
         tx_bytes = bytes.fromhex(_strip_0x(raw_tx))
         if tx_bytes[:1] not in (b"\x76", b"\x78"):
@@ -135,7 +136,7 @@ def _transaction_valid_before(raw_tx: str) -> int | None:
         decoded = rlp.decode(tx_bytes[1:])
     except Exception:
         return None
-    if not isinstance(decoded, list) or len(decoded) <= 8:
+    if not is_list(decoded) or len(decoded) <= 8:
         return None
     valid_before = decoded[8]
     if not isinstance(valid_before, bytes) or not valid_before:
@@ -172,7 +173,7 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     canonical envelope keeps replay keys and receipt hashes equal to the node's.
     Anything that does not decode as a 0x76 transaction is returned unchanged.
     """
-    import rlp
+    from mpp.methods.tempo import _rlp as rlp
 
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
@@ -181,7 +182,7 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
         fields = rlp.decode(tx_bytes[1:])
     except Exception:
         return raw_tx
-    if not isinstance(fields, list) or len(fields) not in (14, 15):
+    if not is_list(fields) or len(fields) not in (14, 15):
         return raw_tx
     signature = fields[-1]
     if not isinstance(signature, bytes):
@@ -194,14 +195,14 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
 
 def _transaction_fee_token(raw_tx: str) -> str | None:
     """Return the fee token of a signed 0x76 Tempo transaction, if it sets one."""
-    import rlp
+    from mpp.methods.tempo import _rlp as rlp
 
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
         fields = rlp.decode(tx_bytes[1:])
     except Exception as err:
         raise RuntimeError("fee-sponsored transaction feeToken is invalid") from err
-    if tx_bytes[:1] != b"v" or not isinstance(fields, list) or len(fields) < 11:
+    if tx_bytes[:1] != b"v" or not is_list(fields) or len(fields) < 11:
         raise RuntimeError("fee-sponsored transaction feeToken is invalid")
     fee_token = fields[10]
     if fee_token == b"":
@@ -223,16 +224,17 @@ def _transaction_sender(raw_tx: str) -> str | None:
     Returns ``None`` if the transaction is malformed or the sender cannot be
     derived.
     """
-    import rlp
     from eth_account import Account
     from eth_hash.auto import keccak
+
+    from mpp.methods.tempo import _rlp as rlp
 
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
         fields = rlp.decode(tx_bytes[1:])
     except Exception:
         return None
-    if tx_bytes[0] not in (0x76, 0x78) or not isinstance(fields, list):
+    if tx_bytes[0] not in (0x76, 0x78) or not is_list(fields):
         return None
     if len(fields) not in (14, 15):
         return None
@@ -442,10 +444,10 @@ class SenderValidation:
 ValidateSender = Callable[[SenderValidation], bool]
 
 
-def _rpc_error_msg(result: dict) -> str:
+def _rpc_error_msg(result: dict[str, Any]) -> str:
     """Extract error message from a JSON-RPC error response."""
     error_obj = result["error"]
-    if isinstance(error_obj, dict):
+    if is_dict(error_obj):
         msg = error_obj.get("message") or error_obj.get("name") or str(error_obj)
         data = error_obj.get("data", "")
         return f"{msg}: {data}" if data else msg
@@ -472,7 +474,7 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
 
     if isinstance(error, dict):
         rpc_error = error.get("error")
-        if isinstance(rpc_error, dict) and rpc_error.get("code") == SYNC_CONFIRMATION_TIMEOUT_CODE:
+        if is_dict(rpc_error) and rpc_error.get("code") == SYNC_CONFIRMATION_TIMEOUT_CODE:
             return True
         return ALREADY_KNOWN_TRANSACTION_RE.search(_rpc_error_msg(error)) is not None
 
@@ -495,7 +497,10 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
     return False
 
 
-def _match_transfer_calldata(call_data_hex: str, request: ChargeRequest) -> bool:
+# Kept for tests/test_tempo.py; nothing in the package calls it.
+def _match_transfer_calldata(  # pyright: ignore[reportUnusedFunction]
+    call_data_hex: str, request: ChargeRequest
+) -> bool:
     """Check if ABI-encoded calldata matches the expected transfer parameters."""
     call_data_hex = _strip_0x(call_data_hex)
     if len(call_data_hex) < TRANSFER_CALL_DATA_HEX_LEN:
@@ -616,7 +621,7 @@ def _funding_currency(raw_tx: str, request: ChargeRequest) -> str | None:
     swap input token; a direct transfer route by the charge currency. Call
     validation has already bound the route to the expected transfers.
     """
-    import rlp
+    from mpp.methods.tempo import _rlp as rlp
 
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
@@ -645,11 +650,11 @@ def _rpc_transaction_calls(transaction: dict[str, Any]) -> list[tuple[str, int, 
             if to
             else []
         )
-    if not isinstance(raw_calls, list):
+    if not is_list(raw_calls):
         return None
     calls: list[tuple[str, int, str]] = []
     for call in raw_calls:
-        if not isinstance(call, dict):
+        if not is_dict(call):
             return None
         to = call.get("to")
         data = call.get("input", call.get("data"))
@@ -1082,7 +1087,7 @@ class ChargeIntent:
             )
         except Exception:
             return None
-        if not isinstance(transaction, dict):
+        if not is_dict(transaction):
             return None
         from_addr = transaction.get("from")
         if not isinstance(from_addr, str) or from_addr.lower() != sender.lower():
@@ -1276,7 +1281,7 @@ class ChargeIntent:
         # the payment invalid.
         if not receipt_data:
             return None
-        if not isinstance(receipt_data, dict):
+        if not is_dict(receipt_data):
             raise InternalPaymentError() from RuntimeError("Invalid transaction receipt")
 
         return receipt_data
@@ -1586,7 +1591,8 @@ class ChargeIntent:
 
         # Multi-transfer: order-insensitive matching
         sorted_expected = sorted(expected, key=lambda t: 0 if t.memo else 1)
-        indexed_logs = list(enumerate(receipt.get("logs", [])))
+        logs: list[Any] = receipt.get("logs", [])
+        indexed_logs = list(enumerate(logs))
         # TIP-20 emits Transfer and TransferWithMemo for one movement. Pair by
         # token, sender, recipient and amount, retaining the memo for attribution.
         # Count multiplicities rather than adjacency so routed payments work too.
@@ -2083,7 +2089,7 @@ class ChargeIntent:
                 raise VerificationError("No transaction receipt returned")
             # The transaction was included: its outcome is known.
             outcome_unknown = False
-            if not isinstance(receipt_data, dict):
+            if not is_dict(receipt_data):
                 raise VerificationError("Invalid transaction receipt")
 
             self._verify_receipt_transfers(
@@ -2286,8 +2292,12 @@ class ChargeIntent:
         ``allow_expired=True`` as well, an expired one is not rejected either,
         so the caller can reconcile an earlier submission of it.
         """
-        from pytempo import Call, TempoTransaction
-        from pytempo.models import Signature, as_address
+        # pytempo ships no type information.
+        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
+        from pytempo.models import (  # pyright: ignore[reportMissingTypeStubs]
+            Signature,
+            as_address,
+        )
 
         from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
@@ -2526,11 +2536,11 @@ class ChargeIntent:
             )
 
         rpc_result = result.get("result")
-        blocks = rpc_result.get("blocks") if isinstance(rpc_result, dict) else None
-        block0 = blocks[0] if isinstance(blocks, list) and blocks else None
-        calls = block0.get("calls") if isinstance(block0, dict) else None
-        call = None
-        if isinstance(calls, list) and calls and isinstance(calls[0], dict):
+        blocks = rpc_result.get("blocks") if is_dict(rpc_result) else None
+        block0 = blocks[0] if is_list(blocks) and blocks else None
+        calls = block0.get("calls") if is_dict(block0) else None
+        call: dict[Any, Any] | None = None
+        if is_list(calls) and calls and is_dict(calls[0]):
             call = calls[0]
         if call is None:
             raise InternalPaymentError() from RuntimeError(
@@ -2541,12 +2551,13 @@ class ChargeIntent:
         if status in ("0x1", 1, True):
             return
 
-        detail = (call.get("error") or {}).get("message") or "no revert reason returned"
+        call_error: dict[str, Any] = call.get("error") or {}
+        detail = call_error.get("message") or "no revert reason returned"
         raise VerificationError(
             f"Sponsored transaction would revert in pre-broadcast simulation: {detail}"
         )
 
-    def _validate_calls(self, calls: tuple, request: ChargeRequest) -> None:
+    def _validate_calls(self, calls: tuple[Any, ...], request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""
         normalized_calls = [
             ("0x" + bytes(call.to).hex(), int(call.value), call.data.hex()) for call in calls
@@ -2566,7 +2577,7 @@ class ChargeIntent:
         not decode the transaction.
         """
         try:
-            import rlp
+            from mpp.methods.tempo import _rlp as rlp
         except ImportError as error:
             if strict:
                 raise InternalPaymentError() from error
@@ -2587,7 +2598,7 @@ class ChargeIntent:
             if strict:
                 raise VerificationError("Invalid serialized transaction") from error
             return None
-        if not isinstance(decoded, list) or len(decoded) < 5:
+        if not is_list(decoded) or len(decoded) < 5:
             if strict:
                 raise VerificationError("Invalid serialized transaction")
             return None
@@ -2597,16 +2608,21 @@ class ChargeIntent:
         if int.from_bytes(decoded[0], "big") != request.methodDetails.chainId:
             raise VerificationError("Transaction chain ID does not match charge chain ID")
 
-        calls_data = decoded[4] if len(decoded) > 4 else []
+        calls_data: list[Any] = decoded[4] if len(decoded) > 4 else []
         if not calls_data:
             raise VerificationError("Transaction contains no calls")
 
         normalized_calls: list[tuple[str, int, str]] = []
         for call_item in calls_data:
-            if not isinstance(call_item, (list, tuple)) or len(call_item) < 3:
+            call_fields: Sequence[Any] = call_item
+            if not isinstance(call_fields, (list, tuple)) or len(call_fields) < 3:
                 raise VerificationError("Invalid transaction: malformed call data")
 
-            call_to_raw, call_value_raw, call_data_raw = call_item[0], call_item[1], call_item[2]
+            call_to_raw, call_value_raw, call_data_raw = (
+                call_fields[0],
+                call_fields[1],
+                call_fields[2],
+            )
             if not isinstance(call_to_raw, bytes) or not isinstance(call_data_raw, bytes):
                 raise VerificationError("Invalid transaction: malformed call data")
 

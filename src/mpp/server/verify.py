@@ -19,6 +19,7 @@ from mpp import (
     generate_challenge_id,
 )
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._typing import is_dict
 from mpp._units import transform_units
 from mpp._validation import Validation
 from mpp.errors import (
@@ -471,7 +472,7 @@ def _assert_sponsored_challenge_lifetime(request: dict[str, Any], expires: str) 
     from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS
 
     details = request.get("methodDetails")
-    if not isinstance(details, dict) or not details.get("feePayer"):
+    if not is_dict(details) or not details.get("feePayer"):
         return
     try:
         expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))

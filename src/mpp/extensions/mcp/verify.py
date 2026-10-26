@@ -40,6 +40,7 @@ from typing import Any
 import rfc8785
 
 from mpp import Challenge
+from mpp._typing import is_dict
 from mpp.errors import PaymentRequiredError as CorePaymentRequiredError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
@@ -123,11 +124,10 @@ async def verify_or_challenge(
         for value in response.headers.get_list("www-authenticate")
     ]
     try:
-        problem = json.loads(response.body or b"{}")
+        decoded = json.loads(response.body or b"{}")
     except ValueError:
-        problem = {}
-    if not isinstance(problem, dict):
-        problem = {}
+        decoded = None
+    problem: dict[str, Any] = decoded if is_dict(decoded) else {}
     if response.status == 402 and problem.get("type") in (None, CorePaymentRequiredError.type):
         return challenges
     problem_type = problem.get("type")
