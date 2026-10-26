@@ -238,7 +238,9 @@ class Mpp:
             configuration = _configuration_digest(method, probe)
             if probe is None:
                 # Configuration that cannot be probed is not known to be identical:
-                # such copies get distinct tags and are never ambiguous.
+                # such copies get distinct ordinal tags, which only this process's
+                # routes may rely on. Out of band, another process may list them in
+                # another order, so their tags are not resolved by position.
                 unknown.add(configuration)
             ordinal = occurrences.get(configuration, 0)
             occurrences[configuration] = ordinal + 1
@@ -253,6 +255,11 @@ class Mpp:
             configuration
             for configuration, count in occurrences.items()
             if count > 1 and configuration not in unknown
+        }
+        self._unprobed = {
+            configuration
+            for configuration, count in occurrences.items()
+            if count > 1 and configuration in unknown
         }
         self._handlers: dict[str, Any] = {
             key: HandlerFactory(self, group) for key, group in keys.items()
@@ -356,11 +363,7 @@ class Mpp:
             raise InvalidChallengeError(echo.id, "credential was not issued by a configured method")
         method = matching[0]
         if self._configurations[id(method)] in self._ambiguous:
-            raise InvalidChallengeError(
-                echo.id,
-                "credential matches several identically configured methods; "
-                "it cannot be settled out of band",
-            )
+            raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
         return method
 
     def _register_payment_success_handler(self, method: ServerMethod) -> None:
@@ -428,11 +431,31 @@ class Mpp:
             raise PaymentExpiredError(echo.expires)
 
         tag = _offer_tag(echoed_opaque)
+        unprobed = False
         if tag is not None:
             # Several configured methods share this name and intent, and may settle
             # through different replay stores: settle through exactly the one that
             # issued the challenge.
-            candidates = [self._tagged_method(tag, echo)]
+            tagged = self._tagged_method(tag, echo)
+            configuration = self._configurations[id(tagged)]
+            if configuration in self._unprobed:
+                # Copies whose configuration cannot be compared are tagged by their
+                # position here, which need not be their position where the challenge
+                # was issued: only the echoed request can tell them apart.
+                if request is None:
+                    raise InvalidChallengeError(
+                        echo.id,
+                        "credential matches several methods whose configuration cannot "
+                        "be compared; pass request= to select one",
+                    )
+                unprobed = True
+                candidates = [
+                    candidate
+                    for candidate in self.methods
+                    if self._configurations[id(candidate)] == configuration
+                ]
+            else:
+                candidates = [tagged]
 
         echoed = _comparable(echoed_request)
         if request is None:
@@ -460,12 +483,17 @@ class Mpp:
             if normalized:
                 if not matching:
                     raise InvalidChallengeError(echo.id, "credential request does not match")
+                if unprobed and len(matching) > 1:
+                    raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
                 method = _select_echoed(matching, echoed_request)
                 # Route issuance binds the normalized input's scope, including one the
                 # method's resolve_request derives.
                 expected_scope = scopes[id(method)]
                 wire_scope = False
             elif _comparable(request) == echoed:
+                if unprobed and len(candidates) > 1:
+                    # The wire form matches every copy alike.
+                    raise InvalidChallengeError(echo.id, _IDENTICAL_COPIES)
                 method = _select_echoed(candidates, echoed_request)
                 expected_scope = request.get("_mppx_scope")
                 wire_scope = True
@@ -756,6 +784,10 @@ def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     # A method whose model passes the whole wire through names the whole signed scope.
     return expected == custom or expected == echoed
 
+
+_IDENTICAL_COPIES = (
+    "credential matches several identically configured methods; it cannot be settled out of band"
+)
 
 _OFFER_TAG_RE = re.compile(r"[0-9a-f]{16}")
 

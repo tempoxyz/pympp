@@ -1484,13 +1484,20 @@ class TestIssuingOfferTag:
         receipt = await server.broadcast_credential(credential, request={"account": "acct_1"})
         assert receipt.status == "success"
 
-    async def test_probe_less_methods_settle_out_of_band_through_their_own(self) -> None:
+    @staticmethod
+    def _bound_to(recipient: str) -> Any:
+        """A resolve_request that needs a recipient and accepts only its own."""
         from mpp.server import RequestContext
 
         def resolve_request(context: RequestContext) -> dict[str, Any]:
-            if "recipient" not in context.request:
-                raise ValueError("recipient is required")
+            if context.request.get("recipient") != recipient:
+                raise ValueError("recipient is not this method's")
             return dict(context.request)
+
+        return resolve_request
+
+    async def test_probe_less_methods_settle_out_of_band_through_their_own(self) -> None:
+        from mpp.errors import InvalidChallengeError
 
         def verify(label: str) -> Any:
             async def hook(context: Any) -> Receipt:
@@ -1499,10 +1506,10 @@ class TestIssuingOfferTag:
             return hook
 
         # Equal name, intent and defaults, but configuration that cannot be probed:
-        # not known to be identical, so each settles through its own method.
+        # their tags are positional, so only the echoed request selects one.
         methods = [
-            server_method(verify=verify(label), resolve_request=resolve_request)
-            for label in ("first", "second")
+            server_method(verify=verify(label), resolve_request=self._bound_to(recipient))
+            for label, recipient in (("first", RECIPIENT), ("second", OTHER))
         ]
         server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
         for method, recipient, label in (
@@ -1512,10 +1519,80 @@ class TestIssuingOfferTag:
             options = {"amount": "1", "recipient": recipient}
             issued = challenge(await server.compose((method, options))(http_request()))
             credential = authorization(issued)
-            receipt = await server.broadcast_credential(credential)
-            assert receipt.reference == label
+            with pytest.raises(InvalidChallengeError, match="pass request= to select one"):
+                await server.broadcast_credential(credential)
             receipt = await server.broadcast_credential(credential, request=options)
             assert receipt.reference == label
+            # In band, the route checks the tag of the method it issues for.
+            route = server.compose((method, options))
+            assert not isinstance(await route(http_request(credential)), PaymentRequired)
+
+    async def test_probe_less_methods_are_not_resolved_by_position(self) -> None:
+        from mpp.errors import InvalidChallengeError
+
+        stores = {RECIPIENT: MemoryStore(), OTHER: MemoryStore()}
+        seen: dict[str, list[str]] = {RECIPIENT: [], OTHER: []}
+
+        def method(recipient: str) -> ServerMethod:
+            from mpp.errors import VerificationFailedError
+
+            async def broadcast(context: Any) -> Receipt:
+                # Claims the hash in this method's own replay store.
+                tx_hash = context.credential.payload["hash"]
+                if not await stores[recipient].put_if_absent(f"charge:{tx_hash}", True):
+                    raise VerificationFailedError("transaction hash already used")
+                seen[recipient].append(tx_hash)
+                return Receipt.success(tx_hash)
+
+            return server_method(broadcast=broadcast, resolve_request=self._bound_to(recipient))
+
+        first, second = method(RECIPIENT), method(OTHER)
+        issuing = Mpp(methods=[first, second], realm=REALM, secret_key=SECRET)
+        # A settlement worker listing the same methods in another order.
+        settling = Mpp(methods=[second, first], realm=REALM, secret_key=SECRET)
+        assert settling._method_tag(second) == issuing._method_tag(first)
+
+        options = {"amount": "1", "recipient": RECIPIENT}
+        issued = challenge(await issuing.compose((first, options))(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0xa"})
+        with pytest.raises(InvalidChallengeError, match="pass request= to select one"):
+            await settling.broadcast_credential(credential)
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await settling.broadcast_credential(
+                credential, request={"amount": "2", "recipient": RECIPIENT}
+            )
+        receipt = await settling.broadcast_credential(credential, request=options)
+        assert receipt.reference == "0xa"
+        assert seen == {RECIPIENT: ["0xa"], OTHER: []}
+
+        # The other copy's replay store was left alone: its own payment still settles.
+        other = {"amount": "1", "recipient": OTHER}
+        issued = challenge(await issuing.compose((second, other))(http_request()))
+        credential = authorization(issued, {"type": "hash", "hash": "0xa"})
+        receipt = await settling.broadcast_credential(credential, request=other)
+        assert receipt.reference == "0xa"
+        assert seen == {RECIPIENT: ["0xa"], OTHER: ["0xa"]}
+
+    async def test_identical_probe_less_copies_are_not_settled_out_of_band(self) -> None:
+        from mpp.errors import InvalidChallengeError
+        from mpp.server import RequestContext
+
+        def resolve_request(context: RequestContext) -> dict[str, Any]:
+            if "recipient" not in context.request:
+                raise ValueError("recipient is required")
+            return dict(context.request)
+
+        methods = [
+            server_method(verify=_verified, resolve_request=resolve_request) for _ in range(2)
+        ]
+        server = Mpp(methods=methods, realm=REALM, secret_key=SECRET)
+        options = {"amount": "1", "recipient": RECIPIENT}
+        issued = challenge(await server.compose((methods[1], options))(http_request()))
+        credential = authorization(issued)
+        with pytest.raises(InvalidChallengeError, match="several identically configured"):
+            await server.broadcast_credential(credential, request=options)
+        with pytest.raises(InvalidChallengeError, match="several identically configured"):
+            await server.broadcast_credential(credential, request=dict(issued.request))
 
     async def test_whole_wire_scope_is_accepted_as_route_input(self) -> None:
         server = raw_mpp()
