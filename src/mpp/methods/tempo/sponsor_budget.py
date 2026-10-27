@@ -35,8 +35,10 @@ _MAX_CONCURRENT_RECEIPT_CHECKS: Final = 8
 
 _receipt_checked_at: dict[tuple[str, str], int] = {}
 _receipt_checks_in_flight: set[tuple[str, str]] = set()
-_receipt_lookups: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
-    weakref.WeakKeyDictionary()
+# A contended semaphore references its loop, so the semaphore is held weakly: it
+# lives only while waiters use it, and a closed loop is never kept alive by it.
+_receipt_lookups: weakref.WeakValueDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakValueDictionary()
 )
 _process_store: MemoryStore | None = None
 

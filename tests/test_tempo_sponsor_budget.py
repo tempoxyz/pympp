@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import time
+import weakref
 
 import pytest
 
@@ -347,6 +349,35 @@ async def test_waiters_share_bounded_receipt_lookups() -> None:
     # Each pending transaction is looked up once per interval, whatever the waiters.
     assert calls == pending
     assert peak <= 8
+
+
+def test_contended_receipt_lookups_do_not_retain_closed_loops() -> None:
+    loops = []
+
+    async def contend() -> None:
+        loops.append(asyncio.get_running_loop())
+        store = MemoryStore()
+        pending = 12
+        budget = SponsorBudget(max_in_flight_reservations=pending)
+        for i in range(pending):
+            reservation = await reserve(store, budget, f"0x{i:02x}")
+            assert await budget_module.transition(store, reservation, "pending")
+        clear_receipt_checks()
+
+        async def slow_unsettled(_tx_hash: str) -> bool:
+            await asyncio.sleep(0.01)
+            return False
+
+        with pytest.raises(VerificationError):
+            await reserve(store, budget, "0xff", wait_ms=100, is_settled=slow_unsettled)
+
+    for _ in range(3):
+        asyncio.run(contend())
+    refs = [weakref.ref(loop) for loop in loops]
+    loops.clear()
+    gc.collect()
+    assert all(ref() is None for ref in refs)
+    assert len(budget_module._receipt_lookups) == 0
 
 
 async def never_answers(_tx_hash: str) -> bool:
