@@ -878,24 +878,29 @@ def _fee_payer_envelope(raw_tx: str, sender: str) -> str:
 
     A wallet serializes a transaction awaiting its fee payer as 0x76 with an empty
     fee payer signature; fee-paying servers take the 0x78 envelope, which carries
-    the sender's address in that slot.
+    the sender's address in that slot. The fee payer picks the fee token, so a
+    wallet's default one is dropped; the sender's signature does not cover it.
     """
     import rlp
 
+    tx_type = b""
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
-        if tx_bytes[:1] == b"\x78":
-            return raw_tx
-        fields = rlp.decode(tx_bytes[1:]) if tx_bytes[:1] == b"\x76" else None
+        tx_type = tx_bytes[:1]
+        fields = rlp.decode(tx_bytes[1:]) if tx_type in (b"\x76", b"\x78") else None
     except (AttributeError, ValueError, rlp.DecodingError):
         fields = None
     if (
         not isinstance(fields, list)
         or len(fields) not in (14, 15)
-        or fields[11] not in (b"", b"\x00")
+        or (tx_type == b"\x76" and fields[11] not in (b"", b"\x00"))
     ):
         raise TransactionError("Wallet did not return a transaction awaiting a fee payer")
-    fields[11] = bytes.fromhex(sender.removeprefix("0x"))
+    if tx_type == b"\x78" and fields[10] == b"":
+        return raw_tx
+    if tx_type == b"\x76":
+        fields[11] = bytes.fromhex(sender.removeprefix("0x"))
+    fields[10] = b""
     return "0x78" + rlp.encode(fields).hex()
 
 

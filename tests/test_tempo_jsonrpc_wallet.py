@@ -225,6 +225,44 @@ async def test_wallet_signs_pull_only_challenge_with_eth_sign_transaction(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("envelope", [False, True])
+async def test_sponsored_wallet_signature_drops_the_wallet_fee_token(envelope: bool) -> None:
+    from pytempo import Call, TempoTransaction
+
+    from mpp.methods.tempo import TempoAccount
+    from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+    def signed(fee_token: str | None) -> Any:
+        return TempoTransaction.create(
+            chain_id=4217,
+            gas_limit=0x186A0,
+            max_fee_per_gas=1,
+            max_priority_fee_per_gas=1,
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            fee_token=fee_token,
+            awaiting_fee_payer=True,
+            valid_before=2_000_000_000,
+            calls=(Call.create(to=CURRENCY, value=0, data="0x"),),
+        ).sign(TempoAccount.from_key("0x" + "11" * 32).private_key)
+
+    # A wallet whose chain config sets a default fee token signs it into the request.
+    with_token = signed(CURRENCY)
+    raw_tx = (encode_fee_payer_envelope(with_token) if envelope else with_token.encode()).hex()
+    address = "0x" + bytes(with_token.sender_address).hex()
+    wallet = FakeWallet(eth_signTransaction="0x" + raw_tx)
+
+    credential = await _pay(
+        JsonRpcAccount(address, request=wallet),
+        _challenge(supportedModes=["pull"], feePayer=True),
+    )
+
+    # Fee-paying servers refuse an envelope with a fee token; the server sets it.
+    expected = "0x" + encode_fee_payer_envelope(signed(None)).hex()
+    assert credential.payload == {"type": "transaction", "signature": expected}
+
+
+@pytest.mark.asyncio
 async def test_address_account_sends_wallet_requests_to_rpc_url() -> None:
     calls: list[str] = []
 
