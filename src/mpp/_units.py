@@ -32,14 +32,21 @@ def parse_units(value: str, decimals: int) -> int:
     """
     d = _parse_decimal(value)
 
-    result = d * (10**decimals)
+    # Scale with integers: Decimal arithmetic rounds to the context precision
+    # (28 digits by default) and would silently change large amounts.
+    _, digits, exponent = d.as_tuple()
+    assert isinstance(exponent, int)
+    coefficient = int("".join(map(str, digits)))
+    shift = exponent + decimals
+    if shift >= 0:
+        return coefficient * 10**shift
 
-    if result != int(result):
+    whole, fraction = divmod(coefficient, 10**-shift)
+    if fraction:
         raise ValueError(
             f"Amount {value!r} with {decimals} decimals produces fractional base units"
         )
-
-    return int(result)
+    return whole
 
 
 def _parse_decimal(value: str) -> Decimal:

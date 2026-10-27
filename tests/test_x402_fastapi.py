@@ -276,6 +276,25 @@ async def test_encoded_path_delimiters_keep_distinct_challenge_scopes() -> None:
     assert facilitator.calls.count("settle") == 1
 
 
+async def test_challenge_keeps_atomic_amounts_beyond_decimal_precision() -> None:
+    amount = "123456789012345678901234567891"
+    accepts = {**ROUTES["GET /paid"]["accepts"]}
+    accepts["price"] = {
+        "amount": amount,
+        "asset": BASE_SEPOLIA_USDC.address,
+        "extra": {"name": "USDC", "version": "2"},
+    }
+    app = create_app(
+        Facilitator(), routes={"GET /paid": {**ROUTES["GET /paid"], "accepts": accepts}}
+    )
+
+    async with client(app) as http:
+        unpaid = await http.get("/paid")
+    [accepted] = decode_payment_required(unpaid.headers[PAYMENT_REQUIRED_HEADER])["accepts"]
+    challenge = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+    assert challenge.request["amount"] == accepted["amount"] == amount
+
+
 def test_x402_extra_installs_the_evm_scheme_dependencies() -> None:
     with open(Path(__file__).parents[1] / "pyproject.toml", "rb") as file:
         extra = tomllib.load(file)["project"]["optional-dependencies"]["x402"]

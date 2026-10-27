@@ -21,6 +21,14 @@ class TestParseUnits:
     def test_large_amount(self) -> None:
         assert parse_units("10", 6) == 10_000_000
 
+    def test_amount_beyond_decimal_precision_is_exact(self) -> None:
+        assert parse_units("123456789012.345678901234567891", 18) == (
+            123456789012345678901234567891
+        )
+        assert parse_units("1234567890123456789012345678901", 0) == (
+            1234567890123456789012345678901
+        )
+
     def test_zero(self) -> None:
         assert parse_units("0", 6) == 0
 
