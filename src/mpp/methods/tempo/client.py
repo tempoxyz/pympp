@@ -614,7 +614,7 @@ def _check_recipient_addresses(request: dict) -> None:
 
     The transfer calldata embeds each recipient as one ABI word, so a longer
     value would spill into the amount word and sign a transfer the amount caps
-    never saw (VERIA-1145).
+    never saw.
     """
     recipient = request.get("recipient")
     if not isinstance(recipient, str) or _ADDRESS_RE.fullmatch(recipient) is None:
