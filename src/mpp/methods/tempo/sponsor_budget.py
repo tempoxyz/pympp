@@ -15,6 +15,7 @@ import asyncio
 import json
 import time
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Final, Literal, TypeVar
@@ -26,13 +27,27 @@ from mpp.store import CompareAndSetStore, MemoryStore
 _INITIAL_POLL_INTERVAL_MS: Final = 10
 _MAX_POLL_INTERVAL_MS: Final = 250
 _PREPARED_LEASE_MS: Final = 30_000
-# Waiters share receipt lookups: each pending transaction is checked at most
-# once per interval per process, with a bounded number of lookups at a time.
+# Waiters share receipt lookups: each pending transaction has at most one lookup
+# in flight per process, and is looked up again only an interval after the last
+# one finished, with a bounded number of lookups at a time.
 _RECEIPT_CHECK_INTERVAL_MS: Final = 1_000
 _MAX_CONCURRENT_RECEIPT_CHECKS: Final = 8
 
 _receipt_checked_at: dict[tuple[str, str], int] = {}
+_receipt_checks_in_flight: set[tuple[str, str]] = set()
+_receipt_lookups: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
 _process_store: MemoryStore | None = None
+
+
+def _receipt_lookup_slots() -> asyncio.Semaphore:
+    """Return the receipt lookup limit shared by every waiter on this event loop."""
+    loop = asyncio.get_running_loop()
+    slots = _receipt_lookups.get(loop)
+    if slots is None:
+        slots = _receipt_lookups[loop] = asyncio.Semaphore(_MAX_CONCURRENT_RECEIPT_CHECKS)
+    return slots
 
 
 def process_store() -> MemoryStore:
@@ -64,8 +79,11 @@ class SponsorBudget:
         reservations = self.max_in_flight_reservations
         if isinstance(reservations, bool) or not isinstance(reservations, int) or reservations < 1:
             raise ValueError("max_in_flight_reservations must be a positive integer")
-        if self.max_in_flight_total_fee <= 0:
-            raise ValueError("max_in_flight_total_fee must be greater than zero")
+        total_fee = self.max_in_flight_total_fee
+        if isinstance(total_fee, bool) or not isinstance(total_fee, int) or total_fee < 1:
+            raise ValueError("max_in_flight_total_fee must be a positive integer")
+        if self.store is not None and not isinstance(self.store, CompareAndSetStore):
+            raise TypeError("SponsorBudget.store must support compare_and_set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +200,7 @@ async def _reconcile(store: CompareAndSetStore, key: str, is_settled: IsSettled)
     for checked, at in list(_receipt_checked_at.items()):
         if at + _RECEIPT_CHECK_INTERVAL_MS <= now:
             del _receipt_checked_at[checked]
-    lookups = asyncio.Semaphore(_MAX_CONCURRENT_RECEIPT_CHECKS)
+    lookups = _receipt_lookup_slots()
 
     async def reconcile_one(id: str, entry: dict[str, Any]) -> None:
         reservation = Reservation(key, id, entry["owner"])
@@ -193,22 +211,33 @@ async def _reconcile(store: CompareAndSetStore, key: str, is_settled: IsSettled)
                 store, reservation, lambda _: None, unless=lambda e: not _is_stale(e, now)
             )
             return
-        # A broadcasting owner has not published its outcome yet; releasing it
-        # here would race its own transition to pending.
-        if entry["phase"] != "pending":
+        # A broadcasting owner normally publishes its outcome itself, so its
+        # transaction is looked up only once the owner outlived its lease (it
+        # may have crashed before moving it to pending). A receipt means the
+        # transaction settled, so releasing it is safe in either phase.
+        if entry["phase"] == "broadcasting" and entry["leaseUntil"] > now:
+            return
+        if entry["phase"] not in ("broadcasting", "pending"):
             return
         checked = (key, id)
-        if checked in _receipt_checked_at:
+        if checked in _receipt_checks_in_flight or checked in _receipt_checked_at:
             return
-        _receipt_checked_at[checked] = now
+        _receipt_checks_in_flight.add(checked)
         try:
             async with lookups:
                 settled = await is_settled(entry["transactionHash"])
+            _receipt_checked_at[checked] = _now_ms()
         except Exception:
+            _receipt_checked_at[checked] = _now_ms()
             return
+        finally:
+            _receipt_checks_in_flight.discard(checked)
         if settled:
             await _mutate_owned(
-                store, reservation, lambda _: None, unless=lambda e: e["phase"] != "pending"
+                store,
+                reservation,
+                lambda _: None,
+                unless=lambda e: e["phase"] not in ("broadcasting", "pending"),
             )
 
     await asyncio.gather(*(reconcile_one(id, entry) for id, entry in current.items()))
@@ -240,62 +269,73 @@ async def reserve(
     key = _key(chain_id, sponsor)
     reservation = Reservation(key, transaction_hash.lower(), str(uuid.uuid4()))
     poll_interval = _INITIAL_POLL_INTERVAL_MS
-    while True:
-        now = _now_ms()
-        if now >= wait_until:
-            raise VerificationError(
-                "Sponsored transaction expired while waiting for sponsor budget"
-            )
-
-        def change(current: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
-            if current is None:
-                return "invalid", None
-            existing = current.get(reservation.id)
-            if existing is not None:
-                if not _is_stale(existing, _now_ms()):
-                    return "duplicate", None
-                # An earlier attempt left this entry behind (its release
-                # failed): drop it in this same write so it never blocks a
-                # retry of the same transaction.
-                current = {k: v for k, v in current.items() if k != reservation.id}
-            total = sum(int(entry["fee"]) for entry in current.values())
-            if (
-                len(current) >= budget.max_in_flight_reservations
-                or total + fee > budget.max_in_flight_total_fee
-            ):
-                return "wait", None
-            return "reserved", {
-                **current,
-                reservation.id: {
-                    "expiresAt": expires_at,
-                    "fee": str(fee),
-                    # Reconciliation can be slow: start the lease from the
-                    # time of the write, not of the loop's first check.
-                    "leaseUntil": min(expires_at, _now_ms() + _PREPARED_LEASE_MS),
-                    "owner": reservation.owner,
-                    "phase": "prepared",
-                    "transactionHash": transaction_hash,
-                },
-            }
-
-        match await _update(store, key, change):
-            case "reserved":
-                return reservation
-            case "invalid":
-                raise InternalPaymentError() from RuntimeError(
-                    "Sponsor budget store contains incompatible state"
+    # Reconciliation runs alongside admission: a slow receipt lookup must not
+    # hold back a waiter after another one already freed its capacity.
+    reconciling: asyncio.Future[None] | None = None
+    try:
+        while True:
+            now = _now_ms()
+            if now >= wait_until:
+                raise VerificationError(
+                    "Sponsored transaction expired while waiting for sponsor budget"
                 )
-            case "duplicate":
-                raise InternalPaymentError() from RuntimeError(
-                    "Sponsored transaction already has a budget reservation"
-                )
-        # At capacity: release what has settled or expired, without letting
-        # slow receipt lookups hold the request past its deadline.
-        remaining = wait_until - _now_ms()
-        if remaining > 0:
-            try:
-                await asyncio.wait_for(_reconcile(store, key, is_settled), remaining / 1000)
-            except TimeoutError:
-                pass
-        await asyncio.sleep(max(0, min(poll_interval, wait_until - _now_ms())) / 1000)
-        poll_interval = min(poll_interval * 2, _MAX_POLL_INTERVAL_MS)
+
+            def change(current: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
+                if current is None:
+                    return "invalid", None
+                existing = current.get(reservation.id)
+                if existing is not None:
+                    if not _is_stale(existing, _now_ms()):
+                        return "duplicate", None
+                    # An earlier attempt left this entry behind (its release
+                    # failed): drop it in this same write so it never blocks a
+                    # retry of the same transaction.
+                    current = {k: v for k, v in current.items() if k != reservation.id}
+                total = sum(int(entry["fee"]) for entry in current.values())
+                if (
+                    len(current) >= budget.max_in_flight_reservations
+                    or total + fee > budget.max_in_flight_total_fee
+                ):
+                    return "wait", None
+                return "reserved", {
+                    **current,
+                    reservation.id: {
+                        "expiresAt": expires_at,
+                        "fee": str(fee),
+                        # Reconciliation can be slow: start the lease from the
+                        # time of the write, not of the loop's first check.
+                        "leaseUntil": min(expires_at, _now_ms() + _PREPARED_LEASE_MS),
+                        "owner": reservation.owner,
+                        "phase": "prepared",
+                        "transactionHash": transaction_hash,
+                    },
+                }
+
+            match await _update(store, key, change):
+                case "reserved":
+                    return reservation
+                case "invalid":
+                    raise InternalPaymentError() from RuntimeError(
+                        "Sponsor budget store contains incompatible state"
+                    )
+                case "duplicate":
+                    raise InternalPaymentError() from RuntimeError(
+                        "Sponsored transaction already has a budget reservation"
+                    )
+            # At capacity: release what has settled or expired in the background,
+            # and retry admission on every poll rather than after the whole batch.
+            if reconciling is not None and reconciling.done():
+                finished, reconciling = reconciling, None
+                if not finished.cancelled() and (error := finished.exception()) is not None:
+                    raise error
+            if reconciling is None:
+                reconciling = asyncio.ensure_future(_reconcile(store, key, is_settled))
+            await asyncio.sleep(max(0, min(poll_interval, wait_until - _now_ms())) / 1000)
+            poll_interval = min(poll_interval * 2, _MAX_POLL_INTERVAL_MS)
+    finally:
+        if reconciling is not None:
+            if reconciling.done():
+                if not reconciling.cancelled():
+                    reconciling.exception()
+            else:
+                reconciling.cancel()

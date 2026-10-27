@@ -4502,6 +4502,40 @@ class TestCosignAsFeePayer:
         # State can change while waiting for budget: simulate right before the send.
         assert calls == ["reserve", "simulate"]
 
+    def test_sponsor_budget_must_be_a_sponsor_budget(self):
+        with pytest.raises(TypeError, match="SponsorBudget"):
+            ChargeIntent(rpc_url="https://rpc.test", sponsor_budget=True)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_wait_ends_before_the_floor_and_client_timeout(self):
+        from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
+        from mpp.methods.tempo import sponsor_budget
+        from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        reserve = AsyncMock(side_effect=sponsor_budget.reserve)
+        started = time.time()
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(sponsor_budget, "reserve", reserve),
+        ):
+            await intent.verify(credential, request)
+        assert reserve.await_args is not None
+        wait_until = reserve.await_args.kwargs["wait_until"]
+        valid_before = _transaction_valid_before(signed)
+        assert valid_before is not None
+        # A reservation it could no longer broadcast is not worth waiting for.
+        assert wait_until <= (valid_before - MIN_REMAINING_VALIDITY_SECONDS) * 1000
+        # The client must still be waiting for the answer when the confirmation ends.
+        max_wait = DEFAULT_PAID_RETRY_TIMEOUT - intent._confirmation_timeout
+        assert wait_until <= (time.time() + max_wait) * 1000 + 1
+        assert wait_until >= (started + max_wait) * 1000 - 1
+
     def test_sponsor_budget_fallback_is_shared_across_intents(self):
         class PlainStore:
             async def get(self, key):

@@ -24,7 +24,8 @@ def _clear_receipt_checks() -> None:
 
 
 def clear_receipt_checks() -> None:
-    getattr(budget_module, "_receipt_checked_at", {}).clear()
+    budget_module._receipt_checked_at.clear()
+    budget_module._receipt_checks_in_flight.clear()
 
 
 async def never_settled(_tx_hash: str) -> bool:
@@ -66,11 +67,32 @@ async def reservations(store: MemoryStore) -> dict:
         {"max_in_flight_reservations": 0},
         {"max_in_flight_reservations": True},
         {"max_in_flight_total_fee": 0},
+        {"max_in_flight_total_fee": float("nan")},
+        {"max_in_flight_total_fee": 1.5},
+        {"max_in_flight_total_fee": True},
     ],
 )
 def test_rejects_invalid_config(kwargs: dict) -> None:
     with pytest.raises(ValueError):
         SponsorBudget(**kwargs)
+
+
+def test_rejects_a_store_without_compare_and_set() -> None:
+    class PlainStore:
+        async def get(self, key):
+            return None
+
+        async def put(self, key, value):
+            pass
+
+        async def delete(self, key):
+            pass
+
+        async def put_if_absent(self, key, value):
+            return True
+
+    with pytest.raises(TypeError, match="compare_and_set"):
+        SponsorBudget(store=PlainStore())  # type: ignore[arg-type]
 
 
 def test_defaults_to_ten_times_the_policy_fee_cap() -> None:
@@ -412,3 +434,95 @@ async def test_prepared_lease_starts_after_slow_reconciliation(
     await reserve(store, budget, "0x02", expires_in_ms=600_000, is_settled=slow_lookup)
     # The lease runs from when the reservation was written, so it is still live.
     assert (await reservations(store))["0x02"]["leaseUntil"] > clock[0]
+
+
+async def _fill_with_pending(store: MemoryStore, budget: SponsorBudget, count: int) -> None:
+    for i in range(count):
+        reservation = await reserve(store, budget, f"0x{i:02x}")
+        assert await budget_module.transition(store, reservation, "pending")
+    clear_receipt_checks()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_waiters_never_exceed_the_lookup_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Lookups outlast the interval: a later waiter must neither duplicate a
+    # running lookup nor start more than the shared bound.
+    monkeypatch.setattr(budget_module, "_RECEIPT_CHECK_INTERVAL_MS", 10)
+    store = MemoryStore()
+    pending = 10
+    budget = SponsorBudget(max_in_flight_reservations=pending)
+    await _fill_with_pending(store, budget, pending)
+    active: dict[str, int] = {}
+    peak = 0
+    peak_per_hash = 0
+
+    async def slow_unsettled(tx_hash: str) -> bool:
+        nonlocal peak, peak_per_hash
+        active[tx_hash] = active.get(tx_hash, 0) + 1
+        peak = max(peak, sum(active.values()))
+        peak_per_hash = max(peak_per_hash, active[tx_hash])
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            active[tx_hash] -= 1
+        return False
+
+    async def later_waiter() -> None:
+        await asyncio.sleep(0.05)
+        await reserve(store, budget, "0xfe", wait_ms=150, is_settled=slow_unsettled)
+
+    results = await asyncio.gather(
+        reserve(store, budget, "0xff", wait_ms=200, is_settled=slow_unsettled),
+        later_waiter(),
+        return_exceptions=True,
+    )
+    assert all(isinstance(result, VerificationError) for result in results)
+    assert peak <= 8
+    assert peak_per_hash == 1
+
+
+@pytest.mark.asyncio
+async def test_freed_capacity_admits_a_waiter_despite_a_slow_lookup() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget(max_in_flight_reservations=2)
+    await _fill_with_pending(store, budget, 2)
+
+    async def first_settles(tx_hash: str) -> bool:
+        if tx_hash == "0x00":
+            return True
+        await asyncio.Event().wait()
+        return False
+
+    await asyncio.wait_for(
+        reserve(store, budget, "0xff", wait_ms=5_000, is_settled=first_settles), 1
+    )
+    assert set(await reservations(store)) == {"0x01", "0xff"}
+
+
+@pytest.mark.asyncio
+async def test_settled_broadcast_is_released_once_its_owner_outlived_the_lease() -> None:
+    store = MemoryStore()
+    budget = SponsorBudget(max_in_flight_reservations=1)
+    reservation = await reserve(store, budget, "0x01")
+    assert await budget_module.transition(store, reservation, "broadcasting")
+    looked_up: list[str] = []
+
+    async def settled(tx_hash: str) -> bool:
+        looked_up.append(tx_hash)
+        return True
+
+    # Its owner may still publish the outcome itself while its lease runs.
+    await budget_module._reconcile(store, KEY, settled)
+    assert looked_up == []
+    assert "0x01" in await reservations(store)
+    # The owner never moved it to pending (it crashed): a receipt frees it.
+    raw = await store.get(KEY)
+    assert raw is not None
+    state = json.loads(raw)
+    state["reservations"]["0x01"]["leaseUntil"] = int(time.time() * 1000) - 1
+    await store.put(KEY, json.dumps(state))
+    await reserve(store, budget, "0x02", wait_ms=1_000, is_settled=settled)
+    assert looked_up == ["0x01"]
+    assert set(await reservations(store)) == {"0x02"}

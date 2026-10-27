@@ -21,7 +21,7 @@ from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
-from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
+from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_PAID_RETRY_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
 from mpp._validation import Validation
 from mpp.errors import (
@@ -843,6 +843,9 @@ class ChargeIntent:
                 :class:`~mpp.methods.tempo.sponsor_budget.SponsorBudget` on the
                 replay store). Pass ``False`` only when it is enforced elsewhere.
         """
+        if sponsor_budget is not None and sponsor_budget is not False:
+            if not isinstance(sponsor_budget, _sponsor_budget.SponsorBudget):
+                raise TypeError("sponsor_budget must be a SponsorBudget, False or None")
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
@@ -2213,7 +2216,14 @@ class ChargeIntent:
         # The transaction can still be included for a short grace after
         # valid_before, so it stays reserved until then.
         expires_at = int((valid_before + VALID_BEFORE_GRACE) * 1000)
-        wait_until = valid_before * 1000
+        # Stop waiting once the transaction falls below the sponsored validity
+        # floor (it could not be broadcast anyway), or before the client gives
+        # up on its paid retry: the confirmation wait still follows.
+        max_wait = max(1.0, DEFAULT_PAID_RETRY_TIMEOUT - self._confirmation_timeout)
+        wait_until = min(
+            (valid_before - MIN_REMAINING_VALIDITY_SECONDS) * 1000,
+            math.ceil((time.time() + max_wait) * 1000),
+        )
         if challenge_expires_at is not None:
             # Round up, so a wait that runs out has the challenge expired too.
             wait_until = min(wait_until, math.ceil(challenge_expires_at * 1000))
