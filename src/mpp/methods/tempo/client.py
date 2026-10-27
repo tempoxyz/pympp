@@ -680,39 +680,52 @@ class TempoMethod:
             # Keep sponsored envelopes inside the server's default policy.
             max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
 
-        gas_limit = DEFAULT_GAS_LIMIT
-        try:
-            if swapping:
-                # Estimate the whole batch: the transfers alone run before the swap funds them.
-                batch = [
-                    {
-                        "to": "0x" + bytes(c.to).hex(),
-                        "value": hex(c.value),
-                        "data": "0x" + c.data.hex(),
-                    }
-                    for c in calls_tuple
-                ]
-                estimated = int(
-                    await _rpc_call(
-                        resolved_rpc,
-                        "eth_estimateGas",
-                        [{"from": sender, "calls": batch}, "latest"],
-                    ),
-                    16,
-                )
-                gas_limit = max(gas_limit, estimated + 5_000)
-            elif splits:
-                total_estimated = 0
-                for c in calls_tuple:
-                    total_estimated += await estimate_gas(
-                        resolved_rpc, sender, currency, c.data.hex()
+        async def estimate_gas_limit(calls: tuple[Call, ...], swapping: bool) -> int:
+            gas_limit = DEFAULT_GAS_LIMIT
+            try:
+                if swapping:
+                    # Estimate the whole batch: the transfers alone run before the swap funds them.
+                    batch = [
+                        {
+                            "to": "0x" + bytes(c.to).hex(),
+                            "value": hex(c.value),
+                            "data": "0x" + c.data.hex(),
+                        }
+                        for c in calls
+                    ]
+                    estimated = int(
+                        await _rpc_call(
+                            resolved_rpc,
+                            "eth_estimateGas",
+                            [{"from": sender, "calls": batch}, "latest"],
+                        ),
+                        16,
                     )
-                gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls_tuple))
-            elif gas_estimate_data is not None:
-                estimated = await estimate_gas(resolved_rpc, sender, currency, gas_estimate_data)
-                gas_limit = max(gas_limit, estimated + 5_000)
-        except Exception:
-            pass
+                    gas_limit = max(gas_limit, estimated + 5_000)
+                elif splits:
+                    total_estimated = 0
+                    for c in calls:
+                        total_estimated += await estimate_gas(
+                            resolved_rpc, sender, currency, c.data.hex()
+                        )
+                    gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls))
+                elif gas_estimate_data is not None:
+                    estimated = await estimate_gas(
+                        resolved_rpc, sender, currency, gas_estimate_data
+                    )
+                    gas_limit = max(gas_limit, estimated + 5_000)
+            except Exception:
+                pass
+            return gas_limit
+
+        def fee_requirement(gas_limit: int) -> int:
+            return max(
+                1,
+                (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
+                // ATTODOLLARS_PER_MICRODOLLAR,
+            )
+
+        gas_limit = await estimate_gas_limit(calls_tuple, swapping)
 
         fee_token: str | None = None
         if not awaiting_fee_payer:
@@ -720,11 +733,7 @@ class TempoMethod:
             # A swapping payer may not hold the currency before the swap, so
             # it pays fees in a funded supported stablecoin.
             if swapping or currency.lower() in (MACH.lower(), OUSD.lower()):
-                required_balance = max(
-                    1,
-                    (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
-                    // ATTODOLLARS_PER_MICRODOLLAR,
-                )
+                required_balance = fee_requirement(gas_limit)
                 try:
                     fee_token = await self._resolve_supported_fee_token(
                         account=sender,
@@ -750,27 +759,10 @@ class TempoMethod:
                         *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
                         *transfer_calls,
                     )
-                    fee_token = await self._resolve_supported_fee_token(
-                        account=sender,
-                        chain_id=chain_id,
-                        rpc_url=resolved_rpc,
-                        required_balance=required_balance,
-                        reserved=swap_spent,
-                    )
-                    if fee_token.lower() != currency.lower():
-                        # The rebuild freed another fee token: buy only the payment from
-                        # the same token_in, since the swap may not exceed the charge.
-                        swap_calls, swap_spent = await self._find_swap_calls(
-                            account=sender,
-                            amount_out=int(amount),
-                            token_out=currency,
-                            rpc_url=resolved_rpc,
-                            token_in=swap_calls[0][0],
-                        )
-                        calls_tuple = (
-                            *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
-                            *transfer_calls,
-                        )
+                    if not swap_calls:
+                        # The currency balance rose since the first read: no swap is needed.
+                        swap_spent = {currency.lower(): int(amount)}
+                    else:
                         fee_token = await self._resolve_supported_fee_token(
                             account=sender,
                             chain_id=chain_id,
@@ -778,6 +770,35 @@ class TempoMethod:
                             required_balance=required_balance,
                             reserved=swap_spent,
                         )
+                        if fee_token.lower() != currency.lower():
+                            # The rebuild freed another fee token: buy only the payment from
+                            # the same token_in, since the swap may not exceed the charge.
+                            swap_calls, swap_spent = await self._find_swap_calls(
+                                account=sender,
+                                amount_out=int(amount),
+                                token_out=currency,
+                                rpc_url=resolved_rpc,
+                                token_in=swap_calls[0][0],
+                            )
+                            if not swap_calls:
+                                swap_spent = {currency.lower(): int(amount)}
+                            calls_tuple = (
+                                *(
+                                    Call.create(to=to, value=0, data=data)
+                                    for to, data in swap_calls
+                                ),
+                                *transfer_calls,
+                            )
+                    # The calls changed: size gas and the fee for the batch that is signed.
+                    gas_limit = await estimate_gas_limit(calls_tuple, bool(swap_calls))
+                    required_balance = fee_requirement(gas_limit)
+                    fee_token = await self._resolve_supported_fee_token(
+                        account=sender,
+                        chain_id=chain_id,
+                        rpc_url=resolved_rpc,
+                        required_balance=required_balance,
+                        reserved=swap_spent,
+                    )
 
         # The swap's amountOut is its third word. The server rejects an output above
         # the charge, so a fee the held currency cannot pay fails before signing.

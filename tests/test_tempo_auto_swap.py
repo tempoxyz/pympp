@@ -48,7 +48,7 @@ async def sign(
     chain_id: int = CHAIN_ID,
     currency: str = CURRENCY,
     gas_estimates: list[list[dict[str, str]]] | None = None,
-    batch_gas: int = 200_000,
+    batch_gas: int | Callable[[list[dict[str, str]]], int] = 200_000,
     signed_fields: list[Any] | None = None,
     **method_options: Any,
 ) -> tuple[list[tuple[str, int, str]], str]:
@@ -79,7 +79,7 @@ async def sign(
         if name == "eth_estimateGas":
             if gas_estimates is not None:
                 gas_estimates.append(params[0]["calls"])
-            return hex(batch_gas)
+            return hex(batch_gas(params[0]["calls"]) if callable(batch_gas) else batch_gas)
         return {"eth_chainId": hex(chain_id), "eth_gasPrice": hex(GAS_PRICE)}[name]
 
     async def fake_balance(_url: str, token: str, address: str) -> int:
@@ -291,6 +291,53 @@ async def test_fee_headroom_swap_never_buys_more_than_the_charge() -> None:
     request = ChargeRequest(amount=str(AMOUNT), currency=USDC, recipient=RECIPIENT)
     normalized = [(to, value, data.removeprefix("0x")) for to, value, data in calls]
     assert len(_validate_normalized_calls(normalized, request)) == 1
+
+
+@pytest.mark.asyncio
+async def test_fee_headroom_rebuild_re_estimates_gas_for_the_new_route() -> None:
+    # The first batch swaps from pathUSD; the fee rebuild moves to OUSD, whose route costs
+    # more gas. The signed limit covers the batch that is signed, not the first one.
+    def one_to_one(amount: int) -> int:
+        return amount
+
+    def route_gas(batch: list[dict[str, str]]) -> int:
+        return 1_500_000 if batch[0]["to"] == OUSD.lower() else 200_000
+
+    estimates: list[list[dict[str, str]]] = []
+    fields: list[Any] = []
+    calls, fee_token = await sign(
+        AutoSwap(token_in=[PATH_USD, OUSD]),
+        {PATH_USD: 1_010_000 + FEE // 2, OUSD: 2_000_000},
+        {PATH_USD: one_to_one, OUSD: one_to_one},
+        currency=USDC,
+        gas_estimates=estimates,
+        batch_gas=route_gas,
+        signed_fields=fields,
+    )
+
+    assert calls[0][0] == OUSD.lower()
+    assert fee_token == PATH_USD.lower()
+    assert estimates[-1][0]["to"] == OUSD.lower()
+    assert int.from_bytes(fields[3], "big") == 1_505_000
+
+
+@pytest.mark.asyncio
+async def test_fee_headroom_rebuild_sends_a_plain_transfer_when_no_swap_is_needed() -> None:
+    # The payer's USDC.e balance rises between the first read and the fee rebuild, so the
+    # rebuild needs no swap: the charge is a plain transfer instead of an IndexError.
+    reads = iter([0, 0])
+
+    def usdc() -> int:
+        return next(reads, AMOUNT + 10 * FEE)
+
+    calls, _ = await sign(
+        AutoSwap(token_in=[PATH_USD]),
+        {USDC: usdc, PATH_USD: 1_010_000 + FEE // 2},
+        {PATH_USD: 1_000_000},
+        currency=USDC,
+    )
+
+    assert [to for to, _, _ in calls] == [USDC.lower()]
 
 
 @pytest.mark.asyncio
