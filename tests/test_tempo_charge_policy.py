@@ -345,6 +345,64 @@ async def test_rejected_charge_is_never_signed() -> None:
     create.assert_not_called()
 
 
+# A recipient with extra hex digits would spill into the transfer's amount word.
+OVERLONG_RECIPIENT = "0x" + RECIPIENT[2:].lower().zfill(64) + f"{10**30:064x}"
+
+
+@pytest.mark.parametrize(
+    "challenge",
+    [
+        pytest.param(make_challenge(amount="1", recipient=OVERLONG_RECIPIENT), id="primary"),
+        pytest.param(
+            make_challenge(
+                amount="200",
+                splits=[{"amount": "100", "recipient": OVERLONG_RECIPIENT}],
+            ),
+            id="split",
+        ),
+        pytest.param(make_challenge(amount="1", recipient="0x1234"), id="short"),
+    ],
+)
+async def test_malformed_recipient_is_never_signed(challenge: Challenge) -> None:
+    method = make_method(max_atomic_amount=1000)
+
+    assert method.can_handle_challenge(challenge) is False
+    with (
+        patch("mpp.methods.tempo.client._rpc_call", AsyncMock()) as rpc,
+        patch("pytempo.TempoTransaction.create") as create,
+    ):
+        with pytest.raises(ValueError, match="not a valid address"):
+            await method.create_credential(challenge)
+
+    rpc.assert_not_called()
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("to", "amount"),
+    [
+        pytest.param(OVERLONG_RECIPIENT, 1, id="overlong-recipient"),
+        pytest.param(RECIPIENT, 1 << 256, id="amount-overflow"),
+        pytest.param(RECIPIENT, -1, id="negative-amount"),
+    ],
+)
+def test_transfer_encoding_rejects_values_that_overflow_a_word(to: str, amount: int) -> None:
+    method = make_method()
+    memo = "0x" + "00" * 32
+
+    with pytest.raises(ValueError):
+        method._encode_transfer(to, amount)
+    with pytest.raises(ValueError):
+        method._encode_transfer_with_memo(to, amount, memo)
+
+
+def test_transfer_encoding_is_one_word_per_argument() -> None:
+    data = make_method()._encode_transfer(RECIPIENT, 1000)
+
+    assert len(data) == 2 + 8 + 64 * 2
+    assert data.endswith(f"{1000:064x}")
+
+
 @pytest.mark.parametrize(
     ("max_amount", "cap"),
     [

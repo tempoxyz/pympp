@@ -234,6 +234,7 @@ class TempoMethod:
         self._check_allowed_chain_id(
             challenge_chain_id if challenge_chain_id is not None else expected_chain_id
         )
+        _check_recipient_addresses(request)
         self._check_expected_recipients(request)
         self._check_amount_caps(request)
         from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
@@ -588,9 +589,7 @@ class TempoMethod:
         Selector: 0xa9059cbb = keccak256("transfer(address,uint256)")[:4]
         """
         selector = "a9059cbb"
-        to_padded = to[2:].lower().zfill(64)
-        amount_padded = hex(amount)[2:].zfill(64)
-        return f"0x{selector}{to_padded}{amount_padded}"
+        return f"0x{selector}{_abi_address(to)}{_abi_uint256(amount)}"
 
     def _encode_transfer_with_memo(self, to: str, amount: int, memo: str) -> str:
         """Encode a TIP-20 transferWithMemo call.
@@ -600,14 +599,48 @@ class TempoMethod:
         )[:4]
         """
         selector = "95777d59"
-        to_padded = to[2:].lower().zfill(64)
-        amount_padded = hex(amount)[2:].zfill(64)
+        to_padded = _abi_address(to)
+        amount_padded = _abi_uint256(amount)
         memo_clean = memo[2:] if memo.startswith("0x") else memo
         if len(memo_clean) != 64:
             raise ValueError(f"memo must be exactly 32 bytes (64 hex chars), got {len(memo_clean)}")
         if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
             raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _check_recipient_addresses(request: dict) -> None:
+    """Reject a primary or split recipient that is not a 20-byte hex address.
+
+    The transfer calldata embeds each recipient as one ABI word, so a longer
+    value would spill into the amount word and sign a transfer the amount caps
+    never saw (VERIA-1145).
+    """
+    recipient = request.get("recipient")
+    if not isinstance(recipient, str) or _ADDRESS_RE.fullmatch(recipient) is None:
+        raise ValueError(f"Challenge recipient is not a valid address: {recipient!r}")
+    method_details = request.get("methodDetails")
+    splits = method_details.get("splits") if isinstance(method_details, dict) else None
+    for split in splits or ():
+        split_recipient = split.get("recipient") if isinstance(split, dict) else None
+        if not isinstance(split_recipient, str) or _ADDRESS_RE.fullmatch(split_recipient) is None:
+            raise ValueError(
+                f"Challenge split recipient is not a valid address: {split_recipient!r}"
+            )
+
+
+def _abi_address(address: str) -> str:
+    """ABI-encode a 20-byte hex address as one 32-byte word (64 hex chars)."""
+    if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:
+        raise ValueError(f"Invalid recipient address: {address!r}")
+    return address[2:].lower().zfill(64)
+
+
+def _abi_uint256(value: int) -> str:
+    """ABI-encode a uint256 as one 32-byte word (64 hex chars)."""
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value < 1 << 256:
+        raise ValueError("Transfer amount must be a uint256")
+    return f"{value:064x}"
 
 
 def _assert_sponsored_challenge_time_left(expires: str | None) -> None:
