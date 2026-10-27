@@ -21,6 +21,7 @@ from mpp.attestation import (
     SigningContext,
     Unverified,
     Verified,
+    _signature,
     compose_signers,
     tap,
     web_bot_auth,
@@ -489,6 +490,36 @@ class TestServer:
         gc.collect()
 
         assert alive() is None
+
+    async def test_guard_never_caches_requests_it_cannot_track(self) -> None:
+        class Counting:
+            calls = 0
+
+            async def verify(self, request: Any) -> Any:
+                self.calls += 1
+                return Verified(None)
+
+        class Untrackable:  # Cannot be weakly referenced.
+            __slots__ = ()
+
+        verifier = Counting()
+        guard = Guard({"counting": verifier})
+        request = Untrackable()
+
+        assert await guard(request) is None  # type: ignore[arg-type]
+        assert await guard(request) is None  # type: ignore[arg-type]
+        assert verifier.calls == 2
+        assert guard._cache == {}
+
+    def test_request_token_is_not_cached_for_requests_it_cannot_track(self) -> None:
+        class Untrackable:
+            __slots__ = ()
+
+        request = Untrackable()
+        before = dict(_signature._tokens)
+
+        assert _signature._request_token(request) != _signature._request_token(request)  # type: ignore[arg-type]
+        assert _signature._tokens == before
 
     async def test_skips_mcp_requests_and_rejects_empty_config(self) -> None:
         mpp = self._server(Ed25519PrivateKey.generate())

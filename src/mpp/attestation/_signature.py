@@ -264,8 +264,14 @@ def _request_token(request: Request) -> str:
     """
     key = id(request)
     if (token := _tokens.get(key)) is None:
-        token = _tokens[key] = secrets.token_hex(16)
-        weakref.finalize(request, _tokens.pop, key, None)
+        token = secrets.token_hex(16)
+        try:
+            # Register eviction before caching, so a later request object reusing the
+            # address never inherits this token and the claims it made.
+            weakref.finalize(request, _tokens.pop, key, None)
+        except TypeError:
+            return token
+        _tokens[key] = token
     return token
 
 

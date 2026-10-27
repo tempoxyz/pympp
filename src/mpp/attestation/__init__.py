@@ -216,9 +216,14 @@ class Guard:
         key = id(request)
         if (cached := self._cache.get(key)) is not None:
             return await asyncio.shield(cached)
+        try:
+            # Register eviction before caching: an id-keyed entry left behind would hand
+            # its outcome to a later request object reusing the address.
+            weakref.finalize(request, self._cache.pop, key, None)
+        except TypeError:
+            return await self._check(request)
         task = asyncio.ensure_future(self._check(request))
         self._cache[key] = task
-        weakref.finalize(request, self._cache.pop, key, None)
         task.add_done_callback(lambda done: self._forget_failure(key, done))
         return await asyncio.shield(task)
 
