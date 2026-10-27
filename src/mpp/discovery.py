@@ -440,13 +440,15 @@ def _document(
 def _normalize_payment_info(payment: Mapping[str, Any]) -> dict[str, Any]:
     """Validate ``x-payment-info`` and return its ``{"offers": [...]}`` form.
 
+    Top-level extensions alongside precomputed ``offers`` are kept.
+
     Raises:
         pydantic.ValidationError: When the payment info is invalid.
     """
     _PaymentInfo.model_validate(payment)
     payment = deepcopy(dict(payment))
     if "offers" in payment:
-        return {"offers": payment["offers"]}
+        return payment
     return {"offers": [payment]}
 
 

@@ -193,6 +193,17 @@ def test_generate_proxy() -> None:
     assert validate(document) == []
 
 
+def test_proxy_keeps_top_level_extensions_beside_offers() -> None:
+    offers = [{"amount": "10", "intent": "charge", "method": "tempo"}]
+    payment = {"offers": offers, "x-provider-policy": {"refunds": False}}
+    document = generate_proxy(
+        routes=[ProxyRoute(method="GET", path="/v1/models", payment=payment)],
+    )
+
+    assert document["paths"]["/v1/models"]["get"]["x-payment-info"] == payment
+    assert validate(document) == []
+
+
 @pytest.mark.parametrize(
     ("document", "path"),
     [
