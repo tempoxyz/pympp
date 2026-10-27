@@ -47,11 +47,15 @@ class FakeWallet:
     """Records wallet requests and answers them from `responses`."""
 
     def __init__(self, **responses: Any) -> None:
-        self.responses = responses
+        self.responses = {"eth_chainId": hex(4217), **responses}
         self.requests: list[tuple[str, list[Any]]] = []
+        self.chain_id_queries = 0
 
     async def __call__(self, method: str, params: list[Any]) -> Any:
-        self.requests.append((method, params))
+        if method == "eth_chainId":
+            self.chain_id_queries += 1
+        else:
+            self.requests.append((method, params))
         response = self.responses[method]
         if isinstance(response, Exception):
             raise response
@@ -293,10 +297,6 @@ async def test_fallback_carries_fee_token() -> None:
     [
         {"status": 500, "receipts": [{"transactionHash": TX_HASH}]},
         {"status": 600, "receipts": [{"transactionHash": TX_HASH}]},
-        {
-            "status": 200,
-            "receipts": [{"transactionHash": TX_HASH}, {"transactionHash": "0x" + "cd" * 32}],
-        },
     ],
 )
 async def test_wallet_payment_without_one_confirmed_transaction_fails(
@@ -482,3 +482,232 @@ async def test_push_refuses_a_malformed_recipient() -> None:
     with pytest.raises(ValueError, match="Invalid recipient address"):
         await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
     assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipts",
+    [[], [{"transactionHash": TX_HASH}, {"transactionHash": "0x" + "cd" * 32}]],
+)
+async def test_confirmed_bundle_without_one_transaction_is_an_unknown_outcome(
+    receipts: list[dict[str, Any]],
+) -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls="bundle-8",
+        wallet_getCallsStatus={"status": 200, "receipts": receipts},
+    )
+    challenge = _challenge(splits=[{"amount": "100000", "recipient": WALLET}])
+
+    with pytest.raises(PaymentOutcomeUnknownError) as error:
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert isinstance(error.value.cause, tempo.TransactionError)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_unknown_outcome_follows_the_sent_bundle() -> None:
+    unavailable = RpcError({"code": -32603, "message": "Internal error"})
+    wallet = FakeWallet(wallet_sendCalls="bundle-9", wallet_getCallsStatus=unavailable)
+    method = _tempo_method(
+        account=JsonRpcAccount(WALLET, request=wallet), chain_id=4217, rpc_url="https://rpc.test"
+    )
+    challenge = _challenge()
+
+    with (
+        patch("mpp.methods.tempo.client._rpc_call", side_effect=_node),
+        patch("mpp.methods.tempo._wallet._STATUS_RETRY_COUNT", 0),
+    ):
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await method.create_credential(challenge)
+        # The status read recovers: the retry follows bundle-9 instead of paying again.
+        wallet.responses["wallet_getCallsStatus"] = {
+            "status": 200,
+            "receipts": [{"transactionHash": TX_HASH}],
+        }
+        credential = await method.create_credential(challenge)
+
+    assert credential.payload == {"type": "hash", "hash": TX_HASH}
+    assert wallet.methods().count("wallet_sendCalls") == 1
+    assert wallet.requests[-1] == ("wallet_getCallsStatus", ["bundle-9"])
+
+
+@pytest.mark.asyncio
+async def test_push_fee_token_covers_the_fee_not_one_unit() -> None:
+    from mpp.methods.tempo._defaults import OUSD, fee_tokens_for_chain
+
+    dust_token, funded_token = fee_tokens_for_chain(4217)[:2]
+    wallet = FakeWallet(
+        wallet_sendCalls="bundle-10",
+        wallet_getCallsStatus={"status": 200, "receipts": [{"transactionHash": TX_HASH}]},
+    )
+    challenge = _challenge()
+    challenge.request["currency"] = OUSD
+
+    async def node(rpc_url: str, method: str, params: list[Any], *, client: Any = None) -> Any:
+        if method == "eth_gasPrice":
+            return hex(20 * 10**9)  # 1M gas costs 0.02 at this price.
+        return await _node(rpc_url, method, params, client=client)
+
+    async def balance(rpc_url: str, token: str, account: str) -> int:
+        return 1 if token == dust_token else 10**6
+
+    with patch("mpp.methods.tempo.client._tip20_balance", new=balance):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge, node=node)
+
+    assert wallet.requests[0][1][0]["capabilities"] == {"feeToken": funded_token}
+
+
+class GatewayError(Exception):
+    """A transport error that carries an HTTP status as its code."""
+
+    code = 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [RpcError({"code": 1001, "message": "Relay unavailable"}), GatewayError("Bad gateway")]
+)
+async def test_unknown_send_calls_error_does_not_fall_back(error: Exception) -> None:
+    wallet = FakeWallet(wallet_sendCalls=error, eth_sendTransaction=TX_HASH)
+
+    with pytest.raises(type(error)):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+    assert wallet.methods() == ["wallet_sendCalls"]
+
+
+@pytest.mark.asyncio
+async def test_generic_send_transaction_error_is_not_retried() -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls=RpcError({"code": -32601, "message": "Method not found"}),
+        eth_sendTransaction=RpcError({"code": -32000, "message": "nonce too low"}),
+        wallet_sendTransaction=TX_HASH,
+    )
+
+    with pytest.raises(RpcError, match="nonce too low"):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+    assert wallet.methods() == ["wallet_sendCalls", "eth_sendTransaction"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_method_code_4200_falls_back() -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls=RpcError({"code": 4200, "message": "Unsupported method"}),
+        eth_sendTransaction=TX_HASH,
+        eth_getTransactionReceipt={"status": "0x1", "transactionHash": TX_HASH},
+    )
+
+    credential = await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+
+    assert credential.payload == {"type": "hash", "hash": TX_HASH}
+
+
+def test_push_floor_covers_the_confirmation_wait() -> None:
+    from mpp.methods.tempo._wallet import SEND_CALLS_TIMEOUT
+
+    assert tempo.PUSH_MIN_REMAINING_VALIDITY_SECONDS > SEND_CALLS_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_push_refuses_a_challenge_shorter_than_the_confirmation_wait() -> None:
+    from mpp.errors import PaymentExpiredError
+
+    wallet = FakeWallet()
+    challenge = _with_expires(_challenge(), _expires_in(4))
+
+    with pytest.raises(PaymentExpiredError):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+    assert wallet.requests == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_transaction_is_bounded_by_the_challenge_expiry() -> None:
+    wallet = FakeWallet(
+        wallet_sendCalls=RpcError({"code": -32601, "message": "Method not found"}),
+        eth_sendTransaction=TX_HASH,
+        eth_getTransactionReceipt={"status": "0x1", "transactionHash": TX_HASH},
+    )
+    expires = datetime.now(UTC) + timedelta(seconds=30)
+    challenge = _with_expires(_challenge(), expires.isoformat().replace("+00:00", "Z"))
+
+    await _pay(JsonRpcAccount(WALLET, request=wallet), challenge)
+
+    assert int(wallet.requests[1][1][0]["validBefore"], 16) == int(expires.timestamp()) + 1
+
+
+@pytest.mark.asyncio
+async def test_push_refuses_a_wallet_on_another_chain() -> None:
+    wallet = FakeWallet(eth_chainId=hex(42431))
+
+    with pytest.raises(tempo.TransactionError, match="wallet is on 42431"):
+        await _pay(JsonRpcAccount(WALLET, request=wallet), _challenge())
+    assert wallet.requests == []
+
+
+def _with_signature(raw_tx: str, transform: Any) -> str:
+    import rlp
+
+    tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+    fields = rlp.decode(tx_bytes[1:])
+    return "0x" + (tx_bytes[:1] + rlp.encode(transform(fields))).hex()
+
+
+def _raw_recovery_id(fields: list[Any]) -> list[Any]:
+    signature = fields[-1]
+    return [*fields[:-1], signature[:64] + bytes([signature[64] - 27])]
+
+
+@pytest.mark.asyncio
+async def test_wallet_signature_with_raw_recovery_id_is_canonicalised() -> None:
+    from eth_hash.auto import keccak
+
+    signed = _signed_transaction(sponsored=False)
+    canonical = "0x" + signed.encode().hex()
+    address = "0x" + bytes(signed.sender_address).hex()
+    wallet = FakeWallet(eth_signTransaction=_with_signature(canonical, _raw_recovery_id))
+
+    credential = await _pay(
+        JsonRpcAccount(address, request=wallet), _challenge(supportedModes=["pull"])
+    )
+
+    assert credential.payload["signature"] == canonical
+    method = _tempo_method(account=JsonRpcAccount(address))
+    assert method.transaction_hash(credential) == "0x" + keccak(bytes.fromhex(canonical[2:])).hex()
+
+
+def test_transaction_hash_canonicalises_and_skips_fee_payer_slot() -> None:
+    from eth_hash.auto import keccak
+
+    from mpp import Credential
+
+    canonical = "0x" + _signed_transaction(sponsored=False).encode().hex()
+    method = _tempo_method(account=JsonRpcAccount(WALLET))
+
+    def credential(raw_tx: str) -> Credential:
+        return Credential(
+            challenge=_challenge().to_echo(), payload={"type": "transaction", "signature": raw_tx}
+        )
+
+    raw = _with_signature(canonical, _raw_recovery_id)
+    expected = "0x" + keccak(bytes.fromhex(canonical[2:])).hex()
+    assert method.transaction_hash(credential(raw)) == expected
+    placeholder = _with_signature(canonical, lambda f: [*f[:11], b"\x00", *f[12:]])
+    assert method.transaction_hash(credential(placeholder)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("problem", ["chain", "sender", "fee_payer_slot", "not_tempo"])
+async def test_wallet_signed_transaction_is_checked(problem: str) -> None:
+    signed = _signed_transaction(sponsored=False)
+    raw_tx = "0x" + signed.encode().hex()
+    address = "0x" + bytes(signed.sender_address).hex()
+    if problem == "chain":
+        raw_tx = _with_signature(raw_tx, lambda f: [(42431).to_bytes(2, "big"), *f[1:]])
+    elif problem == "sender":
+        address = WALLET
+    elif problem == "fee_payer_slot":
+        raw_tx = _with_signature(raw_tx, lambda f: [*f[:11], b"\x00", *f[12:]])
+    else:
+        raw_tx = "0x02" + raw_tx[4:]
+    wallet = FakeWallet(eth_signTransaction=raw_tx)
+
+    with pytest.raises(tempo.TransactionError):
+        await _pay(JsonRpcAccount(address, request=wallet), _challenge(supportedModes=["pull"]))

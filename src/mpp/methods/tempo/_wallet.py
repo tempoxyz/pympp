@@ -4,24 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import Any
-
-from pytempo import Call
+from typing import TYPE_CHECKING, Any
 
 from mpp.methods.tempo.account import WalletRequest
+
+if TYPE_CHECKING:
+    from pytempo import Call
 
 # Seconds to wait for a sent call bundle: Tempo's block time times three, at least 5s.
 SEND_CALLS_TIMEOUT = 5.0
 POLLING_INTERVAL = 0.5
 _STATUS_RETRY_COUNT = 4
-# JSON-RPC codes for a method the wallet does not have or support.
-_METHOD_UNSUPPORTED_CODES = (-32601, -32004)
-# JSON-RPC and EIP-1193 codes of named errors; a wallet error with another code is unknown.
-_KNOWN_RPC_CODES = frozenset(
-    {-32700, -32600, -32601, -32602, -32603, -32000, -32001, -32002, -32003, -32004, -32005}
-    | {-32006, 4001, 4100, 4200, 4900, 4901, 4902}
-    | {5000, 5700, 5710, 5720, 5730, 5740, 5750, 5760, 7000}
-)
+# JSON-RPC and EIP-1193 codes for a method the wallet does not have or support.
+# Only these, which guarantee nothing was sent, let a payment be sent another way.
+_METHOD_UNSUPPORTED_CODES = (-32601, -32004, 4200)
 # Error details from wallets that lack EIP-5792 without saying so with an error code.
 _FALLBACK_DETAILS = (
     "does not exist / is not available",
@@ -80,12 +76,15 @@ async def send_calls_sync(
     force_atomic: bool = False,
     polling_interval: float = POLLING_INTERVAL,
     timeout: float = SEND_CALLS_TIMEOUT,
+    valid_before: int | None = None,
 ) -> dict[str, Any]:
     """Send calls with EIP-5792 ``wallet_sendCalls`` and wait for the bundle's final status.
 
     With ``experimental_fallback``, a wallet without EIP-5792 sends a single call
-    with ``eth_sendTransaction`` instead. Returns the status with its ``receipts``
-    once it is confirmed (``200``) or failed (``>= 300``).
+    with ``eth_sendTransaction`` instead, bounded by ``valid_before`` when given.
+    Returns the status with its ``receipts`` once it is confirmed (``200``) or
+    failed (``>= 300``), plus the bundle's ``id`` and, on the fallback, its
+    ``transactionHash``.
     """
     params: dict[str, Any] = {
         "atomicRequired": force_atomic,
@@ -112,19 +111,51 @@ async def send_calls_sync(
                 "non-optional `capabilities` are not supported on fallback to "
                 "`eth_sendTransaction`."
             ) from error
-        call = {**params["calls"][0], **({"feeToken": fee_token} if fee_token else {})}
+        call = {
+            **params["calls"][0],
+            **({"feeToken": fee_token} if fee_token else {}),
+            **({"validBefore": hex(valid_before)} if valid_before is not None else {}),
+        }
         tx_hash = await _send_transaction(request, address, chain_id, call)
-        return await _wait(
-            lambda: _transaction_status(request, tx_hash),
+        return await wait_for_calls(
+            request,
             tx_hash,
-            polling_interval,
-            timeout,
             transaction_hash=tx_hash,
+            polling_interval=polling_interval,
+            timeout=timeout,
         )
     bundle_id = response if isinstance(response, str) else str(response["id"])
-    return await _wait(
+    return await wait_for_calls(
+        request, bundle_id, polling_interval=polling_interval, timeout=timeout
+    )
+
+
+async def wait_for_calls(
+    request: WalletRequest,
+    bundle_id: str,
+    *,
+    transaction_hash: str | None = None,
+    polling_interval: float = POLLING_INTERVAL,
+    timeout: float = SEND_CALLS_TIMEOUT,
+) -> dict[str, Any]:
+    """Wait for the final status of calls the wallet already sent, without sending again.
+
+    ``transaction_hash`` follows a transaction sent on the ``eth_sendTransaction``
+    fallback instead of a ``wallet_sendCalls`` bundle.
+    """
+    if transaction_hash is not None:
+        status = await _wait(
+            lambda: _transaction_status(request, transaction_hash),
+            bundle_id,
+            polling_interval,
+            timeout,
+            transaction_hash=transaction_hash,
+        )
+        return {**status, "id": bundle_id, "transactionHash": transaction_hash}
+    status = await _wait(
         lambda: _calls_status(request, bundle_id), bundle_id, polling_interval, timeout
     )
+    return {**status, "id": bundle_id}
 
 
 async def _wait(
@@ -182,8 +213,9 @@ async def _send_transaction(
     try:
         return await request("eth_sendTransaction", params)
     except Exception as error:
-        # Some wallets only serve the `wallet_` namespace.
-        if getattr(error, "code", None) not in (-32000, -32602, *_METHOD_UNSUPPORTED_CODES):
+        # Some wallets only serve the `wallet_` namespace. Only a definite refusal of
+        # the request retries: a generic error may come after the wallet sent it.
+        if getattr(error, "code", None) not in (-32602, *_METHOD_UNSUPPORTED_CODES):
             raise
         return await request("wallet_sendTransaction", params)
 
@@ -193,7 +225,6 @@ def _supports_fallback(error: Exception) -> bool:
     details = str(getattr(error, "message", error)).lower()
     return (
         code in _METHOD_UNSUPPORTED_CODES
-        or (code is not None and code not in _KNOWN_RPC_CODES)
         or details == "this request method is not supported"
         or any(fragment in details for fragment in _FALLBACK_DETAILS)
     )

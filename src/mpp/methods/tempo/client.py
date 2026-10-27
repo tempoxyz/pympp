@@ -28,6 +28,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
+from mpp.methods.tempo._wallet import SEND_CALLS_TIMEOUT
 from mpp.methods.tempo.account import JsonRpcAccount, WalletRequest
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 
@@ -54,9 +55,10 @@ EXPIRING_NONCE_KEY = (1 << 256) - 1  # U256::MAX
 EXPIRING_NONCE_VALID_BEFORE_SECS = 60
 FEE_PAYER_VALID_BEFORE_SECS = EXPIRING_NONCE_VALID_BEFORE_SECS  # Deprecated alias.
 # Remaining challenge validity an unsponsored push payment needs before the
-# wallet sends it: only a margin for presenting the credential. The 15s
-# MIN_REMAINING_VALIDITY_SECONDS floor applies only to fee-sponsored challenges.
-PUSH_MIN_REMAINING_VALIDITY_SECONDS = 2
+# wallet sends it: the wait for the sent calls to confirm, plus a margin for
+# presenting the credential. The 15s MIN_REMAINING_VALIDITY_SECONDS floor
+# applies only to fee-sponsored challenges.
+PUSH_MIN_REMAINING_VALIDITY_SECONDS = SEND_CALLS_TIMEOUT + 2
 # Tempo gas prices use attodollars (10^-18 USD) while TIP-20 fee tokens use
 # microdollars (10^-6 USD).
 ATTODOLLARS_PER_MICRODOLLAR = 10**12
@@ -123,6 +125,12 @@ class TempoMethod:
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
     _signing: dict[tuple[str, str], asyncio.Task[Credential]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    # Push payments a wallet sent whose outcome is not known yet, by payer and
+    # challenge ID: (bundle ID, fallback transaction hash, chain ID). A retry of
+    # the challenge follows the sent payment instead of sending another.
+    _pending_pushes: dict[tuple[str, str], tuple[str, str | None, int]] = field(
         default_factory=dict, init=False, repr=False
     )
 
@@ -223,6 +231,26 @@ class TempoMethod:
             except Exception:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
+
+    async def _gas_limit(
+        self, rpc_url: str, sender: str, currency: str, calls: Sequence[Call], splits: bool
+    ) -> int:
+        """Return the gas limit for transfer calls: the default, or the estimate if higher."""
+        gas_limit = DEFAULT_GAS_LIMIT
+        try:
+            if splits:
+                total_estimated = 0
+                for c in calls:
+                    total_estimated += await estimate_gas(rpc_url, sender, currency, c.data.hex())
+                gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls))
+            else:
+                estimated = await estimate_gas(
+                    rpc_url, sender, currency, "0x" + calls[0].data.hex()
+                )
+                gas_limit = max(gas_limit, estimated + 5_000)
+        except Exception:
+            pass
+        return gas_limit
 
     def _check_charge_policy(self, request: dict, expected_chain_id: int | None) -> None:
         """Reject a challenge whose chain, recipients, amount or split memos violate the policy.
@@ -432,9 +460,72 @@ class TempoMethod:
         from mpp.methods.tempo._wallet import (
             CallsStatusError,
             WaitForCallsStatusTimeoutError,
-            send_calls_sync,
+            wait_for_calls,
         )
 
+        wallet_request = self._wallet_request(wallet)
+        key = (wallet.address.lower(), challenge.id)
+        pending = self._pending_pushes.get(key)
+        if pending is None:
+            chain_id = await self._prepare_push(wallet, challenge, expected_chain_id, sponsored)
+        else:
+            chain_id = pending[2]
+        try:
+            if pending is not None:
+                # The wallet already sent this challenge's payment: follow it, never send again.
+                status = await wait_for_calls(
+                    wallet_request, pending[0], transaction_hash=pending[1]
+                )
+            else:
+                status = await self._send_push(
+                    wallet,
+                    wallet_request,
+                    challenge,
+                    chain_id,
+                    memo=memo,
+                    splits=splits,
+                    sponsored=sponsored,
+                )
+        except (CallsStatusError, WaitForCallsStatusTimeoutError) as error:
+            # The wallet already sent the payment, which may still settle.
+            self._pending_pushes[key] = (error.id, error.transaction_hash, chain_id)
+            raise PaymentOutcomeUnknownError(
+                challenge, error, transaction_hash=error.transaction_hash
+            ) from error
+        receipts = status["receipts"]
+        hashes = list(dict.fromkeys(str(r.get("transactionHash") or "").lower() for r in receipts))
+        if status["statusCode"] != 200:
+            self._pending_pushes.pop(key, None)
+            raise TransactionError(
+                f"Wallet payment failed with status {status['statusCode']}: {hashes}"
+            )
+        tx_hash = receipts[0].get("transactionHash") if len(hashes) == 1 else None
+        if not tx_hash:
+            # The wallet confirmed calls it sent, but no single transaction proves them.
+            self._pending_pushes[key] = (status["id"], status.get("transactionHash"), chain_id)
+            cause = TransactionError(
+                f"Wallet split the payment across transactions: {hashes}"
+                if len(hashes) > 1
+                else "No transaction receipt returned."
+            )
+            raise PaymentOutcomeUnknownError(
+                challenge, cause, transaction_hash=status.get("transactionHash")
+            ) from cause
+        self._pending_pushes.pop(key, None)
+        return Credential(
+            challenge=challenge.to_echo(),
+            payload={"type": "hash", "hash": tx_hash},
+            source=f"did:pkh:eip155:{chain_id}:{wallet.address}",
+        )
+
+    async def _prepare_push(
+        self,
+        wallet: JsonRpcAccount,
+        challenge: Challenge,
+        expected_chain_id: int | None,
+        sponsored: bool,
+    ) -> int:
+        """Check a push payment's time left and chain before the wallet sends it."""
         # A sent transfer cannot be recalled, so leave time to confirm it and present it.
         # Only a fee-sponsored challenge needs the sponsor's cosign floor.
         min_seconds = (
@@ -443,57 +534,72 @@ class TempoMethod:
         _assert_challenge_time_left(
             challenge.expires, "Push-mode", required=True, min_seconds=min_seconds
         )
-        request = challenge.request
         chain_id = await self._get_chain_id(self.rpc_url)
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
                 f"Chain ID mismatch: RPC returned {chain_id}, "
                 f"expected {expected_chain_id} from client policy"
             )
+        if wallet.request is not None:
+            # The wallet sends on its own connection, which must be on the same chain.
+            wallet_chain_id = int(str(await wallet.request("eth_chainId", [])), 16)
+            if wallet_chain_id != chain_id:
+                raise TransactionError(
+                    f"Chain ID mismatch: wallet is on {wallet_chain_id}, expected {chain_id}"
+                )
+        return chain_id
+
+    async def _send_push(
+        self,
+        wallet: JsonRpcAccount,
+        wallet_request: WalletRequest,
+        challenge: Challenge,
+        chain_id: int,
+        *,
+        memo: str,
+        splits: list[dict] | None,
+        sponsored: bool,
+    ) -> dict:
+        """Have the wallet send a charge's transfer calls and wait for their status."""
+        from mpp.methods.tempo._wallet import send_calls_sync
+
+        request = challenge.request
         calls = self._transfer_calls(
             request["amount"], request["currency"], request["recipient"], memo, splits
         )
         capabilities = None
         if request["currency"].lower() in (MACH.lower(), OUSD.lower()):
+            # Pick a fee token that covers the fee at the current gas price.
+            gas_price = int(await _rpc_call(self.rpc_url, "eth_gasPrice", []), 16)
+            gas_limit = await self._gas_limit(
+                self.rpc_url, wallet.address, request["currency"], calls, splits=bool(splits)
+            )
             fee_token = await self._resolve_supported_fee_token(
-                account=wallet.address, chain_id=chain_id, rpc_url=self.rpc_url, required_balance=1
+                account=wallet.address,
+                chain_id=chain_id,
+                rpc_url=self.rpc_url,
+                required_balance=_fee_balance(gas_limit, gas_price),
             )
             capabilities = {"feeToken": fee_token}
         # The RPC round trips above take time too: check again just before paying.
         _assert_challenge_time_left(
-            challenge.expires, "Push-mode", required=True, min_seconds=min_seconds
+            challenge.expires,
+            "Push-mode",
+            required=True,
+            min_seconds=(
+                MIN_REMAINING_VALIDITY_SECONDS if sponsored else PUSH_MIN_REMAINING_VALIDITY_SECONDS
+            ),
         )
-        try:
-            status = await send_calls_sync(
-                self._wallet_request(wallet),
-                address=wallet.address,
-                chain_id=chain_id,
-                calls=calls,
-                capabilities=capabilities,
-                experimental_fallback=len(calls) == 1,
-                force_atomic=len(calls) > 1,
-            )
-        except (CallsStatusError, WaitForCallsStatusTimeoutError) as error:
-            # The wallet already sent the payment, which may still settle.
-            raise PaymentOutcomeUnknownError(
-                challenge, error, transaction_hash=error.transaction_hash
-            ) from error
-        receipts = status["receipts"]
-        hashes = list(dict.fromkeys(str(r.get("transactionHash") or "").lower() for r in receipts))
-        if status["statusCode"] != 200:
-            raise TransactionError(
-                f"Wallet payment failed with status {status['statusCode']}: {hashes}"
-            )
-        if len(hashes) > 1:
-            # A hash credential proves one transaction, which must carry every transfer.
-            raise TransactionError(f"Wallet split the payment across transactions: {hashes}")
-        tx_hash = receipts[0].get("transactionHash") if receipts else None
-        if not tx_hash:
-            raise TransactionError("No transaction receipt returned.")
-        return Credential(
-            challenge=challenge.to_echo(),
-            payload={"type": "hash", "hash": tx_hash},
-            source=f"did:pkh:eip155:{chain_id}:{wallet.address}",
+        return await send_calls_sync(
+            wallet_request,
+            address=wallet.address,
+            chain_id=chain_id,
+            calls=calls,
+            capabilities=capabilities,
+            experimental_fallback=len(calls) == 1,
+            force_atomic=len(calls) > 1,
+            # The fallback transaction can carry the challenge's deadline.
+            valid_before=_expiring_valid_before(challenge.expires),
         )
 
     def _wallet_request(self, wallet: JsonRpcAccount) -> WalletRequest:
@@ -537,9 +643,15 @@ class TempoMethod:
             or not fields[4]
             or not isinstance(fields[-1], bytes)
             or not fields[-1]
+            # A fee payer slot means a co-signature still changes the hash.
+            or fields[11] != b""
         ):
             return None
-        return "0x" + keccak(tx_bytes).hex()
+        from mpp.methods.tempo.intents import _canonical_raw_transaction
+
+        # Nodes hash the transaction with 27/28 recovery IDs.
+        canonical = _canonical_raw_transaction("0x" + tx_bytes.hex())
+        return "0x" + keccak(bytes.fromhex(canonical.removeprefix("0x"))).hex()
 
     async def _build_tempo_transfer(
         self,
@@ -591,7 +703,6 @@ class TempoMethod:
         resolved_rpc = rpc_url or self.rpc_url
 
         calls_tuple = self._transfer_calls(amount, currency, recipient, memo, splits)
-        gas_estimate_data = None if splits else "0x" + calls_tuple[0].data.hex()
 
         # When using an access key, the root account (smart wallet) is the
         # sender, not the access key address.
@@ -611,35 +722,19 @@ class TempoMethod:
             # Keep sponsored envelopes inside the server's default policy.
             max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
 
-        gas_limit = DEFAULT_GAS_LIMIT
-        try:
-            if splits:
-                total_estimated = 0
-                for c in calls_tuple:
-                    total_estimated += await estimate_gas(
-                        resolved_rpc, sender, currency, c.data.hex()
-                    )
-                gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls_tuple))
-            elif gas_estimate_data is not None:
-                estimated = await estimate_gas(resolved_rpc, sender, currency, gas_estimate_data)
-                gas_limit = max(gas_limit, estimated + 5_000)
-        except Exception:
-            pass
+        gas_limit = await self._gas_limit(
+            resolved_rpc, sender, currency, calls_tuple, splits=bool(splits)
+        )
 
         fee_token: str | None = None
         if not awaiting_fee_payer:
             fee_token = currency
             if currency.lower() in (MACH.lower(), OUSD.lower()):
-                required_balance = max(
-                    1,
-                    (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1)
-                    // ATTODOLLARS_PER_MICRODOLLAR,
-                )
                 fee_token = await self._resolve_supported_fee_token(
                     account=sender,
                     chain_id=chain_id,
                     rpc_url=resolved_rpc,
-                    required_balance=required_balance,
+                    required_balance=_fee_balance(gas_limit, gas_price),
                 )
 
         tx = TempoTransaction.create(
@@ -660,8 +755,15 @@ class TempoMethod:
             raw_tx = await self._wallet_request(self.account)(
                 "eth_signTransaction", [_transaction_request(tx, sender)]
             )
+            if not isinstance(raw_tx, str):
+                raise TransactionError("Wallet did not return a signed Tempo transaction")
+            from mpp.methods.tempo.intents import _canonical_raw_transaction
+
+            # Nodes hash the transaction with 27/28 recovery IDs; so must the credential.
+            raw_tx = _canonical_raw_transaction(raw_tx)
             if awaiting_fee_payer:
                 raw_tx = _fee_payer_envelope(raw_tx, sender)
+            _check_wallet_transaction(raw_tx, sender, chain_id, sponsored=awaiting_fee_payer)
             return raw_tx, chain_id
 
         if self.root_account:
@@ -795,6 +897,43 @@ def _fee_payer_envelope(raw_tx: str, sender: str) -> str:
         raise TransactionError("Wallet did not return a transaction awaiting a fee payer")
     fields[11] = bytes.fromhex(sender.removeprefix("0x"))
     return "0x78" + rlp.encode(fields).hex()
+
+
+def _fee_balance(gas_limit: int, gas_price: int) -> int:
+    """Return the fee-token balance, in base units, that pays ``gas_limit`` at ``gas_price``."""
+    return max(
+        1, (gas_limit * gas_price + ATTODOLLARS_PER_MICRODOLLAR - 1) // ATTODOLLARS_PER_MICRODOLLAR
+    )
+
+
+def _check_wallet_transaction(raw_tx: str, sender: str, chain_id: int, *, sponsored: bool) -> None:
+    """Refuse a wallet-signed transaction for another chain or sender, or one that isn't final.
+
+    An unsponsored transaction must have an empty fee payer slot, so its hash is final.
+    """
+    import rlp
+
+    from mpp.methods.tempo.intents import _transaction_sender
+
+    tx_type = b""
+    try:
+        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
+        tx_type = tx_bytes[:1]
+        fields = rlp.decode(tx_bytes[1:]) if tx_type in (b"\x76", b"\x78") else None
+    except (ValueError, rlp.DecodingError):
+        fields = None
+    if (
+        not isinstance(fields, list)
+        or len(fields) not in (14, 15)
+        or (tx_type == b"\x78") != sponsored
+        or (not sponsored and fields[11] != b"")
+    ):
+        raise TransactionError("Wallet did not return a signed Tempo transaction")
+    signed_chain_id = int.from_bytes(fields[0], "big") if isinstance(fields[0], bytes) else None
+    if signed_chain_id != chain_id:
+        raise TransactionError(f"Wallet signed for chain {signed_chain_id}, expected {chain_id}")
+    if (_transaction_sender(raw_tx) or "").lower() != sender.lower():
+        raise TransactionError("Wallet signed the transaction for another sender")
 
 
 def _assert_challenge_time_left(
