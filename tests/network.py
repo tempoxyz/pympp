@@ -4,7 +4,8 @@ Mirrors mppx's `test/config.ts`. `TEMPO_NETWORK` selects the network:
 
 - `none` (default): pure tests only; `integration` tests are skipped.
 - `localnet`: the Docker Tempo localnet from docker-compose.yml
-  (`make node`), at http://localhost:8545 unless `TEMPO_RPC_URL` says otherwise.
+  (`make node`), at http://localhost:8545 (port: `TEMPO_LOCALNET_PORT`) unless
+  `TEMPO_RPC_URL` says otherwise.
 - `moderato`: the public Moderato testnet.
 
 `TEMPO_RPC_URL` overrides the network's RPC URL. Set alone, as before
@@ -23,7 +24,7 @@ from mpp.methods.tempo._defaults import TESTNET_RPC_URL
 
 TempoNetwork = Literal["localnet", "moderato", "none"]
 
-LOCALNET_RPC_URL = "http://localhost:8545"
+LOCALNET_RPC_URL = f"http://localhost:{os.environ.get('TEMPO_LOCALNET_PORT') or 8545}"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 

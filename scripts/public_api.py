@@ -126,7 +126,12 @@ def fmt_value(value: Any) -> str:
         isinstance(value, tuple | frozenset | list | dict) and len(text) <= 200
     ):
         return f" = {text}"
-    if type(value).__module__ in ("typing", "types", "typing_extensions"):
+    # types.GenericAlias also covers collections.abc.Callable[...] aliases.
+    if isinstance(value, types.GenericAlias) or type(value).__module__ in (
+        "typing",
+        "types",
+        "typing_extensions",
+    ):
         return f" = {text}"
     return f": {fmt_type(type(value))}"
 
@@ -186,6 +191,9 @@ def render_class(name: str, cls: type, indent: str) -> list[str]:
         for member in cls:
             lines.append(f"{inner}{member.name} = {stable_repr(member.value)}")
     else:
+        optional = sorted(getattr(cls, "__optional_keys__", ()))  # TypedDict, with inherited
+        if optional:
+            lines.append(f"{inner}optional keys: {', '.join(optional)}")
         for attr, annotation in annotations.items():
             if not attr.startswith("_"):
                 value = fmt_value(own[attr]).removeprefix(":") if attr in own else ""
@@ -249,6 +257,11 @@ def dump() -> str:
 
 
 def main() -> int:
+    if sys.version_info[:2] != (3, 12):
+        sys.exit(
+            "The snapshot's typing reprs depend on the Python version and CI uses 3.12: "
+            "run `make api` or `make api-check`."
+        )
     parser = argparse.ArgumentParser(description="Dump or check the public API snapshot.")
     parser.add_argument("--check", action="store_true", help="fail if the snapshot is stale")
     args = parser.parse_args()

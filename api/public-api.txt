@@ -279,10 +279,10 @@ module mpp.events
         credential: Credential
         receipt: Receipt
     EventPayload = mpp.events.ClientChallengeReceivedPayload | mpp.events.ClientCredentialCreatedPayload | mpp.events.ClientPaymentResponsePayload | mpp.events.ClientPaymentFailedPayload | mpp.events.ServerChallengeCreatedPayload | mpp.events.ServerPaymentFailedPayload | mpp.events.ServerPaymentSuccessPayload | dict[str, typing.Any]
-    EventHandler: collections.abc._CallableGenericAlias
-    WildcardEventHandler: collections.abc._CallableGenericAlias
-    AnyEventHandler: collections.abc._CallableGenericAlias
-    Unsubscribe: collections.abc._CallableGenericAlias
+    EventHandler = collections.abc.Callable[[typing.Any], typing.Any | collections.abc.Awaitable[typing.Any]]
+    WildcardEventHandler = collections.abc.Callable[['PaymentEvent'], typing.Any | collections.abc.Awaitable[typing.Any]]
+    AnyEventHandler = collections.abc.Callable[[typing.Any], typing.Any | collections.abc.Awaitable[typing.Any]]
+    Unsubscribe = collections.abc.Callable[[], None]
     class PaymentEvent
         @dataclass(frozen=True, slots=True)
         field name: str
@@ -404,8 +404,8 @@ module mpp.extensions.mcp.verify
     async def verify_or_challenge(handler: ComposedHandler, *, tool: str, meta: dict[str, Any] | None = None) -> list[MCPChallenge] | tuple[MCPCredential, MCPReceipt]
 
 module mpp.methods
-    CanOfferFn: collections.abc._CallableGenericAlias
-    PaymentSuccessHandler: collections.abc._CallableGenericAlias
+    CanOfferFn = collections.abc.Callable[[dict[str, typing.Any]], bool | collections.abc.Awaitable[bool]]
+    PaymentSuccessHandler = collections.abc.Callable[[mpp.events.ServerPaymentSuccessPayload], None | collections.abc.Awaitable[None]]
     RequestT = ~RequestT
     PayloadT = ~PayloadT
     class Method(typing.Generic[~RequestT, ~PayloadT])
@@ -436,7 +436,7 @@ module mpp.methods.evm
     AuthorizationPayload -> mpp.methods.evm.intents.AuthorizationPayload
     ChargeIntent -> mpp.methods.evm.intents.ChargeIntent
     ChargeRequest -> mpp.methods.evm.intents.ChargeRequest
-    SettleFn: collections.abc._CallableGenericAlias
+    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | collections.abc.Awaitable[str]]
     charge: mpp.methods.Method
     def challenge_hash(challenge_id: str, realm: str) -> str
 
@@ -476,7 +476,7 @@ module mpp.methods.evm.intents
         field payload: dict[str, Any]
         field request: dict[str, Any]
         field source: str
-    SettleFn: collections.abc._CallableGenericAlias
+    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | collections.abc.Awaitable[str]]
     class AuthorizationPayload(pydantic.main.BaseModel)
         field type: Literal['authorization']
         field from_: str (alias 'from')
@@ -540,7 +540,7 @@ module mpp.methods.stripe.client
         field network_id: str
         field payment_method_types: list[str]
         field payment_method: str
-    CreateTokenFn: collections.abc._CallableGenericAlias
+    CreateTokenFn = collections.abc.Callable[[mpp.methods.stripe.client.OnChallengeParameters], collections.abc.Awaitable[str]]
     class StripeMethod
         @dataclass(frozen=False, slots=False)
         field name: str = 'stripe'
@@ -563,6 +563,7 @@ module mpp.methods.stripe.intents
 
 module mpp.methods.stripe.machine_payments
     class DepositAddresses(TypedDict)
+        optional keys: tempo
         tempo: str
     class SptPayments
         def __init__(self, network_id: str, client: StripeClient, metadata: dict[str, str] | None) -> None
@@ -576,7 +577,7 @@ module mpp.methods.stripe.machine_payments
     def create(*, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None) -> MachinePayments
 
 module mpp.methods.stripe.payment_intent_method
-    RecordPayment: collections.abc._CallableGenericAlias
+    RecordPayment = collections.abc.Callable[[mpp.Credential, dict[str, typing.Any], mpp.Receipt, dict[str, typing.Any], dict[str, str]], collections.abc.Awaitable[None]]
     def with_payment_intent_input(method: ServerMethod, record_payment: RecordPayment, configured_metadata: Mapping[str, str] | None = None) -> ServerMethod
 
 module mpp.methods.stripe.payment_intent_options
@@ -587,6 +588,7 @@ module mpp.methods.stripe.payment_intent_options
     class Hooks(TypedDict)
         inputs: HookInputs
     class PaymentIntentOptions(TypedDict)
+        optional keys: customer, hooks, metadata, receipt_email
         customer: str
         receipt_email: str
         metadata: dict[str, str]
@@ -660,7 +662,7 @@ module mpp.methods.tempo
     ChargeIntent -> mpp.methods.tempo.intents.ChargeIntent
     Transfer -> mpp.methods.tempo.intents.Transfer
     SenderValidation -> mpp.methods.tempo.intents.SenderValidation
-    ValidateSender: collections.abc._CallableGenericAlias
+    ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
     get_transfers -> mpp.methods.tempo.intents.get_transfers
     Relay -> mpp.methods.tempo.relay.Relay
     RelayErrorCode = typing.Literal['already_used', 'broadcast_failed', 'expired', 'invalid_payment', 'insufficient_funds', 'policy_denied', 'screen_rejected', 'simulation_failed', 'temporarily_unavailable', 'unsupported', 'unknown']
@@ -780,7 +782,7 @@ module mpp.methods.tempo.intents
         field expected_sender: str
         field sender: str
         field source: str | None
-    ValidateSender: collections.abc._CallableGenericAlias
+    ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
     class ChargeIntent
         def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None) -> None
         async def aclose(self) -> None
@@ -1002,8 +1004,8 @@ module mpp.server.method
         field kw_only request: dict[str, Any]
         field kw_only challenge: Challenge
         field kw_only operation: Literal['broadcast', 'validate'] = 'validate'
-    VerifyFn: collections.abc._CallableGenericAlias
-    ValidateFn: collections.abc._CallableGenericAlias
+    VerifyFn = collections.abc.Callable[[mpp.server.method.VerifyContext], collections.abc.Awaitable['Receipt']]
+    ValidateFn = collections.abc.Callable[[mpp.server.method.ValidateContext], collections.abc.Awaitable[mpp._validation.Validation]]
     class ServerMethod
         @dataclass(frozen=True, slots=True)
         field kw_only method: Method[Any, Any]

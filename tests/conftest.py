@@ -109,8 +109,11 @@ def _fund_account(rpc_url: str, address: str, currency: str) -> None:
 
 
 def _funded_account(rpc_url: str, currency: str, key_var: str) -> TempoAccount:
-    """A pre-funded account from `key_var` when set, else a fresh one from the faucet."""
-    if os.environ.get(key_var):
+    """A pre-funded account from `key_var` when set, else a fresh one from the faucet.
+
+    A fresh localnet holds no funds for configured (Moderato) keys, so it always uses the faucet.
+    """
+    if os.environ.get(key_var) and not TEMPO.is_localnet:
         return TempoAccount.from_env(key_var)
     account = TempoAccount.from_key("0x" + os.urandom(32).hex())
     _fund_account(rpc_url, account.address, currency)
