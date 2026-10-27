@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
+import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
@@ -174,6 +177,24 @@ async def test_x402_credential_goes_to_the_official_middleware() -> None:
     assert "payment-receipt" not in response.headers
     assert facilitator.calls == ["verify", "settle"]
     assert facilitator.supported_calls == 1
+
+
+async def test_facilitator_sync_runs_once_off_the_event_loop() -> None:
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+
+    class SlowFacilitator(Facilitator):
+        def get_supported(self) -> SupportedResponse:
+            threads.append(threading.get_ident())
+            time.sleep(0.05)
+            return super().get_supported()
+
+    facilitator = SlowFacilitator()
+    async with client(create_app(facilitator)) as http:
+        responses = await asyncio.gather(*(http.get("/paid") for _ in range(3)))
+    assert [response.status_code for response in responses] == [402, 402, 402]
+    assert facilitator.supported_calls == 1
+    assert threads and loop_thread not in threads
 
 
 async def test_rejects_mpp_and_x402_credentials_together() -> None:

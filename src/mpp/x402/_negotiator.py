@@ -8,6 +8,7 @@ MPP challenge to unpaid x402 responses.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import re
@@ -98,6 +99,7 @@ class Negotiator:
         if paywall_provider is not None:
             self.http_server.register_paywall_provider(paywall_provider)
         self._initialized = False
+        self._initialize_lock = asyncio.Lock()
 
     async def negotiate(self, request: Request, context: HTTPRequestContext) -> Negotiation:
         if not self.http_server.requires_payment(context):
@@ -114,10 +116,7 @@ class Negotiator:
                 ),
             )
         try:
-            if not self._initialized:
-                # Retried on the next protected request when it fails.
-                self.http_server.initialize()
-                self._initialized = True
+            await self._initialize()
             if x402_credential(request):
                 return Negotiation("x402")
             result = await self.http_server.process_http_request(
@@ -139,6 +138,17 @@ class Negotiator:
             return Negotiation(
                 "handled", Response.json({"error": str(facilitator_error)}, status=502)
             )
+
+    async def _initialize(self) -> None:
+        # x402's initialize fetches facilitator support synchronously: run it off
+        # the event loop, once for concurrent requests, and retry on the next
+        # protected request when it fails.
+        if self._initialized:
+            return
+        async with self._initialize_lock:
+            if not self._initialized:
+                await asyncio.to_thread(self.http_server.initialize)
+                self._initialized = True
 
     async def _pay(
         self,
