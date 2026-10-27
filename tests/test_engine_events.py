@@ -251,7 +251,9 @@ class TestFailureEvents:
         assert recorder.calls == 0
 
     @pytest.mark.xfail(
-        strict=True,
+        # Not strict: json.loads hits the recursion limit at this depth on
+        # Python 3.12 and 3.13 only; 3.11 and 3.14 parse it.
+        strict=False,
         raises=RecursionError,
         reason=(
             "BUG: a 64 KiB Authorization holding deeply nested JSON raises RecursionError "

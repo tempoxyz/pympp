@@ -153,7 +153,9 @@ class TestParsersOnlyRaiseParseError:
             assert_only_parse_error(parse_www_authenticate, field)
 
     @pytest.mark.xfail(
-        strict=True,
+        # Not strict: json.loads hits the recursion limit at this depth on
+        # Python 3.12 and 3.13 only; 3.11 and 3.14 parse it.
+        strict=False,
         raises=RecursionError,
         reason=(
             "BUG: _b64_decode catches ValueError only; a 64 KiB Authorization holding "
