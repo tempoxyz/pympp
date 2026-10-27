@@ -372,7 +372,7 @@ class TestComposeSelectsOneOffer:
                 c["amount"],
                 c["currency"],
                 c["recipient"],
-                str(c["meta"] or None),
+                json.dumps(c["meta"] or None, sort_keys=True),
             ),
         ),
         data=st.data(),

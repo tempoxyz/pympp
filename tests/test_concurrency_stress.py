@@ -104,8 +104,15 @@ async def stores(request: pytest.FixtureRequest, tmp_path: Any) -> AsyncIterator
         async def make() -> Any:
             # redis-py's default pool raises past 100 connections instead of waiting.
             pool = BlockingConnectionPool.from_url(url, decode_responses=True)
-            client = Redis(connection_pool=pool)
-            cleanups.append(client.aclose)
+            # from_pool hands the pool to the client, so aclose() disconnects it too.
+            client = Redis.from_pool(pool)
+
+            async def close() -> None:
+                async for key in client.scan_iter(match=f"{prefix}*"):
+                    await client.delete(key)
+                await client.aclose()
+
+            cleanups.append(close)
             return RedisStore(client, key_prefix=prefix)
 
     yield make
