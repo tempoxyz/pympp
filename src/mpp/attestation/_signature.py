@@ -278,7 +278,9 @@ def _request_token(request: Request) -> str:
 async def _try_claim(store: ExpiringStore, key: str, token: str, expires: int) -> bool:
     if expires <= time.time():
         return False
-    if await store.put_if_absent_until(key, token, expires):
+    # Hold the claim CLOCK_SKEW past expiry, so a verifier whose clock lags the
+    # store's still finds the nonce taken while it would accept the signature.
+    if await store.put_if_absent_until(key, token, expires + CLOCK_SKEW):
         return True
     stored = await store.get(key)
     return stored == token or stored == token.encode()

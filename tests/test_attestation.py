@@ -419,6 +419,25 @@ class TestServer:
         assert (await handler(signed)).status == 402
         assert (await handler(_copy(signed))).status == 401
 
+    async def test_nonce_claim_outlives_expiry_by_clock_skew(self) -> None:
+        key = Ed25519PrivateKey.generate()
+        deadlines: list[float] = []
+
+        class Recording(MemoryStore):
+            async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+                deadlines.append(expires_at)
+                return await super().put_if_absent_until(key, value, expires_at)
+
+        verifier = tap.verifier(key_resolver=_resolver(key), nonce_store=Recording())
+        request = await _signed(tap.signer(intent="payment", key=key, key_id="k"))
+
+        result = await verifier.verify(request)
+
+        parsed = _parse(request.headers, ["agent-payer-auth"])
+        assert isinstance(result, Verified)
+        assert isinstance(parsed, tuple)
+        assert deadlines == [parsed[0].expires + _signature.CLOCK_SKEW]
+
     async def test_composed_servers_with_separate_nonce_stores_each_claim(self) -> None:
         key = Ed25519PrivateKey.generate()
         servers = [
