@@ -15,6 +15,9 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+# Base-unit amounts are uint256 on-chain: 2**256 - 1 has 78 digits.
+_MAX_DIGITS = 78
+
 
 def parse_units(value: str, decimals: int) -> int:
     """Convert a human-readable decimal string to base units.
@@ -38,15 +41,26 @@ def parse_units(value: str, decimals: int) -> int:
     assert isinstance(exponent, int)
     coefficient = int("".join(map(str, digits)))
     shift = exponent + decimals
+    # Bound the shift before any power of ten: the exponent is unbounded, and
+    # 10**shift for an input like "1e-1000000000" would take minutes to build.
+    if coefficient == 0:
+        return 0
     if shift >= 0:
+        if len(digits) + shift > _MAX_DIGITS:
+            raise ValueError(f"Invalid amount: {value!r} exceeds {_MAX_DIGITS} digits")
         return coefficient * 10**shift
 
+    if -shift > len(digits):
+        # coefficient < 10**len(digits) <= 10**-shift, so the remainder is nonzero.
+        raise _fractional(value, decimals)
     whole, fraction = divmod(coefficient, 10**-shift)
     if fraction:
-        raise ValueError(
-            f"Amount {value!r} with {decimals} decimals produces fractional base units"
-        )
+        raise _fractional(value, decimals)
     return whole
+
+
+def _fractional(value: str, decimals: int) -> ValueError:
+    return ValueError(f"Amount {value!r} with {decimals} decimals produces fractional base units")
 
 
 def _parse_decimal(value: str) -> Decimal:

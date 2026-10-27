@@ -121,3 +121,22 @@ class TestParseUnitsEdgeCases:
 
     def test_whitespace_stripped(self) -> None:
         assert parse_units(" 1.5 ", 6) == 1_500_000
+
+    def test_tiny_exponent_rejected_without_huge_power(self) -> None:
+        with pytest.raises(ValueError, match="fractional base units"):
+            parse_units("1e-1000000000", 6)
+
+    def test_huge_exponent_rejected_without_huge_power(self) -> None:
+        with pytest.raises(ValueError, match="Invalid amount"):
+            parse_units("1e1000000000", 6)
+
+    def test_zero_with_extreme_exponent(self) -> None:
+        assert parse_units("0e-1000000000", 6) == 0
+        assert parse_units("0e1000000000", 6) == 0
+
+    def test_uint256_bound(self) -> None:
+        max_uint256 = 2**256 - 1
+        assert parse_units(str(max_uint256), 0) == max_uint256
+        assert parse_units("1e77", 0) == 10**77
+        with pytest.raises(ValueError, match="Invalid amount"):
+            parse_units("1e78", 0)
