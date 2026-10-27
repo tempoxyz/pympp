@@ -621,6 +621,8 @@ def _check_recipient_addresses(request: dict) -> None:
         raise ValueError(f"Challenge recipient is not a valid address: {recipient!r}")
     method_details = request.get("methodDetails")
     splits = method_details.get("splits") if isinstance(method_details, dict) else None
+    if splits is not None and not isinstance(splits, list):
+        raise ValueError("Challenge splits must be a list")
     for split in splits or ():
         split_recipient = split.get("recipient") if isinstance(split, dict) else None
         if not isinstance(split_recipient, str) or _ADDRESS_RE.fullmatch(split_recipient) is None:

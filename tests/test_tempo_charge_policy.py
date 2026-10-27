@@ -361,6 +361,7 @@ OVERLONG_RECIPIENT = "0x" + RECIPIENT[2:].lower().zfill(64) + f"{10**30:064x}"
             id="split",
         ),
         pytest.param(make_challenge(amount="1", recipient="0x1234"), id="short"),
+        pytest.param(make_challenge(amount="1", splits=True), id="splits-not-a-list"),  # type: ignore[arg-type]
     ],
 )
 async def test_malformed_recipient_is_never_signed(challenge: Challenge) -> None:
@@ -371,7 +372,7 @@ async def test_malformed_recipient_is_never_signed(challenge: Challenge) -> None
         patch("mpp.methods.tempo.client._rpc_call", AsyncMock()) as rpc,
         patch("pytempo.TempoTransaction.create") as create,
     ):
-        with pytest.raises(ValueError, match="not a valid address"):
+        with pytest.raises(ValueError, match="not a valid address|must be a list"):
             await method.create_credential(challenge)
 
     rpc.assert_not_called()
