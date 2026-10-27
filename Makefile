@@ -63,7 +63,7 @@ MPP_TOOLS_VECTORS ?=
 fuzz:
 	uv run python fuzz/seeds.py $(if $(MPP_TOOLS_VECTORS),--vectors $(MPP_TOOLS_VECTORS))
 	@failed=; for target in $(FUZZ_TARGETS); do \
-		mkdir -p fuzz/corpus/$$target fuzz/crashes/$$target; \
+		mkdir -p fuzz/corpus/$$target fuzz/crashes/$$target fuzz/seeds/$$target; \
 		echo "Fuzzing $$target for $(FUZZ_SECONDS)s"; \
 		$(ATHERIS) python fuzz/$$target.py fuzz/corpus/$$target fuzz/seeds/$$target \
 			-dict=fuzz/json.dict -max_total_time=$(FUZZ_SECONDS) -max_len=$(FUZZ_MAX_LEN) -timeout=10 \

@@ -70,9 +70,10 @@ jobs:
           persist-credentials: false
           sparse-checkout: conformance/vectors
 
-      # A new key every run saves the grown corpus; restore-keys picks up the last one.
-      - name: Cache corpus
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # restore-keys picks up the last corpus; the save below uses a new key
+      # every run, even when fuzzing crashed, so the corpus keeps growing.
+      - name: Restore corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -84,8 +85,18 @@ jobs:
           SECONDS_PER_TARGET: ${{ inputs.seconds || '900' }}
         run: |
           set -o pipefail
+          case "$SECONDS_PER_TARGET" in
+            '' | *[!0-9]*) echo "seconds must be a whole number: $SECONDS_PER_TARGET" >&2; exit 1 ;;
+          esac
           make fuzz FUZZ_TARGETS="$TARGET" FUZZ_SECONDS="$SECONDS_PER_TARGET" \
             MPP_TOOLS_VECTORS=mpp-tools/conformance/vectors 2>&1 | tee "$RUNNER_TEMP/fuzz.log"
+
+      - name: Save corpus
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
 
       - name: Summarize crash
         if: failure()

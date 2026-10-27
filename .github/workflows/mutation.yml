@@ -66,6 +66,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -o pipefail
           mutants=$(uv run python scripts/mutation.py changed "$BASE_SHA" | tr '\n' ' ')
           echo "Mutants: ${mutants:-none}"
           echo "MUTANTS=$mutants" >> "$GITHUB_ENV"

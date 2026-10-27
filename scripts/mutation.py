@@ -37,9 +37,24 @@ def changed_lines(base: str, path: str) -> set[int]:
     lines: set[int] = set()
     for match in HUNK_RE.finditer(diff):
         start, count = int(match[1]), int(match[2] or 1)
-        # A pure deletion (count 0) marks the line it was removed before.
-        lines.update(range(start, start + max(count, 1)))
+        # A pure deletion (count 0) starts after line ``start``: mark the lines on
+        # both sides, so deleting a function's leading decorator marks its def.
+        lines.update(range(start, start + max(count, 2)))
     return lines
+
+
+def mutable(function: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Whether mutmut generates mutants for ``function``.
+
+    mutmut 3.8 skips decorated functions, except ones decorated only with a bare
+    ``@staticmethod`` or ``@classmethod``.
+    """
+    decorators = function.decorator_list
+    return not decorators or (
+        len(decorators) == 1
+        and isinstance(decorators[0], ast.Name)
+        and decorators[0].id in ("staticmethod", "classmethod")
+    )
 
 
 def function_globs(path: str, lines: set[int]) -> list[str]:
@@ -63,6 +78,8 @@ def function_globs(path: str, lines: set[int]) -> list[str]:
         else:
             continue
         for mangled, function in functions:
+            if not mutable(function):
+                continue
             start = min([function.lineno, *(d.lineno for d in function.decorator_list)])
             if lines & set(range(start, (function.end_lineno or start) + 1)):
                 globs.append(f"{module}.{mangled}__mutmut_*")
