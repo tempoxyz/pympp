@@ -42,7 +42,7 @@ def challenge(currency: str = CURRENCY) -> Challenge:
 
 async def sign(
     auto_swap: bool | AutoSwap,
-    balances: dict[str, int],
+    balances: dict[str, int | Callable[[], int]],
     quotes: dict[str, int | Exception | Callable[[int], int]],
     *,
     chain_id: int = CHAIN_ID,
@@ -84,7 +84,8 @@ async def sign(
 
     async def fake_balance(_url: str, token: str, address: str) -> int:
         assert address == ACCOUNT.address
-        return lowered.get(token.lower(), 0)
+        balance = lowered.get(token.lower(), 0)
+        return balance() if callable(balance) else balance
 
     with (
         patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
@@ -93,8 +94,9 @@ async def sign(
     ):
         credential = await method.create_credential(challenge(currency))
     # The first quote asks for the payer's shortfall in the charge currency.
-    shortfall = AMOUNT - lowered.get(currency.lower(), 0)
-    assert quoted_amounts[:1] in ([], [shortfall])
+    held = lowered.get(currency.lower(), 0)
+    if not callable(held):
+        assert quoted_amounts[:1] in ([], [AMOUNT - held])
     fields = rlp.decode(bytes.fromhex(credential.payload["signature"][2:])[1:])
     if signed_fields is not None:
         signed_fields.extend(fields)
@@ -289,6 +291,29 @@ async def test_fee_headroom_swap_never_buys_more_than_the_charge() -> None:
     request = ChargeRequest(amount=str(AMOUNT), currency=USDC, recipient=RECIPIENT)
     normalized = [(to, value, data.removeprefix("0x")) for to, value, data in calls]
     assert len(_validate_normalized_calls(normalized, request)) == 1
+
+
+@pytest.mark.asyncio
+async def test_fee_headroom_swap_fails_locally_when_the_held_currency_cannot_pay_the_fee() -> None:
+    # The payer holds less pathUSD than the fee when the fee swap is built, so buying the
+    # fee would make the swap output exceed the charge. The client fails before signing,
+    # even when a later balance read sees enough pathUSD for the fee.
+    reads = iter([FEE // 2, FEE // 2, FEE // 2])
+
+    def path_usd() -> int:
+        return next(reads, 2 * FEE)
+
+    def one_to_one(amount: int) -> int:
+        return amount
+
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await sign(
+            True,
+            {PATH_USD: path_usd, USDC: 2_000_000},
+            {USDC: one_to_one},
+            chain_id=TESTNET_CHAIN_ID,
+            currency=PATH_USD,
+        )
 
 
 @pytest.mark.asyncio

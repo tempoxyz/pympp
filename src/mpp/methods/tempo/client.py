@@ -654,6 +654,7 @@ class TempoMethod:
 
         transfer_calls = calls_tuple
         swapping = False
+        swap_calls: list[tuple[str, str]] = []
         swap_spent: dict[str, int] = {}
         if self.auto_swap is not None:
             swap_calls, swap_spent = await self._find_swap_calls(
@@ -777,6 +778,13 @@ class TempoMethod:
                             required_balance=required_balance,
                             reserved=swap_spent,
                         )
+
+        # The swap's amountOut is its third word. The server rejects an output above
+        # the charge, so a fee the held currency cannot pay fails before signing.
+        if swap_calls and int(swap_calls[-1][1][138:202], 16) > int(amount):
+            raise TransactionError(
+                "Charges require a funded supported stablecoin for transaction fees"
+            )
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
