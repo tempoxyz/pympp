@@ -11,6 +11,7 @@ credential), so that case has no counterpart here.
 from __future__ import annotations
 
 import base64
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from typing import Any
 
@@ -151,13 +152,19 @@ class TestSuccessPayloads:
     async def test_receipt_cannot_be_mutated_by_listeners(self) -> None:
         server = make_server()
 
+        blocked: list[bool] = []
+
         def tamper(payload: dict[str, Any]) -> None:
-            payload["receipt"].reference = "tx-mutated"
+            try:
+                payload["receipt"].reference = "tx-mutated"
+            except FrozenInstanceError:
+                blocked.append(True)
 
         server.on_payment_success(tamper)
 
         paid = await pay(server)
 
+        assert blocked == [True]
         assert isinstance(paid, PaymentVerified)
         assert paid.receipt.reference == "tx-original"
         header = paid.receipt.to_payment_receipt()

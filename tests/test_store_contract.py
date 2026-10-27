@@ -24,6 +24,12 @@ from mpp.stores.sqlite import SQLiteStore
 
 REDIS_URL = os.environ.get("REDIS_URL")
 
+# Expiry windows are wall-clock time on Redis: keep them wide enough that a slow
+# round trip or scheduler pause can't expire a key before the "still live" checks.
+TTL_SECONDS = 2
+LIVE_SECONDS = 2.0
+EXPIRE_AFTER = LIVE_SECONDS + 0.5
+
 
 @dataclass
 class Backend:
@@ -79,8 +85,13 @@ async def backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
         async def make_redis(ttl_seconds: int | None = None, key_prefix: str = prefix) -> Any:
             return RedisStore(client, key_prefix=key_prefix, ttl_seconds=ttl_seconds)
 
+        async def delete_keys() -> None:
+            async for key in client.scan_iter(match=f"{prefix}*"):
+                await client.delete(key)
+
         result = Backend(name, make_redis, time.time, asyncio.sleep, supports_ttl=True)
         result.cleanups.append(client.aclose)
+        result.cleanups.append(delete_keys)
     else:
         clock = FakeClock(monkeypatch)
         if name == "memory":
@@ -200,54 +211,54 @@ class TestPutIfAbsent:
 
 class TestTtl:
     async def test_put_expires_after_ttl(self, ttl_backend: Backend) -> None:
-        store = await ttl_backend.make(ttl_seconds=1)
+        store = await ttl_backend.make(ttl_seconds=TTL_SECONDS)
         await store.put("k", "v")
         assert await store.get("k") == "v"
-        await ttl_backend.advance(1.2)
+        await ttl_backend.advance(TTL_SECONDS + 0.5)
         assert await store.get("k") is None
 
     async def test_expired_put_can_be_claimed(self, ttl_backend: Backend) -> None:
-        store = await ttl_backend.make(ttl_seconds=1)
+        store = await ttl_backend.make(ttl_seconds=TTL_SECONDS)
         await store.put("k", "stale")
-        await ttl_backend.advance(1.2)
+        await ttl_backend.advance(TTL_SECONDS + 0.5)
         assert await store.put_if_absent("k", "fresh") is True
         assert await store.get("k") == "fresh"
 
     async def test_replay_claims_ignore_ttl(self, ttl_backend: Backend) -> None:
-        store = await ttl_backend.make(ttl_seconds=1)
+        store = await ttl_backend.make(ttl_seconds=TTL_SECONDS)
         assert await store.put_if_absent("paid", "receipt")
-        await ttl_backend.advance(1.2)
+        await ttl_backend.advance(TTL_SECONDS + 0.5)
         assert await store.get("paid") == "receipt"
         assert await store.put_if_absent("paid", "replay") is False
 
 
 class TestAbsoluteExpiry:
     async def test_expires_at_deadline_then_reclaims(self, backend: Backend, store: Any) -> None:
-        assert await store.put_if_absent_until("k", "first", backend.now() + 0.5) is True
+        assert await store.put_if_absent_until("k", "first", backend.now() + LIVE_SECONDS) is True
         assert await store.get("k") == "first"
-        await backend.advance(0.6)
+        await backend.advance(EXPIRE_AFTER)
         assert await store.get("k") is None
-        assert await store.put_if_absent_until("k", "second", backend.now() + 0.5) is True
+        assert await store.put_if_absent_until("k", "second", backend.now() + LIVE_SECONDS) is True
         assert await store.get("k") == "second"
 
     async def test_live_key_keeps_value_and_deadline(self, backend: Backend, store: Any) -> None:
-        assert await store.put_if_absent_until("k", "first", backend.now() + 0.5)
+        assert await store.put_if_absent_until("k", "first", backend.now() + LIVE_SECONDS)
         assert await store.put_if_absent_until("k", "second", backend.now() + 3600) is False
         assert await store.put_if_absent("k", "third") is False
         assert await store.get("k") == "first"
-        await backend.advance(0.6)
+        await backend.advance(EXPIRE_AFTER)
         assert await store.get("k") is None
 
     async def test_does_not_replace_a_persistent_key(self, backend: Backend, store: Any) -> None:
         await store.put("k", "persistent")
-        assert await store.put_if_absent_until("k", "temp", backend.now() + 0.5) is False
-        await backend.advance(0.6)
+        assert await store.put_if_absent_until("k", "temp", backend.now() + LIVE_SECONDS) is False
+        await backend.advance(EXPIRE_AFTER)
         assert await store.get("k") == "persistent"
 
     async def test_put_clears_the_deadline(self, backend: Backend, store: Any) -> None:
-        assert await store.put_if_absent_until("k", "temp", backend.now() + 0.5)
+        assert await store.put_if_absent_until("k", "temp", backend.now() + LIVE_SECONDS)
         await store.put("k", "kept")
-        await backend.advance(0.6)
+        await backend.advance(EXPIRE_AFTER)
         assert await store.get("k") == "kept"
 
     @pytest.mark.parametrize("deadline", ["now", "past", "nan", "inf"])
