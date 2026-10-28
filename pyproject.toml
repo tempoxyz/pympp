@@ -138,6 +138,7 @@ markers = [
     "integration: requires TEMPO_RPC_URL (real Tempo node)",
     "redis: requires REDIS_URL (real Redis instance)",
     "x402_localnet: requires X402_ANVIL_RPC_URL (Anvil node for x402 settlement)",
+    "stress: heavy concurrency runs; requires MPP_STRESS=1",
 ]
 
 # Mutation testing of the protocol-critical modules (`make mutation`). Runs
