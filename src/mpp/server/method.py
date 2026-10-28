@@ -14,7 +14,7 @@ from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
 
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
-    from mpp.server.http import Request
+    from mpp.server.http import Request, Response
     from mpp.store import Store
     from mpp.x402._server import X402Intent
 
@@ -49,12 +49,16 @@ class VerifyContext:
 
     `credential.payload` is parsed by the method's payload model. `request` is the
     resolved route input; `challenge` is the authenticated challenge the credential
-    echoes, whose `request` is the wire request.
+    echoes, whose `request` is the wire request. `input` is the HTTP request being
+    paid for (mppx's captured request), so a method can classify it by HTTP method, URL,
+    headers and body; it is ``None`` outside a route handler, such as in
+    `Mpp.validate_credential` and `Mpp.broadcast_credential`.
     """
 
     credential: Credential
     request: dict[str, Any]
     challenge: Challenge
+    input: Request | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -64,8 +68,17 @@ class ValidateContext(VerifyContext):
     operation: Literal["broadcast", "validate"] = "validate"
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RespondContext(VerifyContext):
+    """Arguments for :attr:`ServerMethod.respond`: the verify context and its receipt."""
+
+    receipt: Receipt
+
+
 VerifyFn = Callable[[VerifyContext], Awaitable["Receipt"]]
 ValidateFn = Callable[[ValidateContext], Awaitable[Validation]]
+RespondFn = Callable[[RespondContext], "Response | None | Awaitable[Response | None]"]
+StableBindingFn = Callable[[Mapping[str, Any]], Mapping[str, Any]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -91,6 +104,15 @@ class ServerMethod:
             `Mpp.broadcast_credential` accept for this method; others are rejected.
         needs_request_body: Set when `resolve_request` reads `RequestContext.input.body`,
             so framework decorators such as `pay()` read the request body for it.
+        respond: Called after a credential is verified, before `payment.success`. A returned
+            :class:`~mpp.server.Response` fully handles the request (a management action,
+            such as opening or closing a payment channel): the route doesn't run and
+            `PaymentVerified.with_receipt` returns that response with the receipt
+            attached. ``None`` lets the route serve its content.
+        stable_binding: Maps a wire request to the fields a credential's echoed request must
+            match (mppx ``stableBinding``). Set, a challenge pays any request to its route whose
+            binding matches, such as a reusable session challenge bound to its channel terms
+            but not to its quoted amount; unset, the echoed request must equal the route's.
     """
 
     method: Method[Any, Any]
@@ -107,6 +129,8 @@ class ServerMethod:
     use_store: Callable[[Store], None] | None = None
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
+    respond: RespondFn | None = None
+    stable_binding: StableBindingFn | None = None
 
     def __post_init__(self) -> None:
         if self.verify is None and self.broadcast is None:
@@ -117,6 +141,10 @@ class ServerMethod:
             raise ValueError("can_offer must be callable")
         if self.on_payment_success is not None and not callable(self.on_payment_success):
             raise ValueError("on_payment_success must be callable")
+        if self.respond is not None and not callable(self.respond):
+            raise ValueError("respond must be callable")
+        if self.stable_binding is not None and not callable(self.stable_binding):
+            raise ValueError("stable_binding must be callable")
 
     @property
     def name(self) -> str:
@@ -146,6 +174,7 @@ class ServerMethod:
                     credential=context.credential,
                     request=context.request,
                     challenge=context.challenge,
+                    input=context.input,
                     operation="broadcast",
                 )
             )

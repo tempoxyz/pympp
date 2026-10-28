@@ -16,7 +16,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-import attrs
 from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
 
@@ -31,8 +30,9 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
+from mpp.methods.tempo import _fee_payer
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
-from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
+from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.schemas import (
@@ -2433,144 +2433,22 @@ class ChargeIntent:
         ``allow_expired=True`` as well, an expired one is not rejected either,
         so the caller can reconcile an earlier submission of it.
         """
-        # pytempo ships no type information.
-        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
-        from pytempo.models import (  # pyright: ignore[reportMissingTypeStubs]
-            Signature,
-            as_address,
-        )
-
-        from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
-
         if self.fee_payer is None:
             raise InternalPaymentError() from RuntimeError("No fee payer account configured")
 
-        try:
-            all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
-            decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(all_bytes)
-        except Exception as err:
-            raise VerificationError("Failed to deserialize client transaction") from err
+        def validate_calls(calls: tuple[Any, ...]) -> None:
+            if request is not None:
+                self._validate_calls(calls, request)
 
-        if key_auth is not None or decoded[12]:
-            raise VerificationError(
-                "Authorization-bearing transactions cannot be simulated and are not "
-                "supported by local fee-payer cosigning"
-            )
-
-        # Cosigning recovers the sender via secp256k1 ECDSA, so only a raw
-        # 65-byte signature is supported; other envelopes (keychain, P256,
-        # WebAuthn) are rejected up front.
-        if len(sender_sig) != 65:
-            if sender_sig and sender_sig[0] in (0x03, 0x04):
-                raise VerificationError(
-                    "Access-key (keychain) signed fee-payer envelopes are not "
-                    "supported by local cosigning"
-                )
-            raise VerificationError(
-                "Only 65-byte secp256k1 sender signatures are supported by local "
-                "fee-payer cosigning"
-            )
-
-        def _int(b: bytes) -> int:
-            return int.from_bytes(b, "big") if b else 0
-
-        # Fee-payer invariants (matches mpp-rs cosign_fee_payer_transaction)
-        if decoded[10]:
-            raise VerificationError(
-                "Fee payer transaction must not include fee_token (server sets it)"
-            )
-
-        nonce_key = _int(decoded[6])
-        if nonce_key != (1 << 256) - 1:
-            raise VerificationError("Fee payer envelope must use expiring nonce key (U256::MAX)")
-
-        valid_before_raw = decoded[8]
-        if not valid_before_raw:
-            raise VerificationError("Fee payer envelope must include valid_before")
-        valid_before = _int(valid_before_raw)
-        if require_remaining_validity:
-            _assert_remaining_validity(valid_before)
-        elif not allow_expired:
-            _assert_not_expired(valid_before)
-
-        chain_id = _int(decoded[0])
-        policy = get_policy(chain_id)
-
-        gas_limit = _int(decoded[3])
-        if gas_limit > policy.max_gas:
-            raise VerificationError("Invalid transaction: gas limit exceeds sponsor policy")
-
-        max_priority_fee_per_gas = _int(decoded[1])
-        max_fee_per_gas = _int(decoded[2])
-        if max_fee_per_gas > policy.max_fee_per_gas:
-            raise VerificationError("Invalid transaction: max fee per gas exceeds sponsor policy")
-        if max_priority_fee_per_gas > max_fee_per_gas:
-            raise VerificationError(
-                "Invalid transaction: max priority fee per gas exceeds max fee per gas"
-            )
-        if max_priority_fee_per_gas > policy.max_priority_fee_per_gas:
-            raise VerificationError(
-                "Invalid transaction: max priority fee per gas exceeds sponsor policy"
-            )
-        if gas_limit * max_fee_per_gas > policy.max_total_fee:
-            raise VerificationError("Invalid transaction: total fee budget exceeds sponsor policy")
-        if valid_before > int(time.time()) + policy.max_validity_window_seconds:
-            raise VerificationError("Invalid transaction: validity window exceeds sponsor policy")
-
-        if decoded[5]:
-            raise VerificationError("Invalid transaction: access list is not allowed")
-
-        calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
-
-        if request is not None:
-            self._validate_calls(calls, request)
-
-        tx_for_recovery = TempoTransaction(
-            chain_id=chain_id,
-            max_priority_fee_per_gas=max_priority_fee_per_gas,
-            max_fee_per_gas=max_fee_per_gas,
-            gas_limit=gas_limit,
-            calls=calls,
-            access_list=(),
-            nonce_key=_int(decoded[6]),
-            nonce=_int(decoded[7]),
-            valid_before=_int(decoded[8]) if decoded[8] else None,
-            valid_after=_int(decoded[9]) if decoded[9] else None,
-            fee_token=decoded[10] if decoded[10] else None,
-            # Part of the sender's signing hash; must be carried through.
-            tempo_authorization_list=tuple(decoded[12]),
-            awaiting_fee_payer=True,
-            key_authorization=key_auth,  # type: ignore[arg-type]
+        _raw, cosigned, recovered_address = _fee_payer.cosign_fee_payer_envelope(
+            raw_tx,
+            fee_payer=self.fee_payer,
+            policy=get_policy,
+            fee_token=fee_token,
+            validate_calls=validate_calls,
+            require_remaining_validity=require_remaining_validity,
+            allow_expired=allow_expired,
         )
-        sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
-
-        from eth_account import Account
-
-        try:
-            recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
-        except Exception as err:
-            raise VerificationError("Invalid sender signature") from err
-        envelope_address = "0x" + sender_addr_bytes.hex()
-
-        if recovered_address.lower() != envelope_address.lower():
-            raise VerificationError("Sender address does not match recovered signer")
-
-        tx_to_sign = attrs.evolve(
-            tx_for_recovery,
-            sender_signature=Signature(
-                r=int.from_bytes(sender_sig[:32], "big"),
-                s=int.from_bytes(sender_sig[32:64], "big"),
-                v=sender_sig[64],
-            ),
-            sender_address=as_address(recovered_address),
-            fee_token=fee_token or PATH_USD,
-        )
-
-        try:
-            cosigned = tx_to_sign.sign(self.fee_payer.private_key, for_fee_payer=True)
-        except Exception as err:
-            raise InternalPaymentError() from err
-
         raw_cosigned = "0x" + cosigned.encode().hex()
 
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
@@ -2588,66 +2466,7 @@ class ChargeIntent:
         different transaction than the one broadcast. Local cosigning rejects
         these envelopes before applying the sponsor signature.
         """
-        if getattr(tx, "key_authorization", None) is not None or getattr(
-            tx, "tempo_authorization_list", ()
-        ):
-            raise VerificationError(
-                "Cannot build a faithful tempo_simulateV1 payload for an "
-                "authorization-bearing transaction"
-            )
-
-        sig = tx.fee_payer_signature
-        parity = sig.v if sig.v in (0, 1) else sig.v - 27
-
-        # The node rebuilds the batch as ``calls[]`` followed by the top-level
-        # call appended last; an absent top-level ``to`` is read as a CREATE and
-        # rejected. So we put the final call top-level and the rest in ``calls``
-        # to preserve order.
-        last_call = tx.calls[-1]
-        leading_calls = tx.calls[:-1]
-
-        tx_request: dict[str, Any] = {
-            "from": sender,
-            "type": "0x76",
-            "chainId": hex(tx.chain_id),
-            "nonce": hex(tx.nonce),
-            "nonceKey": hex(tx.nonce_key),
-            "gas": hex(tx.gas_limit),
-            "maxFeePerGas": hex(tx.max_fee_per_gas),
-            "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
-            "feeToken": "0x" + bytes(tx.fee_token).hex(),
-            "feePayerSignature": {
-                # Fixed 32-byte r/s so leading zeros are not dropped.
-                "r": f"0x{sig.r:064x}",
-                "s": f"0x{sig.s:064x}",
-                "yParity": hex(parity),
-            },
-            # Top-level payment call so the node does not read this as a CREATE.
-            "to": "0x" + bytes(last_call.to).hex(),
-            "value": hex(last_call.value),
-            "data": "0x" + last_call.data.hex(),
-        }
-        if leading_calls:
-            tx_request["calls"] = [
-                {
-                    "to": "0x" + bytes(c.to).hex(),
-                    "value": hex(c.value),
-                    "data": "0x" + c.data.hex(),
-                }
-                for c in leading_calls
-            ]
-        if tx.valid_before is not None:
-            tx_request["validBefore"] = hex(tx.valid_before)
-        if tx.valid_after is not None:
-            tx_request["validAfter"] = hex(tx.valid_after)
-
-        return {
-            "blockStateCalls": [{"calls": [tx_request]}],
-            # We only care about execution outcome, not mempool admission.
-            "validation": False,
-            "traceTransfers": False,
-            "returnFullTransactions": False,
-        }
+        return _fee_payer.build_simulate_payload(tx, sender)
 
     async def _simulate_before_broadcast(
         self, client: Any, simulate_payload: dict[str, Any], rpc_url: str
@@ -2656,47 +2475,7 @@ class ChargeIntent:
 
         Fails closed: any RPC/transport error is treated as a failed check.
         """
-        try:
-            response = await client.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "tempo_simulateV1",
-                    "params": [simulate_payload, "latest"],
-                    "id": 1,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as err:
-            raise InternalPaymentError() from err
-
-        if "error" in result:
-            raise InternalPaymentError() from RuntimeError(
-                f"Pre-broadcast simulation failed: {_rpc_error_msg(result)}"
-            )
-
-        rpc_result = result.get("result")
-        blocks = rpc_result.get("blocks") if is_dict(rpc_result) else None
-        block0 = blocks[0] if is_list(blocks) and blocks else None
-        calls = block0.get("calls") if is_dict(block0) else None
-        call: dict[Any, Any] | None = None
-        if is_list(calls) and calls and is_dict(calls[0]):
-            call = calls[0]
-        if call is None:
-            raise InternalPaymentError() from RuntimeError(
-                "Pre-broadcast simulation returned no call results"
-            )
-
-        status = call.get("status")
-        if status in ("0x1", 1, True):
-            return
-
-        call_error: dict[str, Any] = call.get("error") or {}
-        detail = call_error.get("message") or "no revert reason returned"
-        raise VerificationError(
-            f"Sponsored transaction would revert in pre-broadcast simulation: {detail}"
-        )
+        await _fee_payer.simulate_before_broadcast(client, simulate_payload, rpc_url)
 
     def _validate_calls(self, calls: tuple[Any, ...], request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""

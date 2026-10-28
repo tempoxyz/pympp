@@ -58,6 +58,7 @@ from mpp.server.http import (
 )
 from mpp.server.method import (
     RequestContext,
+    RespondContext,
     ServerMethod,
     ValidateContext,
     VerifyContext,
@@ -94,6 +95,7 @@ __all__ = [
     "PaymentVerified",
     "Request",
     "RequestContext",
+    "RespondContext",
     "Response",
     "SelectOffers",
     "ServerMethod",

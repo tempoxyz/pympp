@@ -293,6 +293,9 @@ def pay(
             result = await handler(await to_request(request_obj, read_body=read_body))
             if isinstance(result, PaymentRequired):
                 return to_framework_response(result.challenge)
+            if result.response is not None:
+                # The payment method handled the request (a management action).
+                return to_framework_response(result.response)
             response = await endpoint(request_obj, result.credential, result.receipt)
             return result.with_receipt(response)
 

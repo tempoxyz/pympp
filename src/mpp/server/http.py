@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, Self, TypeAlias
 
 import httpx
@@ -133,18 +133,29 @@ class PaymentRequired:
 
 @dataclass(frozen=True, slots=True)
 class PaymentVerified:
-    """Payment succeeded: run the route and wrap its response with :meth:`with_receipt`."""
+    """Payment succeeded: run the route and wrap its response with :meth:`with_receipt`.
+
+    ``response`` is set when the payment method fully handled the request (its
+    ``respond`` hook returned a management response, such as for opening or closing a
+    payment channel): it already carries the receipt headers, the route must not run, and
+    :meth:`with_receipt` returns it in place of the route's response.
+    """
 
     credential: Credential
     receipt: Receipt
     status: Literal[200] = 200
+    response: Response | None = field(default=None, kw_only=True)
 
-    def with_receipt(self, response: Any) -> Any:
+    def with_receipt(self, response: Any = None) -> Any:
         """Attach the receipt headers to ``response``.
 
         A :class:`Response` is copied; any other response object with mutable ``headers``,
-        such as a Starlette response, is updated in place and returned.
+        such as a Starlette response, is updated in place and returned. When the method
+        returned a management response (:attr:`response`), that is returned instead and
+        ``response`` is ignored.
         """
+        if self.response is not None:
+            return self.response
         headers = {"Payment-Receipt": self.receipt.to_payment_receipt()}
         if x402 := payment_response_header(self.credential, self.receipt):
             headers[PAYMENT_RESPONSE_HEADER] = x402

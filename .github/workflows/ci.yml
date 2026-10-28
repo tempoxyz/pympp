@@ -171,6 +171,11 @@ jobs:
           cat "$RUNNER_TEMP/compose-up.log"
           [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
+      # mppx's session server and client for the session interop tests
+      # (tests/interop/mppx_session); those tests skip without them.
+      - name: Install the mppx session interop harness
+        run: npm ci --prefix tests/interop/mppx_session --ignore-scripts --no-audit --no-fund
+
       - name: Run all tests with coverage
         run: >-
           uv run pytest -v --cov=mpp --cov-report=term-missing

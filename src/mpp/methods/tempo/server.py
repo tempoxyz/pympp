@@ -7,6 +7,11 @@ Usage::
 
     mpp = Mpp(methods=tempo.charge(recipient="0x..."))
     result = await mpp.charge(amount="0.50")(request)
+
+Sessions (pay-as-you-go over a TIP-1034 channel) use :func:`session`::
+
+    mpp = Mpp(methods=[tempo.session(account=payee, store=RedisStore(...))])
+    handler = mpp.session(amount="0.0001", unit_type="request")
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp.methods.tempo.client import _CHAIN_ID_UNSET, _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent, ValidateSender
 from mpp.methods.tempo.schemas import charge as definition
+from mpp.methods.tempo.session.server.session import session
 from mpp.server.method import RequestContext, ServerMethod, ValidateContext, VerifyContext
 
 if TYPE_CHECKING:
@@ -32,7 +38,7 @@ if TYPE_CHECKING:
     from mpp.methods.tempo.sponsor_budget import SponsorBudget
     from mpp.store import Store
 
-__all__ = ["charge"]
+__all__ = ["charge", "session"]
 
 
 def charge(

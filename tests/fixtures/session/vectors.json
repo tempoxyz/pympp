@@ -1,0 +1,987 @@
+{
+  "keys": {
+    "payer": "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+    "signer": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
+    "feePayer": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+  },
+  "addresses": {
+    "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "signer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "feePayer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+  },
+  "channelIds": [
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xed240657a23533d442c095ee632b98e91ed1cb0fb9bbde769db2adc1777af119"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 4217,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0x642a3a056dee929fa304b7adb96c6877767cd46357383e370aef3b9a4c962e1c"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x908e8322ecdf6e0d16601930d6e99f4f3961a9d22f702dfa6f9e915eeab6474e"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 42431,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0x8f6d7cc3a5aaf26a4ddf7a875a477033abd82b37c4a5f4f6793d1c8631a46389"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 1337,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xba3392beb001ab035eacb105d4f750d5e1ad8483352e7cc6e359b43b28c02422"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        "operator": "0x0000000000000000000000000000000000000000",
+        "token": "0x20c0000000000000000000000000000000000001",
+        "salt": "0x0101010101010101010101010101010101010101010101010101010101010101",
+        "authorizedSigner": "0x0000000000000000000000000000000000000000",
+        "expiringNonceHash": "0xabababababababababababababababababababababababababababababababab"
+      },
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xbc0b1d6e17cd261943977dc4d303c1cd993e1aaca10d2baeaa2ebd19d8dcfc59"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xb2df43fdf2f86512f0e31b66fe5efadbea32b9cc88c03ee91ee2feebce3e5a69"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 4217,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0x15f9523f9629c539ddd53a46c827445b4757042f4c7d4e51e08f5a09d3613266"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xf15763b17061c261b44fb662f8be80e26e579929aa729c5fd05d9fcbe79ff814"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 42431,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xae62ae44b694560dac56e0ad873f95935972d8a7708284166cb60ab1a659d727"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 1337,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x08b16594b2df7c6880b02ec7e00b273340f2a1a6505b4ae70a32849872019b09"
+    },
+    {
+      "descriptor": {
+        "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        "token": "0x20C000000000000000000000b9537d11c60E8b50",
+        "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+      },
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xcfe9f0aeae5bb87adcfa8789c081cb3ec678e6dbd3967a6b243d9ce59e895443"
+    }
+  ],
+  "vouchers": [
+    {
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xed240657a23533d442c095ee632b98e91ed1cb0fb9bbde769db2adc1777af119",
+      "cumulativeAmount": "0",
+      "voucherDigest": "0xa8f99feae2f8dcce323f63f5f24b9056da6eca611cabd873302cdc9cc647faca",
+      "closeDigest": "0xdab49ae854e529ef88bfd94d28adb365c42c84e9b3b98d78af00a45c14280e85",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x77a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569a1d046026e2c64c75b42f8db431cc7d05971463481004f8d5aca3ab0e535fd9331b",
+      "closeSignature": "0x949d0761c2d0f24a6eaced98d92a4119e88db3db2e0d07b5e29f16b0df8850920c20bd6346ed06b2d2518ecc167147d4b04a1784478534fdadecbe8b8155780e1c",
+      "variants": {
+        "canonical": "0x77a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569a1d046026e2c64c75b42f8db431cc7d05971463481004f8d5aca3ab0e535fd9331b",
+        "rawParity": "0x77a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569a1d046026e2c64c75b42f8db431cc7d05971463481004f8d5aca3ab0e535fd93300",
+        "highS": "0x77a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569ae2fb9fd91d39b38a4bd0724bce3382f9239a799e9f43a766132eb37e7cd6680e1c",
+        "uppercase": "0x77A8B0C50F7D354F6C80DBA60F92BB5106363880F7033076D8F54E16FBC0569A1D046026E2C64C75B42F8DB431CC7D05971463481004F8D5ACA3AB0E535FD9331B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb9226677a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569a1d046026e2c64c75b42f8db431cc7d05971463481004f8d5aca3ab0e535fd9331b",
+        "truncated": "0x77a8b0c50f7d354f6c80dba60f92bb5106363880f7033076d8f54e16fbc0569a1d046026e2c64c75b42f8db431cc7d05971463481004f8d5aca3ab0e535fd9"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xed240657a23533d442c095ee632b98e91ed1cb0fb9bbde769db2adc1777af119",
+      "cumulativeAmount": "1",
+      "voucherDigest": "0x83353908346d4c80393688ac94a8d6630030c63e714df488cc8848edeac3d035",
+      "closeDigest": "0x3da4ec327bbaf75fcc44ff26622ad2b31fc1a2b091184e0f3471acdbf16561b7",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x14a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c03a4507fe2151c91464732fa050214c20c816f213d323d41c3cea118a0bc5600e1c",
+      "closeSignature": "0x6551742b86e7327a6c4e428e6c41fdfd2ae09dced85997626db257e9db864bbd443bb4e266de9dd74b0a9066c587d3652d9007cdb503fd3c48f3a171bde247f31c",
+      "variants": {
+        "canonical": "0x14a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c03a4507fe2151c91464732fa050214c20c816f213d323d41c3cea118a0bc5600e1c",
+        "rawParity": "0x14a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c03a4507fe2151c91464732fa050214c20c816f213d323d41c3cea118a0bc5600e01",
+        "highS": "0x14a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c0c5baf801deae36eb9b8cd05fafdeb3ddf297ead2dc24cc1f82e84d02c470e1331b",
+        "uppercase": "0x14A0D219DE5978F7B7D6D32F569D315ED22E9E2A5B32552A00C6840BDD7045C03A4507FE2151C91464732FA050214C20C816F213D323D41C3CEA118A0BC5600E1C",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb9226614a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c03a4507fe2151c91464732fa050214c20c816f213d323d41c3cea118a0bc5600e1c",
+        "truncated": "0x14a0d219de5978f7b7d6d32f569d315ed22e9e2a5b32552a00c6840bdd7045c03a4507fe2151c91464732fa050214c20c816f213d323d41c3cea118a0bc560"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xed240657a23533d442c095ee632b98e91ed1cb0fb9bbde769db2adc1777af119",
+      "cumulativeAmount": "1000000",
+      "voucherDigest": "0x7edd7c555923e6e21e88825169744590747d9044601192136becde22dfe5c948",
+      "closeDigest": "0xa44bd6a988998215a916bb5296802d5e58f6e57b93dd2c019e137dd4eee6c379",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x0a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b9441efbfd236622469e9cf3712528ad3c3bd85ea338e9522d292038dc9be5e054f1b",
+      "closeSignature": "0xe97d09451fbd60839a3c61250f0e2d70d0e5e67e2c2fd0e8bf8740ab4ad1064a403774efc321ccd40dc0f58f6a16fe90a964f6084fb21c316a5a89c1033db11e1b",
+      "variants": {
+        "canonical": "0x0a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b9441efbfd236622469e9cf3712528ad3c3bd85ea338e9522d292038dc9be5e054f1b",
+        "rawParity": "0x0a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b9441efbfd236622469e9cf3712528ad3c3bd85ea338e9522d292038dc9be5e054f00",
+        "highS": "0x0a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b94be10402dc99ddb961630c8edad752c3afd28f2b320b37d692dced0c311d83bf21c",
+        "uppercase": "0x0A5BCD6FD61C5A3F5EB2EC357B961621F2BF5323E999B601E44DB17FAB854B9441EFBFD236622469E9CF3712528AD3C3BD85EA338E9522D292038DC9BE5E054F1B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb922660a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b9441efbfd236622469e9cf3712528ad3c3bd85ea338e9522d292038dc9be5e054f1b",
+        "truncated": "0x0a5bcd6fd61c5a3f5eb2ec357b961621f2bf5323e999b601e44db17fab854b9441efbfd236622469e9cf3712528ad3c3bd85ea338e9522d292038dc9be5e05"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 4217,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0xed240657a23533d442c095ee632b98e91ed1cb0fb9bbde769db2adc1777af119",
+      "cumulativeAmount": "79228162514264337593543950335",
+      "voucherDigest": "0xf9719ab54806ce0db400111e00a8463dcad0b5d20b9fab42771676ddc3b31a01",
+      "closeDigest": "0xb5efbe4dee2e5534ecddc3ac2314c8292b902ae9d207f40a47184cc6e8d3c74b",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0xa2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b815433dbf76569e0b77954b8051cca36b8dc189d243c35cd8830fa6b4c38b823791b",
+      "closeSignature": "0xc211d4a971c377fc421eeea310682bf63f6860651379b894a0b05dc7b6dba53920fa6a2724feefe45ebe9a1a558ba255955e31d20aed8e52595c1320cb3919b61b",
+      "variants": {
+        "canonical": "0xa2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b815433dbf76569e0b77954b8051cca36b8dc189d243c35cd8830fa6b4c38b823791b",
+        "rawParity": "0xa2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b815433dbf76569e0b77954b8051cca36b8dc189d243c35cd8830fa6b4c38b8237900",
+        "highS": "0xa2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b81abcc24089a961f4886ab47fae335c945de963fc27312d2b38ed7f340977e1dc81c",
+        "uppercase": "0xA2ADFBB80C6A1204A6FD70927A5EBCF1C8F56495EEB4BD0DCD0B26DFC04D6B815433DBF76569E0B77954B8051CCA36B8DC189D243C35CD8830FA6B4C38B823791B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb92266a2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b815433dbf76569e0b77954b8051cca36b8dc189d243c35cd8830fa6b4c38b823791b",
+        "truncated": "0xa2adfbb80c6a1204a6fd70927a5ebcf1c8f56495eeb4bd0dcd0b26dfc04d6b815433dbf76569e0b77954b8051cca36b8dc189d243c35cd8830fa6b4c38b823"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x908e8322ecdf6e0d16601930d6e99f4f3961a9d22f702dfa6f9e915eeab6474e",
+      "cumulativeAmount": "0",
+      "voucherDigest": "0xc18d0b277f4ccaf5244a4b5b4b44979754e242cc43e11a4f7bd204f012215ab2",
+      "closeDigest": "0x406e181c821a180e55150f99697d2114836d41bf96f95ce674b789376b8c9dfc",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x28255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb35340680443c2bf84f8bb496dd572479fdd7e20b58b4816dba4a3b295a0a26fe83b55608d31c",
+      "closeSignature": "0x8eeba257885739b310d7557ecac38ee9bb415266bcc6f69dd3307722151121283d2b408c823c041bc7fa4ca56577e58d98b790303c2ecb18a6c868bed94bb3cb1b",
+      "variants": {
+        "canonical": "0x28255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb35340680443c2bf84f8bb496dd572479fdd7e20b58b4816dba4a3b295a0a26fe83b55608d31c",
+        "rawParity": "0x28255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb35340680443c2bf84f8bb496dd572479fdd7e20b58b4816dba4a3b295a0a26fe83b55608d301",
+        "highS": "0x28255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb3534068044c3d407b0744b6922a8db8602281df4a6062d6f2c650d76e1b5ab60091ae0386e1b",
+        "uppercase": "0x28255567BD6C2E12CE70ACA87F71ABBF38E6D2C71E85D2ABB1C0EB35340680443C2BF84F8BB496DD572479FDD7E20B58B4816DBA4A3B295A0A26FE83B55608D31C",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb9226628255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb35340680443c2bf84f8bb496dd572479fdd7e20b58b4816dba4a3b295a0a26fe83b55608d31c",
+        "truncated": "0x28255567bd6c2e12ce70aca87f71abbf38e6d2c71e85d2abb1c0eb35340680443c2bf84f8bb496dd572479fdd7e20b58b4816dba4a3b295a0a26fe83b55608"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x908e8322ecdf6e0d16601930d6e99f4f3961a9d22f702dfa6f9e915eeab6474e",
+      "cumulativeAmount": "1",
+      "voucherDigest": "0xd2dde7e923e5c6f334dcd3ae314b055696600334c26763709659affb14617aee",
+      "closeDigest": "0x441fb16d038c3dca2e9533343cc610eaed29fd401a309ccee5caa622972c6f21",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x4ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486d3db379c7c89140e8775df8483cbcabb027b764e9d75344adf3b112b6006c8ced1b",
+      "closeSignature": "0x9f2244015d51e4761f9b4e0897aebbe6f4a66cb128ca17ca3c31d2b0baa93f986dc1f945ce1cc46d396a494b44d473108daf25dde44abe6bb0016fa65e0991191b",
+      "variants": {
+        "canonical": "0x4ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486d3db379c7c89140e8775df8483cbcabb027b764e9d75344adf3b112b6006c8ced1b",
+        "rawParity": "0x4ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486d3db379c7c89140e8775df8483cbcabb027b764e9d75344adf3b112b6006c8ced00",
+        "highS": "0x4ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486dc24c8638376ebf1788a207b7c343544e92f777fcd7f55b8dcc214bd6cfc9b4541c",
+        "uppercase": "0x4EF6EE45A26F4C89E357BC223861467D26A700A9B771EF95F49BF8C08195486D3DB379C7C89140E8775DF8483CBCABB027B764E9D75344ADF3B112B6006C8CED1B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb922664ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486d3db379c7c89140e8775df8483cbcabb027b764e9d75344adf3b112b6006c8ced1b",
+        "truncated": "0x4ef6ee45a26f4c89e357bc223861467d26a700a9b771ef95f49bf8c08195486d3db379c7c89140e8775df8483cbcabb027b764e9d75344adf3b112b6006c8c"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x908e8322ecdf6e0d16601930d6e99f4f3961a9d22f702dfa6f9e915eeab6474e",
+      "cumulativeAmount": "1000000",
+      "voucherDigest": "0x6f92ef52f30ea346b607ecbe2013f37a275200eb4fd87e72b7006e412852b942",
+      "closeDigest": "0xe6756b5b599eda55fb49dfe7deeaa41bf774a50ba8770a3ba7979e42c0b1a935",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x09ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea36a305ee6c9aafa0cb7a926ebc96e0d576dd3e9d16521e967ba911ab5b307dfbe1b",
+      "closeSignature": "0x0e2a1cbbd212579c55f2f1a7b2188443b80541fdadb67e9bbb0faf3523ee468937529ad8de60a0c248494a38e19ef8f4366f956574362d06ce1f55f942650f281b",
+      "variants": {
+        "canonical": "0x09ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea36a305ee6c9aafa0cb7a926ebc96e0d576dd3e9d16521e967ba911ab5b307dfbe1b",
+        "rawParity": "0x09ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea36a305ee6c9aafa0cb7a926ebc96e0d576dd3e9d16521e967ba911ab5b307dfbe00",
+        "highS": "0x09ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea395cfa119365505f34856d9143691f2a74cdaf3154a26b6d4054143d71d2e61831c",
+        "uppercase": "0x09DDB3CCD6B1B3B393BC4885A5015B97F98B05F39897FD74C3072A9AA856DEA36A305EE6C9AAFA0CB7A926EBC96E0D576DD3E9D16521E967BA911AB5B307DFBE1B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb9226609ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea36a305ee6c9aafa0cb7a926ebc96e0d576dd3e9d16521e967ba911ab5b307dfbe1b",
+        "truncated": "0x09ddb3ccd6b1b3b393bc4885a5015b97f98b05f39897fd74c3072a9aa856dea36a305ee6c9aafa0cb7a926ebc96e0d576dd3e9d16521e967ba911ab5b307df"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 42431,
+      "escrow": "0x4d50500000000000000000000000000000000000",
+      "channelId": "0x908e8322ecdf6e0d16601930d6e99f4f3961a9d22f702dfa6f9e915eeab6474e",
+      "cumulativeAmount": "79228162514264337593543950335",
+      "voucherDigest": "0xc153e1e81a6e6f40e04f18b610790272ae167b7c870bf3531310386c57ed60d7",
+      "closeDigest": "0x6a9a918b000f715f015fcd738545f64d43968fe062bfeb95f81d729263712b8a",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0xcc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce174f6e96760ded8f74dc7c085e96583136538c41b60881ca53fc61ed39d21b9ac1c",
+      "closeSignature": "0xb9b82d56686ed8ee644cc74a8193afcb65badf155fe8e504f41006047db7ad343367572e65717d97ae44f0c75384ccb898d8d33e1ffa0396aa09de45eba8352e1c",
+      "variants": {
+        "canonical": "0xcc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce174f6e96760ded8f74dc7c085e96583136538c41b60881ca53fc61ed39d21b9ac1c",
+        "rawParity": "0xcc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce174f6e96760ded8f74dc7c085e96583136538c41b60881ca53fc61ed39d21b9ac01",
+        "highS": "0xcc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce18b0916989f212708b2383f7a169a7ceb557618cb4ec08396800c3fb9331487951b",
+        "uppercase": "0xCC6ADA73208B819F2BDE78213D70C4CE60B04E78348F8CC0C4BD62BBA2939CE174F6E96760DED8F74DC7C085E96583136538C41B60881CA53FC61ED39D21B9AC1C",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb92266cc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce174f6e96760ded8f74dc7c085e96583136538c41b60881ca53fc61ed39d21b9ac1c",
+        "truncated": "0xcc6ada73208b819f2bde78213d70c4ce60b04e78348f8cc0c4bd62bba2939ce174f6e96760ded8f74dc7c085e96583136538c41b60881ca53fc61ed39d21b9"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xbc0b1d6e17cd261943977dc4d303c1cd993e1aaca10d2baeaa2ebd19d8dcfc59",
+      "cumulativeAmount": "0",
+      "voucherDigest": "0x350d2b7f5259557c0c9395f64094889324f07c3ca01895d50014e87560856ef0",
+      "closeDigest": "0x59489ffb0e21253857715b3ec98bf27a161c9d000c66c507c14938f44b3042f0",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b896d420ec9a03476ccf7d0f8808235ea707453534557bcc995fe693ba5f993cec31b",
+      "closeSignature": "0x974a19ea3c8c1791e86c7e5fa7a47cc9d61dce1dfe602e92a9aacdc5dfa2c7cf5cd9b87d9eb9768c469b5f79ca9db762b9a93600be78b0a687a70c0ec6d563cc1c",
+      "variants": {
+        "canonical": "0x206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b896d420ec9a03476ccf7d0f8808235ea707453534557bcc995fe693ba5f993cec31b",
+        "rawParity": "0x206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b896d420ec9a03476ccf7d0f8808235ea707453534557bcc995fe693ba5f993cec300",
+        "highS": "0x206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b8992bdf1365fcb8933082f077f7dca158e465b89a1578bd6a5c16922e6d6a2727e1c",
+        "uppercase": "0x206B20B3C0097423FDCEB14FA881A24BC130EC971FF7052DD6349C9C7A347B896D420EC9A03476CCF7D0F8808235EA707453534557BCC995FE693BA5F993CEC31B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb92266206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b896d420ec9a03476ccf7d0f8808235ea707453534557bcc995fe693ba5f993cec31b",
+        "truncated": "0x206b20b3c0097423fdceb14fa881a24bc130ec971ff7052dd6349c9c7a347b896d420ec9a03476ccf7d0f8808235ea707453534557bcc995fe693ba5f993ce"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xbc0b1d6e17cd261943977dc4d303c1cd993e1aaca10d2baeaa2ebd19d8dcfc59",
+      "cumulativeAmount": "1",
+      "voucherDigest": "0x332744dd16c4011a0cc444ed5eca0406b8eee85f55b9fe71ac845fa878075e89",
+      "closeDigest": "0xa1f7c2f9199fe648a448d37f239a7a8a248eccb7afeeb4e79312283abe9d57c1",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x4575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241311ea4ce5799f537e4006f99e916636d00119051ccbb23e13a96db232009f5e11b",
+      "closeSignature": "0xab708c93381c023df124601c9df94542573dda8e206520c84a1d2fd50838ad36071512a8cca05b9682da0c0fcfc00123af2a3634b1cb9dbdf8567d5f1cb22ffc1c",
+      "variants": {
+        "canonical": "0x4575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241311ea4ce5799f537e4006f99e916636d00119051ccbb23e13a96db232009f5e11b",
+        "rawParity": "0x4575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241311ea4ce5799f537e4006f99e916636d00119051ccbb23e13a96db232009f5e100",
+        "highS": "0x4575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241cee15b31a8660ac81bff906616e99c91ba9d4c94e28d7c5a853b8369b02c4b601c",
+        "uppercase": "0x4575724BB6AB0087E90D06FF22FC49E93F23AD2838F337F1DC661782A6F39241311EA4CE5799F537E4006F99E916636D00119051CCBB23E13A96DB232009F5E11B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb922664575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241311ea4ce5799f537e4006f99e916636d00119051ccbb23e13a96db232009f5e11b",
+        "truncated": "0x4575724bb6ab0087e90d06ff22fc49e93f23ad2838f337f1dc661782a6f39241311ea4ce5799f537e4006f99e916636d00119051ccbb23e13a96db232009f5"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xbc0b1d6e17cd261943977dc4d303c1cd993e1aaca10d2baeaa2ebd19d8dcfc59",
+      "cumulativeAmount": "1000000",
+      "voucherDigest": "0x5b0c9ec3b127b6f077d54e5304bb8d27cf92d55f115c3a5b954afa56a2a2bcac",
+      "closeDigest": "0xac82fd5d8f3aded40033271c44c8ee3c4b7b4b78e1368d4c165bf797872d7663",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0x627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bd325be76caad22649e8dfc16429e03e2bcef5caf94d39b4eac65e37f2efef19611b",
+      "closeSignature": "0x29b61e6aea8b0e70080b626afb62bb318f97f01976261f3ef2b1e95c9657a2e116553934169ca59d1598ac30ec89d990479c8e927e1e66df826ac6840491fa841b",
+      "variants": {
+        "canonical": "0x627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bd325be76caad22649e8dfc16429e03e2bcef5caf94d39b4eac65e37f2efef19611b",
+        "rawParity": "0x627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bd325be76caad22649e8dfc16429e03e2bcef5caf94d39b4eac65e37f2efef196100",
+        "highS": "0x627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bdcda41893552dd9b617203e9bd61fc1d2ebb911ed620eeb50f9742699e04727e01c",
+        "uppercase": "0x627FCED17309127CEEEA0E1E6BE7E97BF62511E9769E3504970512C6E6FAB0BD325BE76CAAD22649E8DFC16429E03E2BCEF5CAF94D39B4EAC65E37F2EFEF19611B",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb92266627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bd325be76caad22649e8dfc16429e03e2bcef5caf94d39b4eac65e37f2efef19611b",
+        "truncated": "0x627fced17309127ceeea0e1e6be7e97bf62511e9769e3504970512c6e6fab0bd325be76caad22649e8dfc16429e03e2bcef5caf94d39b4eac65e37f2efef19"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    },
+    {
+      "chainId": 1337,
+      "escrow": "0x1111111111111111111111111111111111111111",
+      "channelId": "0xbc0b1d6e17cd261943977dc4d303c1cd993e1aaca10d2baeaa2ebd19d8dcfc59",
+      "cumulativeAmount": "79228162514264337593543950335",
+      "voucherDigest": "0xbccf4214ce574e6fd04e47049f869ee0066e3a9567a407faffb549b8939275c5",
+      "closeDigest": "0xa601dee8225493aa94495d8281c80f6ca6fde036282e96187ed3bc7ed326cf3d",
+      "signer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "signature": "0xb3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c39529482737cc5f90a81b122536c2bf32f62217be63725b6dcc5cfa18fe3c898735f692a1c",
+      "closeSignature": "0xf01a48d24093b1fb14928dd86a7e1fb1852b4ff67eb7c4dffaa0c752ccd117765b1bb2c14ff4c323b724060e3185d4f75b309f6140396466a08fe7831c91a1001b",
+      "variants": {
+        "canonical": "0xb3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c39529482737cc5f90a81b122536c2bf32f62217be63725b6dcc5cfa18fe3c898735f692a1c",
+        "rawParity": "0xb3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c39529482737cc5f90a81b122536c2bf32f62217be63725b6dcc5cfa18fe3c898735f692a01",
+        "highS": "0xb3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c395294828c833a06f57e4eddac93d40cd09dde82d477b72fd282d09a2fee95f45cd6d8171b",
+        "uppercase": "0xB3F60AEB128253EC32E0FB80583DC5E6535C01017036BA6F6ED66F4C39529482737CC5F90A81B122536C2BF32F62217BE63725B6DCC5CFA18FE3C898735F692A1C",
+        "keychain": "0x03f39fd6e51aad88f6f4ce6ab8827279cfffb92266b3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c39529482737cc5f90a81b122536c2bf32f62217be63725b6dcc5cfa18fe3c898735f692a1c",
+        "truncated": "0xb3f60aeb128253ec32e0fb80583dc5e6535c01017036ba6f6ed66f4c39529482737cc5f90a81b122536c2bf32f62217be63725b6dcc5cfa18fe3c898735f69"
+      },
+      "verify": {
+        "canonical": {
+          "payer": true,
+          "other": false
+        },
+        "rawParity": {
+          "payer": false,
+          "other": false
+        },
+        "highS": {
+          "payer": true,
+          "other": false
+        },
+        "uppercase": {
+          "payer": true,
+          "other": false
+        },
+        "keychain": {
+          "payer": false,
+          "other": false
+        },
+        "truncated": {
+          "payer": false,
+          "other": false
+        }
+      },
+      "closeVerify": {
+        "payer": true,
+        "voucherSignatureAsClose": false
+      }
+    }
+  ],
+  "transactions": [
+    {
+      "label": "unsponsored",
+      "sponsored": false,
+      "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "raw": "0x76f90175820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300809420c000000000000000000000000000000000000180c0b841b29061853df8a8bfcf247ed9c736535b87be0de3be66e299b61c619328cc23902ce304ccc96b21a63eccf330a9f57d65fdd95536cab7d968c4deb7a8782497f51b",
+      "expiringNonceHash": "0x6d2f7e9f92669642562369a89ebadb4e2d275ba22c470fdfb4ee3db12bbd40e8",
+      "channelId": "0xc71979b32806dbefa1cb3ab66f4a69f998b4c959c4d4cc2c8dc89cffeef766ac"
+    },
+    {
+      "label": "unsponsored-no-fee-token",
+      "sponsored": false,
+      "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "raw": "0x76f90161820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300808080c0b841c927289e4f65b7b272149999032bc3d88125aa4851ab848749ee62cf9d42b12e6050642e02aaf2b4f05913b1d05ea4e7f21a30f7e4bfc454647f984b23811a3e1b",
+      "expiringNonceHash": "0xc9af1723429a24fb1a4e7c62059e0fb7cedbee4052a21c50ae75f5b80e4ad22b",
+      "channelId": "0x7541404fa281a24163cb932db150569cc57cb26b054b89d5612b8bf199a3b35d"
+    },
+    {
+      "label": "unsponsored-valid-after",
+      "sponsored": false,
+      "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "raw": "0x76f90178820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb3008301e2409420c000000000000000000000000000000000000180c0b841dea01294e13974cfb2d74c5a4fc80a7965fbbde59067c5fa053f1fb9f982d5f3032c07c2034124a7756bc292b68aa8718b67a535ebc22725404450c5421401c51b",
+      "expiringNonceHash": "0x423f4b7c292855f18ed390de6b1e57f82bb643479630b8b090b7f0b9406dc46c",
+      "channelId": "0xfabd0c506a67db6d3ce8d48caeec03f1c60c0aaf352f14e6fc14765dcb53c2a0"
+    },
+    {
+      "label": "sponsored",
+      "sponsored": true,
+      "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "raw": "0x78f90189820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300809420c000000000000000000000000000000000000194f39fd6e51aad88f6f4ce6ab8827279cfffb92266c0b841ab2daec24c1802294f69f01411917bb8611c5885022843889c6c1a9c416a64402ccfd342c1451890784aed58765b9c30ff050cb3bbee50f4ed2a8d04c0a236ec1b",
+      "expiringNonceHash": "0x0819417cd65830eef3e77e1d117d5eeb4315963304ebcabaa0fd6d27c2a8ba4b",
+      "cosigned": "0x76f901b9820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300809420c0000000000000000000000000000000000001f84301a0bd544dc9fcbea4dcde79964ee705e4efd67d0638f59e00466d1530a814ed946da0546817c41c0396056b084e207e873320cd3a6b7c9cff8fc44467f1043a42d090c0b841ab2daec24c1802294f69f01411917bb8611c5885022843889c6c1a9c416a64402ccfd342c1451890784aed58765b9c30ff050cb3bbee50f4ed2a8d04c0a236ec1b",
+      "cosignedExpiringNonceHash": "0x0819417cd65830eef3e77e1d117d5eeb4315963304ebcabaa0fd6d27c2a8ba4b",
+      "cosignedHash": "0x1b350d322efe22c917bb9dcbe6b424b89f035320609026a31cc3d3a3e0c4c011",
+      "feePayer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "channelId": "0x9a8a2978d273a83701c19979b395b990f82d16a3e834d0e9d7f567306ab0b7f3"
+    },
+    {
+      "label": "sponsored-no-fee-token",
+      "sponsored": true,
+      "sender": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "raw": "0x78f90175820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300808094f39fd6e51aad88f6f4ce6ab8827279cfffb92266c0b841ab2daec24c1802294f69f01411917bb8611c5885022843889c6c1a9c416a64402ccfd342c1451890784aed58765b9c30ff050cb3bbee50f4ed2a8d04c0a236ec1b",
+      "expiringNonceHash": "0x0819417cd65830eef3e77e1d117d5eeb4315963304ebcabaa0fd6d27c2a8ba4b",
+      "cosigned": "0x76f901b9820539843b9aca008504a817c8008307a120f8def8dc944d5050000000000000000000000000000000000080b8c4edc53b0000000000000000000000000070997970c51812dc3a010c7d01b50e0d17dc79c8000000000000000000000000000000000000000000000000000000000000000000000000000000000000000020c000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000004c4b4001010101010101010101010101010101010101010101010101010101010101010000000000000000000000000000000000000000000000000000000000000000c0a0ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff8084713fb300809420c0000000000000000000000000000000000001f84301a0bd544dc9fcbea4dcde79964ee705e4efd67d0638f59e00466d1530a814ed946da0546817c41c0396056b084e207e873320cd3a6b7c9cff8fc44467f1043a42d090c0b841ab2daec24c1802294f69f01411917bb8611c5885022843889c6c1a9c416a64402ccfd342c1451890784aed58765b9c30ff050cb3bbee50f4ed2a8d04c0a236ec1b",
+      "cosignedExpiringNonceHash": "0x0819417cd65830eef3e77e1d117d5eeb4315963304ebcabaa0fd6d27c2a8ba4b",
+      "cosignedHash": "0x1b350d322efe22c917bb9dcbe6b424b89f035320609026a31cc3d3a3e0c4c011",
+      "feePayer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      "channelId": "0x9a8a2978d273a83701c19979b395b990f82d16a3e834d0e9d7f567306ab0b7f3"
+    }
+  ],
+  "abi": {
+    "descriptor": {
+      "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      "token": "0x20C000000000000000000000b9537d11c60E8b50",
+      "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007"
+    },
+    "calldata": {
+      "open": "0xedc53b000000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50000000000000000000000000000000000000000000000000000000000000007bffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc",
+      "topUp": "0xdc48471e000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000001c8",
+      "settle": "0x97fb5104000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000031500000000000000000000000000000000000000000000000000000000000001200000000000000000000000000000000000000000000000000000000000000041121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121212121200000000000000000000000000000000000000000000000000000000000000",
+      "close": "0x73b57f74000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000003e8000000000000000000000000000000000000000000000000000000000000038400000000000000000000000000000000000000000000000000000000000001400000000000000000000000000000000000000000000000000000000000000041343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343434343400000000000000000000000000000000000000000000000000000000000000",
+      "requestClose": "0x675402e5000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007",
+      "withdraw": "0x41e2c664000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007",
+      "getChannel": "0xeef95313000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007",
+      "getChannelState": "0xd18da8b15656565656565656565656565656565656565656565656565656565656565656",
+      "getChannelStatesBatch": "0xd1f4cda20000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000256565656565656565656565656565656565656565656565656565656565656567878787878787878787878787878787878787878787878787878787878787878",
+      "computeChannelId": "0x185eeeac000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007"
+    },
+    "state": {
+      "settled": "10",
+      "deposit": "100",
+      "closeRequestedAt": 1700000000
+    },
+    "results": {
+      "getChannel": "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb922660000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b50ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000006553f100",
+      "getChannelState": "0x000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000006553f100",
+      "getChannelStatesBatch": "0x00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000006553f100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "events": {
+      "ChannelOpened": {
+        "topics": [
+          "0xdebaba36f0e9c7978f536fed432d9360b1f9646d7ca88531c34c3eae43f154a7",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x00000000000000000000000090f79bf6eb2c4f870365e785982e1f101e93b90600000000000000000000000020c000000000000000000000b9537d11c60e8b500000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bcffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000004c4b40",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "operator": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+          "token": "0x20C000000000000000000000b9537d11c60E8b50",
+          "authorizedSigner": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "salt": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "expiringNonceHash": "0x0000000000000000000000000000000000000000000000000000000000000007",
+          "deposit": "5000000"
+        }
+      },
+      "TopUp": {
+        "topics": [
+          "0x2a96f534665f3150977dd4c35d91373c74030288edbb3cf83c527dd25012364f",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000004c4b47",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "additionalDeposit": "7",
+          "newDeposit": "5000007"
+        }
+      },
+      "Settled": {
+        "topics": [
+          "0x11c4e4c79ad8802431b44c15047ed1ddb82fbfc1abd452c765f7ee3990df1399",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000000000006300000000000000000000000000000000000000000000000000000000000000090000000000000000000000000000000000000000000000000000000000000063",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "cumulativeAmount": "99",
+          "deltaPaid": "9",
+          "newSettled": "99"
+        }
+      },
+      "CloseRequested": {
+        "topics": [
+          "0xf5a36fc00a96cbb9cf1f8f59299165e1d8ffffe94396d82904b4da524d16bbce",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x000000000000000000000000000000000000000000000000000000006553f484",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "closeGraceEnd": "1700000900"
+        }
+      },
+      "ChannelClosed": {
+        "topics": [
+          "0x5613aed96d5bf39f928408dbe1d4143490b9bb5957eac2dd8e69b5dc4b2206e6",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x00000000000000000000000000000000000000000000000000000000000000630000000000000000000000000000000000000000000000000000000000000001",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+          "settledToPayee": "99",
+          "refundedToPayer": "1"
+        }
+      },
+      "CloseRequestCancelled": {
+        "topics": [
+          "0x6bbcbc59913c43e567847487b95410b0b65cf253531b1c6505b21f8359c838fe",
+          "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266",
+          "0x0000000000000000000000003c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        ],
+        "data": "0x",
+        "args": {
+          "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+          "payer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+          "payee": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+        }
+      }
+    }
+  },
+  "receipts": [
+    {
+      "receipt": {
+        "method": "tempo",
+        "intent": "session",
+        "status": "success",
+        "timestamp": "2026-10-28T12:00:00.123Z",
+        "reference": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+        "challengeId": "challenge-ü-1",
+        "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+        "acceptedCumulative": "1000",
+        "spent": "250",
+        "units": 3,
+        "txHash": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      "serialized": "eyJtZXRob2QiOiJ0ZW1wbyIsImludGVudCI6InNlc3Npb24iLCJzdGF0dXMiOiJzdWNjZXNzIiwidGltZXN0YW1wIjoiMjAyNi0xMC0yOFQxMjowMDowMC4xMjNaIiwicmVmZXJlbmNlIjoiMHg5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhIiwiY2hhbGxlbmdlSWQiOiJjaGFsbGVuZ2Utw7wtMSIsImNoYW5uZWxJZCI6IjB4OWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YSIsImFjY2VwdGVkQ3VtdWxhdGl2ZSI6IjEwMDAiLCJzcGVudCI6IjI1MCIsInVuaXRzIjozLCJ0eEhhc2giOiIweGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2RjZGNkY2QifQ"
+    },
+    {
+      "receipt": {
+        "method": "tempo",
+        "intent": "session",
+        "status": "success",
+        "timestamp": "2026-10-28T12:00:00.123Z",
+        "reference": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+        "challengeId": "challenge-ü-1",
+        "channelId": "0x9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+        "acceptedCumulative": "1000",
+        "spent": "250"
+      },
+      "serialized": "eyJtZXRob2QiOiJ0ZW1wbyIsImludGVudCI6InNlc3Npb24iLCJzdGF0dXMiOiJzdWNjZXNzIiwidGltZXN0YW1wIjoiMjAyNi0xMC0yOFQxMjowMDowMC4xMjNaIiwicmVmZXJlbmNlIjoiMHg5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhIiwiY2hhbGxlbmdlSWQiOiJjaGFsbGVuZ2Utw7wtMSIsImNoYW5uZWxJZCI6IjB4OWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YTlhOWE5YSIsImFjY2VwdGVkQ3VtdWxhdGl2ZSI6IjEwMDAiLCJzcGVudCI6IjI1MCJ9"
+    }
+  ]
+}
