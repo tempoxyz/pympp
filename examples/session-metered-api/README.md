@@ -82,8 +82,8 @@ faucet (`tempo_fundAddress`).
 |----------|---------|---------|
 | `TEMPO_RPC_URL` | both | `http://localhost:18645` |
 | `TEMPO_CURRENCY` | both | pathUSD |
-| `PAYEE_KEY`, `SPONSOR_KEY` | server | development keys |
-| `MPP_SECRET_KEY` | server | a development secret |
+| `PAYEE_KEY`, `SPONSOR_KEY` | server | development keys (localnet only; required elsewhere) |
+| `MPP_SECRET_KEY` | server | a development secret (localnet only; required elsewhere) |
 | `STORE_PATH`, `PORT` | server | `sessions.db`, `8000` |
 | `PAYER_KEY` | agent | a new random key |
 | `SERVER_URL`, `CALLS`, `MAX_DEPOSIT` | agent | `http://localhost:8000`, `500`, `0.05` |

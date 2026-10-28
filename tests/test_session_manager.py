@@ -24,6 +24,7 @@ from mpp.methods.tempo.session.client.manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
     is_expected_close_receipt,
 )
+from mpp.methods.tempo.session.client.store import entry_key
 from mpp.methods.tempo.session.protocol import (
     ChannelDescriptor,
     create_session_receipt,
@@ -376,12 +377,13 @@ class TestTopUp:
             with pytest.raises(UncertainFundingError):
                 await manager.fetch(URL)
 
-    async def test_channel_switched_during_top_up_is_left_alone(
+    async def test_channel_switched_during_top_up_still_records_deposit(
         self, fake_chain: dict[str, list[Any]]
     ) -> None:
         server = FakeSessionServer(suggested_deposit="1000")
         other = entry_for(deposit=50)
-        manager = manager_for(lambda request: handle(request))
+        store = create_channel_store()
+        manager = manager_for(lambda request: handle(request), channel_store=store)
 
         def handle(request: httpx.Request) -> httpx.Response:
             if request.method == "POST":
@@ -391,8 +393,33 @@ class TestTopUp:
 
         async with manager:
             await manager.fetch(URL)
+            funded = manager.channel
+            assert funded is not None
             await manager.top_up(100)
             assert manager.channel is other and other.deposit == 50
+            stored = store.get(entry_key(funded))
+            assert stored is not None and stored.channel_id == funded.channel_id
+            assert stored.deposit == funded.deposit + 100
+
+    async def test_channel_switched_during_top_up_keeps_replaced_store_entry(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        server = FakeSessionServer(suggested_deposit="1000")
+        other = entry_for(deposit=50)
+        store = create_channel_store()
+        manager = manager_for(lambda request: handle(request), channel_store=store)
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                # The funded channel's scope now stores another channel.
+                manager._channel = other  # pyright: ignore[reportPrivateUsage]
+                store.set(other)
+            return server.handler(request)
+
+        async with manager:
+            await manager.fetch(URL)
+            await manager.top_up(100)
+            assert store.get(entry_key(other)) is other and other.deposit == 50
 
 
 # ── close ─────────────────────────────────────────────────────────

@@ -264,7 +264,8 @@ class SessionMethod:
             raise TypeError("tempo session context must be a SessionContext")
         resolved = await self.resolve(challenge)
         automatic = context is None or (context.action is None and context.descriptor is None)
-        lock = store_lock(self.store, f"channel:{resolved.key}")
+        scope = f"channel:{resolved.key}"
+        lock = store_lock(self.store, scope)
         held = False
         try:
             if automatic:
@@ -274,6 +275,8 @@ class SessionMethod:
             entry = await store_get(self.store, resolved.key)
             plan = self._plan(resolved, context, entry)
             if not automatic and plan.type == "open":
+                # Fetched again: an unacquired lock may have been dropped meanwhile.
+                lock = store_lock(self.store, scope)
                 await lock.acquire()
                 held = True
                 next_entry = await store_get(self.store, resolved.key)

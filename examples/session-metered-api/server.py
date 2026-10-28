@@ -10,7 +10,7 @@ import os
 import random
 
 import uvicorn
-from localnet import fund_on_localnet
+from localnet import LOCALNET_CHAIN_ID, chain_id, fund_on_localnet
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -26,13 +26,12 @@ from mpp.stores import SQLiteStore
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", "http://localhost:18645")
 CURRENCY = os.environ.get("TEMPO_CURRENCY", PATH_USD)
-# Development keys for the localnet: set your own anywhere else.
-PAYEE_KEY = os.environ.get(
-    "PAYEE_KEY", "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-)
-SPONSOR_KEY = os.environ.get(
-    "SPONSOR_KEY", "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdcab365"
-)
+# Development keys and secret, used only on the localnet: set your own anywhere else.
+DEV_SECRETS = {
+    "PAYEE_KEY": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+    "SPONSOR_KEY": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdcab365",
+    "MPP_SECRET_KEY": "session-metered-api-dev-secret",
+}
 STORE_PATH = os.environ.get("STORE_PATH", "sessions.db")
 PORT = int(os.environ.get("PORT", "8000"))
 
@@ -75,11 +74,21 @@ def create_app(mpp: Mpp) -> Starlette:
     )
 
 
+async def secrets(rpc_url: str) -> dict[str, str]:
+    """PAYEE_KEY, SPONSOR_KEY and MPP_SECRET_KEY: required off the localnet."""
+    values = {name: os.environ.get(name, "") for name in DEV_SECRETS}
+    missing = [name for name, value in values.items() if not value]
+    if missing and await chain_id(rpc_url) != LOCALNET_CHAIN_ID:
+        raise SystemExit(f"Set {', '.join(missing)}: the development defaults are localnet-only.")
+    return {name: value or DEV_SECRETS[name] for name, value in values.items()}
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    payee = TempoAccount.from_key(PAYEE_KEY)
-    sponsor = TempoAccount.from_key(SPONSOR_KEY)
+    keys = await secrets(RPC_URL)
+    payee = TempoAccount.from_key(keys["PAYEE_KEY"])
+    sponsor = TempoAccount.from_key(keys["SPONSOR_KEY"])
     await fund_on_localnet(RPC_URL, CURRENCY, payee.address, sponsor.address)
     store = await SQLiteStore.create(STORE_PATH)
     mpp = Mpp(
@@ -94,7 +103,7 @@ async def main() -> None:
                 on_session_settlement=on_settlement,
             )
         ],
-        secret_key=os.environ.get("MPP_SECRET_KEY", "session-metered-api-dev-secret"),
+        secret_key=keys["MPP_SECRET_KEY"],
     )
     log.info("payee %s, fee sponsor %s, rpc %s", payee.address, sponsor.address, RPC_URL)
     config = uvicorn.Config(create_app(mpp), host="0.0.0.0", port=PORT, log_level="warning")

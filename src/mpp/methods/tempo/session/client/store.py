@@ -14,7 +14,7 @@ import json
 import weakref
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from mpp.methods.tempo.session.protocol import ChannelDescriptor
 
@@ -235,15 +235,51 @@ _locks = _StoreMap()
 _funding_stores = _StoreMap()
 
 
+class _ScopeLock(asyncio.Lock):
+    """A per-key lock that drops its map entry once nobody holds or awaits it.
+
+    mppx deletes a key's pending operation when it settles (ChannelStore.ts:exclusive), so
+    server-chosen scopes do not accumulate.
+    """
+
+    def __init__(self, owner: dict[str, _ScopeLock], key: str) -> None:
+        super().__init__()
+        self._owner = owner
+        self._key = key
+        self._users = 0
+
+    async def acquire(self) -> Literal[True]:
+        self._users += 1
+        try:
+            return await super().acquire()
+        except BaseException:
+            self._users -= 1
+            self._prune()
+            raise
+
+    def release(self) -> None:
+        super().release()
+        self._users -= 1
+        self._prune()
+
+    def _prune(self) -> None:
+        if self._users == 0 and self._owner.get(self._key) is self:
+            del self._owner[self._key]
+
+
 def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
-    """The in-process lock for ``key`` on ``store``, created on first use."""
-    locks: dict[str, asyncio.Lock] | None = _locks.get(store)
+    """The in-process lock for ``key`` on ``store``, created on first use.
+
+    Acquire it without awaiting anything else first: its entry is dropped when its last
+    holder releases it.
+    """
+    locks: dict[str, _ScopeLock] | None = _locks.get(store)
     if locks is None:
         locks = {}
         _locks.set(store, locks)
     lock = locks.get(key)
     if lock is None:
-        lock = asyncio.Lock()
+        lock = _ScopeLock(locks, key)
         locks[key] = lock
     return lock
 

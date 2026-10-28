@@ -441,6 +441,12 @@ class SessionManager:
             self._apply_receipt(receipt)
             latest = self._channel if self._channel is not None else target
             if latest.channel_id != target.channel_id:
+                # The manager moved to another channel meanwhile: still record the deposit
+                # on the funded channel when it is the one stored for its scope.
+                stored = await store_get(self._store, entry_key(target))
+                if stored is not None and stored.channel_id == target.channel_id:
+                    funded = max(stored.deposit, target.deposit) + additional
+                    await persist_channel(self._store, stored.copy(deposit=funded))
                 return receipt
             updated = latest.copy(deposit=max(latest.deposit, target.deposit) + additional)
             await persist_channel(self._store, updated)

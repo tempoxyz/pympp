@@ -41,6 +41,7 @@ from mpp.methods.tempo.session.client.session import (
 )
 from mpp.methods.tempo.session.client.state import SessionContext
 from mpp.methods.tempo.session.client.store import (
+    _locks,  # pyright: ignore[reportPrivateUsage]
     _StoreMap,  # pyright: ignore[reportPrivateUsage]
     entry_key,
     store_get,
@@ -632,6 +633,38 @@ class TestStores:
             return "ok"
 
         assert await with_funding_lock(store, "k", operation) == "ok"
+
+    async def test_scope_locks_are_dropped_after_use(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        store = create_channel_store()
+        server = Server()
+        method = SessionMethod(account=ACCOUNT, channel_store=store, max_deposit="0.001")
+        transport = transport_for(server, method)
+        for _ in range(2):
+            assert (await get(transport)).status_code == 200
+        # A challenge rejected by local policy leaves no lock behind either.
+        with pytest.raises(ValueError):
+            await method.create_credential(
+                CredentialParams(challenge=make_challenge(amount="5000"))
+            )
+        assert _locks.get(store) == {}
+
+    async def test_scope_lock_is_kept_while_awaited(self) -> None:
+        store = create_channel_store()
+        lock = store_lock(store, "k")
+        await lock.acquire()
+        waiter = asyncio.ensure_future(lock.acquire())
+        cancelled = asyncio.ensure_future(store_lock(store, "k").acquire())
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.sleep(0)
+        lock.release()
+        await waiter
+        assert store_lock(store, "k") is lock
+        lock.release()
+        assert _locks.get(store) == {}
+        assert store_lock(store, "k") is not lock
 
     def test_store_map_forgets_collected_stores(self) -> None:
         mapping = _StoreMap()
