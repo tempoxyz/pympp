@@ -1727,3 +1727,37 @@ def test_unnamed_decorated_handlers_require_explicit_identity() -> None:
     assert callable(pay(payment, tool="named")(partial(handler, "value")))
     with pytest.raises(ValueError, match="non-empty"):
         pay(payment, tool="")(handler)
+
+
+async def test_tool_calls_carry_a_body_and_management_responses_stop_the_tool() -> None:
+    from mpp.server import RespondContext, Response
+
+    seen: list[bytes | None] = []
+
+    async def verify(context: VerifyContext) -> Receipt:
+        return Receipt.success(reference="0x123")
+
+    def respond(context: RespondContext) -> Response | None:
+        assert context.input is not None
+        seen.append(context.input.body)
+        return Response(204) if len(seen) > 1 else None
+
+    server = Mpp(
+        methods=server_method(name="tempo", intent="charge", verify=verify, respond=respond),
+        realm="api.example.com",
+        secret_key=MCP_TEST_SECRET,
+    )
+    handler = server["tempo/charge"](amount="1000")
+
+    async def call() -> Any:
+        challenge = await _challenge(handler, "paid")
+        meta = MCPCredential(challenge=challenge, payload={}).to_meta()
+        return await verify_or_challenge(handler, tool="paid", meta=meta)
+
+    # A tool call is a content request (mppx's MCP transports set hasBody).
+    assert isinstance(await call(), tuple)
+    assert seen == [b""]
+    # A management response cannot be returned from a tool call, so the tool must not run.
+    with pytest.raises(PaymentVerificationError) as raised:
+        await call()
+    assert raised.value.detail == "The credential is not valid for a tool call."

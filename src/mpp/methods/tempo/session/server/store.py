@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import time
 import weakref
@@ -32,6 +33,8 @@ from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 from mpp.errors import PaymentError, VerificationFailedError
 from mpp.methods.tempo.session.protocol import ChannelDescriptor, SignedVoucher, uint96
 from mpp.store import CompareAndSetStore, Store
+
+_logger = logging.getLogger(__name__)
 
 _R = TypeVar("_R")
 
@@ -1063,6 +1066,10 @@ def _decode_stored(channel_id: str, raw: Any) -> ChannelState | None:
     return _normalize_state(channel_id, decode_channel_state(raw))
 
 
+class _CompareAndSetUnavailable(Exception):
+    """The backing store refused ``compare_and_set`` (raised ``NotImplementedError``)."""
+
+
 class StoreChannelStore:
     """:class:`ChannelStore` over a pympp key-value store (mppx ``fromStore``).
 
@@ -1106,7 +1113,18 @@ class StoreChannelStore:
         """Atomic read-modify-write returning the callback's ``result``."""
         key = normalize_channel_id(channel_id)
         if self._cas:
-            return await self._update_cas(key, fn)
+            try:
+                return await self._update_cas(key, fn)
+            except _CompareAndSetUnavailable:
+                # A store without usable compare-and-set (such as Redis denying EVAL)
+                # keeps working with updates serialized in this process only.
+                if self._cas:
+                    self._cas = False
+                    _logger.warning(
+                        "The session channel store cannot compare_and_set, so channel "
+                        "updates are serialized in this process only. Use a shared store "
+                        "that supports it when running several processes."
+                    )
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             change = fn(_decode_stored(key, await self._store.get(key)))
@@ -1139,10 +1157,15 @@ class StoreChannelStore:
             if raw is None and value is None:
                 self._notify(key)
                 return change.result
-            if await store.compare_and_set(key, raw, value) or (
-                # Stores returning bytes may compare either the bytes or the text they were given.
-                isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value)
-            ):
+            try:
+                written = await store.compare_and_set(key, raw, value) or (
+                    # Stores returning bytes may compare either the bytes or the text they
+                    # were given.
+                    isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value)
+                )
+            except NotImplementedError as error:
+                raise _CompareAndSetUnavailable from error
+            if written:
                 self._notify(key)
                 return change.result
 

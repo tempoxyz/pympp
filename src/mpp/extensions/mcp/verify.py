@@ -104,12 +104,28 @@ async def verify_or_challenge(
     headers = {}
     if authorization is not None:
         headers = {"Authorization": authorization, "Payment-Authorization": authorization}
+    # A tool call is an application content request even though it has no HTTP body, so
+    # it carries an empty one: a body-less POST would read as session management (top-up,
+    # close) and serve the tool without charging (mppx's MCP transports set hasBody).
     result = await handler(
-        Request("POST", _TOOL_CALL_URL, headers=headers, route=f"{TOOL_ROUTE_PREFIX}{tool}")
+        Request(
+            "POST",
+            _TOOL_CALL_URL,
+            headers=headers,
+            body=b"",
+            route=f"{TOOL_ROUTE_PREFIX}{tool}",
+        )
     )
 
     if isinstance(result, PaymentVerified):
         assert credential is not None
+        if result.response is not None:
+            # The method handled the request itself (a management response): a tool call
+            # cannot return it, and the tool must not run.
+            raise PaymentVerificationError(
+                challenges=[],
+                detail="The credential is not valid for a tool call.",
+            )
         receipt = MCPReceipt.from_core(
             receipt=result.receipt,
             challenge_id=credential.challenge.id,
