@@ -425,7 +425,7 @@ async def test_wire_identical_cross_instance_offers_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stable_binding_offers_differing_only_in_amount_pay_the_first() -> None:
+async def test_stable_binding_offers_prefer_the_signed_offer_then_the_first() -> None:
     method = MockMethod("session", intent="session")
     verified: list[dict[str, Any]] = []
 
@@ -452,10 +452,18 @@ async def test_stable_binding_offers_differing_only_in_amount_pay_the_first() ->
 
     unpaid = challenges(await configured(http_request()))
     assert len(unpaid) == 2
+    # The offer whose challenge the client paid verifies at its own price.
     paid = await configured(http_request(credential(unpaid[1]).to_authorization()))
-
     assert isinstance(paid, PaymentVerified)
-    assert [request["amount"] for request in verified] == ["1.00"]
+    assert [request["amount"] for request in verified] == ["2.00"]
+
+    # A reusable challenge quoting a price no offer has now is paid by the first offer.
+    stale = challenges(
+        await server.compose(("session/session", {"amount": "5.00"}))(http_request())
+    )
+    paid = await configured(http_request(credential(stale[0]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert [request["amount"] for request in verified] == ["2.00", "1.00"]
 
 
 @pytest.mark.asyncio
