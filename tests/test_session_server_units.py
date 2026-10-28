@@ -1274,6 +1274,15 @@ class TestSessionMethod:
         with pytest.raises(ValueError, match="needs a recipient"):
             await handler(Request("GET", "http://api.test/paid"))
 
+    def test_reads_the_request_body(self) -> None:
+        # A POST is content only when it has a body, so adapters must pass the body through.
+        method = tempo_server.session(account=PAYEE, rpc_url=RPC, store=MemoryStore())
+        assert method.needs_request_body
+        handler = Mpp(methods=[method], realm="api.test", secret_key="s").session(
+            amount="1", unit_type="request"
+        )
+        assert handler.needs_request_body
+
     def test_fee_payer_true_needs_an_account(self) -> None:
         with pytest.raises(ValueError, match="requires an account"):
             tempo_server.session(
