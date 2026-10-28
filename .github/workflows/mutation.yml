@@ -1,0 +1,72 @@
+name: Mutation Testing
+
+# Mutation testing of the protocol-critical modules listed under
+# [tool.mutmut] in pyproject.toml. Runs every mutant against the unit suite
+# weekly (and on demand), never on pull requests, and only reports surviving
+# mutants for now.
+
+on:
+  schedule:
+    - cron: "0 3 * * 0" # weekly, Sundays at 03:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Resolve as of a week ago, like ci.yml, so a fresh upstream release cannot
+  # break the run.
+  UV_EXCLUDE_NEWER: "7 days"
+
+jobs:
+  mutation:
+    name: All mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    # Report-only until the surviving mutants are triaged.
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: tempoxyz/gh-actions/vendor/astral-sh/setup-uv@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      # SIGINT lets mutmut save what it tested before the time box ends.
+      - name: Run mutmut
+        run: |
+          timeout --signal=INT 330m uv run --with mutmut==3.8.0 --with "pytest<9.2" mutmut run || true
+
+      - name: Report surviving mutants
+        run: |
+          uv run --with mutmut==3.8.0 --with "pytest<9.2" python scripts/mutation.py report mutants/report.md
+          head -c 900000 mutants/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-report
+          path: |
+            mutants/report.md
+            mutants/mutmut-cicd-stats.json
+          if-no-files-found: ignore

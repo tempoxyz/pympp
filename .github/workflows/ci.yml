@@ -77,6 +77,11 @@ jobs:
         with:
           version: PATH
 
+      # api/public-api.txt records every public name and signature, so API
+      # changes show up in review. `make api` regenerates it.
+      - name: Public API snapshot
+        run: uv run python scripts/public_api.py --check
+
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -86,6 +91,18 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    # Redis-backed store tests run on every Python version.
+    services:
+      redis:
+        image: redis:7.4.8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Secure runner
@@ -110,26 +127,14 @@ jobs:
 
       - name: Run tests
         env:
-          PYTHON_VERSION: ${{ matrix.python-version }}
-        run: |
-          cov_reports=(--cov-report=term-missing)
-          if [[ "$PYTHON_VERSION" == "3.12" ]]; then
-            cov_reports+=(--cov-report=xml:coverage.xml --cov-report=html:htmlcov)
-          fi
-          uv run pytest -v --cov=mpp "${cov_reports[@]}" --cov-fail-under=90
+          REDIS_URL: redis://localhost:6379
+        run: uv run pytest -v --cov=mpp --cov-report=term-missing --cov-fail-under=90
 
-      - name: Upload coverage artifacts
-        if: always() && matrix.python-version == '3.12'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: coverage-report
-          path: |
-            coverage.xml
-            htmlcov/
-          if-no-files-found: ignore
-
+  # The whole suite against the Tempo localnet, Redis and Anvil, so this run
+  # measures coverage: branch coverage must not fall below .coverage-baseline,
+  # and a pull request's changed lines need 90% coverage.
   integration:
-    name: Integration Test
+    name: Integration Test and Coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -140,6 +145,8 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # diff-cover compares against the base branch.
+          fetch-depth: 0
 
       # Start the containers in the background so pulling and booting them
       # overlaps the setup below; a later step waits for `up --wait` to finish.
@@ -164,12 +171,34 @@ jobs:
           cat "$RUNNER_TEMP/compose-up.log"
           [[ "$(cat "$RUNNER_TEMP/compose-up.status" 2>/dev/null)" == 0 ]]
 
-      - name: Run integration tests
-        run: uv run pytest -m "integration or redis or x402_localnet" -v
+      - name: Run all tests with coverage
+        run: >-
+          uv run pytest -v --cov=mpp --cov-report=term-missing
+          --cov-report=xml:coverage.xml --cov-report=json:coverage.json --cov-report=html:htmlcov
         env:
-          TEMPO_RPC_URL: http://localhost:8545
+          TEMPO_NETWORK: localnet
           REDIS_URL: redis://localhost:6379
           X402_ANVIL_RPC_URL: http://localhost:18546
+
+      - name: Check branch coverage against the baseline
+        run: uv run python scripts/coverage_ratchet.py coverage.json
+
+      - name: Check coverage of changed lines
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: uv run diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=90
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage.json
+            htmlcov/
+          if-no-files-found: ignore
 
       - name: Stop containers
         if: always()

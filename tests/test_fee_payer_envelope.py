@@ -188,6 +188,39 @@ class TestDecodeFeePayerEnvelope:
         with pytest.raises(ValueError, match="Malformed"):
             decode_fee_payer_envelope(short)
 
+    def test_rejects_invalid_rlp(self) -> None:
+        """Malformed RLP raises ValueError, not rlp.DecodingError."""
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78, 0xC5, 0x01]))
+
+    def test_rejects_list_fee_fields(self) -> None:
+        """A list in a scalar slot such as max_fee_per_gas raises ValueError."""
+        fields: list = [b""] * 14
+        fields[2] = [b"\x01"]
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78]) + rlp.encode(fields))
+
+    def test_rejects_deeply_nested_rlp(self) -> None:
+        """RLP nested past the recursion limit raises ValueError, not RecursionError."""
+        # rlp.encode itself recurses, so build the nested lists by hand.
+        nested = b"\xc0"
+        for _ in range(5_000):
+            size = len(nested)
+            if size <= 55:
+                nested = bytes([0xC0 + size]) + nested
+            else:
+                length = size.to_bytes((size.bit_length() + 7) // 8, "big")
+                nested = bytes([0xF7 + len(length)]) + length + nested
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78]) + nested)
+
+    def test_rejects_list_sender_fields(self) -> None:
+        """A list where the sender address or signature belongs raises ValueError."""
+        fields: list = [b""] * 14
+        fields[11] = [b"\x01"]
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78]) + rlp.encode(fields))
+
 
 class TestEncoderDecoderIntegration:
     """Integration tests: encode → decode → cosign roundtrip."""

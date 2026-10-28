@@ -168,3 +168,20 @@ class TestHostileInputs:
         expected = '{"b":1,"' + key + '":2}'
         assert compute(body) == compute(expected)
         assert verify(compute(expected), body) is True
+
+
+class TestLoneSurrogates:
+    """Bodies holding lone UTF-16 surrogates hash like mppx instead of raising."""
+
+    def test_dict_body_escapes_lone_surrogates_like_json_stringify(self) -> None:
+        # json.loads accepts lone surrogate escapes; JSON.stringify re-escapes them.
+        body = json.loads('{"\\ud800": "x\\udc00"}')
+        assert compute(body) == compute(b'{"\\ud800":"x\\udc00"}')
+        assert verify(compute(body), body) is True
+
+    def test_dict_body_joins_surrogate_pairs(self) -> None:
+        assert compute({"a": "\ud83d\ude00"}) == compute({"a": "\U0001f600"})
+
+    def test_str_body_replaces_lone_surrogates_like_text_encoder(self) -> None:
+        assert compute("a\ud800b") == compute("a\ufffdb".encode())
+        assert compute("\ud83d\ude00") == compute("\U0001f600".encode())
