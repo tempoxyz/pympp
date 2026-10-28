@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp import Challenge, Credential
+from mpp._typing import is_dict, is_list
 from mpp.runtime import ClientMethod, CredentialParams
 
 
@@ -85,20 +86,20 @@ class StripeMethod:
         currency = str(request.get("currency", ""))
         raw_external_id = request.get("externalId")
         external_id = raw_external_id if isinstance(raw_external_id, str) else None
-        network_id = method_details.get("networkId") if isinstance(method_details, dict) else None
+        network_id = method_details.get("networkId") if is_dict(method_details) else None
         if not network_id:
             raise ValueError("networkId is required in challenge.methodDetails")
         payment_method_types = (
-            method_details.get("paymentMethodTypes") if isinstance(method_details, dict) else None
+            method_details.get("paymentMethodTypes") if is_dict(method_details) else None
         )
         if (
-            not isinstance(payment_method_types, list)
+            not is_list(payment_method_types)
             or not payment_method_types
             or not all(isinstance(value, str) for value in payment_method_types)
         ):
             raise ValueError("paymentMethodTypes is required in challenge.methodDetails")
-        metadata = method_details.get("metadata") if isinstance(method_details, dict) else None
-        if isinstance(metadata, dict) and "externalId" in metadata:
+        metadata = method_details.get("metadata") if is_dict(method_details) else None
+        if is_dict(metadata) and "externalId" in metadata:
             raise ValueError(
                 "methodDetails.metadata.externalId is reserved; use request externalId instead"
             )

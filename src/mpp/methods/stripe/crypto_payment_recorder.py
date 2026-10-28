@@ -105,7 +105,8 @@ def _optional_rejection(error: Exception) -> bool:
 
     if not isinstance(error, stripe.InvalidRequestError):
         return False
-    param = error.param
+    # stripe leaves InvalidRequestError.param unannotated.
+    param: object = error.param  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     return isinstance(param, str) and any(
         param == name or param.startswith((name + "[", name + "."))
         for name in ("customer", "receipt_email", "metadata", "hooks")

@@ -18,6 +18,7 @@ import httpx
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import ParseError
+from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
     PaymentError,
@@ -69,7 +70,7 @@ def _paid_retry_extensions(
     """
     timeout = extensions.get("timeout")
     if paid_retry_timeout is _PAID_RETRY_TIMEOUT_UNSET:
-        if not isinstance(timeout, dict) or timeout.get("read") is None:
+        if not is_dict(timeout) or timeout.get("read") is None:
             return extensions
         read = max(timeout["read"], DEFAULT_PAID_RETRY_TIMEOUT)
         return {**extensions, "timeout": {**timeout, "read": read}}
@@ -114,7 +115,7 @@ def _payment_origins(
 ) -> frozenset[tuple[str, str, int | None]] | None:
     if origins is None:
         return None
-    result = set()
+    result: set[tuple[str, str, int | None]] = set()
     for value in origins:
         url = httpx.URL(value)
         if (

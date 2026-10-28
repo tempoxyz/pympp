@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from importlib.metadata import version
+from typing import Any
 
 from mpp import Credential
 from mpp.methods.stripe.payment_intent_options import validate_metadata
@@ -21,7 +22,7 @@ def build_analytics(credential: Credential) -> dict[str, str]:
 def merge_metadata(
     credential: Credential,
     configured: Mapping[str, str] | None,
-    options: dict,
+    options: dict[str, Any],
 ) -> dict[str, str]:
     return validate_metadata(
         {

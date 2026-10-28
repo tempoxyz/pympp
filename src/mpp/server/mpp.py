@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._typing import is_mapping
 from mpp._validation import Validation
 from mpp.errors import (
     InvalidChallengeError,
@@ -659,9 +660,9 @@ def _custom_scope_matches(expected: Any, echoed: Any, *, wire: bool) -> bool:
     """
     if expected is None:
         return True
-    custom = echoed.get("custom") if isinstance(echoed, Mapping) else None
+    custom = echoed.get("custom") if is_mapping(echoed) else None
     if wire:
-        return isinstance(expected, Mapping) and expected.get("custom") == custom
+        return is_mapping(expected) and expected.get("custom") == custom
     # A method whose model passes the whole wire through names the whole signed scope.
     return expected == custom or expected == echoed
 

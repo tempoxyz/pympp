@@ -322,7 +322,7 @@ async def _settle(
 
 def _response_from_skip_handler(directive: SkipHandlerDirective) -> Response:
     content_type = directive.content_type or "application/json"
-    value = directive.body if directive.body is not None else {}
+    value: Any = directive.body if directive.body is not None else {}
     if "json" in content_type.lower():
         body = json.dumps(value, separators=(",", ":")).encode()
     else:

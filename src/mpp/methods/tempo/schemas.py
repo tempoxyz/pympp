@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
 
+from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import Method
 
@@ -44,13 +45,13 @@ def reject_fixed_attribution_memos(request: Mapping[str, Any]) -> None:
     verification with ``CredentialReplayedError``.
     """
     details = request.get("methodDetails")
-    if not isinstance(details, Mapping):
+    if not is_mapping(details):
         return
     splits = details.get("splits")
-    if not isinstance(splits, list):
+    if not is_list(splits):
         return
     for split in splits:
-        if isinstance(split, Mapping) and is_fixed_attribution_memo(split.get("memo")):
+        if is_mapping(split) and is_fixed_attribution_memo(split.get("memo")):
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
 
 

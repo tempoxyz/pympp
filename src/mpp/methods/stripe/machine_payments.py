@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import mpp.methods.stripe.intents as stripe_intents
+from mpp._typing import is_dict
 from mpp.methods import CanOfferFn
 from mpp.methods.stripe import server as stripe
 from mpp.methods.stripe.connect import ConnectSettlement
@@ -242,6 +243,6 @@ def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) ->
 
 
 def _payload_type(payload: Any) -> Any:
-    if isinstance(payload, dict):
+    if is_dict(payload):
         return payload.get("type")
     return getattr(getattr(payload, "root", payload), "type", None)

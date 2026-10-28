@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import InvalidChallengeError, PaymentExpiredError
@@ -138,7 +138,7 @@ def _flatten(methods: Sequence[Any]) -> tuple[ClientMethod, ...]:
         if isinstance(entry, ClientMethod):
             flat.append(entry)
         elif isinstance(entry, Sequence) and not isinstance(entry, str):
-            flat.extend(_flatten(entry))
+            flat.extend(_flatten(cast("Sequence[Any]", entry)))
         else:
             raise TypeError(f"not a client payment method: {entry!r}")
     return tuple(flat)

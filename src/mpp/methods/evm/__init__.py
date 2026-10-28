@@ -58,3 +58,17 @@ _LAZY_EXPORTS = {
 
 def __getattr__(name: str) -> Any:
     return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)
+
+
+__all__ = [
+    "BASE",
+    "BASE_SEPOLIA",
+    "BASE_SEPOLIA_USDC",
+    "BASE_USDC",
+    "CELO",
+    "CELO_SEPOLIA",
+    "CELO_SEPOLIA_USDC",
+    "CELO_USDC",
+    "CELO_USDT",
+    "EvmAsset",
+]

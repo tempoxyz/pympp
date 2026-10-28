@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from mpp import ChallengeEcho, Credential, canonical_b64url
 from mpp._parsing import ParseError, _b64_decode
+from mpp._typing import is_mapping
 from mpp.errors import MalformedCredentialError, VerificationFailedError
 from mpp.x402._header import (
     InvalidHeaderError,
@@ -107,7 +108,7 @@ class X402Intent(Protocol):
 
 
 def _application_meta(meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(meta, Mapping):
+    if not is_mapping(meta):
         return None
     return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
 
@@ -145,7 +146,7 @@ def route_extensions(
 def challenge_route_extensions(challenge: Any, http_method: str) -> dict[str, Any]:
     """Return the route extensions of an issued challenge."""
     request = getattr(challenge, "request", None)
-    scope = request.get("_mppx_scope") if isinstance(request, Mapping) else None
+    scope = request.get("_mppx_scope") if is_mapping(request) else None
     return route_extensions(
         http_method=http_method,
         scope=scope,
@@ -168,14 +169,14 @@ def route_nonce(
 
 def _contains_extensions(actual: Any, expected: Mapping[str, Any]) -> bool:
     """Return whether echoed extensions carry the route's, ignoring the client salt."""
-    if not isinstance(actual, Mapping):
+    if not is_mapping(actual):
         return False
     for key, expected_extension in expected.items():
         extension = actual.get(key)
-        if not isinstance(extension, Mapping):
+        if not is_mapping(extension):
             return False
         info = extension.get("info")
-        if not isinstance(info, Mapping):
+        if not is_mapping(info):
             return False
         nonce = info.get("nonce")
         stripped = (
@@ -231,11 +232,9 @@ def x402_credential(
     expected_resource = {"url": resource_url}
     echoed_extensions = payment.get("extensions")
     binding = (
-        echoed_extensions.get(ROUTE_BINDING_EXTENSION)
-        if isinstance(echoed_extensions, Mapping)
-        else None
+        echoed_extensions.get(ROUTE_BINDING_EXTENSION) if is_mapping(echoed_extensions) else None
     )
-    client_nonce = binding.get("info", {}).get("nonce") if isinstance(binding, Mapping) else None
+    client_nonce = binding.get("info", {}).get("nonce") if is_mapping(binding) else None
     is_route_bound = client_nonce is not None
     requires_binding = route_requires_binding(scope=scope, digest=digest, meta=meta)
     resource = payment.get("resource")
@@ -268,7 +267,7 @@ def x402_credential(
 
     payload, source = intent.x402_credential_payload(payment, request)
     if is_route_bound:
-        assert isinstance(echoed_extensions, Mapping)
+        assert is_mapping(echoed_extensions)
         expected_nonce = route_nonce(
             accepted=requirements, resource=expected_resource, extensions=echoed_extensions
         )
@@ -370,8 +369,8 @@ def payment_response_header(credential: Credential, receipt: Receipt) -> str | N
         request = _b64_decode(credential.challenge.request) if credential.challenge.request else {}
     except ParseError:
         request = {}
-    details = request.get("methodDetails") if isinstance(request, Mapping) else None
-    chain_id = details.get("chainId") if isinstance(details, Mapping) else None
+    details = request.get("methodDetails") if is_mapping(request) else None
+    chain_id = details.get("chainId") if is_mapping(details) else None
     if isinstance(chain_id, bool) or not isinstance(chain_id, int):
         return None
     payer = receipt.payer or credential.payload.get("from")

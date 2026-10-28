@@ -134,8 +134,94 @@ quote-style = "double"
 
 [tool.pyright]
 pythonVersion = "3.11"
-typeCheckingMode = "standard"
 include = ["src", "tests", "scripts"]
+typeCheckingMode = "strict"
+# Package-internal helpers are shared across modules by underscore convention.
+reportPrivateUsage = false
+# Public entry points check argument types at runtime for untyped callers.
+reportUnnecessaryIsInstance = false
+reportUnnecessaryComparison = false
+
+# Tests and scripts stay at the "standard" level: every rule strict adds is set back to its
+# standard value.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+extraPaths = ["."]
+strictListInference = false
+strictSetInference = false
+strictDictionaryInference = false
+reportAssertAlwaysTrue = "warning"
+reportConstantRedefinition = "none"
+reportDeprecated = "none"
+reportDuplicateImport = "none"
+reportIncompleteStub = "none"
+reportInconsistentConstructor = "none"
+reportInvalidStringEscapeSequence = "warning"
+reportInvalidStubStatement = "none"
+reportInvalidTypeVarUse = "warning"
+reportMatchNotExhaustive = "none"
+reportMissingParameterType = "none"
+reportMissingTypeArgument = "none"
+reportMissingTypeStubs = "none"
+reportSelfClsParameterName = "warning"
+reportTypeCommentUsage = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportUnnecessaryCast = "none"
+reportUnnecessaryContains = "none"
+reportUnsupportedDunderAll = "warning"
+reportUntypedBaseClass = "none"
+reportUntypedClassDecorator = "none"
+reportUntypedFunctionDecorator = "none"
+reportUntypedNamedTuple = "none"
+reportUnusedClass = "none"
+reportUnusedExpression = "warning"
+reportUnusedFunction = "none"
+reportUnusedImport = "none"
+reportUnusedVariable = "none"
+reportWildcardImportFromLibrary = "warning"
+
+[[tool.pyright.executionEnvironments]]
+root = "scripts"
+strictListInference = false
+strictSetInference = false
+strictDictionaryInference = false
+reportAssertAlwaysTrue = "warning"
+reportConstantRedefinition = "none"
+reportDeprecated = "none"
+reportDuplicateImport = "none"
+reportIncompleteStub = "none"
+reportInconsistentConstructor = "none"
+reportInvalidStringEscapeSequence = "warning"
+reportInvalidStubStatement = "none"
+reportInvalidTypeVarUse = "warning"
+reportMatchNotExhaustive = "none"
+reportMissingParameterType = "none"
+reportMissingTypeArgument = "none"
+reportMissingTypeStubs = "none"
+reportSelfClsParameterName = "warning"
+reportTypeCommentUsage = "none"
+reportUnknownArgumentType = "none"
+reportUnknownLambdaType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownVariableType = "none"
+reportUnnecessaryCast = "none"
+reportUnnecessaryContains = "none"
+reportUnsupportedDunderAll = "warning"
+reportUntypedBaseClass = "none"
+reportUntypedClassDecorator = "none"
+reportUntypedFunctionDecorator = "none"
+reportUntypedNamedTuple = "none"
+reportUnusedClass = "none"
+reportUnusedExpression = "warning"
+reportUnusedFunction = "none"
+reportUnusedImport = "none"
+reportUnusedVariable = "none"
+reportWildcardImportFromLibrary = "warning"
 
 [tool.coverage.run]
 branch = true

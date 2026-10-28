@@ -13,6 +13,7 @@ from typing import Any, cast
 import mpp.methods.stripe._defaults as stripe_defaults
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_TIMEOUT
+from mpp._typing import is_dict
 from mpp.errors import (
     CredentialReplayedError,
     InvalidChallengeError,
@@ -318,7 +319,7 @@ class ChargeIntent:
         }
         if settlement:
             for key, value in settlement.params().items():
-                if isinstance(value, dict):
+                if is_dict(value):
                     for field, item in value.items():
                         body[f"{key}[{field}]"] = str(item)
                 else:

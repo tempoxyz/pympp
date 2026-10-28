@@ -55,3 +55,20 @@ _LAZY_EXPORTS = {
 
 def __getattr__(name: str) -> Any:
     return load_lazy_attr(__name__, name, _LAZY_EXPORTS, globals(), _EXTRA_INSTALL_HINT)
+
+
+__all__ = [
+    "CHAIN_ID",
+    "ESCROW_CONTRACTS",
+    "MACH",
+    "OUSD",
+    "PATH_USD",
+    "TESTNET_CHAIN_ID",
+    "USDC",
+    "PkhSource",
+    "default_currencies_for_chain",
+    "default_currency_for_chain",
+    "escrow_contract_for_chain",
+    "fee_tokens_for_chain",
+    "parse_pkh_source",
+]

@@ -11,6 +11,8 @@ import re
 from collections.abc import Mapping
 from typing import Any, Literal, NotRequired, TypedDict
 
+from mpp._typing import is_list, is_mapping
+
 X402_VERSION: Literal[2] = 2
 """x402 protocol version supported by this package."""
 
@@ -106,7 +108,7 @@ class SettleResponse(TypedDict):
 
 
 def _object(value: Any, name: str) -> dict[str, Any]:
-    if not isinstance(value, Mapping):
+    if not is_mapping(value):
         raise X402FormatError(f"{name} must be an object")
     if not all(isinstance(key, str) for key in value):
         raise X402FormatError(f"{name} keys must be strings")
@@ -185,7 +187,7 @@ def parse_payment_required(value: Any) -> PaymentRequired:
     record = _object(value, "paymentRequired")
     _version(record, "paymentRequired")
     accepts = record.get("accepts")
-    if not isinstance(accepts, list) or not accepts:
+    if not is_list(accepts) or not accepts:
         raise X402FormatError("paymentRequired.accepts must be a non-empty array")
     for index, accepted in enumerate(accepts):
         parse_payment_requirements(accepted, f"paymentRequired.accepts[{index}]")
@@ -274,9 +276,9 @@ def _json_equal(left: Any, right: Any) -> bool:
     """JSON equality that never equates booleans with numbers."""
     if isinstance(left, bool) or isinstance(right, bool):
         return type(left) is type(right) and left == right
-    if isinstance(left, Mapping) and isinstance(right, Mapping):
+    if is_mapping(left) and is_mapping(right):
         return left.keys() == right.keys() and all(_json_equal(left[k], right[k]) for k in left)
-    if isinstance(left, list) and isinstance(right, list):
+    if is_list(left) and is_list(right):
         return len(left) == len(right) and all(
             _json_equal(a, b) for a, b in zip(left, right, strict=True)
         )

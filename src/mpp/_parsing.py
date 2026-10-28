@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp._canonical import canonical_b64url
+from mpp._typing import is_dict
 
 if TYPE_CHECKING:
     from mpp import Challenge, Credential, Receipt
@@ -67,7 +68,7 @@ def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[s
         padded = encoded + "=" * (-len(encoded) % 4)
         decoded = base64.urlsafe_b64decode(padded)
         obj = json.loads(decoded)
-        if not isinstance(obj, dict):
+        if not is_dict(obj):
             raise ParseError("Expected JSON object")
         # JSON escapes can contain lone surrogates that fail later UTF-8/HMAC encoding.
         json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -301,7 +302,7 @@ def parse_authorization(header: str) -> Credential:
         raise ParseError("Credential missing required field: payload")
 
     challenge_data = data["challenge"]
-    if not isinstance(challenge_data, dict):
+    if not is_dict(challenge_data):
         raise ParseError("Credential challenge must be an object")
     if "id" not in challenge_data:
         raise ParseError("Credential challenge missing required field: id")
@@ -448,7 +449,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         external_id=str(data["externalId"]) if data.get("externalId") else None,
         subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
         funding_currency=str(data["fundingCurrency"]) if data.get("fundingCurrency") else None,
-        extra=extra if isinstance(extra, dict) else None,
+        extra=extra if is_dict(extra) else None,
         extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
         or None,
     )

@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, TypeVar
 
+from mpp._typing import is_dict
 from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
 from mpp.store import CompareAndSetStore, MemoryStore
@@ -123,10 +124,10 @@ def _decode(raw: Any) -> dict[str, Any] | None:
         state = json.loads(raw)
     except (TypeError, ValueError):
         return None
-    if not isinstance(state, dict) or state.get("version") != 1:
+    if not is_dict(state) or state.get("version") != 1:
         return None
     reservations = state.get("reservations")
-    return reservations if isinstance(reservations, dict) else None
+    return reservations if is_dict(reservations) else None
 
 
 async def _update(
@@ -161,7 +162,7 @@ async def _mutate_owned(
 ) -> bool:
     def change(current: dict[str, Any] | None) -> tuple[bool, dict[str, Any] | None]:
         entry = (current or {}).get(reservation.id)
-        if not isinstance(entry, dict) or entry.get("owner") != reservation.owner:
+        if not is_dict(entry) or entry.get("owner") != reservation.owner:
             return False, None
         if unless is not None and unless(entry):
             return False, None
@@ -330,6 +331,8 @@ async def reserve(
                     raise InternalPaymentError() from RuntimeError(
                         "Sponsored transaction already has a budget reservation"
                     )
+                case _:
+                    pass
             # At capacity: release what has settled or expired in the background,
             # and retry admission on every poll rather than after the whole batch.
             if reconciling is not None and reconciling.done():

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 
+from mpp._typing import is_dict, is_list
 from mpp.server.http import PaymentRequired, Request, Response
 from mpp.x402._server import X402Input
 from mpp.x402._types import PAYMENT_SIGNATURE_HEADER
@@ -60,7 +61,7 @@ def get_request_url(request: Any) -> str | None:
     # Starlette rebuilds the URL from the decoded path; take the path from ASGI raw_path
     # so encoded delimiters such as %2F stay distinct from the characters they encode.
     scope = getattr(request, "scope", None)
-    raw_path = scope.get("raw_path") if isinstance(scope, dict) else None
+    raw_path = scope.get("raw_path") if is_dict(scope) else None
     if isinstance(raw_path, bytes) and raw_path:
         try:
             parsed = httpx.URL(text)
@@ -90,7 +91,7 @@ def framework_scope(request: Any) -> dict[str, str]:
     scope: dict[str, str] = {}
 
     raw_scope = getattr(request, "scope", None)
-    if isinstance(raw_scope, dict):
+    if is_dict(raw_scope):
         route = raw_scope.get("route")
         route_path = getattr(route, "path", None)
         if isinstance(route_path, str) and route_path:
@@ -99,7 +100,7 @@ def framework_scope(request: Any) -> dict[str, str]:
             endpoint = raw_scope.get("endpoint")
             router = raw_scope.get("router")
             routes = getattr(router, "routes", None)
-            if isinstance(routes, list):
+            if is_list(routes):
                 for candidate in routes:
                     if getattr(candidate, "endpoint", None) is endpoint:
                         matched_path = getattr(candidate, "path", None)
@@ -151,13 +152,13 @@ def framework_scope(request: Any) -> dict[str, str]:
         scope.setdefault("query", query_string)
 
     meta = getattr(request, "META", None)
-    if isinstance(meta, dict):
+    if is_dict(meta):
         query = meta.get("QUERY_STRING")
         if isinstance(query, str) and query:
             scope.setdefault("query", query)
 
     method = getattr(request, "method", None)
-    if not isinstance(method, str) and isinstance(raw_scope, dict):
+    if not isinstance(method, str) and is_dict(raw_scope):
         method = raw_scope.get("method")
     if isinstance(method, str) and method:
         scope["http_method"] = method.upper()
@@ -170,7 +171,7 @@ def _framework_headers(request: Any) -> list[tuple[str, str]]:
         items = headers.items() if hasattr(headers, "items") else headers
         return [(str(name), str(value)) for name, value in items]
     meta = getattr(request, "META", None)
-    if isinstance(meta, dict):
+    if is_dict(meta):
         return [
             (key[5:].replace("_", "-").title(), str(value))
             for key, value in meta.items()

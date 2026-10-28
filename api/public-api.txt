@@ -1,41 +1,10 @@
 module mpp
-    def canonical_b64url(data: Any) -> str
-    class ParseError(Exception)
-    def format_authorization(credential: Credential) -> str
-    def format_payment_receipt(receipt: Receipt) -> str
-    def format_www_authenticate(challenge: Challenge, realm: str) -> str
-    def parse_authorization(header: str) -> Credential
-    def parse_payment_receipt(header: str) -> Receipt
-    def parse_www_authenticate(header: str) -> Challenge
+    AUTHORIZATION_HEADER = 'Authorization'
     BadRequestError -> mpp.errors.BadRequestError
-    CredentialReplayedError -> mpp.errors.CredentialReplayedError
-    InternalPaymentError -> mpp.errors.InternalPaymentError
-    InvalidChallengeError -> mpp.errors.InvalidChallengeError
-    InvalidPayloadError -> mpp.errors.InvalidPayloadError
-    MalformedCredentialError -> mpp.errors.MalformedCredentialError
-    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
-    PaymentError -> mpp.errors.PaymentError
-    PaymentExpiredError -> mpp.errors.PaymentExpiredError
-    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
-    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
-    PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
-    PaymentRequiredError -> mpp.errors.PaymentRequiredError
-    VerificationFailedError -> mpp.errors.VerificationFailedError
+    BodyDigest: module
     CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
     CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
     CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
-    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
-    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
-    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
-    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
-    EventDispatcher -> mpp.events.EventDispatcher
-    PaymentEvent -> mpp.events.PaymentEvent
-    PaymentEventName -> mpp.events.PaymentEventName
-    AUTHORIZATION_HEADER = 'Authorization'
-    PAYMENT_AUTHORIZATION_HEADER = 'Payment-Authorization'
-    def is_default_credential_header(header: str | None) -> bool
-    def advertised_credential_header(header: str | None) -> str | None
-    def generate_challenge_id(*, secret_key: str, realm: str, method: str, intent: str, request: dict[str, Any], expires: str | None = None, digest: str | None = None, opaque: dict[str, str] | None = None, header: str | None = None) -> str
     class Challenge
         @dataclass(frozen=True, slots=True)
         field id: str
@@ -67,6 +36,7 @@ module mpp
         field opaque: str | None = None
         field header: str | None = None
         field description: str | None = None
+    ClientMethod -> mpp.runtime.ClientMethod
     class Credential
         @dataclass(frozen=True, slots=True)
         field challenge: ChallengeEcho
@@ -74,6 +44,30 @@ module mpp
         field source: str | None = None
         @classmethod def from_authorization(cls, header: str) -> Credential
         def to_authorization(self) -> str
+    CredentialParams -> mpp.runtime.CredentialParams
+    CredentialReplayedError -> mpp.errors.CredentialReplayedError
+    EventDispatcher -> mpp.events.EventDispatcher
+    Expires: module
+    InternalPaymentError -> mpp.errors.InternalPaymentError
+    InvalidChallengeError -> mpp.errors.InvalidChallengeError
+    InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    MalformedCredentialError -> mpp.errors.MalformedCredentialError
+    MemoryStore -> mpp.store.MemoryStore
+    Method -> mpp.methods.Method
+    PAYMENT_AUTHORIZATION_HEADER = 'Payment-Authorization'
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
+    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    class ParseError(Exception)
+    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
+    PaymentError -> mpp.errors.PaymentError
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
+    PaymentExpiredError -> mpp.errors.PaymentExpiredError
+    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
+    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
+    PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
+    PaymentRequiredError -> mpp.errors.PaymentRequiredError
     class Receipt
         @dataclass(frozen=True, slots=True)
         field status: Literal['success']
@@ -89,27 +83,37 @@ module mpp
         @classmethod def from_payment_receipt(cls, header: str) -> Receipt
         @classmethod def success(cls, reference: str, timestamp: datetime | None = None, method: str = 'tempo', external_id: str | None = None, subscription_id: str | None = None, funding_currency: str | None = None) -> Receipt
         def to_payment_receipt(self) -> str
-    Method -> mpp.methods.Method
-    ClientMethod -> mpp.runtime.ClientMethod
-    CredentialParams -> mpp.runtime.CredentialParams
-    MemoryStore -> mpp.store.MemoryStore
     Store -> mpp.store.Store
+    VerificationFailedError -> mpp.errors.VerificationFailedError
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
+    def advertised_credential_header(header: str | None) -> str | None
+    def canonical_b64url(data: Any) -> str
+    def format_authorization(credential: Credential) -> str
+    def format_payment_receipt(receipt: Receipt) -> str
+    def format_www_authenticate(challenge: Challenge, realm: str) -> str
+    def generate_challenge_id(*, secret_key: str, realm: str, method: str, intent: str, request: dict[str, Any], expires: str | None = None, digest: str | None = None, opaque: dict[str, str] | None = None, header: str | None = None) -> str
+    def is_default_credential_header(header: str | None) -> bool
+    def parse_authorization(header: str) -> Credential
+    def parse_payment_receipt(header: str) -> Receipt
+    def parse_www_authenticate(header: str) -> Challenge
+    stores: module
 
 module mpp.client
-    Mpp -> mpp.client.transport.Mpp
-    PaymentTransport -> mpp.client.transport.PaymentTransport
     CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
     CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
-    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
-    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
-    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
-    EventDispatcher -> mpp.events.EventDispatcher
-    PaymentEvent -> mpp.events.PaymentEvent
-    PaymentEventName -> mpp.events.PaymentEventName
-    Method -> mpp.methods.Method
     ClientMethod -> mpp.runtime.ClientMethod
     CredentialParams -> mpp.runtime.CredentialParams
+    EventDispatcher -> mpp.events.EventDispatcher
+    Expires: module
+    Method -> mpp.methods.Method
+    Mpp -> mpp.client.transport.Mpp
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
     PaymentRuntime -> mpp.runtime.PaymentRuntime
+    PaymentTransport -> mpp.client.transport.PaymentTransport
+    WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
 
 module mpp.client.transport
     class PaymentTransport(httpx.AsyncBaseTransport)
@@ -327,24 +331,11 @@ module mpp.events
 module mpp.extensions
 
 module mpp.extensions.mcp
-    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
     CODE_MALFORMED_CREDENTIAL = -32602
     CODE_PAYMENT_REQUIRED = -32042
     CODE_PAYMENT_VERIFICATION_FAILED = -32043
     META_CREDENTIAL = 'org.paymentauth/credential'
     META_RECEIPT = 'org.paymentauth/receipt'
-    payment_capabilities -> mpp.extensions.mcp.capabilities.payment_capabilities
-    McpClient -> mpp.extensions.mcp.client.McpClient
-    McpToolResult -> mpp.extensions.mcp.client.McpToolResult
-    PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
-    pay -> mpp.extensions.mcp.decorator.pay
-    MalformedCredentialError -> mpp.extensions.mcp.errors.MalformedCredentialError
-    PaymentRequiredError -> mpp.extensions.mcp.errors.PaymentRequiredError
-    PaymentVerificationError -> mpp.extensions.mcp.errors.PaymentVerificationError
-    MCPChallenge -> mpp.extensions.mcp.types.MCPChallenge
-    MCPCredential -> mpp.extensions.mcp.types.MCPCredential
-    MCPReceipt -> mpp.extensions.mcp.types.MCPReceipt
-    verify_or_challenge -> mpp.extensions.mcp.verify.verify_or_challenge
 
 module mpp.extensions.mcp.capabilities
     def payment_capabilities(methods: Mpp | Iterable[ServerMethod]) -> dict[str, Any]
@@ -451,7 +442,6 @@ module mpp.methods
         def parse_payload(self, payload: Any) -> ~PayloadT
 
 module mpp.methods.evm
-    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
     BASE = 8453
     BASE_SEPOLIA = 84532
     BASE_SEPOLIA_USDC: mpp.methods.evm.assets.EvmAsset
@@ -462,15 +452,6 @@ module mpp.methods.evm
     CELO_USDC: mpp.methods.evm.assets.EvmAsset
     CELO_USDT: mpp.methods.evm.assets.EvmAsset
     EvmAsset -> mpp.methods.evm.assets.EvmAsset
-    AuthorizationConfig -> mpp.methods.evm.client.AuthorizationConfig
-    evm -> mpp.methods.evm.client.evm
-    Authorization -> mpp.methods.evm.intents.Authorization
-    AuthorizationPayload -> mpp.methods.evm.intents.AuthorizationPayload
-    ChargeIntent -> mpp.methods.evm.intents.ChargeIntent
-    ChargeRequest -> mpp.methods.evm.intents.ChargeRequest
-    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | collections.abc.Awaitable[str]]
-    charge: mpp.methods.Method
-    def challenge_hash(challenge_id: str, realm: str) -> str
 
 module mpp.methods.evm.assets
     BASE = 8453
@@ -560,7 +541,7 @@ module mpp.methods.stripe
 
 module mpp.methods.stripe.analytics
     def build_analytics(credential: mpp.Credential) -> dict[str, str]
-    def merge_metadata(credential: mpp.Credential, configured: collections.abc.Mapping[str, str] | None, options: dict) -> dict[str, str]
+    def merge_metadata(credential: mpp.Credential, configured: collections.abc.Mapping[str, str] | None, options: dict[str, typing.Any]) -> dict[str, str]
 
 module mpp.methods.stripe.client
     class OnChallengeParameters
@@ -693,11 +674,6 @@ module mpp.methods.stripe.server
     def charge(*, network_id: str, client: Any | None = None, secret_key: str | None = None, payment_method_types: list[str] | None = None, currency: str | None = None, decimals: int = 2, recipient: str | None = None, external_id: str | None = None, metadata: dict[str, str] | None = None, connect: ConnectInput = None, http_client: Any | None = None, timeout: float = 30.0, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
 
 module mpp.methods.tempo
-    class PkhSource(NamedTuple)
-        address: str
-        chain_id: int
-    def parse_pkh_source(source: str) -> PkhSource | None
-    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
     CHAIN_ID = 4217
     ESCROW_CONTRACTS: mappingproxy
     MACH = '0x20c000000000000000000000f37de3740ADec032'
@@ -705,24 +681,14 @@ module mpp.methods.tempo
     PATH_USD = '0x20c0000000000000000000000000000000000000'
     TESTNET_CHAIN_ID = 42431
     USDC = '0x20C000000000000000000000b9537d11c60E8b50'
+    class PkhSource(NamedTuple)
+        address: str
+        chain_id: int
     def default_currencies_for_chain(chain_id: int | None) -> tuple[str, ...]
     def default_currency_for_chain(chain_id: int | None) -> str
     def escrow_contract_for_chain(chain_id: int) -> str
     def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]
-    TempoAccount -> mpp.methods.tempo.account.TempoAccount
-    TempoMethod -> mpp.methods.tempo.client.TempoMethod
-    TransactionError -> mpp.methods.tempo.client.TransactionError
-    ChargeIntent -> mpp.methods.tempo.intents.ChargeIntent
-    Transfer -> mpp.methods.tempo.intents.Transfer
-    SenderValidation -> mpp.methods.tempo.intents.SenderValidation
-    ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
-    get_transfers -> mpp.methods.tempo.intents.get_transfers
-    Relay -> mpp.methods.tempo.relay.Relay
-    RelayErrorCode = typing.Literal['already_used', 'broadcast_failed', 'expired', 'invalid_payment', 'insufficient_funds', 'policy_denied', 'screen_rejected', 'simulation_failed', 'temporarily_unavailable', 'unsupported', 'unknown']
-    ChargeInput -> mpp.methods.tempo.schemas.ChargeInput
-    ChargePayload -> mpp.methods.tempo.schemas.ChargePayload
-    Split -> mpp.methods.tempo.schemas.Split
-    SponsorBudget -> mpp.methods.tempo.sponsor_budget.SponsorBudget
+    def parse_pkh_source(source: str) -> PkhSource | None
 
 module mpp.methods.tempo.account
     class TempoAccount
@@ -792,7 +758,7 @@ module mpp.methods.tempo.client
 module mpp.methods.tempo.fee_payer_envelope
     FEE_PAYER_ENVELOPE_TYPE_ID = 120
     def encode_fee_payer_envelope(signed_tx: TempoTransaction) -> bytes
-    def decode_fee_payer_envelope(data: bytes) -> tuple[list, bytes, bytes, _RawSignedKeyAuthorization | None]
+    def decode_fee_payer_envelope(data: bytes) -> tuple[list[Any], bytes, bytes, _RawSignedKeyAuthorization | None]
 
 module mpp.methods.tempo.fee_payer_policy
     class Policy
@@ -957,6 +923,40 @@ module mpp.runtime
         def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
 
 module mpp.server
+    BadRequestError -> mpp.errors.BadRequestError
+    CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
+    ComposedHandler -> mpp.server.compose.ComposedHandler
+    CredentialReplayedError -> mpp.errors.CredentialReplayedError
+    EventDispatcher -> mpp.events.EventDispatcher
+    Expires: module
+    HandlerFactory -> mpp.server.mpp.HandlerFactory
+    InternalPaymentError -> mpp.errors.InternalPaymentError
+    InvalidChallengeError -> mpp.errors.InvalidChallengeError
+    InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    MalformedCredentialError -> mpp.errors.MalformedCredentialError
+    Method -> mpp.methods.Method
+    Mpp -> mpp.server.mpp.Mpp
+    OfferSelectionContext -> mpp.server.compose.OfferSelectionContext
+    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
+    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
+    PaymentError -> mpp.errors.PaymentError
+    PaymentEvent -> mpp.events.PaymentEvent
+    PaymentEventName -> mpp.events.PaymentEventName
+    PaymentExpiredError -> mpp.errors.PaymentExpiredError
+    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
+    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
+    PaymentRequired -> mpp.server.http.PaymentRequired
+    PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
+    PaymentVerified -> mpp.server.http.PaymentVerified
+    Request -> mpp.server.http.Request
+    RequestContext -> mpp.server.method.RequestContext
+    Response -> mpp.server.http.Response
+    SelectOffers = collections.abc.Callable[[tuple[mpp.server.compose.ServerOffer, ...], mpp.server.compose.OfferSelectionContext], collections.abc.Sequence[mpp.server.compose.ServerOffer] | collections.abc.Awaitable[collections.abc.Sequence[mpp.server.compose.ServerOffer]]]
+    ServerMethod -> mpp.server.method.ServerMethod
+    ServerOffer -> mpp.server.compose.ServerOffer
+    ValidateContext -> mpp.server.method.ValidateContext
     class Validation
         @dataclass(frozen=True, slots=True)
         field credential: Credential
@@ -967,45 +967,12 @@ module mpp.server
         property challenge: ChallengeEcho
         property method: str
         property source: str | None
-    BadRequestError -> mpp.errors.BadRequestError
-    CredentialReplayedError -> mpp.errors.CredentialReplayedError
-    InternalPaymentError -> mpp.errors.InternalPaymentError
-    InvalidChallengeError -> mpp.errors.InvalidChallengeError
-    InvalidPayloadError -> mpp.errors.InvalidPayloadError
-    MalformedCredentialError -> mpp.errors.MalformedCredentialError
-    PaymentActionRequiredError -> mpp.errors.PaymentActionRequiredError
-    PaymentError -> mpp.errors.PaymentError
-    PaymentExpiredError -> mpp.errors.PaymentExpiredError
-    PaymentInsufficientError -> mpp.errors.PaymentInsufficientError
-    PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
-    PaymentRequiredError -> mpp.errors.PaymentRequiredError
     VerificationError -> mpp.errors.VerificationError
     VerificationFailedError -> mpp.errors.VerificationFailedError
-    CHALLENGE_CREATED = <PaymentEventName.CHALLENGE_CREATED: 'challenge.created'>
-    PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
-    PAYMENT_SUCCESS = <PaymentEventName.PAYMENT_SUCCESS: 'payment.success'>
+    VerifyContext -> mpp.server.method.VerifyContext
     WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
-    EventDispatcher -> mpp.events.EventDispatcher
-    PaymentEvent -> mpp.events.PaymentEvent
-    PaymentEventName -> mpp.events.PaymentEventName
-    Method -> mpp.methods.Method
-    ComposedHandler -> mpp.server.compose.ComposedHandler
-    OfferSelectionContext -> mpp.server.compose.OfferSelectionContext
-    SelectOffers = collections.abc.Callable[[tuple[mpp.server.compose.ServerOffer, ...], mpp.server.compose.OfferSelectionContext], collections.abc.Sequence[mpp.server.compose.ServerOffer] | collections.abc.Awaitable[collections.abc.Sequence[mpp.server.compose.ServerOffer]]]
-    ServerOffer -> mpp.server.compose.ServerOffer
     compose -> mpp.server.compose.compose
     pay -> mpp.server.decorator.pay
-    PaymentRequired -> mpp.server.http.PaymentRequired
-    PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
-    PaymentVerified -> mpp.server.http.PaymentVerified
-    Request -> mpp.server.http.Request
-    Response -> mpp.server.http.Response
-    RequestContext -> mpp.server.method.RequestContext
-    ServerMethod -> mpp.server.method.ServerMethod
-    ValidateContext -> mpp.server.method.ValidateContext
-    VerifyContext -> mpp.server.method.VerifyContext
-    HandlerFactory -> mpp.server.mpp.HandlerFactory
-    Mpp -> mpp.server.mpp.Mpp
 
 module mpp.server.asgi
     DEFAULT_MAX_BODY_SIZE = 10485760
@@ -1166,10 +1133,7 @@ module mpp.store
         async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
 
 module mpp.stores
-    def load_lazy_attr(module_name: str, name: str, lazy_exports: Mapping[str, tuple[str, ...]], namespace: dict[str, Any], extra_install_hint: str) -> Any
     MemoryStore -> mpp.store.MemoryStore
-    RedisStore -> mpp.stores.redis.RedisStore
-    SQLiteStore -> mpp.stores.sqlite.SQLiteStore
 
 module mpp.stores.redis
     class RedisStore

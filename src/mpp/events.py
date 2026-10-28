@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal, TypedDict, overload
 
+from mpp._typing import is_dict
+
 if TYPE_CHECKING:
     import httpx
 
@@ -135,7 +137,7 @@ def _snapshot(payload: Any) -> Any:
     """
     from mpp import Challenge, Credential, Receipt
 
-    if not isinstance(payload, dict):
+    if not is_dict(payload):
         return payload
     return {
         key: _copy_value(value, (Challenge, Credential, Receipt)) for key, value in payload.items()
@@ -224,7 +226,7 @@ class EventDispatcher:
         return result
 
 
-class _SnapshotEventDispatcher(EventDispatcher):
+class _SnapshotEventDispatcher(EventDispatcher):  # pyright: ignore[reportUnusedClass]
     """Gives each handler its own copy of the payload's protocol data.
 
     One handler's edits then reach neither the next handler nor the caller,

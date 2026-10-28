@@ -36,6 +36,7 @@ from pydantic import (
 from pydantic import ValidationError as _PydanticValidationError
 from pydantic_core import PydanticCustomError
 
+from mpp._typing import is_mapping
 from mpp.server.compose import ROUTE_OPTION_KEYS, ComposedHandler
 from mpp.server.method import RequestContext, ServerMethod
 
@@ -176,7 +177,7 @@ class IntentRoute:
     method: str
     path: str
     intent: str
-    options: Mapping[str, Any] = field(default_factory=dict)
+    options: Mapping[str, Any] = field(default_factory=dict[str, Any])
     request_body: Mapping[str, Any] | None = None
     summary: str | None = None
 
@@ -285,7 +286,7 @@ def validate(document: Any) -> list[ValidationIssue]:
         return issues
     for path_key, path_item in paths.items():
         for method, operation in path_item.items():
-            if not isinstance(operation, Mapping):
+            if not is_mapping(operation):
                 continue
             operation_path = f"paths.{path_key}.{method}"
             payment_info = operation.get("x-payment-info")
@@ -297,7 +298,7 @@ def validate(document: Any) -> list[ValidationIssue]:
                 issues.extend(_issues(error, f"{operation_path}.x-payment-info"))
                 continue
             responses = operation.get("responses")
-            if not isinstance(responses, Mapping) or "402" not in responses:
+            if not is_mapping(responses) or "402" not in responses:
                 issues.append(
                     ValidationIssue(
                         message="Operation with x-payment-info MUST have a 402 response",
@@ -380,8 +381,8 @@ def _payment_offer(
         input = resolved
     request = method.method.normalize_request(input)
 
-    details = request.get("methodDetails")
-    details = details if isinstance(details, Mapping) else {}
+    raw_details = request.get("methodDetails")
+    details: Mapping[str, Any] = raw_details if is_mapping(raw_details) else {}
     amount = _string(request.get("amount"))
     if amount is None:
         amount = _string(details.get("amount"))
@@ -453,7 +454,7 @@ def _normalize_payment_info(payment: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _issues(error: _PydanticValidationError, prefix: str | None) -> list[ValidationIssue]:
-    issues = []
+    issues: list[ValidationIssue] = []
     for detail in error.errors():
         parts = [str(part) for part in detail["loc"]]
         path = ".".join([prefix, *parts] if prefix is not None else parts) or "(root)"

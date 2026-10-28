@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from mpp._typing import is_dict, is_list
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
@@ -64,17 +65,15 @@ def _is_payment_required_error(error: Exception) -> bool:
     if _error_code(error) != CODE_PAYMENT_REQUIRED:
         return False
     data = _error_data(error)
-    if not isinstance(data, dict):
+    if not is_dict(data):
         return False
     challenges = data.get("challenges")
-    return isinstance(challenges, list) and any(
-        isinstance(challenge, dict) for challenge in challenges
-    )
+    return is_list(challenges) and any(isinstance(challenge, dict) for challenge in challenges)
 
 
 def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
     """Parse a server-provided challenge, skipping malformed entries."""
-    if not isinstance(raw_challenge, dict):
+    if not is_dict(raw_challenge):
         logger.warning(
             "Ignoring malformed MCP challenge: expected dict, got %s",
             type(raw_challenge).__name__,
@@ -101,11 +100,11 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
 def _extract_challenges(error: Exception) -> list[MCPChallenge]:
     """Extract valid payment challenges from a payment required error."""
     data = _error_data(error)
-    if not isinstance(data, dict):
+    if not is_dict(data):
         return []
 
     raw_challenges = data.get("challenges")
-    if not isinstance(raw_challenges, list):
+    if not is_list(raw_challenges):
         return []
 
     challenges: list[MCPChallenge] = []
@@ -274,7 +273,7 @@ class McpClient:
     def _extract_receipt(result: Any) -> MCPReceipt | None:
         """Extract a payment receipt from a tool result's _meta."""
         meta = getattr(result, "meta", None)
-        if not meta or not isinstance(meta, dict):
+        if not meta or not is_dict(meta):
             return None
         receipt_data = meta.get(META_RECEIPT)
         if receipt_data is None:

@@ -9,12 +9,13 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode
+from mpp._typing import is_dict, is_mapping
 from mpp.errors import (
     InvalidChallengeError,
     InvalidPayloadError,
@@ -235,8 +236,8 @@ class _PreparedOffer:
 class _Call:
     """State shared by the offers prepared for one request."""
 
-    bodies: dict[int, BodyType | None] = field(default_factory=dict)
-    prepared: list[_PreparedOffer] = field(default_factory=list)
+    bodies: dict[int, BodyType | None] = field(default_factory=dict[int, BodyType | None])
+    prepared: list[_PreparedOffer] = field(default_factory=list[_PreparedOffer])
 
 
 class _AmbiguousOffersError(Exception):
@@ -309,7 +310,9 @@ def _intent(method: ServerMethod, input: dict[str, Any]) -> _MethodIntent:
     return _MethodIntent(method, input)
 
 
-def _validate_options(options: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_options(  # pyright: ignore[reportUnusedFunction]  # used by mpp.server.mpp
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
     """Check route options shared by every method."""
     if options.get("expires") is not None and options.get("expires_in") is not None:
         raise ValueError("expires and expires_in cannot both be set")
@@ -318,7 +321,7 @@ def _validate_options(options: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("expires_in must be a timedelta")
     meta = options.get("meta")
     if meta is not None and (
-        not isinstance(meta, dict)
+        not is_dict(meta)
         or any(
             not isinstance(key, str) or not isinstance(value, str) for key, value in meta.items()
         )
@@ -333,6 +336,9 @@ class ComposedHandler:
     Call it with a :class:`~mpp.server.Request` to get :class:`~mpp.server.PaymentRequired`
     or :class:`~mpp.server.PaymentVerified`.
     """
+
+    _offers: tuple[_Offer, ...]
+    _composed: bool
 
     def __init__(self, *handlers: ComposedHandler) -> None:
         """Combine previously configured handlers."""
@@ -651,10 +657,10 @@ async def _select_offers(group: Sequence[_PreparedOffer], request: Request) -> l
 
 def _freeze(value: Any) -> Any:
     """Return a read-only deep copy of a JSON-like value."""
-    if isinstance(value, Mapping):
+    if is_mapping(value):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     if isinstance(value, list | tuple):
-        return tuple(_freeze(item) for item in value)
+        return tuple(_freeze(item) for item in cast("list[Any] | tuple[Any, ...]", value))
     return value
 
 
