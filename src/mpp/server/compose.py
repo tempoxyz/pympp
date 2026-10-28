@@ -659,6 +659,12 @@ class ComposedHandler:
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:
+            # Like mppx, offers matched by stable binding (reusable challenges) may differ only
+            # in unbound fields such as the quoted amount: the first configured one pays.
+            if all(
+                offer.offer.method.stable_binding is not None for offer in authenticated_matches
+            ):
+                return authenticated_matches[0]
             raise _AmbiguousOffersError(authenticated_matches)
         if authenticated_matches:
             return authenticated_matches[0]
