@@ -44,3 +44,9 @@ Thumbs.db
 # uv
 uv.lock
 .env
+
+# Mutation testing and fuzzing
+mutants/
+fuzz/corpus/
+fuzz/crashes/
+fuzz/seeds/
