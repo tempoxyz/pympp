@@ -23,6 +23,7 @@ from mpp.x402._server import ROUTE_BINDING_EXTENSION, route_nonce
 from mpp.x402._types import EIP3009, X402_VERSION, PaymentRequirements, X402FormatError
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
+_UINT256_MAX = 2**256 - 1
 VALID_AFTER_SKEW_SECONDS = 600
 """How far back ``validAfter`` is set, tolerating clock skew (mppx: 600 seconds)."""
 
@@ -56,7 +57,10 @@ def check_exact(
     asset = accepted["asset"]
     if not _ADDRESS_RE.fullmatch(asset) or asset.lower() != currency.lower():
         raise ValueError(f"x402 exact currency is not allowed: {asset}")
-    if max_amount is not None and int(accepted["amount"]) > max_amount:
+    amount = int(accepted["amount"])
+    if amount > _UINT256_MAX:
+        raise ValueError("x402 exact amount exceeds uint256")
+    if max_amount is not None and amount > max_amount:
         raise ValueError("x402 exact amount exceeds max_amount")
     if not _ADDRESS_RE.fullmatch(accepted["payTo"]):
         raise ValueError("x402 exact payTo must be an address")

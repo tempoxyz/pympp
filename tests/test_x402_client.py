@@ -164,6 +164,7 @@ class TestOffers:
             encode({**payment_required(), "accepts": {}}),
             encode({"x402Version": 2, "accepts": [requirements()]}),
             encode({**payment_required(), "resource": {"url": "/relative"}}),
+            encode({**payment_required(), "resource": {"url": "http://[bad"}}),
         ],
     )
     def test_malformed_headers_raise(self, value: str) -> None:
@@ -217,6 +218,15 @@ class TestPolicy:
         assert not client.can_handle_challenge(over)  # type: ignore[misc]
         with pytest.raises(ValueError, match="exceeds max_amount"):
             await sign(over, client)
+
+    async def test_amounts_beyond_uint256_are_skipped(self) -> None:
+        too_big = offer(requirements(amount=str(2**256)))
+        assert not method().can_handle_challenge(too_big)  # type: ignore[misc]
+        with pytest.raises(ValueError, match="uint256"):
+            await sign(too_big)
+        runtime = PaymentRuntime([method()])
+        fine = offer(requirements(amount="100"))
+        assert runtime.match_challenge([too_big, fine])[0] is fine
 
     async def test_requires_resource_information(self) -> None:
         challenge = offer()

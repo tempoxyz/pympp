@@ -91,8 +91,12 @@ def _parse_envelope(value: Any) -> dict[str, Any]:
 
 
 def _realm(url: str) -> str:
-    split = urlsplit(url)
-    if not split.scheme or not split.hostname:
+    try:
+        split = urlsplit(url)
+        hostname = split.hostname
+    except ValueError as error:
+        raise X402FormatError("paymentRequired.resource.url must be an absolute URL") from error
+    if not split.scheme or not hostname:
         raise X402FormatError("paymentRequired.resource.url must be an absolute URL")
     return split.netloc.rpartition("@")[2].lower()
 
