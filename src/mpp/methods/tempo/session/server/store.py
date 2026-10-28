@@ -20,6 +20,7 @@ Channel records are stored as canonical JSON text under the normalized channel I
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import secrets
@@ -1064,6 +1065,9 @@ def _decode_stored(channel_id: str, raw: Any) -> ChannelState | None:
     return _normalize_state(channel_id, decode_channel_state(raw))
 
 
+_CAS_PROBE_KEY = "mpp:session:cas-probe"
+"""Key the store atomicity probe writes before a broadcast, then removes."""
+
 _CAS_REFUSED = (
     "the session channel store refused compare_and_set; use a store that supports it, "
     "such as a Redis server that allows EVAL"
@@ -1143,15 +1147,34 @@ class StoreChannelStore:
         if not self._cas or self._cas_checked:
             return
         store = cast(CompareAndSetStore, self._store)
-        probe = f"{normalize_channel_id(channel_id)}:cas-probe:{secrets.token_hex(8)}"
+        token = secrets.token_hex(8)
         try:
-            written = await store.compare_and_set(probe, None, "1")
-            removed = written and await store.compare_and_set(probe, "1", None)
+            # One fixed key per store, so a probe that cannot be cleaned up leaves one key
+            # behind rather than one per attempt.
+            written = False
+            for _ in range(3):
+                raw = await store.get(_CAS_PROBE_KEY)
+                if await self._compare_and_set_raw(_CAS_PROBE_KEY, raw, token):
+                    written = True
+                    break
         except NotImplementedError as error:
             raise NotImplementedError(_CAS_REFUSED) from error
-        if not (written and removed):
+        if not written:
             raise NotImplementedError(_CAS_REFUSED)
+        # The write path is what channel updates need; removing the probe is best effort.
+        with contextlib.suppress(Exception):
+            raw = await store.get(_CAS_PROBE_KEY)
+            if raw is not None:
+                await self._compare_and_set_raw(_CAS_PROBE_KEY, raw, None)
         self._cas_checked = True
+
+    async def _compare_and_set_raw(self, key: str, raw: Any | None, value: str | None) -> bool:
+        """compare_and_set against a value read back, as bytes or as the text it holds."""
+        store = cast(CompareAndSetStore, self._store)
+        return await store.compare_and_set(key, raw, value) or (
+            # Stores returning bytes may compare either the bytes or the text they were given.
+            isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value)
+        )
 
     async def _update_cas(
         self, key: str, fn: Callable[[ChannelState | None], StoreChange[_R]]
@@ -1172,11 +1195,7 @@ class StoreChannelStore:
                 self._notify(key)
                 return change.result
             try:
-                written = await store.compare_and_set(key, raw, value) or (
-                    # Stores returning bytes may compare either the bytes or the text they
-                    # were given.
-                    isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value)
-                )
+                written = await self._compare_and_set_raw(key, raw, value)
             except NotImplementedError as error:
                 raise NotImplementedError(_CAS_REFUSED) from error
             if written:

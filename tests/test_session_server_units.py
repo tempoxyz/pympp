@@ -1753,3 +1753,49 @@ class TestChannelStoreCasRefused:
         await check_atomic_update(life.store, life.channel_id)
         await check_atomic_update(life.store, "0x" + "ab" * 32)
         assert life.raw._data == before  # pyright: ignore[reportPrivateUsage]
+
+
+class BytesCasStore(DictStore):
+    """A store that keeps values as bytes and compares expected values as given."""
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        return self.data.setdefault(key, value) is value
+
+    async def get(self, key: str) -> Any:
+        return self.data.get(key)
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        if self.data.get(key) != expected:
+            return False
+        if value is None:
+            self.data.pop(key, None)
+        else:
+            self.data[key] = value.encode() if isinstance(value, str) else value
+        return True
+
+
+class DeleteRefusingCasStore(BytesCasStore):
+    """A store that writes but refuses deletes, like a Redis ACL that denies DEL."""
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        if value is None:
+            raise NotImplementedError("DEL denied")
+        return await super().compare_and_set(key, expected, value)
+
+
+class TestChannelStoreProbeStores:
+    async def test_bytes_store_passes_the_probe_and_leaves_no_key(self) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        raw = BytesCasStore()
+        channel_store = store_module.StoreChannelStore(raw)
+        await channel_store.check_atomic_update("0x" + "ab" * 32)
+        assert not raw.data
+
+    async def test_failed_cleanup_leaves_one_key_and_checks_once(self) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        raw = DeleteRefusingCasStore()
+        for _ in range(3):
+            await store_module.StoreChannelStore(raw).check_atomic_update("0x" + "ab" * 32)
+        assert list(raw.data) == ["mpp:session:cas-probe"]
