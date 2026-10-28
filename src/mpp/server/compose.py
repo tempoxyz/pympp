@@ -664,7 +664,14 @@ class ComposedHandler:
             if all(
                 offer.offer.method.stable_binding is not None for offer in authenticated_matches
             ):
-                return authenticated_matches[0]
+                # The offer whose request the client signed pays at that price; a reusable
+                # challenge quoting a since-changed price falls back to the first.
+                exact = [
+                    offer
+                    for offer in authenticated_matches
+                    if _requests_match(echoed_request, offer.request, None)
+                ]
+                return (exact or authenticated_matches)[0]
             raise _AmbiguousOffersError(authenticated_matches)
         if authenticated_matches:
             return authenticated_matches[0]
