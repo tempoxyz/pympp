@@ -1155,7 +1155,10 @@ class StoreChannelStore:
             try:
                 # The adapter's own key: no other prober races it, so a False write is a
                 # refusal, and a probe that cannot be cleaned up leaves one key per adapter.
-                written = await store.compare_and_set(self._cas_probe_key, None, "1")
+                # Compare against what is there: an interrupted earlier probe may have left
+                # its write behind, which must not read as a refusal.
+                raw = await store.get(self._cas_probe_key)
+                written = await self._compare_and_set_raw(self._cas_probe_key, raw, "1")
             except NotImplementedError as error:
                 raise NotImplementedError(_CAS_REFUSED) from error
             if not written:
