@@ -68,6 +68,7 @@ from tests.test_session_chain import (
     SPONSOR,
     FakeRpc,
     event_log,
+    fail,
     opened_log,
     top_up_log,
 )
@@ -467,6 +468,19 @@ class TestClose:
             )
         assert (await life.channel()).close_requested_at == 0
         assert [f.trigger for f in failures] == ["close"]
+
+    async def test_close_that_would_revert_is_never_sent(self, life: Lifecycle) -> None:
+        # A withdrawn channel (deposit 0, nothing spent) passes validation with a zero close,
+        # as in mppx; its gas estimate fails, so like viem nothing is broadcast.
+        await self._opened(life)
+        life.rpc.states[life.channel_id] = (0, 0, 0)
+        life.rpc.overrides["eth_estimateGas"] = fail("execution reverted")
+        sent = len(life.rpc.sent)
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="execution reverted"):
+                await verification.broadcast_credential_payload(life.context(life.close_payload(0)))
+            assert (await life.channel()).close_requested_at == 0
+        assert len(life.rpc.sent) == sent
 
     async def test_close_without_a_caller_client(
         self, life: Lifecycle, monkeypatch: pytest.MonkeyPatch
@@ -1659,6 +1673,21 @@ class RefusingCasStore(DictStore):
         raise NotImplementedError("EVAL denied")
 
 
+class WriteRefusingCasStore(DictStore):
+    """A store whose compare_and_set refuses only writes, like Redis without KEEPTTL."""
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        return self.data.setdefault(key, value) is value
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        if value is not None:
+            raise NotImplementedError("SET KEEPTTL: syntax error")
+        if self.data.get(key) != expected:
+            return False
+        self.data.pop(key, None)
+        return True
+
+
 class TestChannelStoreCasRefused:
     async def test_open_fails_before_broadcast_when_compare_and_set_is_refused(
         self, life: Lifecycle
@@ -1706,6 +1735,17 @@ class TestChannelStoreCasRefused:
                 )
         assert raw.attempts == 2 and channel_store.atomic
         assert (await channel_store.get_channel(life.channel_id)).spent == 0  # type: ignore[union-attr]
+
+    async def test_probe_exercises_the_write_a_channel_update_makes(self, life: Lifecycle) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        # Like Redis without KEEPTTL: a CAS that only reads or deletes succeeds, a write fails.
+        raw = WriteRefusingCasStore()
+        channel_store = store_module.StoreChannelStore(raw)
+        life.store = channel_store
+        with pytest.raises(NotImplementedError, match="refused compare_and_set"):
+            await life.open(300)
+        assert not life.rpc.sent and not raw.data
 
     async def test_probe_runs_once_and_changes_nothing(self, life: Lifecycle) -> None:
         await life.open(300)
