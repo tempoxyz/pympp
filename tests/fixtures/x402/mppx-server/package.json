@@ -1,0 +1,13 @@
+{
+  "name": "pympp-x402-mppx-server",
+  "private": true,
+  "description": "mppx x402 server fixture for tests/test_x402_client_mppx.py. Pinned to releases older than CI's 7-day package cooldown.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mppx": "0.14.1",
+    "viem": "2.57.7"
+  }
+}

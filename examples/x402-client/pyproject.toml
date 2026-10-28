@@ -1,0 +1,12 @@
+[project]
+name = "pympp-x402-client-example"
+version = "0.1.0"
+description = "pympp client paying an official x402 server"
+requires-python = ">=3.12"
+dependencies = ["pympp[evm,x402]", "uvicorn"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pympp = { path = "../.." }

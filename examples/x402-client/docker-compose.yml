@@ -1,0 +1,74 @@
+# pympp client paying an official x402 server on Anvil. From the repository root:
+#   docker compose -f examples/x402-client/docker-compose.yml up --build --wait server
+#   docker compose -f examples/x402-client/docker-compose.yml run --rm --no-deps client
+name: pympp-x402-client
+
+# setup builds the image; the other Python services reuse it.
+x-app: &app
+  image: pympp-x402-client-example
+  environment:
+    RPC_URL: http://anvil:8545
+    TOKEN_FILE: /shared/token.json
+    FACILITATOR_URL: http://facilitator:4022
+    SERVER_URL: http://server:4021
+  volumes:
+    - shared:/shared
+
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry@sha256:ede4c35d3e9310f6c77f09952cd666e17e4ee7cd5228290d8b4fc9d5cdd37eb1
+    entrypoint: ["anvil"]
+    command:
+      - --host=0.0.0.0
+      - --port=8545
+      - --chain-id=31337
+      - --mnemonic=test test test test test test test test test test test junk
+    healthcheck:
+      test: ["CMD", "cast", "chain-id", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  setup:
+    <<: *app
+    build:
+      context: ../..
+      dockerfile: examples/x402-client/Dockerfile
+    command: ["python", "setup_chain.py"]
+    depends_on:
+      anvil:
+        condition: service_healthy
+
+  facilitator:
+    <<: *app
+    command: ["python", "facilitator.py"]
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    healthcheck: &health
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:4022/supported')"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  server:
+    <<: *app
+    command: ["python", "server.py"]
+    ports:
+      - "127.0.0.1:${X402_EXAMPLE_PORT:-14021}:4021"
+    depends_on:
+      facilitator:
+        condition: service_healthy
+    healthcheck:
+      <<: *health
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:4021/health')"]
+
+  client:
+    <<: *app
+    command: ["python", "client.py"]
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  shared:

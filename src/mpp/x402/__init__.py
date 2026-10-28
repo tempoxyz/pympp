@@ -1,10 +1,15 @@
-"""x402 compatibility for MPP servers.
+"""x402 compatibility for MPP servers and clients.
 
 Lets a server that charges with the ``evm`` method also serve x402 v2
 ``exact`` clients (EIP-3009 ``transferWithAuthorization``) from the same
 endpoint, as mppx does. Unpaid responses carry ``PAYMENT-REQUIRED`` next to
 ``WWW-Authenticate``, x402 clients pay with ``PAYMENT-SIGNATURE``, and paid
 x402 responses carry ``PAYMENT-RESPONSE``.
+
+Clients pay x402 servers with the ``evm`` client method: ``mpp.client.Mpp``
+reads ``PAYMENT-REQUIRED``, pays an accepted ``exact`` requirement with
+``PAYMENT-SIGNATURE``, and :func:`payment_response` reads the paid
+response's ``PAYMENT-RESPONSE`` settlement.
 
 To add MPP to routes the official x402 FastAPI middleware already protects, use
 ``mpp.x402.fastapi.payment_middleware`` (``x402`` extra).
@@ -28,6 +33,12 @@ Example:
         return JSONResponse({"data": "..."})
 """
 
+from mpp.x402._client import (
+    X402Challenge,
+    is_x402_challenge,
+    payment_response,
+    x402_challenges,
+)
 from mpp.x402._header import (
     InvalidHeaderError,
     decode_payment_required,
@@ -89,6 +100,7 @@ __all__ = [
     "RouteBinding",
     "SettleResponse",
     "VerifyResponse",
+    "X402Challenge",
     "X402FormatError",
     "X402Input",
     "X402Intent",
@@ -98,10 +110,13 @@ __all__ = [
     "encode_payment_required",
     "encode_payment_response",
     "encode_payment_signature",
+    "is_x402_challenge",
     "is_x402_credential",
     "payment_required_header",
+    "payment_response",
     "payment_response_header",
     "resolve_facilitator",
     "route_extensions",
     "route_nonce",
+    "x402_challenges",
 ]

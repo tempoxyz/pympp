@@ -25,6 +25,8 @@ from mpp.methods.evm.assets import EvmAsset
 from mpp.methods.evm.intents import CREDENTIAL_TYPE, SettleFn
 from mpp.methods.evm.intents import charge as definition
 from mpp.runtime import ClientMethod, CredentialParams
+from mpp.x402._client import is_x402_challenge
+from mpp.x402._exact import check_exact, create_payment_signature
 from mpp.x402._server import RouteBinding
 from mpp.x402.facilitator import Facilitator
 
@@ -127,7 +129,15 @@ class _Config:
     def can_handle_challenge(self, challenge: Challenge) -> bool:
         """Return whether this method can sign the challenge's charge."""
         try:
-            self._check_challenge(challenge)
+            if is_x402_challenge(challenge):
+                check_exact(
+                    challenge,
+                    chain_id=self.chain_id,
+                    currency=self.currency,
+                    max_amount=self.max_amount,
+                )
+            else:
+                self._check_challenge(challenge)
         except ValueError:
             return False
         return True
@@ -273,6 +283,13 @@ def charge(
 ) -> ClientMethod:
     """Create a client ``evm/charge`` method that signs EIP-3009 authorizations.
 
+    It pays native ``evm/charge`` challenges and x402 v2 ``exact`` offers
+    (``PAYMENT-REQUIRED``) in its currency and chain, as mppx's client does:
+    when a server offers both, the native challenge is paid. x402 offers are
+    signed with the token name and version the server advertises in
+    ``extra``, and paid responses carry the settlement in
+    ``PAYMENT-RESPONSE`` (see :func:`mpp.x402.payment_response`).
+
     Example:
         from eth_account import Account
         from mpp.client import Mpp
@@ -305,6 +322,14 @@ def charge(
     )
 
     async def create_credential(params: CredentialParams) -> str:
+        if is_x402_challenge(params.challenge):
+            return create_payment_signature(
+                params.challenge,
+                account=config.account,
+                chain_id=config.chain_id,
+                currency=config.currency,
+                max_amount=config.max_amount,
+            )
         credential = await config.create_credential(params.challenge)
         return credential.to_authorization()
 
