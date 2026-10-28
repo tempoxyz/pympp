@@ -219,6 +219,12 @@ class TestPolicy:
         with pytest.raises(ValueError, match="exceeds max_amount"):
             await sign(over, client)
 
+    async def test_zero_amount_offers_are_not_signed(self) -> None:
+        zero = offer(requirements(amount="0"))
+        assert not method().can_handle_challenge(zero)  # type: ignore[misc]
+        with pytest.raises(ValueError, match="zero-amount"):
+            await sign(zero)
+
     async def test_amounts_beyond_uint256_are_skipped(self) -> None:
         too_big = offer(requirements(amount=str(2**256)))
         assert not method().can_handle_challenge(too_big)  # type: ignore[misc]

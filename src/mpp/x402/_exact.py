@@ -58,6 +58,10 @@ def check_exact(
     if not _ADDRESS_RE.fullmatch(asset) or asset.lower() != currency.lower():
         raise ValueError(f"x402 exact currency is not allowed: {asset}")
     amount = int(accepted["amount"])
+    if amount == 0:
+        # As on the native path: a zero-value authorization bound to another
+        # server's route could be relayed to that server.
+        raise ValueError("x402 exact client does not sign zero-amount offers")
     if amount > _UINT256_MAX:
         raise ValueError("x402 exact amount exceeds uint256")
     if max_amount is not None and amount > max_amount:
