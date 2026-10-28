@@ -1811,3 +1811,13 @@ class TestChannelStoreProbeStores:
             *(channel_store.check_atomic_update("0x" + "ab" * 32) for _ in range(20))
         )
         assert not raw.data
+
+    async def test_leftover_probe_write_does_not_read_as_refusal(self) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        raw = BytesCasStore()
+        channel_store = store_module.StoreChannelStore(raw)
+        # An earlier probe on this adapter wrote its key, then was interrupted.
+        raw.data[channel_store._cas_probe_key] = b"1"  # pyright: ignore[reportPrivateUsage]
+        await channel_store.check_atomic_update("0x" + "ab" * 32)
+        assert not raw.data
