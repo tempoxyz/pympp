@@ -138,11 +138,19 @@ def _snapshot(payload: Any) -> Any:
     if not isinstance(payload, dict):
         return payload
     return {
-        key: copy.deepcopy(value)
-        if isinstance(value, (dict, list, Challenge, Credential, Receipt))
-        else value
-        for key, value in payload.items()
+        key: _copy_value(value, (Challenge, Credential, Receipt)) for key, value in payload.items()
     }
+
+
+def _copy_value(value: Any, protocol_types: tuple[type, ...]) -> Any:
+    if not isinstance(value, (dict, list, *protocol_types)):
+        return value
+    try:
+        return copy.deepcopy(value)
+    except RecursionError:
+        # A client-supplied payload can nest deeper than deepcopy recurses;
+        # share it rather than skip every listener.
+        return value
 
 
 class EventDispatcher:

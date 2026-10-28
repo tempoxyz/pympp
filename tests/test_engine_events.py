@@ -334,3 +334,26 @@ class TestComposedX402Requirements:
         assert header is not None
         accepts = decode_payment_required(header)["accepts"]
         assert [accepted["maxTimeoutSeconds"] for accepted in accepts] == [60, 600]
+
+
+async def test_uncopyable_payload_still_reaches_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload too deep for deepcopy is shared rather than skipping listeners."""
+    import copy
+
+    from mpp.events import _SnapshotEventDispatcher
+
+    def too_deep(value: Any, memo: Any = None) -> Any:
+        raise RecursionError
+
+    monkeypatch.setattr(copy, "deepcopy", too_deep)
+    request = {"deep": [[[]]]}
+    dispatcher = _SnapshotEventDispatcher()
+    seen: list[Any] = []
+    dispatcher.on("payment.success", lambda payload: seen.append(payload["request"]))
+
+    await dispatcher.emit("payment.success", {"request": request})
+
+    assert seen == [request]
+    assert seen[0] is request

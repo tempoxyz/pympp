@@ -863,6 +863,35 @@ class TestEncodingBoundaries:
 
         assert _unescape_quoted(escaped) == raw
 
+    def test_escape_quoted_rejects_a_lone_cr_or_lf(self) -> None:
+        from mpp._parsing import _escape_quoted
+
+        for value in ("a\rb", "a\nb"):
+            with pytest.raises(ParseError, match="CRLF"):
+                _escape_quoted(value)
+
+    def test_unescape_quoted_pairs_only_an_adjacent_escape(self) -> None:
+        from mpp._parsing import _unescape_quoted
+
+        assert _unescape_quoted("\\ud800xudc00") == "\ufffdxudc00"
+
+    def test_unquoted_auth_param_keeps_backslashes(self) -> None:
+        from mpp._parsing import _parse_auth_params
+
+        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xA"}
+
+    def test_receipt_timestamp_is_formatted_with_z(self) -> None:
+        receipt = Receipt.success("0xabc", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+        decoded = json.loads(base64.urlsafe_b64decode(receipt.to_payment_receipt() + "=="))
+        assert decoded["timestamp"] == "2026-01-02T03:04:05Z"
+
+    def test_credential_echo_fields_default_to_empty(self) -> None:
+        header = "Payment " + _b64_json(
+            {"challenge": {"id": "c", "method": "tempo"}, "payload": {}}
+        )
+        echo = Credential.from_authorization(header).challenge
+        assert (echo.realm, echo.intent, echo.request) == ("", "", "")
+
     def test_receipt_extra_must_be_an_object(self) -> None:
         receipt = {
             "status": "success",
