@@ -63,6 +63,7 @@ from mpp.methods.tempo.session.server.store import (
     OnChainChannelState,
     VoucherValidation,
     accept_voucher_state_update,
+    check_atomic_update,
     finalize_closed_channel_state,
     is_precompile_state,
     keep_greater,
@@ -854,6 +855,7 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
             request_amount=request.amount,
         )
 
+    await check_atomic_update(context.store, channel_id)
     result = await chain.broadcast_open_transaction(
         context.rpc_url,
         serialized_transaction=payload.transaction,
@@ -932,6 +934,7 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
         validate_descriptor=True,
     )
     assert channel.descriptor is not None
+    await check_atomic_update(context.store, channel_id)
     result = await chain.broadcast_top_up_transaction(
         context.rpc_url,
         serialized_transaction=payload.transaction,

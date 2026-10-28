@@ -5,7 +5,9 @@ cancelled top-ups and channel stores without hashing or weak references."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import gc
+import sys
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
@@ -19,6 +21,7 @@ from mpp.client.transport import (
     _response_challenges,  # pyright: ignore[reportPrivateUsage]
 )
 from mpp.errors import PaymentOutcomeUnknownError
+from mpp.events import CREDENTIAL_CREATED
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo.session.client import (
     ChannelEntry,
@@ -265,6 +268,60 @@ class TestDeferredOpen:
         good = snapshot_challenge(entry.channel_id, 100)
         assert _acknowledges_open(outcome(challenges=(good,)), challenge, entry)
         assert not _matches_open(entry, entry.channel_id, "not a number")
+
+    async def test_cancelled_credential_event_releases_the_scope(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        # Cancelled after signing an open but before sending it: the open is dropped
+        # and the scope lock released, so later requests do not hang (mppx Fetch).
+        server = Server()
+        method = SessionMethod(account=ACCOUNT)
+        transport = transport_for(server, method)
+        cancel = [True]
+
+        async def on_created(_: Any) -> None:
+            if cancel.pop() if cancel else False:
+                raise asyncio.CancelledError
+
+        transport.on(CREDENTIAL_CREATED, on_created)
+        with pytest.raises(asyncio.CancelledError):
+            await get(transport)
+        assert stored(method) is None and server.authorizations == []
+        response = await asyncio.wait_for(get(transport), 5)
+        assert response.status_code == 200
+        assert [p["action"] for p in server.payloads] == ["open"]
+
+    async def test_malformed_receipt_releases_the_scope(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        # A receipt nested past the recursion limit is ignored like any malformed one.
+        nested = base64.urlsafe_b64encode(b"[" * 100_000 + b"]" * 100_000).rstrip(b"=")
+        server = Server(httpx.Response(403, headers={"Payment-Receipt": nested.decode()}))
+        method = SessionMethod(account=ACCOUNT)
+        transport = transport_for(server, method)
+        assert (await get(transport)).status_code == 403
+        assert stored(method) is None
+        assert (await asyncio.wait_for(get(transport), 5)).status_code == 200
+
+    async def test_failed_acknowledgement_check_releases_the_scope(
+        self, fake_chain: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        attempt = PaymentAttempt()
+        challenge = make_challenge()
+        await method.create_credential(CredentialParams(challenge=challenge, attempt=attempt))
+        assert attempt.settle is not None
+
+        def fail(*_: Any) -> bool:
+            raise RuntimeError("boom")
+
+        session_module = sys.modules["mpp.methods.tempo.session.client.session"]
+        monkeypatch.setattr(session_module, "_acknowledges_open", fail)
+        with pytest.raises(RuntimeError, match="boom"):
+            await attempt.settle(AttemptOutcome(status="rejected"))
+        key = entry_key(entry_for())
+        lock = store_lock(method.store, f"channel:{key}")
+        assert not lock.locked()
 
     async def test_pending_open_store_delegates_reads_and_deletes(self) -> None:
         backing = create_channel_store()

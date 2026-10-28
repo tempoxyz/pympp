@@ -305,9 +305,13 @@ class SessionMethod:
         """Store a deferred open once the server accepts or acknowledges it."""
 
         async def settle(outcome: AttemptOutcome) -> bool:
-            accepted = outcome.status == "accepted" or _acknowledges_open(
-                outcome, challenge, opened
-            )
+            try:
+                accepted = outcome.status == "accepted" or _acknowledges_open(
+                    outcome, challenge, opened
+                )
+            except BaseException:
+                lock.release()
+                raise
             if not accepted and outcome.status == "pending":
                 return False
             try:
@@ -546,7 +550,11 @@ def _acknowledges_open(outcome: AttemptOutcome, challenge: Challenge, opened: Ch
     session snapshot.
     """
     response = outcome.response
-    receipt = read_receipt(response) if isinstance(response, httpx.Response) else None
+    try:
+        receipt = read_receipt(response) if isinstance(response, httpx.Response) else None
+    except Exception:
+        # Malformed acknowledgements are ignored, whatever fails parsing them (mppx).
+        receipt = None
     if (
         receipt is not None
         and receipt.challenge_id == challenge.id

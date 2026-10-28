@@ -50,6 +50,7 @@ from mpp.methods.tempo.session.server.store import (
     InsufficientBalanceError,
     InvalidSignatureError,
     StoreChannelStore,
+    check_atomic_update,
     from_store,
 )
 from mpp.methods.tempo.session.server.verification import CredentialContext
@@ -1380,9 +1381,11 @@ class TestChannelStoreEdges:
         from mpp.methods.tempo.session.server import store as store_module
 
         raw = DictStore()
-        # A store that cannot be weakly referenced is wrapped afresh each time.
+        # A store that cannot be weakly referenced still gets one adapter, so its per-key
+        # locks serialize every update made through from_store.
         channel_store = from_store(raw)  # type: ignore[arg-type]
-        assert channel_store is not from_store(raw)  # type: ignore[arg-type]
+        assert channel_store is from_store(raw)  # type: ignore[arg-type]
+        assert from_store(DictStore()) is not channel_store  # type: ignore[arg-type]
         assert channel_store.store is raw and not channel_store.atomic
         life.store = channel_store
         await life.open(300)
@@ -1656,9 +1659,9 @@ class RefusingCasStore(DictStore):
         raise NotImplementedError("EVAL denied")
 
 
-class TestChannelStoreCasFallback:
-    async def test_refused_compare_and_set_falls_back_to_a_process_lock(
-        self, life: Lifecycle, caplog: pytest.LogCaptureFixture
+class TestChannelStoreCasRefused:
+    async def test_open_fails_before_broadcast_when_compare_and_set_is_refused(
+        self, life: Lifecycle
     ) -> None:
         from mpp.methods.tempo.session.server import store as store_module
 
@@ -1666,13 +1669,47 @@ class TestChannelStoreCasFallback:
         channel_store = store_module.StoreChannelStore(raw)
         assert channel_store.atomic
         life.store = channel_store
-        with caplog.at_level(logging.WARNING, logger=store_module.__name__):
+        with pytest.raises(NotImplementedError, match="refused compare_and_set"):
             await life.open(300)
-            await channel_store.update_channel(
-                life.channel_id, lambda c: replace(c, spent=10) if c else c
+        # Nothing was broadcast and nothing was stored: the payer's deposit never moved.
+        assert not life.rpc.sent
+        assert raw.attempts == 1 and not raw.data
+        assert channel_store.atomic
+
+    async def test_top_up_fails_before_broadcast_when_compare_and_set_is_refused(
+        self, life: Lifecycle
+    ) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        await life.open(300)
+        sent = len(life.rpc.sent)
+        raw = RefusingCasStore()
+        raw.data.update(life.raw._data)  # pyright: ignore[reportPrivateUsage]
+        payload = await life.top_up_payload(500)
+        with pytest.raises(NotImplementedError, match="refused compare_and_set"):
+            await verification.broadcast_credential_payload(
+                life.context(payload, store=store_module.StoreChannelStore(raw))
             )
-        assert not channel_store.atomic
-        assert raw.attempts == 1
-        channel = await life.channel()
-        assert (channel.highest_voucher_amount, channel.spent) == (300, 10)
-        assert [r.message.count("compare_and_set") for r in caplog.records] == [1]
+        assert len(life.rpc.sent) == sent
+
+    async def test_updates_raise_instead_of_dropping_atomicity(self, life: Lifecycle) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        await life.open(300)
+        raw = RefusingCasStore()
+        raw.data.update(life.raw._data)  # pyright: ignore[reportPrivateUsage]
+        channel_store = store_module.StoreChannelStore(raw)
+        for _ in range(2):
+            with pytest.raises(NotImplementedError, match="refused compare_and_set"):
+                await channel_store.update_channel(
+                    life.channel_id, lambda c: replace(c, spent=10) if c else c
+                )
+        assert raw.attempts == 2 and channel_store.atomic
+        assert (await channel_store.get_channel(life.channel_id)).spent == 0  # type: ignore[union-attr]
+
+    async def test_probe_runs_once_and_changes_nothing(self, life: Lifecycle) -> None:
+        await life.open(300)
+        before = dict(life.raw._data)  # pyright: ignore[reportPrivateUsage]
+        await check_atomic_update(life.store, life.channel_id)
+        await check_atomic_update(life.store, "0x" + "ab" * 32)
+        assert life.raw._data == before  # pyright: ignore[reportPrivateUsage]

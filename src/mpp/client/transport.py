@@ -472,20 +472,34 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "fetch": self._send_auxiliary,
                             "attempt": attempt,
                         }
-                        credential = await self._runtime.create_credential(
-                            challenge,
-                            matched_method,
-                            event_payload={
-                                "challenges": challenges,
-                                "request": request,
-                                "response": response,
-                            },
-                            **{
-                                key: value
-                                for key, value in arguments.items()
-                                if key in self._credential_keywords
-                            },
-                        )
+                        try:
+                            credential = await self._runtime.create_credential(
+                                challenge,
+                                matched_method,
+                                event_payload={
+                                    "challenges": challenges,
+                                    "request": request,
+                                    "response": response,
+                                },
+                                **{
+                                    key: value
+                                    for key, value in arguments.items()
+                                    if key in self._credential_keywords
+                                },
+                            )
+                        except BaseException:
+                            # A credential that never reaches the server is rejected, so the
+                            # method releases its state, even when an event handler fails or
+                            # the request is cancelled after signing (mppx Fetch).
+                            await _settle_attempt(
+                                attempt,
+                                AttemptOutcome(
+                                    status="rejected",
+                                    response=response,
+                                    challenges=tuple(challenges),
+                                ),
+                            )
+                            raise
                         sent = _SentCredential(
                             challenge=challenge,
                             method=matched_method,

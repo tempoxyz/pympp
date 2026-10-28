@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import math
 import time
 import weakref
@@ -33,8 +32,6 @@ from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 from mpp.errors import PaymentError, VerificationFailedError
 from mpp.methods.tempo.session.protocol import ChannelDescriptor, SignedVoucher, uint96
 from mpp.store import CompareAndSetStore, Store
-
-_logger = logging.getLogger(__name__)
 
 _R = TypeVar("_R")
 
@@ -1066,8 +1063,10 @@ def _decode_stored(channel_id: str, raw: Any) -> ChannelState | None:
     return _normalize_state(channel_id, decode_channel_state(raw))
 
 
-class _CompareAndSetUnavailable(Exception):
-    """The backing store refused ``compare_and_set`` (raised ``NotImplementedError``)."""
+_CAS_REFUSED = (
+    "the session channel store refused compare_and_set; use a store that supports it, "
+    "such as a Redis server that allows EVAL"
+)
 
 
 class StoreChannelStore:
@@ -1080,6 +1079,7 @@ class StoreChannelStore:
     def __init__(self, store: Store) -> None:
         self._store = store
         self._cas = isinstance(store, CompareAndSetStore)
+        self._cas_checked = False
         self._locks: dict[str, asyncio.Lock] = {}
         self._waiters: dict[str, set[asyncio.Future[None]]] = {}
 
@@ -1113,18 +1113,7 @@ class StoreChannelStore:
         """Atomic read-modify-write returning the callback's ``result``."""
         key = normalize_channel_id(channel_id)
         if self._cas:
-            try:
-                return await self._update_cas(key, fn)
-            except _CompareAndSetUnavailable:
-                # A store without usable compare-and-set (such as Redis denying EVAL)
-                # keeps working with updates serialized in this process only.
-                if self._cas:
-                    self._cas = False
-                    _logger.warning(
-                        "The session channel store cannot compare_and_set, so channel "
-                        "updates are serialized in this process only. Use a shared store "
-                        "that supports it when running several processes."
-                    )
+            return await self._update_cas(key, fn)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             change = fn(_decode_stored(key, await self._store.get(key)))
@@ -1138,6 +1127,25 @@ class StoreChannelStore:
             if change.op != "noop":
                 self._notify(key)
             return change.result
+
+    async def check_atomic_update(self, channel_id: str) -> None:
+        """Raise when a compare-and-set store refuses ``compare_and_set``.
+
+        Credential handlers call it before broadcasting a transaction whose outcome they
+        must then record, so a store that cannot record it fails before any funds move.
+        The probe changes nothing: it deletes ``channel_id`` only while it is absent.
+
+        Raises:
+            NotImplementedError: The backing store refused ``compare_and_set``.
+        """
+        if not self._cas or self._cas_checked:
+            return
+        store = cast(CompareAndSetStore, self._store)
+        try:
+            await store.compare_and_set(normalize_channel_id(channel_id), None, None)
+        except NotImplementedError as error:
+            raise NotImplementedError(_CAS_REFUSED) from error
+        self._cas_checked = True
 
     async def _update_cas(
         self, key: str, fn: Callable[[ChannelState | None], StoreChange[_R]]
@@ -1164,7 +1172,7 @@ class StoreChannelStore:
                     isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value)
                 )
             except NotImplementedError as error:
-                raise _CompareAndSetUnavailable from error
+                raise NotImplementedError(_CAS_REFUSED) from error
             if written:
                 self._notify(key)
                 return change.result
@@ -1197,6 +1205,9 @@ class StoreChannelStore:
 
 
 _store_cache: weakref.WeakKeyDictionary[Any, StoreChannelStore] = weakref.WeakKeyDictionary()
+# Stores that cannot be weak dictionary keys (unhashable or not weak-referenceable), by
+# identity. Each entry keeps its store alive so the identity stays its own.
+_store_cache_by_id: dict[int, tuple[Store, StoreChannelStore]] = {}
 
 
 def from_store(store: Store) -> StoreChannelStore:
@@ -1204,12 +1215,27 @@ def from_store(store: Store) -> StoreChannelStore:
     try:
         cached = _store_cache.get(store)
     except TypeError:
-        return StoreChannelStore(store)
+        entry = _store_cache_by_id.get(id(store))
+        if entry is not None and entry[0] is store:
+            return entry[1]
+        channel_store = StoreChannelStore(store)
+        _store_cache_by_id[id(store)] = (store, channel_store)
+        return channel_store
     if cached is not None:
         return cached
     channel_store = StoreChannelStore(store)
     _store_cache[store] = channel_store
     return channel_store
+
+
+async def check_atomic_update(store: ChannelStore, channel_id: str) -> None:
+    """Raise before a broadcast when ``store`` cannot record its outcome atomically.
+
+    Raises:
+        NotImplementedError: A compare-and-set backing store refused ``compare_and_set``.
+    """
+    if isinstance(store, StoreChannelStore):
+        await store.check_atomic_update(channel_id)
 
 
 # --------------------------------------------------------------------------------------------
