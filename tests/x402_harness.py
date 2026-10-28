@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -62,6 +63,31 @@ async def serve(app: Any) -> AsyncIterator[str]:
         await task
 
 
+@contextlib.contextmanager
+def serve_in_thread(app: Any) -> Iterator[str]:
+    """Serve an ASGI app from its own thread and event loop; yield its base URL.
+
+    For servers that blocking code on the test's event loop calls, such as an
+    x402 facilitator that Coinbase's resource server queries synchronously for
+    ``/supported`` while it starts.
+    """
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started:
+            if not thread.is_alive() or time.monotonic() > deadline:
+                raise RuntimeError("uvicorn did not start")
+            time.sleep(0.01)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
 @dataclass
 class StubFacilitator:
     """An x402 facilitator that checks EIP-3009 signatures without a chain.
@@ -72,6 +98,8 @@ class StubFacilitator:
     """
 
     settle_result: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None
+    verify_result: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None
+    networks: tuple[str, ...] = ("eip155:84532", "eip155:8453", "eip155:31337")
     verify_requests: list[dict[str, Any]] = field(default_factory=list)
     settle_requests: list[dict[str, Any]] = field(default_factory=list)
     used: set[tuple[str, str]] = field(default_factory=set)
@@ -116,7 +144,19 @@ class StubFacilitator:
         async def verify(request: Request) -> JSONResponse:
             body = await request.json()
             self.verify_requests.append(body)
+            if self.verify_result is not None:
+                override = self.verify_result(body)
+                if override is not None:
+                    return JSONResponse(override)
             return JSONResponse(self.check(body))
+
+        async def supported(request: Request) -> JSONResponse:
+            # Coinbase's resource server reads /supported when it starts.
+            kinds = [
+                {"x402Version": 2, "scheme": "exact", "network": network}
+                for network in self.networks
+            ]
+            return JSONResponse({"kinds": kinds, "extensions": [], "signers": {}})
 
         async def settle(request: Request) -> JSONResponse:
             body = await request.json()
@@ -153,6 +193,7 @@ class StubFacilitator:
             routes=[
                 Route("/verify", verify, methods=["POST"]),
                 Route("/settle", settle, methods=["POST"]),
+                Route("/supported", supported, methods=["GET"]),
             ]
         )
 

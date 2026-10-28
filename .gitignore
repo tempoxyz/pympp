@@ -52,3 +52,6 @@ mutants/
 fuzz/corpus/
 fuzz/crashes/
 fuzz/seeds/
+
+# Node dependencies of the mppx x402 server fixture
+tests/fixtures/x402/mppx-server/node_modules/

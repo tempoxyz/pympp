@@ -2,16 +2,19 @@
 
 Implements automatic 402 Payment Required handling by:
 1. Sending the initial request
-2. If 402, parsing the WWW-Authenticate challenge
-3. Finding a matching method to create credentials
-4. Retrying with the credential header selected by the challenge
+2. If 402, parsing the WWW-Authenticate challenges and any x402
+   PAYMENT-REQUIRED offers
+3. Finding a matching method to create credentials, preferring native
+   challenges over x402 offers
+4. Retrying with the credential header selected by the challenge, or
+   PAYMENT-SIGNATURE for an x402 offer
 """
 
 from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -36,6 +39,15 @@ from mpp.events import (
     Unsubscribe,
 )
 from mpp.runtime import ClientMethod, PaymentRuntime
+from mpp.x402._client import CREDENTIAL_HEADERS as X402_CREDENTIAL_HEADERS
+from mpp.x402._client import is_x402_challenge, x402_challenges
+from mpp.x402._header import encode_payment_signature
+from mpp.x402._types import (
+    PAYMENT_REQUIRED_HEADER,
+    PAYMENT_SIGNATURE_HEADER,
+    PaymentPayload,
+    X402FormatError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -80,8 +92,8 @@ def _paid_retry_extensions(
 
 
 def _set_payment_credential(headers: httpx.Headers, header: str, value: str) -> None:
-    """Attach a Payment credential, preserving ordinary Authorization values."""
-    for stale in _CREDENTIAL_HEADERS:
+    """Attach a Payment or x402 credential, preserving ordinary Authorization values."""
+    for stale in (*_CREDENTIAL_HEADERS, *X402_CREDENTIAL_HEADERS):
         existing = headers.get(stale)
         if (
             existing is not None
@@ -206,7 +218,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
     """httpx transport that handles 402 Payment Required responses.
 
     Wraps an inner transport and automatically:
-    1. Detects 402 responses with WWW-Authenticate: Payment headers
+    1. Detects 402 responses with WWW-Authenticate: Payment or x402
+       PAYMENT-REQUIRED headers
     2. Parses the challenge and finds a matching payment method
     3. Creates credentials and retries the request
     4. Returns the final response (success or failure)
@@ -295,7 +308,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         """Handle request, automatically retrying on 402 with credentials."""
         current_origin = _origin(request.url)
         original_origin = request.extensions.setdefault(_ORIGINAL_ORIGIN_EXTENSION, current_origin)
-        supplied_payment = any(
+        supplied_payment = PAYMENT_SIGNATURE_HEADER in request.headers or any(
             request.headers.get(header, "").lower().startswith("payment ")
             for header in _CREDENTIAL_HEADERS
         )
@@ -342,7 +355,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
                 # Handle multiple WWW-Authenticate headers (per RFC 9110)
                 challenges: list[Challenge] = []
-                parse_error: ParseError | None = None
+                parse_error: ParseError | X402FormatError | None = None
                 for header in response.headers.get_list("www-authenticate"):
                     for field in _payment_challenges(header):
                         try:
@@ -351,6 +364,13 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             parse_error = error
                             continue
                         challenges.append(parsed)
+                # x402 offers from PAYMENT-REQUIRED; native challenges are preferred.
+                payment_required = response.headers.get(PAYMENT_REQUIRED_HEADER)
+                if payment_required is not None:
+                    try:
+                        challenges.extend(x402_challenges(payment_required))
+                    except X402FormatError as error:
+                        parse_error = parse_error or error
 
                 try:
                     challenge, matched_method = self._runtime.match_challenge(challenges)
@@ -444,7 +464,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "response": response,
                         },
                     )
-                    auth_header = credential.to_authorization()
+                    if is_x402_challenge(challenge):
+                        credential_header = PAYMENT_SIGNATURE_HEADER
+                        credential_value = encode_payment_signature(
+                            cast("PaymentPayload", credential.payload)
+                        )
+                    else:
+                        credential_header = challenge.credential_header
+                        credential_value = credential.to_authorization()
                 except Exception as error:
                     await self._events.emit(
                         PAYMENT_FAILED,
@@ -475,7 +502,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     raise
 
                 headers = httpx.Headers(request.headers)
-                _set_payment_credential(headers, challenge.credential_header, auth_header)
+                _set_payment_credential(headers, credential_header, credential_value)
                 retry_request = httpx.Request(
                     method=request.method,
                     url=request.url,
