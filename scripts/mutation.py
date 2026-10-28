@@ -138,7 +138,7 @@ def report(output: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("changed").add_argument("base", help="git ref the change is based on")
     commands.add_parser("report").add_argument("output", type=Path, help="Markdown file to write")

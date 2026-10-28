@@ -342,11 +342,6 @@ class TestUnits:
             **({"suggestedDeposit": str(deposit)} if deposit is not None else {}),
         }
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="parse_units multiplies in Decimal's default 28-digit context, so "
-        "amounts with more significant digits are silently rounded (viem parseUnits is exact)",
-    )
     @pytest.mark.parametrize(
         ("value", "decimals", "expected"),
         [

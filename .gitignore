@@ -28,6 +28,8 @@ ENV/
 # Testing
 .pytest_cache/
 .coverage
+coverage.json
+coverage.xml
 htmlcov/
 .hypothesis/
 
