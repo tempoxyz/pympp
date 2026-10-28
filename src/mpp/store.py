@@ -44,6 +44,19 @@ class ExpiringStore(Store, Protocol):
         ...
 
 
+@runtime_checkable
+class CompareAndSetStore(Store, Protocol):
+    """Optional atomic compare-and-set support for state shared across processes."""
+
+    async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
+        """Write *value* under *key* only while its current value equals *expected*.
+
+        ``expected=None`` requires *key* to be absent and ``value=None`` deletes it.
+        Returns whether the write happened. An existing key keeps its expiry.
+        """
+        ...
+
+
 def _validate_expiry(expires_at: float) -> None:
     if not math.isfinite(expires_at) or expires_at <= time.time():
         raise ValueError("expires_at must be a finite future Unix timestamp")
@@ -106,4 +119,15 @@ class MemoryStore:
         if not await self.put_if_absent(key, value):
             return False
         self._expiry_deadlines[key] = expires_at
+        return True
+
+    async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
+        self._prune_expired()
+        if self._data.get(key) != expected:
+            return False
+        if value is None:
+            await self.delete(key)
+        else:
+            self._check_capacity(key)
+            self._data[key] = value
         return True

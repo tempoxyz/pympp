@@ -19,6 +19,38 @@ from typing import Any
 
 from mpp.store import _validate_expiry
 
+# KEYS[1]; ARGV: has_expected, expected, has_value, value.
+_COMPARE_AND_SET = """
+local current = redis.call('GET', KEYS[1])
+if ARGV[1] == '0' then
+  if current then return 0 end
+elseif current ~= ARGV[2] then
+  return 0
+end
+if ARGV[3] == '0' then
+  redis.call('DEL', KEYS[1])
+else
+  redis.call('SET', KEYS[1], ARGV[4], 'KEEPTTL')
+end
+return 1
+"""
+
+
+def _scripting_unavailable(error: Exception) -> bool:
+    """Whether ``error`` means this server can never run the script.
+
+    Transient replies, such as READONLY during a failover or OOM, do not.
+    """
+    from redis.exceptions import NoPermissionError, ResponseError
+
+    if isinstance(error, NoPermissionError):
+        return True
+    if type(error) is not ResponseError:
+        return False
+    message = str(error).lower()
+    # EVAL missing or denied, or KEEPTTL unsupported (Redis < 6.0).
+    return any(reason in message for reason in ("unknown command", "noperm", "syntax error"))
+
 
 class RedisStore:
     """Async key-value store backed by Redis.
@@ -77,3 +109,26 @@ class RedisStore:
             self._key(key), value, nx=True, pxat=math.ceil(expires_at * 1000)
         )
         return result is not None
+
+    async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
+        """Atomic conditional write in a Lua script; requires Redis server >= 6.0 and EVAL.
+
+        Raises:
+            NotImplementedError: When the server refuses the script, for example
+                because ACLs deny scripting or a proxy lacks EVAL.
+        """
+        try:
+            result = await self._redis.eval(
+                _COMPARE_AND_SET,
+                1,
+                self._key(key),
+                "0" if expected is None else "1",
+                "" if expected is None else expected,
+                "0" if value is None else "1",
+                "" if value is None else value,
+            )
+        except Exception as error:
+            if _scripting_unavailable(error):
+                raise NotImplementedError("Redis server refused EVAL") from error
+            raise
+        return bool(result)
