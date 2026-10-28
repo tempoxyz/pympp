@@ -1279,3 +1279,17 @@ def _parse_max_amount(value: str | Decimal, decimals: int) -> int:
             f"than {decimals} decimals allow."
         )
     return atomic
+
+
+_SESSION_EXPORTS = ("session", "session_manager")
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily load the session client (``session``, ``session_manager``)."""
+    if name in _SESSION_EXPORTS:
+        from mpp.methods.tempo.session import client as session_client
+
+        value = getattr(session_client, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -19,6 +19,14 @@ class CredentialParams:
 
     challenge: Challenge
     context: Any = None
+    request: Any = None
+    """The request that received the challenge (an ``httpx.Request`` over HTTP), when known."""
+    fetch: Callable[[Any], Awaitable[Any]] | None = None
+    """Sends an auxiliary request to the challenging server without payment handling.
+
+    Over HTTP it takes an ``httpx.Request`` and returns the read ``httpx.Response``. Methods
+    use it for management requests a credential depends on, such as a session top-up.
+    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -88,8 +96,13 @@ class PaymentRuntime:
         method: ClientMethod,
         *,
         event_payload: dict[str, Any] | None = None,
+        request: Any = None,
+        fetch: Callable[[Any], Awaitable[Any]] | None = None,
     ) -> Credential:
-        """Create a credential and emit its lifecycle events."""
+        """Create a credential and emit its lifecycle events.
+
+        ``request`` and ``fetch`` are passed to the method in :class:`CredentialParams`.
+        """
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
         if challenge.method != method.name or challenge.intent != method.intent:
@@ -122,7 +135,9 @@ class PaymentRuntime:
         if isinstance(supplied, Credential):
             credential = supplied
         else:
-            serialized = await method.create_credential(CredentialParams(challenge=challenge))
+            serialized = await method.create_credential(
+                CredentialParams(challenge=challenge, request=request, fetch=fetch)
+            )
             credential = Credential.from_authorization(serialized)
         await self.events.emit(
             CREDENTIAL_CREATED,

@@ -443,6 +443,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "request": request,
                             "response": response,
                         },
+                        request=request,
+                        fetch=self._send_auxiliary,
                     )
                     auth_header = credential.to_authorization()
                 except Exception as error:
@@ -565,6 +567,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             with suppress(BaseException):
                 await response.aclose()
             raise
+
+    async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:
+        """Send a request a payment method needs, without payment handling, and read it."""
+        response = await self._inner.handle_async_request(request)
+        try:
+            await response.aread()
+        finally:
+            await response.aclose()
+        return response
 
     async def aclose(self) -> None:
         """Close the inner transport."""

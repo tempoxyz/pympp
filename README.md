@@ -173,6 +173,7 @@ or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
 | [api-server](./examples/api-server/) | Payment-gated API server |
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
+| [session-metered-api](./examples/session-metered-api/) | Sub-cent metered API and an agent paying 500 calls through one session (Docker Compose) |
 
 ## Protocol
 

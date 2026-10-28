@@ -1,0 +1,44 @@
+# docker compose up --build --exit-code-from agent
+services:
+  tempo:
+    image: ${TEMPO_LOCALNET_IMAGE:-ghcr.io/tempoxyz/tempo-localnet@sha256:86f199f161be85d3610d990e5bc2653ece29de3ee9c91e8c8e768cf2b8c05c3b}
+    command: ["--block-time", "1ms"]
+    ports:
+      - "127.0.0.1:${TEMPO_LOCALNET_PORT:-18645}:8545"
+    stop_grace_period: 10s
+    attach: false
+
+  server:
+    build: &build
+      context: ../..
+      dockerfile: examples/session-metered-api/Dockerfile
+    command: ["python", "server.py"]
+    environment:
+      TEMPO_RPC_URL: http://tempo:8545
+      STORE_PATH: /data/sessions.db
+    volumes:
+      - sessions:/data
+    ports:
+      - "127.0.0.1:${SERVER_PORT:-18000}:8000"
+    depends_on:
+      tempo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  agent:
+    build: *build
+    command: ["python", "agent.py"]
+    environment:
+      TEMPO_RPC_URL: http://tempo:8545
+      SERVER_URL: http://server:8000
+      CALLS: ${CALLS:-500}
+    depends_on:
+      server:
+        condition: service_healthy
+
+volumes:
+  sessions:
