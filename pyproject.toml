@@ -246,6 +246,7 @@ only_mutate = [
     "src/mpp/_body_digest.py",
     "src/mpp/_parsing.py",
     "src/mpp/client/transport.py",
+    "src/mpp/methods/tempo/_fee_payer.py",
     "src/mpp/methods/tempo/intents.py",
     "src/mpp/server/compose.py",
     "src/mpp/server/verify.py",

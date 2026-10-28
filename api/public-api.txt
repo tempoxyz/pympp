@@ -1482,12 +1482,14 @@ module mpp.methods.tempo.session.server.store
     class StoreChannelStore
         def __init__(self, store: Store) -> None
         property atomic: bool
+        async def check_atomic_update(self, channel_id: str) -> None
         async def get_channel(self, channel_id: str) -> ChannelState | None
         property store: Store
         async def update_channel(self, channel_id: str, fn: Callable[[ChannelState | None], ChannelState | None]) -> ChannelState | None
         async def update_channel_result(self, channel_id: str, fn: Callable[[ChannelState | None], StoreChange[_R]]) -> _R
         def wait_for_update(self, channel_id: str) -> asyncio.Future[None]
     def from_store(store: Store) -> StoreChannelStore
+    async def check_atomic_update(store: ChannelStore, channel_id: str) -> None
     DEFAULT_IDEMPOTENCY_RETENTION = 86400000
     def assert_idempotency_options(*, idempotency_key: str | None = None, retention: float | None = None) -> None
     async def deduct_from_channel(store: ChannelStore, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> DeductResult
