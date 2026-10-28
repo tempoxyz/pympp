@@ -425,6 +425,40 @@ async def test_wire_identical_cross_instance_offers_fail_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stable_binding_offers_differing_only_in_amount_pay_the_first() -> None:
+    method = MockMethod("session", intent="session")
+    verified: list[dict[str, Any]] = []
+
+    async def verify(context: VerifyContext) -> Receipt:
+        verified.append(dict(context.request))
+        return Receipt.success("session")
+
+    server = Mpp(
+        methods=replace(
+            method.server,
+            verify=verify,
+            stable_binding=lambda request: {
+                "currency": request.get("currency"),
+                "recipient": request.get("recipient"),
+            },
+        ),
+        realm="api.example.com",
+        secret_key="shared-secret",
+    )
+    configured = server.compose(
+        ("session/session", {"amount": "1.00"}),
+        ("session/session", {"amount": "2.00"}),
+    )
+
+    unpaid = challenges(await configured(http_request()))
+    assert len(unpaid) == 2
+    paid = await configured(http_request(credential(unpaid[1]).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert [request["amount"] for request in verified] == ["1.00"]
+
+
+@pytest.mark.asyncio
 async def test_composed_offer_rejects_tampered_opaque() -> None:
     method = MockMethod("first")
     server = Mpp(
