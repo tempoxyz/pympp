@@ -7,6 +7,7 @@ fake JSON-RPC node), so open, top-up, voucher and close run through the real cha
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import logging
 from dataclasses import replace
@@ -1792,10 +1793,21 @@ class TestChannelStoreProbeStores:
         await channel_store.check_atomic_update("0x" + "ab" * 32)
         assert not raw.data
 
-    async def test_failed_cleanup_leaves_one_key_and_checks_once(self) -> None:
+    async def test_failed_cleanup_leaves_one_key_per_adapter(self) -> None:
         from mpp.methods.tempo.session.server import store as store_module
 
         raw = DeleteRefusingCasStore()
         for _ in range(3):
             await store_module.StoreChannelStore(raw).check_atomic_update("0x" + "ab" * 32)
-        assert list(raw.data) == ["mpp:session:cas-probe"]
+        assert len(raw.data) == 3
+        assert all(key.startswith("mpp:session:cas-probe:") for key in raw.data)
+
+    async def test_concurrent_probes_on_one_adapter_never_refuse(self) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        raw = BytesCasStore()
+        channel_store = store_module.StoreChannelStore(raw)
+        await asyncio.gather(
+            *(channel_store.check_atomic_update("0x" + "ab" * 32) for _ in range(20))
+        )
+        assert not raw.data
