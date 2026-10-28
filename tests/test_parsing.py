@@ -774,3 +774,138 @@ def test_accepts_valid_supplementary_unicode() -> None:
     from mpp._parsing import _b64_decode
 
     assert _b64_decode(_b64_json({"text": "\U0001f600"})) == {"text": "\U0001f600"}
+
+
+class TestEncodingBoundaries:
+    """Exact edges of the base64url JSON and quoted-string codecs."""
+
+    def test_b64_encode_is_sorted_compact_unpadded(self) -> None:
+        from mpp._parsing import _b64_encode
+
+        # '{"a":"x","b":1}' is 15 bytes, so standard base64 would pad it.
+        assert _b64_encode({"b": 1, "a": "x"}) == "eyJhIjoieCIsImIiOjF9"
+        assert _b64_encode({"k": "\u00e9?>"}) == "eyJrIjoiXHUwMGU5Pz4ifQ"
+
+    def test_b64_decode_size_limit_is_inclusive(self) -> None:
+        from mpp._parsing import _b64_decode
+
+        payload = _b64_json({"a": "x" * 40})
+        assert _b64_decode(payload, max_size=len(payload)) == {"a": "x" * 40}
+        with pytest.raises(ParseError, match="exceeds maximum size"):
+            _b64_decode(payload, max_size=len(payload) - 1)
+
+    def test_b64_decode_maps_recursion_errors_to_parse_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # json.loads hits the recursion limit on deep nesting only on some
+        # Python versions (3.14 parses it), so raise it directly.
+        from mpp import _parsing
+
+        def too_deep(*args: object, **kwargs: object) -> object:
+            raise RecursionError
+
+        monkeypatch.setattr(_parsing.json, "loads", too_deep)
+        with pytest.raises(ParseError, match="Invalid base64 or JSON encoding"):
+            _parsing._b64_decode(_b64_json({"a": 1}))
+
+    @pytest.mark.parametrize(
+        ("raw", "escaped"),
+        [
+            ("\u00ff", "\u00ff"),
+            ("\u0100", "\\u0100"),
+            ("\uffff", "\\uffff"),
+            ("\U00010000", "\\ud800\\udc00"),
+            ("\U0010ffff", "\\udbff\\udfff"),
+        ],
+        ids=["latin1-max", "bmp-min", "bmp-max", "astral-min", "astral-max"],
+    )
+    def test_escape_quoted_boundaries(self, raw: str, escaped: str) -> None:
+        from mpp._parsing import _escape_quoted, _unescape_quoted
+
+        assert _escape_quoted(raw) == escaped
+        assert _unescape_quoted(escaped) == raw
+
+    @pytest.mark.parametrize(
+        ("escaped", "raw"),
+        [
+            ("\\ud7ff", "\ud7ff"),
+            ("\\ue000", "\ue000"),
+            ("\\ud800\\udc00", "\U00010000"),
+            ("\\udbff\\udfff", "\U0010ffff"),
+            ("\\ud800", "\ufffd"),
+            ("\\udbff", "\ufffd"),
+            ("\\udc00", "\ufffd"),
+            ("\\udfff", "\ufffd"),
+            ("\\ud800\\ud800", "\ufffd\ufffd"),
+            ("\\ud800\\ue000", "\ufffd\ue000"),
+            ("\\udbffx", "\ufffdx"),
+            ("\\ud800\\x", "\ufffdx"),
+            ("\\ud800\\udc0", "\ufffdudc0"),
+            ("\\u12", "u12"),
+            ("\\u12g4", "u12g4"),
+            ("a\\", "a"),
+        ],
+        ids=[
+            "below-high",
+            "above-low",
+            "pair-min",
+            "pair-max",
+            "lone-high-min",
+            "lone-high-max",
+            "lone-low-min",
+            "lone-low-max",
+            "high-high",
+            "high-then-bmp",
+            "high-then-text",
+            "high-then-quoted-pair",
+            "high-then-short-escape",
+            "short-escape",
+            "non-hex-escape",
+            "trailing-backslash",
+        ],
+    )
+    def test_unescape_quoted_surrogate_edges(self, escaped: str, raw: str) -> None:
+        from mpp._parsing import _unescape_quoted
+
+        assert _unescape_quoted(escaped) == raw
+
+    def test_escape_quoted_rejects_a_lone_cr_or_lf(self) -> None:
+        from mpp._parsing import _escape_quoted
+
+        for value in ("a\rb", "a\nb"):
+            with pytest.raises(ParseError, match="CRLF"):
+                _escape_quoted(value)
+
+    def test_unescape_quoted_pairs_only_an_adjacent_escape(self) -> None:
+        from mpp._parsing import _unescape_quoted
+
+        assert _unescape_quoted("\\ud800xudc00") == "\ufffdxudc00"
+
+    def test_unquoted_auth_param_keeps_backslashes(self) -> None:
+        from mpp._parsing import _parse_auth_params
+
+        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xA"}
+
+    def test_receipt_timestamp_is_formatted_with_z(self) -> None:
+        receipt = Receipt.success("0xabc", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
+        decoded = json.loads(base64.urlsafe_b64decode(receipt.to_payment_receipt() + "=="))
+        assert decoded["timestamp"] == "2026-01-02T03:04:05Z"
+
+    def test_credential_echo_fields_default_to_empty(self) -> None:
+        header = "Payment " + _b64_json(
+            {"challenge": {"id": "c", "method": "tempo"}, "payload": {}}
+        )
+        echo = Credential.from_authorization(header).challenge
+        assert (echo.realm, echo.intent, echo.request) == ("", "", "")
+
+    def test_receipt_extra_must_be_an_object(self) -> None:
+        receipt = {
+            "status": "success",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reference": "0xabc",
+            "method": "tempo",
+            "extra": ["not", "an", "object"],
+        }
+        assert Receipt.from_payment_receipt(_b64_json(receipt)).extra is None
+        receipt["extra"] = {"k": "v"}
+        assert Receipt.from_payment_receipt(_b64_json(receipt)).extra == {"k": "v"}

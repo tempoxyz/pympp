@@ -1,7 +1,7 @@
 """Integration tests for client→server payment roundtrip against a real node.
 
-Requires TEMPO_RPC_URL to be set. Run with:
-    TEMPO_RPC_URL=http://localhost:8545 pytest -m integration -v
+Requires a Tempo node (see tests/network.py). Run with:
+    make node && TEMPO_NETWORK=localnet uv run pytest -m integration -v
 """
 
 from __future__ import annotations

@@ -75,6 +75,9 @@ def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[s
         return obj
     except (ValueError, json.JSONDecodeError):
         raise ParseError("Invalid base64 or JSON encoding") from None
+    except RecursionError:
+        # Deeply nested JSON exhausts json.loads' recursion limit.
+        raise ParseError("Invalid base64 or JSON encoding") from None
 
 
 def _escape_quoted(s: str) -> str:

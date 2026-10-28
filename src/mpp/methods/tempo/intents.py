@@ -21,7 +21,7 @@ from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
 
 from mpp import Credential, Receipt
-from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
+from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_PAID_RETRY_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
 from mpp._typing import is_dict, is_list
 from mpp._validation import Validation
@@ -31,6 +31,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
+from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
@@ -41,7 +42,7 @@ from mpp.methods.tempo.schemas import (
     Split,
     TransactionCredentialPayload,
 )
-from mpp.store import ExpiringStore, MemoryStore, Store
+from mpp.store import CompareAndSetStore, ExpiringStore, MemoryStore, Store
 
 if TYPE_CHECKING:
     import httpx
@@ -80,7 +81,8 @@ def _fallback_store(method: str) -> MemoryStore:
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 APPROVE_SELECTOR = "095ea7b3"
-SWAP_EXACT_AMOUNT_OUT_SELECTOR = "b30d91d5"
+# swapExactAmountOut(address,address,uint128,uint128)
+SWAP_EXACT_AMOUNT_OUT_SELECTOR = "f0122b75"
 
 SELECTOR_HEX_LEN = 8
 ABI_WORD_HEX_LEN = 64
@@ -583,8 +585,11 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
         raise VerificationError("Invalid transaction: disallowed call pattern")
 
     if has_swap_prefix:
-        approve_to, _, approve_data = calls[0]
-        swap_to, _, swap_data = calls[1]
+        approve_to, approve_value, approve_data = calls[0]
+        swap_to, swap_value, swap_data = calls[1]
+        # Like mppx, no call may carry a native value.
+        if approve_value or swap_value:
+            raise VerificationError("Invalid transaction: call value is not allowed")
         decoded_approve = _decode_static_call_args(
             approve_data,
             ("address", "uint256"),
@@ -594,7 +599,7 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
             raise VerificationError("Invalid transaction: malformed approve call data")
         decoded_swap = _decode_static_call_args(
             swap_data,
-            ("address", "address", "uint256", "uint256"),
+            ("address", "address", "uint128", "uint128"),
             SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
         )
         if decoded_swap is None:
@@ -697,7 +702,7 @@ def _validate_normalized_calls(
         )
         swap = _decode_static_call_args(
             calls[1][2],
-            ("address", "address", "uint256", "uint256"),
+            ("address", "address", "uint128", "uint128"),
             SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
         )
         # Call scope validation has already checked the canonical encoding.
@@ -811,6 +816,7 @@ class ChargeIntent:
         fee_payer: TempoAccount | None = None,
         fee_token: str | None = None,
         allowed_fee_tokens: Sequence[str] | None = None,
+        sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None,
     ) -> None:
         """Initialize the charge intent.
 
@@ -842,7 +848,13 @@ class ChargeIntent:
             allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
                 Defaults to :func:`fee_tokens_for_chain` for a local fee payer;
                 restricts an external ``feePayerUrl`` sponsor's token when set.
+            sponsor_budget: Caps the fees ``fee_payer`` has in flight (default:
+                :class:`~mpp.methods.tempo.sponsor_budget.SponsorBudget` on the
+                replay store). Pass ``False`` only when it is enforced elsewhere.
         """
+        if sponsor_budget is not None and sponsor_budget is not False:
+            if not isinstance(sponsor_budget, _sponsor_budget.SponsorBudget):
+                raise TypeError("sponsor_budget must be a SponsorBudget, False or None")
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
@@ -855,6 +867,10 @@ class ChargeIntent:
         self._store = store
         self._validate_sender = validate_sender
         self._confirmation_timeout = confirmation_timeout
+        self._sponsor_budget = (
+            None if sponsor_budget is False else sponsor_budget or _sponsor_budget.SponsorBudget()
+        )
+        self._sponsor_budget_shared = True
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -1771,6 +1787,9 @@ class ChargeIntent:
         broadcast_key: str | None = None
         reconciling = False
         legacy_record = False
+        sponsored_fee: int | None = None
+        reservation: _sponsor_budget.Reservation | None = None
+        budget_store: CompareAndSetStore | None = None
         client_store_key: str | None = None
         recovery_expires_at = (
             datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
@@ -1784,12 +1803,16 @@ class ChargeIntent:
                 # Tempo only accepts fee tokens with Fee AMM liquidity.
                 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
-                fields, _, _, _ = decode_fee_payer_envelope(
-                    bytes.fromhex(raw_tx.removeprefix("0x"))
-                )
+                try:
+                    fields, _, _, _ = decode_fee_payer_envelope(
+                        bytes.fromhex(raw_tx.removeprefix("0x"))
+                    )
+                except ValueError as error:
+                    raise VerificationError(str(error)) from error
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
+                sponsored_fee = max_fee
                 prior_transaction: Any = None
                 if self._store is not None:
                     client_hash = _raw_transaction_hash(raw_tx).lower()
@@ -1963,9 +1986,24 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
+                # Simulate before reserving, like mppx, so a transaction that
+                # reverts (such as one from an unfunded key) never holds sponsor
+                # budget that honest charges wait on.
                 await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
-                # The store reservation and simulation can take a while: recheck
-                # the sponsored window right before submission.
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
+                budget_store, reservation = await self._reserve_sponsor_budget(
+                    client, raw_tx, sponsored_fee, request, recovery_expires_at
+                )
+                # Chain state can change while waiting for budget: re-simulate so
+                # the sponsor doesn't pay gas for a transaction that now reverts.
+                if reservation is not None and reservation.waited:
+                    await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                # The store reservation and budget wait can take a while:
+                # recheck the sponsored window right before submission.
                 prior = await self._check_sponsored_validity(
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
@@ -2009,6 +2047,14 @@ class ChargeIntent:
                         "Earlier submission of this transaction has an unknown outcome"
                     )
                 raise PaymentExpiredError(expires)
+            if (
+                reservation is not None
+                and budget_store is not None
+                and not await _sponsor_budget.transition(budget_store, reservation, "broadcasting")
+            ):
+                raise VerificationError(
+                    "Sponsor budget reservation ownership was lost before broadcast"
+                )
             broadcast_attempted = True
             outcome_unknown = True
             try:
@@ -2140,6 +2186,101 @@ class ChargeIntent:
             ):
                 raise InternalPaymentError() from err
             raise
+        finally:
+            if reservation is not None and budget_store is not None:
+                try:
+                    # A transaction that may still land keeps its fee reserved
+                    # until a receipt is observed or it expires.
+                    if outcome_unknown and not verified:
+                        await _sponsor_budget.transition(budget_store, reservation, "pending")
+                    else:
+                        await _sponsor_budget.release(budget_store, reservation)
+                except Exception:
+                    # The reservation expires on its own; the settlement outcome wins.
+                    logger.exception("Sponsor budget cleanup failed")
+
+    def _sponsor_budget_store(self) -> CompareAndSetStore | None:
+        """Return the store holding the local fee payer's in-flight budget, if enforced."""
+        budget = self._sponsor_budget
+        if budget is None or self.fee_payer is None:
+            return None
+        if budget.store is not None:
+            return budget.store
+        if self._sponsor_budget_shared and isinstance(self._store, CompareAndSetStore):
+            return self._store
+        if self._sponsor_budget_shared:
+            self._sponsor_budget_shared = False
+            logger.warning(
+                "tempo.charge's store has no compare_and_set, so the sponsor budget is "
+                "scoped to this process. Pass SponsorBudget(store=...) with a shared store."
+            )
+        return _sponsor_budget.process_store()
+
+    async def _reserve_sponsor_budget(
+        self,
+        client: Any,
+        raw_tx: str,
+        fee: int | None,
+        request: ChargeRequest,
+        challenge_expires_at: float | None,
+    ) -> tuple[CompareAndSetStore | None, _sponsor_budget.Reservation | None]:
+        """Reserve a locally sponsored transaction's fee before it is broadcast."""
+        budget = self._sponsor_budget
+        store = self._sponsor_budget_store()
+        valid_before = _transaction_valid_before(raw_tx)
+        if (
+            budget is None
+            or store is None
+            or self.fee_payer is None
+            or fee is None
+            or valid_before is None
+        ):
+            return None, None
+        # The transaction can still be included for a short grace after
+        # valid_before, so it stays reserved until then.
+        expires_at = int((valid_before + VALID_BEFORE_GRACE) * 1000)
+        # Stop waiting once the transaction falls below the sponsored validity
+        # floor (it could not be broadcast anyway), or before the client gives
+        # up on its paid retry: the confirmation wait still follows.
+        max_wait = max(1.0, DEFAULT_PAID_RETRY_TIMEOUT - self._confirmation_timeout)
+        wait_until = min(
+            (valid_before - MIN_REMAINING_VALIDITY_SECONDS) * 1000,
+            math.ceil((time.time() + max_wait) * 1000),
+        )
+        if challenge_expires_at is not None:
+            # Round up, so a wait that runs out has the challenge expired too.
+            wait_until = min(wait_until, math.ceil(challenge_expires_at * 1000))
+
+        async def is_settled(tx_hash: str) -> bool:
+            return await self._get_transaction_receipt(client, tx_hash) is not None
+
+        sponsor = self.fee_payer.address
+        while True:
+            try:
+                reservation = await _sponsor_budget.reserve(
+                    store,
+                    budget,
+                    chain_id=request.methodDetails.chainId,
+                    sponsor=sponsor,
+                    transaction_hash=_raw_transaction_hash(raw_tx),
+                    fee=fee,
+                    expires_at=expires_at,
+                    wait_until=wait_until,
+                    is_settled=is_settled,
+                )
+                return store, reservation
+            except NotImplementedError:
+                # A replay store without usable compare-and-set (such as Redis
+                # denying EVAL) keeps working with a process-scoped budget.
+                if budget.store is not None or not self._sponsor_budget_shared:
+                    raise
+                self._sponsor_budget_shared = False
+                logger.warning(
+                    "tempo.charge's store cannot compare_and_set, so the sponsor budget "
+                    "is scoped to this process. Pass SponsorBudget(store=...) with a "
+                    "shared store that supports it."
+                )
+                store = _sponsor_budget.process_store()
 
     async def _check_sponsored_validity(
         self,

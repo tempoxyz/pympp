@@ -7,6 +7,7 @@ from typing import Any, cast
 import rlp  # pyright: ignore[reportMissingTypeStubs]
 
 DecodingError = rlp.DecodingError
+RLPException = rlp.exceptions.RLPException  # pyright: ignore[reportUnknownMemberType]
 
 
 def decode(data: bytes) -> Any:

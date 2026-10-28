@@ -8,11 +8,13 @@ import base64
 import hashlib
 import hmac
 import json
+import re
 from typing import Any, cast
 
 from mpp._typing import is_dict
 
 _MAX_ARRAY_INDEX = 2**32 - 2
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 def _is_array_index(key: str) -> bool:
@@ -61,11 +63,31 @@ def _js_order(value: Any) -> Any:
     return value
 
 
+def _join_surrogate_pairs(text: str) -> str:
+    """Combine adjacent surrogate code points into the character they encode."""
+    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
+
+
+def _json(value: Any, *, sort_keys: bool = False) -> str:
+    """Compact JSON like ``JSON.stringify``, which escapes lone surrogates as ``\\udXXX``."""
+    text = json.dumps(value, separators=(",", ":"), sort_keys=sort_keys, ensure_ascii=False)
+    if _SURROGATE.search(text) is None:
+        return text
+    return _SURROGATE.sub(lambda match: f"\\u{ord(match.group()):04x}", _join_surrogate_pairs(text))
+
+
+def _utf8(text: str) -> bytes:
+    """Encode like ``TextEncoder``: lone surrogates become U+FFFD."""
+    if _SURROGATE.search(text) is None:
+        return text.encode("utf-8")
+    return _SURROGATE.sub("\ufffd", _join_surrogate_pairs(text)).encode("utf-8")
+
+
 def _serialize(body: str | bytes | dict[str, Any]) -> bytes:
     if isinstance(body, dict):
-        body = json.dumps(_js_order(body), separators=(",", ":"), ensure_ascii=False)
+        body = _json(_js_order(body))
     if isinstance(body, str):
-        body = body.encode("utf-8")
+        body = _utf8(body)
     return body
 
 
@@ -93,8 +115,7 @@ def compute(body: str | bytes | dict[str, Any]) -> str:
 
 def _compute_legacy(body: dict[str, Any]) -> str:
     """Digest of a dict body as earlier pympp releases computed it (sorted keys)."""
-    data = json.dumps(body, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    return _encode(data.encode("utf-8"))
+    return _encode(_json(body, sort_keys=True).encode("utf-8"))
 
 
 def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:

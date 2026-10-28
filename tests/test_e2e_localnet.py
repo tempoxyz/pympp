@@ -10,7 +10,7 @@ servers sharing one Redis store.
 These tests pinned 0.15 behaviour before the engine refactor and are ported to
 the Mpp engine API unchanged in intent.
 
-Run with TEMPO_RPC_URL=http://localhost:8545 and REDIS_URL=redis://localhost:6379:
+Run with TEMPO_NETWORK=localnet and REDIS_URL=redis://localhost:6379:
     uv run pytest tests/test_e2e_localnet.py -m "integration or redis" -v
 """
 

@@ -49,6 +49,7 @@ _LAZY_EXPORTS = {
     ),
     "mpp.methods.tempo.relay": ("Relay", "RelayErrorCode"),
     "mpp.methods.tempo.schemas": ("ChargeInput", "ChargePayload", "Split"),
+    "mpp.methods.tempo.sponsor_budget": ("SponsorBudget",),
 }
 
 
