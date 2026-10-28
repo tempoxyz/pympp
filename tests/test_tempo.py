@@ -4544,7 +4544,7 @@ class TestCosignAsFeePayer:
         assert calls == ["simulate", "reserve"]
 
     @pytest.mark.asyncio
-    async def test_long_sponsor_budget_wait_is_followed_by_a_fresh_simulation(self):
+    async def test_sponsor_budget_wait_is_followed_by_a_fresh_simulation(self):
         from mpp.methods.tempo import sponsor_budget
 
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
@@ -4555,18 +4555,16 @@ class TestCosignAsFeePayer:
         intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
         calls: list[str] = []
         real_reserve = sponsor_budget.reserve
-        clock = [1000.0]
 
         async def reserve(*args, **kwargs):
             calls.append("reserve")
-            clock[0] += 2  # waited two seconds for budget
-            return await real_reserve(*args, **kwargs)
+            reservation = await real_reserve(*args, **kwargs)
+            return replace(reservation, waited=True)
 
         async def simulate(*args, **kwargs):
             calls.append("simulate")
 
         with (
-            patch("mpp.methods.tempo.intents.time.monotonic", side_effect=lambda: clock[0]),
             patch.object(intent, "_simulate_before_broadcast", AsyncMock(side_effect=simulate)),
             patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
         ):

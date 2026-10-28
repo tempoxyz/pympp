@@ -776,10 +776,6 @@ def _payment_call_leg(call_data_hex: str) -> MatchedTransferLog:
 # ──────────────────────────────────────────────────────────────────
 
 
-# A sponsor-budget wait at least this long gets a fresh simulation before broadcast.
-_RESIMULATE_AFTER_WAIT_SECONDS = 1.0
-
-
 class ChargeIntent:
     """Tempo charge intent for one-time payments.
 
@@ -1993,13 +1989,12 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
-                reserve_started = time.monotonic()
                 budget_store, reservation = await self._reserve_sponsor_budget(
                     client, raw_tx, sponsored_fee, request, recovery_expires_at
                 )
                 # Chain state can change while waiting for budget: re-simulate so
                 # the sponsor doesn't pay gas for a transaction that now reverts.
-                if time.monotonic() - reserve_started >= _RESIMULATE_AFTER_WAIT_SECONDS:
+                if reservation is not None and reservation.waited:
                     await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
                 # The store reservation and budget wait can take a while:
                 # recheck the sponsored window right before submission.

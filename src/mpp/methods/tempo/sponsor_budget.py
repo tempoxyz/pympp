@@ -17,7 +17,7 @@ import time
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, TypeVar
 
 from mpp.errors import InternalPaymentError, VerificationError
@@ -90,11 +90,16 @@ class SponsorBudget:
 
 @dataclass(frozen=True, slots=True)
 class Reservation:
-    """A reservation's location; ``owner`` fences stale workers."""
+    """A reservation's location; ``owner`` fences stale workers.
+
+    ``waited`` is true when admission had to wait for capacity, so chain
+    state may have changed since the caller last checked the transaction.
+    """
 
     key: str
     id: str
     owner: str
+    waited: bool = False
 
 
 IsSettled = Callable[[str], Awaitable[bool]]
@@ -271,6 +276,7 @@ async def reserve(
     key = _key(chain_id, sponsor)
     reservation = Reservation(key, transaction_hash.lower(), str(uuid.uuid4()))
     poll_interval = _INITIAL_POLL_INTERVAL_MS
+    waited = False
     # Reconciliation runs alongside admission: a slow receipt lookup must not
     # hold back a waiter after another one already freed its capacity.
     reconciling: asyncio.Future[None] | None = None
@@ -315,7 +321,7 @@ async def reserve(
 
             match await _update(store, key, change):
                 case "reserved":
-                    return reservation
+                    return replace(reservation, waited=waited)
                 case "invalid":
                     raise InternalPaymentError() from RuntimeError(
                         "Sponsor budget store contains incompatible state"
@@ -332,6 +338,7 @@ async def reserve(
                     raise error
             if reconciling is None:
                 reconciling = asyncio.ensure_future(_reconcile(store, key, is_settled))
+            waited = True
             await asyncio.sleep(max(0, min(poll_interval, wait_until - _now_ms())) / 1000)
             poll_interval = min(poll_interval * 2, _MAX_POLL_INTERVAL_MS)
     finally:

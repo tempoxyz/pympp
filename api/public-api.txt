@@ -931,6 +931,7 @@ module mpp.methods.tempo.sponsor_budget
         field key: str
         field id: str
         field owner: str
+        field waited: bool = False
     IsSettled = collections.abc.Callable[[str], collections.abc.Awaitable[bool]]
     async def transition(store: CompareAndSetStore, reservation: Reservation, phase: Literal['broadcasting', 'pending']) -> bool
     async def release(store: CompareAndSetStore, reservation: Reservation) -> bool
