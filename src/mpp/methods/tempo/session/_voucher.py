@@ -14,7 +14,7 @@ from typing import Any, Protocol, runtime_checkable
 from eth_abi.abi import encode
 from eth_hash.auto import keccak
 
-from mpp.methods.tempo.session.protocol import ESCROW_ADDRESS, SignedVoucher, uint96
+from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS, SignedVoucher, uint96
 
 DOMAIN_NAME = "TIP20 Channel Reserve"
 """Must match the on-chain TIP-20 channel reserve `DOMAIN_SEPARATOR` name."""
@@ -35,16 +35,6 @@ class HashSigner(Protocol):
     """An account that signs a raw 32-byte digest (such as `TempoAccount`)."""
 
     def sign_hash(self, msg_hash: bytes) -> bytes: ...
-
-
-def get_voucher_domain(escrow: str, chain_id: int) -> dict[str, Any]:
-    """The EIP-712 domain for vouchers and close authorizations."""
-    return {
-        "name": DOMAIN_NAME,
-        "version": DOMAIN_VERSION,
-        "chainId": chain_id,
-        "verifyingContract": escrow,
-    }
 
 
 def domain_separator(escrow: str, chain_id: int) -> bytes:

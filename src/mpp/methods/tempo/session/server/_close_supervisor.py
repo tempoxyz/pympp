@@ -13,10 +13,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mpp._typing import is_dict, is_list
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session import abi, chain
-from mpp.methods.tempo.session.protocol import ZERO_ADDRESS
-from mpp.methods.tempo.session.server.schedule import ResolvedSettlementSchedule
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session import _abi as abi
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._protocol import ZERO_ADDRESS
+from mpp.methods.tempo.session.server._schedule import ResolvedSettlementSchedule
+from mpp.methods.tempo.session.server._settlement import (
     OnSessionSettlement,
     OnSessionSettlementFailure,
     SessionSettlementContext,
@@ -27,7 +28,7 @@ from mpp.methods.tempo.session.server.settlement import (
     report_session_settlement_failure,
     resolve_channel_store,
 )
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session.server._store import (
     ChannelState,
     ChannelStore,
     finalize_closed_channel_state,

@@ -14,7 +14,7 @@ import pytest
 from mpp.client import Mpp
 from mpp.methods.tempo.account import TempoAccount
 from mpp.methods.tempo.client import session, session_manager
-from mpp.methods.tempo.session import chain
+from mpp.methods.tempo.session import _chain as chain
 from tests import INTEGRATION
 from tests.conftest import _fund_account  # pyright: ignore[reportPrivateUsage]
 from tests.session_interop import MppxServer, mppx_session_server

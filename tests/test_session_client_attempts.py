@@ -23,6 +23,10 @@ from mpp.client.transport import (
 from mpp.errors import PaymentOutcomeUnknownError
 from mpp.events import CREDENTIAL_CREATED
 from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo.session._protocol import (
+    create_session_receipt,
+    serialize_session_receipt,
+)
 from mpp.methods.tempo.session.client import (
     ChannelEntry,
     SessionManager,
@@ -47,10 +51,6 @@ from mpp.methods.tempo.session.client.store import (
     store_get,
     store_lock,
     with_funding_lock,
-)
-from mpp.methods.tempo.session.protocol import (
-    create_session_receipt,
-    serialize_session_receipt,
 )
 from mpp.runtime import (
     AttemptOutcome,

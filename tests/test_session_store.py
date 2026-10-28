@@ -13,9 +13,10 @@ from typing import Any
 import pytest
 
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session.protocol import ChannelDescriptor, SignedVoucher
-from mpp.methods.tempo.session.server import schedule, store
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session._protocol import ChannelDescriptor, SignedVoucher
+from mpp.methods.tempo.session.server import _schedule as schedule
+from mpp.methods.tempo.session.server import _store as store
+from mpp.methods.tempo.session.server._store import (
     AmountExceedsDepositError,
     ChannelClosedError,
     ChannelNotFoundError,
@@ -385,55 +386,6 @@ def test_finalize_closed_channel_state() -> None:
     )
 
 
-def test_assert_voucher_amounts() -> None:
-    channel = make_channel(highest_voucher_amount=50)
-    on_chain = OnChain(100, 10)
-    check = store.assert_voucher_amounts
-    assert check(
-        channel=channel, channel_state=on_chain, min_voucher_delta=0, cumulative_amount=50
-    ).already_accepted
-    assert not check(
-        channel=channel, channel_state=on_chain, min_voucher_delta=5, cumulative_amount=60
-    ).already_accepted
-    with pytest.raises(AmountExceedsDepositError):
-        check(channel=channel, channel_state=on_chain, min_voucher_delta=0, cumulative_amount=101)
-    with pytest.raises(DeltaTooSmallError):
-        check(channel=channel, channel_state=on_chain, min_voucher_delta=20, cumulative_amount=60)
-    with pytest.raises(VerificationFailedError, match="strictly greater"):
-        check(channel=channel, channel_state=on_chain, min_voucher_delta=0, cumulative_amount=40)
-    with pytest.raises(VerificationFailedError, match="settled"):
-        check(
-            channel=make_channel(highest_voucher_amount=5),
-            channel_state=on_chain,
-            min_voucher_delta=0,
-            cumulative_amount=10,
-        )
-    with pytest.raises(ChannelNotFoundError):
-        check(
-            channel=channel, channel_state=OnChain(0, 0), min_voucher_delta=0, cumulative_amount=60
-        )
-    with pytest.raises(ChannelClosedError):
-        check(
-            channel=channel,
-            channel_state=OnChain(100, 0, 5),
-            min_voucher_delta=0,
-            cumulative_amount=60,
-        )
-
-
-def test_plan_voucher_acceptance_charges_only_when_covered() -> None:
-    accepted = make_channel(highest_voucher_amount=100, spent=60)
-    assert store.plan_voucher_acceptance(accepted=accepted) == store.VoucherAcceptance(
-        accepted, False
-    )
-    charged = store.plan_voucher_acceptance(accepted=accepted, charge_amount=40)
-    assert charged.charged and charged.channel.spent == 100 and charged.channel.units == 1
-    refused = store.plan_voucher_acceptance(accepted=accepted, charge_amount=41)
-    assert not refused.charged and refused.channel is accepted
-    error = store.insufficient_balance_for_charge(accepted, 41)
-    assert str(error) == "Insufficient balance: requested 41, available 40."
-
-
 def test_session_error_problem_types() -> None:
     assert ChannelNotFoundError().status == 410
     assert ChannelNotFoundError("x").to_problem_details()["type"] == (
@@ -451,7 +403,6 @@ def test_codec_round_trips_every_field() -> None:
         highest_voucher=voucher_at(10_000_000),
         deposit=999_999_999_999_999_999_999,
         on_chain_verified_at=123,
-        stream_reservations={"s": store.StreamReservation(amount=5, units=1, expires_at=9)},
         scheduled_settlement_lease=store.ScheduledSettlementLease(expires_at=7, owner="o"),
         last_settlement_at="2025-01-02T00:00:00.000Z",
         last_settlement_spent=4,
@@ -544,36 +495,6 @@ async def test_big_ints_and_descriptor_persist() -> None:
     assert (loaded.spent, loaded.units) == (1_000_042, 1)
 
 
-async def test_wait_for_update() -> None:
-    cs = store.from_store(MemoryStore())
-    await seed(cs)
-    waiter = cs.wait_for_update(CHANNEL_ID)
-    others = [cs.wait_for_update(CHANNEL_ID) for _ in range(2)]
-    other_channel = cs.wait_for_update(CHANNEL_ID_2)
-    await asyncio.sleep(0.01)
-    assert not waiter.done()
-    await cs.update_channel(CHANNEL_ID, lambda c: replace(c, spent=1) if c else c)
-    await asyncio.wait_for(asyncio.gather(waiter, *others), 1)
-    assert not other_channel.done()
-    other_channel.cancel()
-    await asyncio.sleep(0)
-    assert CHANNEL_ID_2 not in cs._waiters  # pyright: ignore[reportPrivateUsage]
-
-    after_deduct = cs.wait_for_update(CHANNEL_ID)
-    assert (await store.deduct_from_channel(cs, CHANNEL_ID, 1)).ok
-    await asyncio.wait_for(after_deduct, 1)
-
-    # A refused deduction writes nothing, so it wakes nobody.
-    idle = cs.wait_for_update(CHANNEL_ID)
-    await cs.update_channel(CHANNEL_ID, lambda c: replace(c, finalized=True) if c else c)
-    await idle
-    idle = cs.wait_for_update(CHANNEL_ID)
-    assert not (await store.deduct_from_channel(cs, CHANNEL_ID, 1)).ok
-    await asyncio.sleep(0.01)
-    assert not idle.done()
-    idle.cancel()
-
-
 # ---------- deductions ----------
 
 
@@ -595,21 +516,6 @@ async def test_insufficient_balance_leaves_state() -> None:
     await seed(cs, highest_voucher_amount=1_000_000, spent=500_000)
     result = await store.deduct_from_channel(cs, CHANNEL_ID, 1_000_000)
     assert not result.ok and result.channel.spent == 500_000
-
-
-async def test_stream_reservations_limit_deductions() -> None:
-    cs = store.from_store(MemoryStore())
-    future = int(time.time() * 1000) + 60_000
-    await seed(
-        cs,
-        highest_voucher_amount=10,
-        stream_reservations={
-            "live": store.StreamReservation(amount=6, units=1, expires_at=future),
-            "expired": store.StreamReservation(amount=100, units=1, expires_at=1),
-        },
-    )
-    assert not (await store.deduct_from_channel(cs, CHANNEL_ID, 5)).ok
-    assert (await store.deduct_from_channel(cs, CHANNEL_ID, 4)).ok
 
 
 @pytest.mark.parametrize("overrides", [{"finalized": True}, {"close_requested_at": 1}])

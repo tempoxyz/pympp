@@ -1,7 +1,7 @@
 """Close supervision against a fake node (mppx server/CloseSupervisor.test.ts).
 
 Channels are opened through the real verification and chain code (see
-tests/test_session_server_units.py) and supervised with escrow reads, log searches and payee
+tests/session_helpers.py) and supervised with escrow reads, log searches and payee
 closes answered by a fake JSON-RPC node.
 """
 
@@ -13,16 +13,16 @@ from typing import Any
 import pytest
 
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session import abi
+from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session.server import supervise_closes
-from mpp.methods.tempo.session.server.close_supervisor import CloseSupervision
-from mpp.methods.tempo.session.server.schedule import ResolvedSettlementSchedule
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session.server._close_supervisor import CloseSupervision
+from mpp.methods.tempo.session.server._schedule import ResolvedSettlementSchedule
+from mpp.methods.tempo.session.server._settlement import (
     SessionSettlementContext,
     SessionSettlementFailureContext,
 )
+from tests.session_helpers import Lifecycle, closed_log, settled_log
 from tests.test_session_chain import CHAIN_ID, DEPOSIT, PAYEE, PAYER, RPC
-from tests.test_session_server_units import Lifecycle, closed_log, settled_log
 
 BLOCK = 1_000
 NOW = 1_700_000_000

@@ -13,6 +13,11 @@ import pytest
 from mpp import Challenge, Credential
 from mpp.errors import PaymentOutcomeUnknownError
 from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo.session._protocol import (
+    ChannelDescriptor,
+    create_session_receipt,
+    serialize_session_receipt,
+)
 from mpp.methods.tempo.session.client import (
     ChannelEntry,
     PaymentResponse,
@@ -25,11 +30,6 @@ from mpp.methods.tempo.session.client.manager import (
     is_expected_close_receipt,
 )
 from mpp.methods.tempo.session.client.store import entry_key
-from mpp.methods.tempo.session.protocol import (
-    ChannelDescriptor,
-    create_session_receipt,
-    serialize_session_receipt,
-)
 from tests import test_session_client as client_tests
 from tests.test_session_client import (
     ACCOUNT,

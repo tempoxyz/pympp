@@ -7,7 +7,7 @@ from typing import Any
 from eth_abi.abi import encode
 from eth_hash.auto import keccak
 
-from mpp.methods.tempo.session.protocol import ESCROW_ADDRESS, ChannelDescriptor
+from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS, ChannelDescriptor
 
 
 def resolve_authorized_signer(descriptor: ChannelDescriptor) -> str:

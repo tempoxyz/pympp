@@ -13,8 +13,14 @@ import pytest
 
 from mpp import Challenge
 from mpp.methods.tempo import TempoAccount
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.channel import compute_channel_id
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import (
+    ESCROW_ADDRESS,
+    VoucherPayload,
+    create_session_receipt,
+    serialize_session_receipt,
+)
 from mpp.methods.tempo.session.client import (
     ChannelEntry,
     SessionContext,
@@ -53,12 +59,6 @@ from mpp.methods.tempo.session.client.store import (
     store_get,
     store_lock,
     with_funding_lock,
-)
-from mpp.methods.tempo.session.protocol import (
-    ESCROW_ADDRESS,
-    VoucherPayload,
-    create_session_receipt,
-    serialize_session_receipt,
 )
 from mpp.runtime import CredentialParams
 from tests import test_session_client as client_tests

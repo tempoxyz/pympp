@@ -1,6 +1,6 @@
 """Session charging and on-chain settlement (mppx ``server/Settlement.ts``, non-store parts).
 
-The schedule and lease state live in :mod:`mpp.methods.tempo.session.server.schedule`.
+The schedule and lease state live in :mod:`mpp.methods.tempo.session.server._schedule`.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 import httpx
 
 from mpp.errors import BadRequestError, VerificationFailedError
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.protocol import ZERO_ADDRESS, SessionReceipt, uint96
-from mpp.methods.tempo.session.server.request_state import (
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._protocol import ZERO_ADDRESS, SessionReceipt, uint96
+from mpp.methods.tempo.session.server._request_state import (
     RequestProbe,
     is_session_content_request,
 )
-from mpp.methods.tempo.session.server.schedule import (
+from mpp.methods.tempo.session.server._schedule import (
     SCHEDULED_SETTLEMENT_LEASE_MS,
     ResolvedSettlementSchedule,
     claim_scheduled_settlement,
@@ -31,7 +31,7 @@ from mpp.methods.tempo.session.server.schedule import (
     release_scheduled_settlement,
     renew_scheduled_settlement,
 )
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session.server._store import (
     PENDING_CLOSE_CLOCK_SKEW_SECONDS,
     PENDING_CLOSE_VALIDITY_SECONDS,
     ChannelClosedError,

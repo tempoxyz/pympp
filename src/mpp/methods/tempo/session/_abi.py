@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from eth_abi.abi import decode, encode
 from eth_hash.auto import keccak
 
-from mpp.methods.tempo.session.protocol import ChannelDescriptor, uint96
+from mpp.methods.tempo.session._protocol import ChannelDescriptor, uint96
 
 DESCRIPTOR_TYPE = "(address,address,address,address,bytes32,address,bytes32)"
 """ABI tuple type of a channel descriptor."""
@@ -114,10 +114,6 @@ _EVENTS: dict[str, tuple[str, list[tuple[str, str, bool]]]] = {
         ],
     ),
 }
-
-EventName = Literal[
-    "ChannelOpened", "Settled", "TopUp", "CloseRequested", "ChannelClosed", "CloseRequestCancelled"
-]
 
 EVENT_TOPICS: dict[str, str] = {name: _topic(sig) for name, (sig, _) in _EVENTS.items()}
 """topic0 of each escrow event, by name."""
@@ -236,11 +232,6 @@ def encode_close(
 def encode_request_close(descriptor: ChannelDescriptor) -> str:
     """Calldata for `requestClose(descriptor)`."""
     return _hex(SELECTORS["requestClose"], [DESCRIPTOR_TYPE], [descriptor_tuple(descriptor)])
-
-
-def encode_withdraw(descriptor: ChannelDescriptor) -> str:
-    """Calldata for `withdraw(descriptor)`."""
-    return _hex(SELECTORS["withdraw"], [DESCRIPTOR_TYPE], [descriptor_tuple(descriptor)])
 
 
 def encode_get_channel(descriptor: ChannelDescriptor) -> str:

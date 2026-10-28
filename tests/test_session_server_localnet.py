@@ -31,14 +31,15 @@ from starlette.routing import Route
 from mpp import Challenge, Credential, Receipt
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import server as tempo_server
-from mpp.methods.tempo.session import chain, voucher
-from mpp.methods.tempo.session.protocol import ESCROW_ADDRESS
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session import _voucher as voucher
+from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS
 from mpp.methods.tempo.session.server import SettlementSchedule
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session.server._settlement import (
     SessionSettlementContext,
     SessionSettlementFailureContext,
 )
-from mpp.methods.tempo.session.server.store import from_store
+from mpp.methods.tempo.session.server._store import from_store
 from mpp.server import Mpp, pay
 from mpp.store import MemoryStore
 from tests import INTEGRATION

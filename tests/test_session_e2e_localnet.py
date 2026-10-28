@@ -35,20 +35,21 @@ from mpp.client import Mpp as ClientMpp
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo import server as tempo_server
-from mpp.methods.tempo.session import chain, voucher
-from mpp.methods.tempo.session.channel import compute_channel_id
-from mpp.methods.tempo.session.client import SessionManager
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session import _voucher as voucher
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ChannelDescriptor,
     deserialize_session_receipt,
 )
+from mpp.methods.tempo.session.client import SessionManager
 from mpp.methods.tempo.session.server import SettlementSchedule, supervise_closes
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session.server._settlement import (
     SessionSettlementContext,
     SessionSettlementFailureContext,
 )
-from mpp.methods.tempo.session.server.store import ChannelState, from_store
+from mpp.methods.tempo.session.server._store import ChannelState, from_store
 from mpp.server import Mpp, pay
 from mpp.store import MemoryStore
 from mpp.stores.sqlite import SQLiteStore

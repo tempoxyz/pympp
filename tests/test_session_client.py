@@ -18,8 +18,16 @@ from mpp import Challenge, Credential
 from mpp.client import Mpp
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo_client
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.channel import compute_channel_id
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import (
+    ESCROW_ADDRESS,
+    ZERO_ADDRESS,
+    ChannelDescriptor,
+    create_session_receipt,
+    serialize_session_receipt,
+)
+from mpp.methods.tempo.session._voucher import verify_voucher
 from mpp.methods.tempo.session.client import (
     ChannelEntry,
     SessionContext,
@@ -42,14 +50,6 @@ from mpp.methods.tempo.session.client.state import (
     plan_credential,
     resolve_challenge_context,
 )
-from mpp.methods.tempo.session.protocol import (
-    ESCROW_ADDRESS,
-    ZERO_ADDRESS,
-    ChannelDescriptor,
-    create_session_receipt,
-    serialize_session_receipt,
-)
-from mpp.methods.tempo.session.voucher import verify_voucher
 from mpp.runtime import CredentialParams
 
 PAYEE = "0x" + "11" * 20
@@ -576,7 +576,7 @@ class TestSessionMethod:
 
 
 def _signed(payload: dict[str, Any]) -> Any:
-    from mpp.methods.tempo.session.protocol import SignedVoucher
+    from mpp.methods.tempo.session._protocol import SignedVoucher
 
     return SignedVoucher(
         channel_id=payload["channelId"],

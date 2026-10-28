@@ -19,7 +19,8 @@ from mpp import AUTHORIZATION_HEADER, Challenge
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.events import CHALLENGE_RECEIVED
-from mpp.methods.tempo.session.channel import compute_channel_id
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import SessionReceipt, parse_uint96_amount
 from mpp.methods.tempo.session.client.session import (
     SessionMethod,
     post_management_credential,
@@ -42,7 +43,6 @@ from mpp.methods.tempo.session.client.store import (
     store_get,
     with_funding_lock,
 )
-from mpp.methods.tempo.session.protocol import SessionReceipt, parse_uint96_amount
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount

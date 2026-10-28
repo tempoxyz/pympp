@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._typing import is_dict, is_list
 from mpp.errors import BadRequestError, VerificationFailedError
-from mpp.methods.tempo.session import abi
-from mpp.methods.tempo.session.channel import compute_channel_id, expiring_nonce_hash
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session import _abi as abi
+from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -1402,36 +1402,6 @@ async def close_on_chain(
     )
 
 
-async def top_up_on_chain(
-    rpc_url: str,
-    account: TempoAccount,
-    descriptor: ChannelDescriptor,
-    additional_deposit: int,
-    *,
-    escrow: str = ESCROW_ADDRESS,
-    fee_payer: TempoAccount | None = None,
-    fee_payer_policy: Mapping[str, int] | None = None,
-    fee_token: str | None = None,
-    candidate_fee_tokens: Sequence[str] | None = None,
-    valid_before: int | None = None,
-    client: httpx.AsyncClient | None = None,
-) -> str:
-    """Send `topUp(descriptor, additionalDeposit)` directly as the payer."""
-    return await _send_precompile_transaction(
-        rpc_url,
-        account,
-        abi.encode_top_up(descriptor, additional_deposit),
-        "topUp",
-        escrow=escrow,
-        fee_payer=fee_payer,
-        fee_payer_policy=fee_payer_policy,
-        fee_token=fee_token,
-        candidate_fee_tokens=candidate_fee_tokens,
-        valid_before=valid_before,
-        client=client,
-    )
-
-
 async def request_close_on_chain(
     rpc_url: str,
     account: TempoAccount,
@@ -1451,35 +1421,6 @@ async def request_close_on_chain(
         account,
         abi.encode_request_close(descriptor),
         "requestClose",
-        escrow=escrow,
-        fee_payer=fee_payer,
-        fee_payer_policy=fee_payer_policy,
-        fee_token=fee_token,
-        candidate_fee_tokens=candidate_fee_tokens,
-        valid_before=valid_before,
-        client=client,
-    )
-
-
-async def withdraw_on_chain(
-    rpc_url: str,
-    account: TempoAccount,
-    descriptor: ChannelDescriptor,
-    *,
-    escrow: str = ESCROW_ADDRESS,
-    fee_payer: TempoAccount | None = None,
-    fee_payer_policy: Mapping[str, int] | None = None,
-    fee_token: str | None = None,
-    candidate_fee_tokens: Sequence[str] | None = None,
-    valid_before: int | None = None,
-    client: httpx.AsyncClient | None = None,
-) -> str:
-    """Send the payer's `withdraw(descriptor)` after the close grace period."""
-    return await _send_precompile_transaction(
-        rpc_url,
-        account,
-        abi.encode_withdraw(descriptor),
-        "withdraw",
         escrow=escrow,
         fee_payer=fee_payer,
         fee_payer_policy=fee_payer_policy,

@@ -15,10 +15,16 @@ from typing import TYPE_CHECKING, Any, Literal
 from mpp import Challenge
 from mpp._typing import is_dict
 from mpp._units import parse_units
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.channel import compute_channel_id
-from mpp.methods.tempo.session.channel import (
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._channel import (
     resolve_authorized_signer as resolve_descriptor_signer,
+)
+from mpp.methods.tempo.session._protocol import (
+    SESSION_PROTOCOL_V2,
+    ChannelDescriptor,
+    OpenPayload,
+    TopUpPayload,
 )
 from mpp.methods.tempo.session.client.ops import (
     SessionCredentialPayload,
@@ -39,12 +45,6 @@ from mpp.methods.tempo.session.client.store import (
     entry_key,
     persist_channel,
     store_get,
-)
-from mpp.methods.tempo.session.protocol import (
-    SESSION_PROTOCOL_V2,
-    ChannelDescriptor,
-    OpenPayload,
-    TopUpPayload,
 )
 
 if TYPE_CHECKING:

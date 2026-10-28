@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, TypeVar, cast
 
-from mpp.methods.tempo.session.protocol import ChannelDescriptor
+from mpp.methods.tempo.session._protocol import ChannelDescriptor
 
 T = TypeVar("T")
 

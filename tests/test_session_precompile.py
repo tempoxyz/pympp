@@ -17,13 +17,16 @@ from pydantic import ValidationError
 
 from mpp.errors import BadRequestError, VerificationError, VerificationFailedError
 from mpp.methods.tempo.account import TempoAccount
-from mpp.methods.tempo.session import abi, chain, protocol, voucher
-from mpp.methods.tempo.session.channel import (
+from mpp.methods.tempo.session import _abi as abi
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session import _protocol as protocol
+from mpp.methods.tempo.session import _voucher as voucher
+from mpp.methods.tempo.session._channel import (
     compute_channel_id,
     expiring_nonce_hash,
     resolve_authorized_signer,
 )
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -189,7 +192,6 @@ class TestAbi:
         assert abi.encode_settle(descriptor, 789, "0x" + "12" * 65) == calldata["settle"]
         assert abi.encode_close(descriptor, 1000, 900, "0x" + "34" * 65) == calldata["close"]
         assert abi.encode_request_close(descriptor) == calldata["requestClose"]
-        assert abi.encode_withdraw(descriptor) == calldata["withdraw"]
         assert abi.encode_get_channel(descriptor) == calldata["getChannel"]
         assert abi.encode_get_channel_state("0x" + "56" * 32) == calldata["getChannelState"]
         assert (
@@ -269,7 +271,6 @@ class TestReceipt:
             channel_id="0x01", required_cumulative=5, accepted_cumulative=3, deposit=10
         )
         assert protocol.NeedVoucherEvent.from_wire(event.to_wire()) == event
-        assert protocol.format_need_voucher_event(event).startswith("event: payment-need-voucher\n")
 
 
 class TestMethodSchema:

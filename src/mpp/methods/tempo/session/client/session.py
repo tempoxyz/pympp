@@ -18,6 +18,11 @@ from mpp import AUTHORIZATION_HEADER, Challenge
 from mpp._parsing import ParseError
 from mpp._typing import is_dict
 from mpp._units import parse_units
+from mpp.methods.tempo.session._protocol import (
+    SessionReceipt,
+    definition,
+    deserialize_session_receipt,
+)
 from mpp.methods.tempo.session.client.ops import serialize_credential
 from mpp.methods.tempo.session.client.state import (
     ChallengeContext,
@@ -44,11 +49,6 @@ from mpp.methods.tempo.session.client.store import (
     store_get,
     store_lock,
     with_funding_lock,
-)
-from mpp.methods.tempo.session.protocol import (
-    SessionReceipt,
-    definition,
-    deserialize_session_receipt,
 )
 
 if TYPE_CHECKING:

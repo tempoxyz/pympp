@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 from mpp import Challenge, Credential
 from mpp._typing import is_dict
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.channel import compute_channel_id
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -24,7 +24,7 @@ from mpp.methods.tempo.session.protocol import (
     VoucherPayload,
     uint96,
 )
-from mpp.methods.tempo.session.voucher import sign_close_authorization, sign_voucher
+from mpp.methods.tempo.session._voucher import sign_close_authorization, sign_voucher
 
 if TYPE_CHECKING:
     import httpx

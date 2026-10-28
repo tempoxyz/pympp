@@ -10,7 +10,7 @@ from localnet import balance, fund_on_localnet, rpc
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo
 from mpp.methods.tempo._defaults import PATH_USD
-from mpp.methods.tempo.session import chain
+from mpp.methods.tempo.session import _chain as chain
 
 RPC_URL = os.environ.get("TEMPO_RPC_URL", "http://localhost:18645")
 CURRENCY = os.environ.get("TEMPO_CURRENCY", PATH_USD)
