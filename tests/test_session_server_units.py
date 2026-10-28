@@ -681,13 +681,28 @@ class TestRequestState:
     def test_fee_payer_resolution(self) -> None:
         resolve = request_state.resolve_request_fee_payer
         assert resolve(default_fee_payer=SPONSOR, request_fee_payer=False) is None
-        assert resolve(default_fee_payer=None, request_fee_payer=SPONSOR) is True
+        # A route's own account is kept for verification; the wire advertises it as true.
+        assert resolve(default_fee_payer=None, request_fee_payer=SPONSOR) is SPONSOR
         assert resolve(default_fee_payer=None, request_fee_payer=True) is None
         assert resolve(default_fee_payer=SPONSOR) is True
         assert resolve(default_fee_payer=None) is None
         credential = request_state.resolve_credential_fee_payer
         assert credential(method_details={"feePayer": True}, fee_payer=SPONSOR) is SPONSOR
         assert credential(method_details={"feePayer": "true"}, fee_payer=SPONSOR) is None
+        route = credential(
+            method_details={"feePayer": True}, fee_payer=None, request_fee_payer=PAYEE
+        )
+        assert route is PAYEE
+        assert (
+            credential(method_details={"feePayer": True}, fee_payer=SPONSOR, request_fee_payer=True)
+            is SPONSOR
+        )
+        assert (
+            credential(
+                method_details={"feePayer": True}, fee_payer=SPONSOR, request_fee_payer=False
+            )
+            is None
+        )
 
     def test_normalize_session_channel_id(self) -> None:
         assert request_state.normalize_session_channel_id(CHANNEL_ID.upper()[2:]) is None
@@ -1259,6 +1274,40 @@ class TestSessionMethod:
         assert isinstance(result, PaymentVerified), result
         assert (await life.channel()).spent == 100
 
+    async def test_adopts_the_engine_store(self, life: Lifecycle) -> None:
+        # Mpp(store=...) reaches a session method configured without its own store.
+        method = tempo_server.session(
+            account=PAYEE, currency=CURRENCY, rpc_url=RPC, http_client=life.rpc.client
+        )
+        server = Mpp(methods=[method], realm="api.test", secret_key="secret", store=life.raw)
+        handler = server.session(amount="0.0001", unit_type="request")
+        url = "http://api.test/paid"
+        challenge = await challenge_for(handler, Request("GET", url))
+        life.rpc.logs = [opened_log(life.descriptor, life.channel_id)]
+        result = await handler(
+            Request("GET", url, headers=authorize(challenge, life.open_payload(100).to_wire()))
+        )
+        assert isinstance(result, PaymentVerified), result
+        assert (await life.channel()).spent == 100
+
+    async def test_route_fee_payer_account_sponsors(self) -> None:
+        # A route's fee-payer account co-signs the open its challenge advertised (mppx
+        # resolveCredentialFeePayer), even on a method configured without one.
+        life = await Lifecycle().build(fee_payer=True)
+        handler = self._server(life, chain_id=CHAIN_ID).session(
+            amount="0.0001", unit_type="request", fee_payer=SPONSOR
+        )
+        url = "http://api.test/paid"
+        challenge = await challenge_for(handler, Request("GET", url))
+        assert challenge.request["methodDetails"]["feePayer"] is True
+        life.rpc.logs = [opened_log(life.descriptor, life.channel_id)]
+        result = await handler(
+            Request("GET", url, headers=authorize(challenge, life.open_payload(100).to_wire()))
+        )
+        assert isinstance(result, PaymentVerified), result
+        assert life.rpc.sent[0].startswith("0x76")
+        assert (await life.channel()).spent == 100
+
     async def test_scheduled_settlement_failure_keeps_the_request_served(
         self, life: Lifecycle, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1312,8 +1361,11 @@ class TestSessionMethod:
     ) -> None:
         monkeypatch.setattr(session, "_warned_fallback_store", False)
         with caplog.at_level(logging.WARNING, logger=session.__name__):
+            # The fallback is created on first use, after Mpp(store=...) could supply one.
             tempo_server.session(account=PAYEE)
-            tempo_server.session(account=PAYEE)
+            assert not caplog.records
+            session._fallback_store()  # pyright: ignore[reportPrivateUsage]
+            session._fallback_store()  # pyright: ignore[reportPrivateUsage]
         assert [r.message.count("in-memory store") for r in caplog.records] == [1]
 
     def test_receipt_without_session_fields(self) -> None:

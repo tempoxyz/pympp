@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
@@ -145,28 +145,38 @@ def resolve_request_fee_payer(
     *,
     default_fee_payer: TempoAccount | None,
     request_fee_payer: Any = None,
-) -> bool | None:
+) -> TempoAccount | bool | None:
     """Whether a challenge advertises fee sponsorship (``methodDetails.feePayer``).
 
     A route's ``fee_payer=False`` turns sponsorship off; otherwise a configured fee payer
-    advertises it. (mppx returns ``false`` for credential requests; it is omitted here so the
-    wire request is the same with and without a credential.)
+    advertises it. A route's own fee-payer account is returned as is, so verification co-signs
+    with it (mppx ``resolveRequestFeePayer``); the wire request advertises it as ``true``.
+    (mppx returns ``false`` for credential requests; it is omitted here so the wire request is
+    the same with and without a credential.)
     """
     if request_fee_payer is False:
         return None
     if request_fee_payer is not None and request_fee_payer is not True:
-        return True
+        return cast("TempoAccount", request_fee_payer)
     if default_fee_payer is not None:
         return True
     return None
 
 
 def resolve_credential_fee_payer(
-    *, method_details: Mapping[str, Any], fee_payer: TempoAccount | None
+    *,
+    method_details: Mapping[str, Any],
+    fee_payer: TempoAccount | None,
+    request_fee_payer: Any = None,
 ) -> TempoAccount | None:
-    """The fee payer allowed for a credential: only when its challenge advertised one."""
-    if method_details.get("feePayer") is not True:
+    """The fee payer allowed for a credential: only when its challenge advertised one.
+
+    A route's fee-payer account (``request_fee_payer``) takes precedence over the method's.
+    """
+    if method_details.get("feePayer") is not True or request_fee_payer is False:
         return None
+    if request_fee_payer is not None and request_fee_payer is not True:
+        return cast("TempoAccount", request_fee_payer)
     return fee_payer
 
 
@@ -293,8 +303,13 @@ def resolve_credential_verification_context(
     decimals: int,
     fee_payer: TempoAccount | None,
     min_voucher_delta: str | None,
+    request_fee_payer: Any = None,
 ) -> CredentialVerificationContext:
-    """Resolve every non-payload verification input from a session challenge."""
+    """Resolve every non-payload verification input from a session challenge.
+
+    ``request_fee_payer`` is the route's resolved ``fee_payer``: a route account sponsors in
+    place of the method's ``fee_payer`` (mppx ``resolveCredentialFeePayer``).
+    """
     request = challenge.request
     details = read_method_details(request)
     if details.min_voucher_delta is not None:
@@ -308,7 +323,11 @@ def resolve_credential_verification_context(
         method_details=details,
         chain_id=details.chain_id,
         escrow=details.escrow_contract,
-        fee_payer=fee_payer if details.fee_payer is True else None,
+        fee_payer=resolve_credential_fee_payer(
+            method_details={"feePayer": details.fee_payer},
+            fee_payer=fee_payer,
+            request_fee_payer=request_fee_payer,
+        ),
         min_voucher_delta=delta,
     )
 

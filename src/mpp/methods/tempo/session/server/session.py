@@ -51,6 +51,7 @@ from mpp.methods.tempo.session.server.settlement import (
 from mpp.methods.tempo.session.server.store import (
     ChannelState,
     CreditResult,
+    StoreChannelStore,
     credit_channel,
     from_store,
     normalize_channel_id,
@@ -96,7 +97,7 @@ def _fallback_store() -> Store:
             "state (accepted vouchers and spend) is scoped to this process, so another worker "
             "or replica, or this one after a restart, cannot charge or close its channels. "
             "Pass a shared compare-and-set store (e.g. mpp.stores.RedisStore) via "
-            "tempo.session(store=...) when running more than one instance."
+            "tempo.session(store=...) or Mpp(store=...) when running more than one instance."
         )
     return MemoryStore()
 
@@ -182,7 +183,8 @@ def session(
 
     Routes take ``amount`` (decimal string, the price of one content request) and ``unit_type``,
     and optionally ``suggested_deposit``, ``min_voucher_delta``, ``recipient``, ``currency``,
-    ``operator``, ``escrow_contract``, ``chain_id`` and ``fee_payer`` (False turns sponsorship off).
+    ``operator``, ``escrow_contract``, ``chain_id`` and ``fee_payer`` (False turns sponsorship off;
+    an account sponsors that route in place of the method's fee payer).
 
     Args:
         account: Payee account: receives payments and sends server settle/close transactions.
@@ -195,7 +197,8 @@ def session(
         escrow_contract: Escrow advertised to clients (default: the TIP-1034 precompile).
         store: Channel store. Use a :class:`~mpp.store.CompareAndSetStore` (MemoryStore,
             RedisStore, SQLiteStore) shared by every instance, so channel updates are
-            linearizable; defaults to a per-process in-memory store.
+            linearizable; defaults to the ``Mpp(store=...)`` store, or else a per-process
+            in-memory store.
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
@@ -232,7 +235,19 @@ def session(
     if fee_payer is True and account is None:
         raise ValueError("fee_payer=True requires an account")
     schedule = resolve_settlement_schedule(settlement_schedule, decimals)
-    channel_store = from_store(store if store is not None else _fallback_store())
+    channel_stores: list[StoreChannelStore] = [from_store(store)] if store is not None else []
+
+    def channel_store() -> StoreChannelStore:
+        # Without its own store, the method adopts `Mpp(store=...)` (`use_store`) or, failing
+        # that, the per-process fallback on first use.
+        if not channel_stores:
+            channel_stores.append(from_store(_fallback_store()))
+        return channel_stores[0]
+
+    def use_store(engine_store: Store) -> None:
+        if not channel_stores:
+            channel_stores.append(from_store(engine_store))
+
     last_on_chain_verified: dict[str, int] = {}
     chain_ids: list[int] = [chain_id] if chain_id is not None else []
 
@@ -282,6 +297,7 @@ def session(
             decimals=decimals,
             fee_payer=resolved_fee_payer,
             min_voucher_delta=min_voucher_delta,
+            request_fee_payer=context.request.get("fee_payer"),
         )
         return CredentialContext(
             challenge=context.challenge,
@@ -289,7 +305,7 @@ def session(
             chain_id=verification.chain_id,
             escrow=verification.escrow,
             rpc_url=resolved_rpc_url,
-            store=channel_store,
+            store=channel_store(),
             account=account,
             http_client=http_client,
             channel_state_ttl=channel_state_ttl,
@@ -339,16 +355,16 @@ def session(
             return int(quoted)
         raise VerificationFailedError("missing request amount")
 
-    async def settle_charged(channel: ChannelState) -> str | None:
+    async def settle_charged(channel: ChannelState, fee_payer: TempoAccount | None) -> str | None:
         try:
             return await maybe_settle_scheduled(
                 channel=channel,
                 schedule=schedule,
-                store=channel_store,
+                store=channel_store(),
                 account=account,
                 rpc_url=resolved_rpc_url,
                 http_client=http_client,
-                fee_payer=resolved_fee_payer,
+                fee_payer=fee_payer,
                 fee_payer_policy=fee_payer_policy,
                 fee_token=fee_token,
                 on_session_settlement=on_session_settlement,
@@ -362,18 +378,21 @@ def session(
     async def broadcast(context: VerifyContext) -> Receipt:
         payload = require_session_credential_payload(context.credential.payload)
         probe = capture_request_probe(context.input) if context.input is not None else None
-        receipt = await broadcast_credential_payload(
-            credential_context(
-                context,
-                payload,
-                require_voucher_advance=should_apply_verified_http_accounting(
-                    request=probe, payload_action=payload.action
-                ),
-            )
+        verify_context = credential_context(
+            context,
+            payload,
+            require_voucher_advance=should_apply_verified_http_accounting(
+                request=probe, payload_action=payload.action
+            ),
         )
+        receipt = await broadcast_credential_payload(verify_context)
 
         async def charge_channel(channel_id: str, request_amount: int) -> ChannelState:
-            return await charge_session_channel(channel_store, channel_id, request_amount)
+            return await charge_session_channel(channel_store(), channel_id, request_amount)
+
+        async def settle_accepted_charge(channel: ChannelState) -> str | None:
+            # Like mppx, with the fee payer the credential's challenge allowed.
+            return await settle_charged(channel, verify_context.fee_payer)
 
         charged = await apply_verified_http_accounting(
             receipt=receipt,
@@ -381,7 +400,7 @@ def session(
             payload_action=payload.action,
             request_amount=lambda: route_amount(context),
             charge=charge_channel,
-            settle_charged=settle_charged,
+            settle_charged=settle_accepted_charge,
         )
         return SessionPaymentReceipt.from_session(charged)
 
@@ -398,6 +417,7 @@ def session(
         on_payment_success=on_payment_success,
         defaults=defaults,
         respond=respond,
+        use_store=use_store,
         stable_binding=_reusable_binding if reusable_challenges else None,
         # Accounting and respond classify a POST as content by its body (mppx: request.body
         # !== null), so framework adapters must read it.

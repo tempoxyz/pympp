@@ -1217,9 +1217,9 @@ module mpp.methods.tempo.session.server.request_state
     def has_captured_request_body(probe: RequestProbe) -> bool
     def is_session_content_request(probe: RequestProbe) -> bool
     def normalize_session_channel_id(value: Any) -> str | None
-    def resolve_credential_fee_payer(*, method_details: Mapping[str, Any], fee_payer: TempoAccount | None) -> TempoAccount | None
-    def resolve_credential_verification_context(*, challenge: Challenge, decimals: int, fee_payer: TempoAccount | None, min_voucher_delta: str | None) -> CredentialVerificationContext
-    def resolve_request_fee_payer(*, default_fee_payer: TempoAccount | None, request_fee_payer: Any = None) -> bool | None
+    def resolve_credential_fee_payer(*, method_details: Mapping[str, Any], fee_payer: TempoAccount | None, request_fee_payer: Any = None) -> TempoAccount | None
+    def resolve_credential_verification_context(*, challenge: Challenge, decimals: int, fee_payer: TempoAccount | None, min_voucher_delta: str | None, request_fee_payer: Any = None) -> CredentialVerificationContext
+    def resolve_request_fee_payer(*, default_fee_payer: TempoAccount | None, request_fee_payer: Any = None) -> TempoAccount | bool | None
     def resolve_session_payment_request(*, request: Mapping[str, Any], chain_id: int, default_fee_payer: TempoAccount | None, parameter_escrow_contract: str | None, fee_token: str | None) -> dict[str, Any]
     def respond_to_session_credential(*, payload_action: str, request: Request | RequestProbe | None) -> Response | None
 
