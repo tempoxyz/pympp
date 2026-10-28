@@ -794,13 +794,19 @@ class TestEncodingBoundaries:
         with pytest.raises(ParseError, match="exceeds maximum size"):
             _b64_decode(payload, max_size=len(payload) - 1)
 
-    def test_b64_decode_rejects_deeply_nested_json(self) -> None:
-        from mpp._parsing import _b64_decode
+    def test_b64_decode_maps_recursion_errors_to_parse_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # json.loads hits the recursion limit on deep nesting only on some
+        # Python versions (3.14 parses it), so raise it directly.
+        from mpp import _parsing
 
-        nested = b'{"a":' + b"[" * 100_000 + b"]" * 100_000 + b"}"
-        encoded = base64.urlsafe_b64encode(nested).decode().rstrip("=")
+        def too_deep(*args: object, **kwargs: object) -> object:
+            raise RecursionError
+
+        monkeypatch.setattr(_parsing.json, "loads", too_deep)
         with pytest.raises(ParseError, match="Invalid base64 or JSON encoding"):
-            _b64_decode(encoded, max_size=len(encoded))
+            _parsing._b64_decode(_b64_json({"a": 1}))
 
     @pytest.mark.parametrize(
         ("raw", "escaped"),
