@@ -1231,27 +1231,19 @@ class StoreChannelStore:
                 future.set_result(None)
 
 
-_store_cache: weakref.WeakKeyDictionary[Any, StoreChannelStore] = weakref.WeakKeyDictionary()
-# Stores that cannot be weak dictionary keys (unhashable or not weak-referenceable), by
-# identity. Each entry keeps its store alive so the identity stays its own.
-_store_cache_by_id: dict[int, tuple[Store, StoreChannelStore]] = {}
+# Adapters by store identity, held weakly: the adapter references its store, so a weak-key
+# cache would keep every store alive (Python has no ephemerons, unlike mppx's WeakMap). An
+# adapter lives while a session method or caller holds it, and is then rebuilt on demand.
+_store_cache: weakref.WeakValueDictionary[int, StoreChannelStore] = weakref.WeakValueDictionary()
 
 
 def from_store(store: Store) -> StoreChannelStore:
     """Wraps a pympp store in the session channel-store interface, once per store."""
-    try:
-        cached = _store_cache.get(store)
-    except TypeError:
-        entry = _store_cache_by_id.get(id(store))
-        if entry is not None and entry[0] is store:
-            return entry[1]
-        channel_store = StoreChannelStore(store)
-        _store_cache_by_id[id(store)] = (store, channel_store)
-        return channel_store
-    if cached is not None:
+    cached = _store_cache.get(id(store))
+    if cached is not None and cached.store is store:
         return cached
     channel_store = StoreChannelStore(store)
-    _store_cache[store] = channel_store
+    _store_cache[id(store)] = channel_store
     return channel_store
 
 

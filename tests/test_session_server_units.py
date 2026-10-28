@@ -1821,3 +1821,20 @@ class TestChannelStoreProbeStores:
         raw.data[channel_store._cas_probe_key] = b"1"  # pyright: ignore[reportPrivateUsage]
         await channel_store.check_atomic_update("0x" + "ab" * 32)
         assert not raw.data
+
+
+class TestFromStoreCache:
+    def test_released_store_and_adapter_are_collected(self) -> None:
+        import gc
+        import weakref as _weakref
+
+        from mpp.methods.tempo.session.server import store as store_module
+        from mpp.store import MemoryStore
+
+        raw = MemoryStore()
+        adapter = store_module.from_store(raw)
+        assert store_module.from_store(raw) is adapter
+        ref = _weakref.ref(raw)
+        del raw, adapter
+        gc.collect()
+        assert ref() is None
