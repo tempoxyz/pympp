@@ -400,7 +400,8 @@ def _authenticate_echo(
             opaque=echo_opaque,
             header=echo.header,
         )
-    except rfc8785.CanonicalizationError as error:
+    except (rfc8785.CanonicalizationError, RecursionError) as error:
+        # json.loads accepts deeper nesting than rfc8785.dumps can recurse into.
         raise MalformedCredentialError("Challenge contains non-canonical JSON") from error
     if not _constant_time_equal(echo.id, expected_id):
         raise InvalidChallengeError(echo.id, "challenge was not issued by this server")

@@ -12,8 +12,6 @@ import atheris
 from _harness import fuzz
 
 with atheris.instrument_imports(include=["mpp", "rlp"]):
-    import rlp
-
     from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
     from mpp.methods.tempo.intents import (
         _canonical_raw_transaction,
@@ -22,17 +20,12 @@ with atheris.instrument_imports(include=["mpp", "rlp"]):
         _transaction_valid_before,
     )
 
-# Not in decode_fee_payer_envelope's documented Raises (ValueError), but
-# rlp.DecodingError escapes it on malformed RLP. Its one caller catches every
-# exception, so this is tolerated rather than reported as a crash.
-DECODING_ERRORS = (ValueError, rlp.DecodingError)
-
 
 def test_one_input(data: bytes) -> None:
     raw = "0x" + data.hex()
     try:
         decode_fee_payer_envelope(data)
-    except DECODING_ERRORS:
+    except ValueError:
         pass
     try:
         _transaction_fee_token(raw)

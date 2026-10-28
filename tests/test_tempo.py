@@ -4516,7 +4516,7 @@ class TestCosignAsFeePayer:
         assert entry["expiresAt"] == (valid_before + VALID_BEFORE_GRACE) * 1000
 
     @pytest.mark.asyncio
-    async def test_sponsor_budget_wait_precedes_simulation(self):
+    async def test_simulation_precedes_the_sponsor_budget_reservation(self):
         from mpp.methods.tempo import sponsor_budget
 
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
@@ -4540,8 +4540,36 @@ class TestCosignAsFeePayer:
             patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
         ):
             await intent.verify(credential, request)
-        # State can change while waiting for budget: simulate right before the send.
-        assert calls == ["reserve", "simulate"]
+        # Like mppx: a reverting transaction is refused before it holds budget.
+        assert calls == ["simulate", "reserve"]
+
+    @pytest.mark.asyncio
+    async def test_sponsor_budget_wait_is_followed_by_a_fresh_simulation(self):
+        from mpp.methods.tempo import sponsor_budget
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        calls: list[str] = []
+        real_reserve = sponsor_budget.reserve
+
+        async def reserve(*args, **kwargs):
+            calls.append("reserve")
+            reservation = await real_reserve(*args, **kwargs)
+            return replace(reservation, waited=True)
+
+        async def simulate(*args, **kwargs):
+            calls.append("simulate")
+
+        with (
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock(side_effect=simulate)),
+            patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
+        ):
+            await intent.verify(credential, request)
+        assert calls == ["simulate", "reserve", "simulate"]
 
     def test_sponsor_budget_must_be_a_sponsor_budget(self):
         with pytest.raises(TypeError, match="SponsorBudget"):

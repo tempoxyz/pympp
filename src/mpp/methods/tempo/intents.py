@@ -580,8 +580,11 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
         raise VerificationError("Invalid transaction: disallowed call pattern")
 
     if has_swap_prefix:
-        approve_to, _, approve_data = calls[0]
-        swap_to, _, swap_data = calls[1]
+        approve_to, approve_value, approve_data = calls[0]
+        swap_to, swap_value, swap_data = calls[1]
+        # Like mppx, no call may carry a native value.
+        if approve_value or swap_value:
+            raise VerificationError("Invalid transaction: call value is not allowed")
         decoded_approve = _decode_static_call_args(
             approve_data,
             ("address", "uint256"),
@@ -1794,9 +1797,12 @@ class ChargeIntent:
                 # Tempo only accepts fee tokens with Fee AMM liquidity.
                 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
-                fields, _, _, _ = decode_fee_payer_envelope(
-                    bytes.fromhex(raw_tx.removeprefix("0x"))
-                )
+                try:
+                    fields, _, _, _ = decode_fee_payer_envelope(
+                        bytes.fromhex(raw_tx.removeprefix("0x"))
+                    )
+                except ValueError as error:
+                    raise VerificationError(str(error)) from error
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
@@ -1974,14 +1980,24 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
-                # Waiting for sponsor budget can take a while, so simulate after it:
-                # the sponsor must not pay gas for a transaction that now reverts.
+                # Simulate before reserving, like mppx, so a transaction that
+                # reverts (such as one from an unfunded key) never holds sponsor
+                # budget that honest charges wait on.
+                await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
                 budget_store, reservation = await self._reserve_sponsor_budget(
                     client, raw_tx, sponsored_fee, request, recovery_expires_at
                 )
-                await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
-                # The store reservation, budget wait and simulation can take a
-                # while: recheck the sponsored window right before submission.
+                # Chain state can change while waiting for budget: re-simulate so
+                # the sponsor doesn't pay gas for a transaction that now reverts.
+                if reservation is not None and reservation.waited:
+                    await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                # The store reservation and budget wait can take a while:
+                # recheck the sponsored window right before submission.
                 prior = await self._check_sponsored_validity(
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )

@@ -160,6 +160,8 @@ async def test_released_capacity_admits_a_waiter() -> None:
     assert await budget_module.release(store, first)
     second = await asyncio.wait_for(waiter, 1)
     assert list(await reservations(store)) == [second.id]
+    # A sub-second wait still counts: the caller must re-simulate.
+    assert (first.waited, second.waited) == (False, True)
 
 
 @pytest.mark.asyncio

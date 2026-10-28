@@ -18,12 +18,6 @@ from collections.abc import Callable
 
 import atheris
 
-# Deeply nested JSON in a header payload raises RecursionError from
-# _parsing._b64_decode's json.loads instead of ParseError. The header targets
-# pass this as known_bugs. pympp#355 adds strict xfail tests for it
-# (test_parsing_properties.py, test_engine_events.py); drop it once they pass.
-HEADER_JSON_BUGS: tuple[type[BaseException], ...] = (RecursionError,)
-
 
 def b64url(data: bytes) -> str:
     """Encode ``data`` as unpadded base64url, the wire form of header payloads."""

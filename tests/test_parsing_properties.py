@@ -152,16 +152,6 @@ class TestParsersOnlyRaiseParseError:
             assert field.lower().startswith("payment")
             assert_only_parse_error(parse_www_authenticate, field)
 
-    @pytest.mark.xfail(
-        # Not strict: json.loads hits the recursion limit at this depth on
-        # Python 3.12 and 3.13 only; 3.11 and 3.14 parse it.
-        strict=False,
-        raises=RecursionError,
-        reason=(
-            "BUG: _b64_decode catches ValueError only; a 64 KiB Authorization holding "
-            "deeply nested JSON raises RecursionError from json.loads instead of ParseError"
-        ),
-    )
     def test_deeply_nested_credential_json(self) -> None:
         depth = 20_000
         nested = b'{"a":' + b"[" * depth + b"]" * depth + b"}"

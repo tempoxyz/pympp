@@ -185,13 +185,6 @@ class TestSuccessPayloads:
         assert paid.receipt.reference == "tx-original"
         assert paid.credential.payload == {"token": "valid"}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: every payment.success listener gets the same payload dict, so one "
-            "listener's edits are visible to the next (mppx snapshots payloads)"
-        ),
-    )
     async def test_listeners_do_not_share_payload_mutations(self) -> None:
         server = make_server()
         seen: list[tuple[Any, Any]] = []
@@ -212,13 +205,6 @@ class TestSuccessPayloads:
         assert receipt.reference == "tx-original"
         assert amount == "1"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: payment.success listeners get the live Credential, so mutating "
-            "credential.payload changes PaymentVerified.credential returned to the app"
-        ),
-    )
     async def test_listener_cannot_mutate_the_returned_credential(self) -> None:
         server = make_server()
         server.on_payment_success(
@@ -250,16 +236,6 @@ class TestFailureEvents:
         assert events == ["failed:MalformedCredentialError:None"]
         assert recorder.calls == 0
 
-    @pytest.mark.xfail(
-        # Not strict: json.loads hits the recursion limit at this depth on
-        # Python 3.12 and 3.13 only; 3.11 and 3.14 parse it.
-        strict=False,
-        raises=RecursionError,
-        reason=(
-            "BUG: a 64 KiB Authorization holding deeply nested JSON raises RecursionError "
-            "out of the route instead of a 402 with payment.failed"
-        ),
-    )
     async def test_deeply_nested_credential_reports_failure(self) -> None:
         server = make_server()
         failures: list[Exception] = []
@@ -358,3 +334,53 @@ class TestComposedX402Requirements:
         assert header is not None
         accepts = decode_payment_required(header)["accepts"]
         assert [accepted["maxTimeoutSeconds"] for accepted in accepts] == [60, 600]
+
+
+async def test_uncopyable_payload_still_reaches_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A payload too deep for deepcopy is shared rather than skipping listeners."""
+    import copy
+
+    from mpp.events import _SnapshotEventDispatcher
+
+    def too_deep(value: Any, memo: Any = None) -> Any:
+        raise RecursionError
+
+    monkeypatch.setattr(copy, "deepcopy", too_deep)
+    request = {"deep": [[[]]]}
+    dispatcher = _SnapshotEventDispatcher()
+    seen: list[Any] = []
+    dispatcher.on("payment.success", lambda payload: seen.append(payload["request"]))
+
+    await dispatcher.emit("payment.success", {"request": request})
+
+    assert seen == [request]
+    assert seen[0] is request
+
+
+async def test_echoed_request_too_deep_to_canonicalize_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RecursionError canonicalizing the echoed request is a 402, not a 500.
+
+    json.loads accepts deeper nesting than rfc8785.dumps recurses into; how deep
+    each goes depends on the Python version and stack, so raise it directly.
+    """
+    from mpp.server import verify
+
+    server = make_server()
+    issued = challenge(await server.charge()(http_request()))
+    credential = Credential(challenge=issued.to_echo(), payload={"token": "valid"})
+
+    def too_deep(**kwargs: Any) -> str:
+        raise RecursionError
+
+    monkeypatch.setattr(verify, "generate_challenge_id", too_deep)
+    failures: list[Exception] = []
+    server.on_payment_failed(lambda payload: failures.append(payload["error"]))
+
+    result = await server.charge()(http_request(credential.to_authorization()))
+
+    assert isinstance(result, PaymentRequired)
+    assert [type(error) for error in failures] == [MalformedCredentialError]

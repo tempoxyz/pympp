@@ -79,12 +79,14 @@ node-stop:
 
 # Mutation testing of the [tool.mutmut] modules. MUTANTS narrows the run to
 # mutant-name globs, e.g. make mutation MUTANTS='mpp._parsing.*'.
-MUTMUT := uv run --with mutmut==3.8.0
+# mutmut 3.8.0 reads pytest's private Item._nodeid, which pytest 9.2 removed
+# (fixed in mutmut 3.8.1); drop the pytest pin when bumping mutmut.
+MUTMUT := uv run --with mutmut==3.8.0 --with "pytest<9.2"
 MUTANTS ?=
 
 mutation:
 	$(MUTMUT) mutmut run $(MUTANTS)
-	$(MUTMUT) python scripts/mutation.py report mutants/report.md
+	MUTANTS="$(MUTANTS)" $(MUTMUT) python scripts/mutation.py report mutants/report.md
 
 # Coverage-guided fuzzing with atheris: FUZZ_SECONDS per target. Point
 # MPP_TOOLS_VECTORS at mpp-tools' conformance/vectors to seed from them.

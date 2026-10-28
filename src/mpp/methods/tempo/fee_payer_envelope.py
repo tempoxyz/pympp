@@ -111,6 +111,11 @@ def encode_fee_payer_envelope(signed_tx: TempoTransaction) -> bytes:
     return bytes([FEE_PAYER_ENVELOPE_TYPE_ID]) + rlp.encode(fields)
 
 
+# chain_id, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, nonce_key,
+# nonce, valid_before, valid_after, fee_token, sender_address.
+_SCALAR_FIELDS = (0, 1, 2, 3, 6, 7, 8, 9, 10, 11)
+
+
 def decode_fee_payer_envelope(
     data: bytes,
 ) -> tuple[list, bytes, bytes, _RawSignedKeyAuthorization | None]:
@@ -129,11 +134,18 @@ def decode_fee_payer_envelope(
     if not data or data[0] != FEE_PAYER_ENVELOPE_TYPE_ID:
         raise ValueError("Not a fee payer envelope (expected 0x78 prefix)")
 
-    decoded = rlp.decode(data[1:])
+    try:
+        decoded = rlp.decode(data[1:])
+    except (rlp.exceptions.RLPException, RecursionError) as error:
+        raise ValueError("Malformed fee payer envelope") from error
     # 14 fields = no key_authorization; 15 = key_authorization present.
     if not isinstance(decoded, list) or len(decoded) not in (14, 15):
         raise ValueError("Malformed fee payer envelope")
 
+    # Every field but calls, access list, authorization list and key
+    # authorization is a scalar; callers read them as bytes.
+    if not all(isinstance(decoded[i], bytes) for i in _SCALAR_FIELDS + (len(decoded) - 1,)):
+        raise ValueError("Malformed fee payer envelope")
     sender_address = decoded[11]
     sender_signature = decoded[-1]
 
@@ -144,7 +156,7 @@ def decode_fee_payer_envelope(
     else:
         key_authorization = None
 
-    return decoded, bytes(sender_address), bytes(sender_signature), key_authorization  # type: ignore[arg-type]
+    return decoded, sender_address, sender_signature, key_authorization
 
 
 def _decode_signed_key_authorization(rlp_fields: list) -> _RawSignedKeyAuthorization:
