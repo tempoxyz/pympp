@@ -597,7 +597,8 @@ module mpp.methods.stripe.intents
 
 module mpp.methods.stripe.machine_payments
     class DepositAddresses(TypedDict)
-        optional keys: tempo
+        optional keys: base, tempo
+        base: str
         tempo: str
     class SptPayments
         def __init__(self, network_id: str, client: StripeClient, metadata: dict[str, str] | None, connect: ConnectSettlement | None = None) -> None
@@ -605,9 +606,12 @@ module mpp.methods.stripe.machine_payments
     class TempoPayments
         def __init__(self, livemode: bool, client: StripeClient, recipient: str | None, metadata: dict[str, str] | None, store: Store, connect: ConnectSettlement | None = None) -> None
         def charge(self) -> ServerMethod
+    class BasePayments
+        def __init__(self, livemode: bool, client: StripeClient, recipient: str | None, metadata: dict[str, str] | None, store: Store, connect: ConnectSettlement | None = None) -> None
+        def charge(self, *, metadata: Mapping[str, str] | None = None, **options: Any) -> ServerMethod
     class MachinePayments
         def __init__(self, *, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None, connect: ConnectSettlement | None = None) -> None
-        def default_methods(self) -> list[ServerMethod]
+        def default_methods(self, *, base: Mapping[str, Any] | None = None) -> list[ServerMethod]
     def create(*, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None, connect: ConnectSettlement | None = None) -> MachinePayments
 
 module mpp.methods.stripe.payment_intent_method

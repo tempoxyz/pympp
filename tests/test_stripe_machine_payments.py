@@ -191,3 +191,147 @@ async def test_tempo_charge_uses_factory_store_for_replay_protection(
     assert await first_intent._reserve_hash(tx_hash) is not None
     with pytest.raises(CredentialReplayedError):
         await second_intent._reserve_hash(tx_hash)
+
+
+BASE_ADDRESS = "0x" + "2" * 40
+
+
+async def test_base_rail_is_added_after_defaults_when_configured() -> None:
+    from mpp.methods.evm import BASE_SEPOLIA_USDC, BASE_USDC
+
+    addresses = {"tempo": TEMPO_ADDRESS, "base": BASE_ADDRESS}
+    _, payments = make_payments(deposit_addresses=addresses)
+    _, live = make_payments(livemode=True, deposit_addresses=addresses)
+    base: dict[str, Any] = {"facilitator": "https://facilitator.example"}
+
+    methods = payments.default_methods(base=base)
+    test_base = await wire(methods[-1], amount="0.01")
+    live_base = await wire(live.base.charge(**base), amount="0.01")
+    can_offer = methods[-1].can_offer
+    assert can_offer is not None
+
+    assert [method.name for method in methods] == ["tempo", "stripe", "evm"]
+    assert [method.name for method in payments.default_methods()] == ["tempo", "stripe"]
+    assert [m.name for m in make_payments()[1].default_methods(base=base)] == ["stripe"]
+    assert (test_base["recipient"], test_base["currency"]) == (
+        BASE_ADDRESS,
+        BASE_SEPOLIA_USDC.address,
+    )
+    assert test_base["methodDetails"]["chainId"] == BASE_SEPOLIA_USDC.chain_id
+    assert (live_base["currency"], live_base["methodDetails"]["chainId"]) == (
+        BASE_USDC.address,
+        BASE_USDC.chain_id,
+    )
+    assert not can_offer({"amount": "9999"})
+    assert can_offer({"amount": "10000"})
+    with pytest.raises(ValueError, match=r"deposit_addresses\['base'\]"):
+        make_payments()[1].base.charge(facilitator="https://facilitator.example")
+
+
+@pytest.mark.asyncio
+async def test_base_charge_records_payment_in_stripe() -> None:
+    from eth_account import Account
+
+    from mpp.methods.evm import BASE_SEPOLIA_USDC
+    from mpp.methods.evm import client as evm_client
+    from mpp.runtime import CredentialParams
+
+    client, payments = make_payments(
+        deposit_addresses={"base": BASE_ADDRESS}, metadata={"order": "123"}
+    )
+    reference = "0x" + "cd" * 32
+    method = payments.base.charge(metadata={"call": "yes"}, settle=lambda _: reference)
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    handler = server.charge(amount="0.25", payment_intent_options={"customer": "cus_test"})
+    issued = challenge(await handler(http_request()))
+    payer = evm_client.charge(
+        currency=BASE_SEPOLIA_USDC, account=Account.from_key("0x" + "11" * 32)
+    )
+    authorization = await payer.create_credential(CredentialParams(challenge=issued))
+
+    await handler(http_request(authorization))
+
+    [(params, _)] = client.payment_intents.calls
+    verification = params["payment_method_options"]["crypto"]["transaction_verification_options"]
+    assert verification == {"network": "base", "transaction_hash": reference}
+    assert params["amount"] == 25
+    assert params["customer"] == "cus_test"
+    assert params["metadata"]["order"] == "123"
+    assert params["metadata"]["call"] == "yes"
+
+
+def test_base_charge_pins_rail_configuration() -> None:
+    _, payments = make_payments(deposit_addresses={"base": BASE_ADDRESS})
+    facilitator = "https://facilitator.example"
+
+    overrides: list[dict[str, Any]] = [
+        {"store": None},
+        {"store": MemoryStore()},
+        {"currency": "0x" + "3" * 40},
+    ]
+    for override in overrides:
+        with pytest.raises(ValueError, match="Stripe Base charges"):
+            payments.base.charge(facilitator=facilitator, **override)
+    with pytest.raises(ValueError, match="recipient"):
+        payments.base.charge(facilitator=facilitator, recipient="0x" + "4" * 40)
+
+    can_offer = payments.base.charge(facilitator=facilitator, can_offer=lambda _: True).can_offer
+    refuse = payments.base.charge(facilitator=facilitator, can_offer=lambda _: False).can_offer
+    assert can_offer is not None and refuse is not None
+    assert can_offer({"amount": "9999"}) is False
+    assert can_offer({"amount": "10000"}) is True
+    assert refuse({"amount": "10000"}) is False
+
+
+@pytest.mark.asyncio
+async def test_single_base_method_refuses_sub_cent_payment_before_settling() -> None:
+    from eth_account import Account
+
+    from mpp.methods.evm import BASE_SEPOLIA_USDC
+    from mpp.methods.evm import client as evm_client
+    from mpp.runtime import CredentialParams
+
+    client, payments = make_payments(deposit_addresses={"base": BASE_ADDRESS})
+    settled: list[Any] = []
+    method = payments.base.charge(settle=lambda auth: settled.append(auth) or "0x" + "cd" * 32)
+    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    handler = server.charge(amount="0.001")
+    issued = challenge(await handler(http_request()))
+    payer = evm_client.charge(
+        currency=BASE_SEPOLIA_USDC, account=Account.from_key("0x" + "11" * 32)
+    )
+    authorization = await payer.create_credential(CredentialParams(challenge=issued))
+
+    await handler(http_request(authorization))
+
+    assert settled == []
+    assert client.payment_intents.calls == []
+
+
+@pytest.mark.asyncio
+async def test_payment_intent_input_keeps_async_resolvers_coroutine_functions() -> None:
+    import inspect
+    from dataclasses import replace
+
+    from mpp.methods.stripe.payment_intent_method import with_payment_intent_input
+    from mpp.server.method import RequestContext
+
+    _, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
+    inner = payments.tempo.charge()
+
+    async def resolve_request(context: RequestContext) -> dict[str, Any]:
+        assert "payment_intent_options" not in context.request
+        return {**context.request, "resolved": True}
+
+    async def record(*_: Any) -> None:
+        return None
+
+    method = with_payment_intent_input(replace(inner, resolve_request=resolve_request), record)
+
+    assert method.resolve_request is not None
+    assert inspect.iscoroutinefunction(method.resolve_request)
+    options = {"customer": "cus_test"}
+    resolved = await method.resolve_request(
+        RequestContext(request={"amount": "1", "payment_intent_options": options})
+    )
+    assert resolved == {"amount": "1", "resolved": True, "payment_intent_options": options}
