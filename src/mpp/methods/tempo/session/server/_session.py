@@ -29,6 +29,7 @@ from mpp.methods.tempo.session._protocol import (
     serialize_session_receipt,
 )
 from mpp.methods.tempo.session.server._request_state import (
+    FEE_PAYER_DISABLED,
     capture_request_probe,
     resolve_credential_verification_context,
     resolve_session_payment_request,
@@ -297,7 +298,11 @@ def session(
             decimals=decimals,
             fee_payer=resolved_fee_payer,
             min_voucher_delta=min_voucher_delta,
-            request_fee_payer=context.request.get("fee_payer"),
+            request_fee_payer=(
+                False
+                if context.request.get(FEE_PAYER_DISABLED)
+                else context.request.get("fee_payer")
+            ),
         )
         return CredentialContext(
             challenge=context.challenge,

@@ -141,6 +141,10 @@ def respond_to_session_credential(
 # --------------------------------------------------------------------------------------------
 
 
+FEE_PAYER_DISABLED = "_fee_payer_disabled"
+"""Route-input key recording a route turning sponsorship off; the wire request ignores it."""
+
+
 def resolve_request_fee_payer(
     *,
     default_fee_payer: TempoAccount | None,
@@ -371,12 +375,17 @@ def resolve_session_payment_request(
     operator = _resolve_operator(resolved.pop("operator", None))
     if operator is not None:
         resolved["operator"] = operator
+    request_fee_payer = resolved.pop("fee_payer", resolved.pop("feePayer", None))
     fee_payer = resolve_request_fee_payer(
         default_fee_payer=default_fee_payer,
-        request_fee_payer=resolved.pop("fee_payer", resolved.pop("feePayer", None)),
+        request_fee_payer=request_fee_payer,
     )
     if fee_payer is not None:
         resolved["fee_payer"] = fee_payer
+    elif request_fee_payer is False:
+        # Kept out of the wire request, but verification must still refuse sponsorship for a
+        # reusable challenge issued before the route turned it off (mppx passes feePayer false).
+        resolved[FEE_PAYER_DISABLED] = True
     if fee_token is not None:
         resolved["fee_token"] = fee_token
     resolved["session_protocol"] = SESSION_PROTOCOL_V2

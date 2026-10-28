@@ -808,6 +808,8 @@ class TestRequestState:
             "operator": PAYEE.address,
             "fee_token": CURRENCY,
             "session_protocol": "v2",
+            # The opt-out stays off the wire but reaches verification.
+            "_fee_payer_disabled": True,
         }
         custom = resolve({"escrowContract": PAYER.address})
         assert custom["escrow_contract"] == PAYER.address and "fee_payer" not in custom
@@ -1359,6 +1361,22 @@ class TestSessionMethod:
         assert isinstance(result, PaymentVerified), result
         assert life.rpc.sent[0].startswith("0x76")
         assert (await life.channel()).spent == 100
+
+    async def test_route_opt_out_refuses_an_earlier_sponsored_reusable_challenge(self) -> None:
+        # A reusable challenge issued while the route sponsored fees must not be co-signed once
+        # the route sets fee_payer=False (mppx passes feePayer false to resolveCredentialFeePayer).
+        life = await Lifecycle().build(fee_payer=True)
+        server = make_server(life, chain_id=CHAIN_ID, fee_payer=SPONSOR, reusable_challenges=True)
+        sponsored = server.session(amount="0.0001", unit_type="request")
+        challenge = await challenge_for(sponsored, Request("GET", URL))
+        assert challenge.request["methodDetails"]["feePayer"] is True
+        opted_out = server.session(amount="0.0001", unit_type="request", fee_payer=False)
+        life.rpc.logs = [opened_log(life.descriptor, life.channel_id)]
+        await opted_out(
+            Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
+        )
+        # The sponsor never co-signed: nothing sponsored was broadcast.
+        assert not any(tx.startswith("0x76") for tx in life.rpc.sent)
 
     @pytest.mark.parametrize("reusable", [True, False])
     async def test_reusable_challenge_pays_later_price(
