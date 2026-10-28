@@ -357,3 +357,30 @@ async def test_uncopyable_payload_still_reaches_listeners(
 
     assert seen == [request]
     assert seen[0] is request
+
+
+async def test_echoed_request_too_deep_to_canonicalize_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A RecursionError canonicalizing the echoed request is a 402, not a 500.
+
+    json.loads accepts deeper nesting than rfc8785.dumps recurses into; how deep
+    each goes depends on the Python version and stack, so raise it directly.
+    """
+    from mpp.server import verify
+
+    server = make_server()
+    issued = challenge(await server.charge()(http_request()))
+    credential = Credential(challenge=issued.to_echo(), payload={"token": "valid"})
+
+    def too_deep(**kwargs: Any) -> str:
+        raise RecursionError
+
+    monkeypatch.setattr(verify, "generate_challenge_id", too_deep)
+    failures: list[Exception] = []
+    server.on_payment_failed(lambda payload: failures.append(payload["error"]))
+
+    result = await server.charge()(http_request(credential.to_authorization()))
+
+    assert isinstance(result, PaymentRequired)
+    assert [type(error) for error in failures] == [MalformedCredentialError]
