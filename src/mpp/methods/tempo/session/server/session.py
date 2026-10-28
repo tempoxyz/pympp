@@ -399,6 +399,9 @@ def session(
         defaults=defaults,
         respond=respond,
         stable_binding=_reusable_binding if reusable_challenges else None,
+        # Accounting and respond classify a POST as content by its body (mppx: request.body
+        # !== null), so framework adapters must read it.
+        needs_request_body=True,
     )
 
 

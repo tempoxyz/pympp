@@ -1274,6 +1274,15 @@ class TestSessionMethod:
         with pytest.raises(ValueError, match="needs a recipient"):
             await handler(Request("GET", "http://api.test/paid"))
 
+    def test_reads_the_request_body(self) -> None:
+        # A POST is content only when it has a body, so adapters must pass the body through.
+        method = tempo_server.session(account=PAYEE, rpc_url=RPC, store=MemoryStore())
+        assert method.needs_request_body
+        handler = Mpp(methods=[method], realm="api.test", secret_key="s").session(
+            amount="1", unit_type="request"
+        )
+        assert handler.needs_request_body
+
     def test_fee_payer_true_needs_an_account(self) -> None:
         with pytest.raises(ValueError, match="requires an account"):
             tempo_server.session(
@@ -1584,3 +1593,86 @@ class TestEngineHooks:
     def test_bare_post_without_url_is_management(self) -> None:
         probe = request_state.RequestProbe("POST", httpx.Headers())
         assert not request_state.is_session_content_request(probe)
+
+
+class TestSessionOverMcp:
+    """An MCP tool call is a billable content request (mppx's MCP transports set hasBody)."""
+
+    async def test_each_tool_call_is_charged_and_a_replayed_voucher_rejected(
+        self, life: Lifecycle
+    ) -> None:
+        from mpp.extensions.mcp import MCPCredential, verify_or_challenge
+        from mpp.extensions.mcp.errors import PaymentVerificationError
+
+        method = tempo_server.session(
+            account=PAYEE,
+            chain_id=CHAIN_ID,
+            currency=CURRENCY,
+            rpc_url=RPC,
+            http_client=life.rpc.client,
+            store=life.raw,
+        )
+        handler = Mpp(methods=[method], realm="api.test", secret_key="secret").session(
+            amount="0.0001", unit_type="request"
+        )
+
+        async def call(payload: Any) -> Any:
+            challenges = await verify_or_challenge(handler, tool="search")
+            assert isinstance(challenges, list)
+            [challenge] = challenges
+            credential = MCPCredential(
+                challenge=challenge, payload=payload.to_wire(), source=SOURCE
+            )
+            return await verify_or_challenge(handler, tool="search", meta=credential.to_meta())
+
+        life.rpc.logs = [opened_log(life.descriptor, life.channel_id)]
+        assert isinstance(await call(life.open_payload(100)), tuple)
+        assert (await life.channel()).spent == 100
+        assert isinstance(await call(life.voucher_payload(200)), tuple)
+        assert (await life.channel()).spent == 200
+        assert isinstance(await call(life.voucher_payload(300)), tuple)
+        channel = await life.channel()
+        assert (channel.spent, channel.units) == (300, 3)
+
+        with pytest.raises(PaymentVerificationError):
+            await call(life.voucher_payload(300))
+        assert (await life.channel()).spent == 300
+
+
+class RefusingCasStore(DictStore):
+    """A store whose compare_and_set is refused, like Redis denying EVAL."""
+
+    __slots__ = ("attempts",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        return self.data.setdefault(key, value) is value
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        self.attempts += 1
+        raise NotImplementedError("EVAL denied")
+
+
+class TestChannelStoreCasFallback:
+    async def test_refused_compare_and_set_falls_back_to_a_process_lock(
+        self, life: Lifecycle, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from mpp.methods.tempo.session.server import store as store_module
+
+        raw = RefusingCasStore()
+        channel_store = store_module.StoreChannelStore(raw)
+        assert channel_store.atomic
+        life.store = channel_store
+        with caplog.at_level(logging.WARNING, logger=store_module.__name__):
+            await life.open(300)
+            await channel_store.update_channel(
+                life.channel_id, lambda c: replace(c, spent=10) if c else c
+            )
+        assert not channel_store.atomic
+        assert raw.attempts == 1
+        channel = await life.channel()
+        assert (channel.highest_voucher_amount, channel.spent) == (300, 10)
+        assert [r.message.count("compare_and_set") for r in caplog.records] == [1]
