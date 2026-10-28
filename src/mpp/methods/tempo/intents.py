@@ -79,7 +79,8 @@ def _fallback_store(method: str) -> MemoryStore:
 TRANSFER_SELECTOR = "a9059cbb"
 TRANSFER_WITH_MEMO_SELECTOR = "95777d59"
 APPROVE_SELECTOR = "095ea7b3"
-SWAP_EXACT_AMOUNT_OUT_SELECTOR = "b30d91d5"
+# swapExactAmountOut(address,address,uint128,uint128)
+SWAP_EXACT_AMOUNT_OUT_SELECTOR = "f0122b75"
 
 SELECTOR_HEX_LEN = 8
 ABI_WORD_HEX_LEN = 64
@@ -589,7 +590,7 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
             raise VerificationError("Invalid transaction: malformed approve call data")
         decoded_swap = _decode_static_call_args(
             swap_data,
-            ("address", "address", "uint256", "uint256"),
+            ("address", "address", "uint128", "uint128"),
             SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
         )
         if decoded_swap is None:
@@ -692,7 +693,7 @@ def _validate_normalized_calls(
         )
         swap = _decode_static_call_args(
             calls[1][2],
-            ("address", "address", "uint256", "uint256"),
+            ("address", "address", "uint128", "uint128"),
             SWAP_EXACT_AMOUNT_OUT_CALL_DATA_HEX_LEN,
         )
         # Call scope validation has already checked the canonical encoding.
