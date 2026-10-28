@@ -19,9 +19,10 @@ from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeS
 
 from mpp.errors import BadRequestError, VerificationError, VerificationFailedError
 from mpp.methods.tempo import TempoAccount
-from mpp.methods.tempo.session import abi, chain
-from mpp.methods.tempo.session.channel import compute_channel_id, expiring_nonce_hash
-from mpp.methods.tempo.session.protocol import ESCROW_ADDRESS, ZERO_ADDRESS, ChannelDescriptor
+from mpp.methods.tempo.session import _abi as abi
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
+from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS, ZERO_ADDRESS, ChannelDescriptor
 
 CHAIN_ID = 1337
 RPC = "http://rpc.test"
@@ -453,7 +454,7 @@ class TestCalldata:
         with pytest.raises(VerificationFailedError, match="deposit"):
             chain.parse_open_call(data, deposit=99)
         with pytest.raises(VerificationFailedError, match="Expected TIP-1034 open"):
-            chain.parse_open_call(abi.encode_withdraw(DESCRIPTOR))
+            chain.parse_open_call(abi.encode_request_close(DESCRIPTOR))
         with pytest.raises(VerificationFailedError, match="Expected TIP-1034 open"):
             chain.parse_open_call(data + "00")  # trailing bytes are not canonical
 
@@ -1010,19 +1011,11 @@ class TestContractCalls:
                 abi.encode_close(DESCRIPTOR, 5, 4, SIGNATURE),
             ),
             (
-                lambda rpc: chain.top_up_on_chain(RPC, PAYER, DESCRIPTOR, 9, client=rpc.client),
-                abi.encode_top_up(DESCRIPTOR, 9),
-            ),
-            (
                 lambda rpc: chain.request_close_on_chain(RPC, PAYER, DESCRIPTOR, client=rpc.client),
                 abi.encode_request_close(DESCRIPTOR),
             ),
-            (
-                lambda rpc: chain.withdraw_on_chain(RPC, PAYER, DESCRIPTOR, client=rpc.client),
-                abi.encode_withdraw(DESCRIPTOR),
-            ),
         ],
-        ids=["settle", "close", "topUp", "requestClose", "withdraw"],
+        ids=["settle", "close", "requestClose"],
     )
     async def test_sends_one_escrow_call(self, rpc: FakeRpc, send: Any, expected: str) -> None:
         tx_hash = await send(rpc)

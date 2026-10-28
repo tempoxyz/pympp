@@ -22,18 +22,12 @@ from mpp.methods import Method
 ESCROW_ADDRESS = "0x4d50500000000000000000000000000000000000"
 """Canonical TIP20EscrowChannel precompile address (mppx `tip20ChannelEscrow`)."""
 
-CLOSE_GRACE_PERIOD = 900
-"""Seconds between a payer's `requestClose` and `withdraw` on Tempo."""
-
 UINT96_MAX = (1 << 96) - 1
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-SESSION_PROTOCOL_V1 = "v1"
-"""Legacy contract-backed Tempo session protocol."""
 SESSION_PROTOCOL_V2 = "v2"
 """TIP-1034 precompile-backed Tempo session protocol."""
 
-SessionCredentialAction = Literal["open", "topUp", "voucher", "close"]
 SESSION_CREDENTIAL_ACTIONS: frozenset[str] = frozenset({"open", "topUp", "voucher", "close"})
 
 _UINT96_AMOUNT_RE = re.compile(r"^\d{1,29}$")
@@ -276,14 +270,6 @@ def is_session_credential_action(value: object) -> bool:
     return isinstance(value, str) and value in SESSION_CREDENTIAL_ACTIONS
 
 
-def read_session_challenge_amount(request: dict[str, Any]) -> int:
-    """Read the raw per-unit session amount from a challenge request."""
-    amount = request.get("amount")
-    if not isinstance(amount, str):
-        raise ValueError("Session challenge is missing amount.")
-    return int(amount)
-
-
 # ──────────────────────────────────────────────────────────────────
 # Receipts and need-voucher events
 # ──────────────────────────────────────────────────────────────────
@@ -446,13 +432,3 @@ def deserialize_session_receipt(encoded: str) -> SessionReceipt:
     except (ValueError, UnicodeDecodeError) as error:
         raise ValueError("Invalid session receipt.") from error
     return SessionReceipt.from_wire(value)
-
-
-def format_receipt_event(receipt: SessionReceipt) -> str:
-    """Format a session receipt as a `payment-receipt` Server-Sent Event."""
-    return f"event: payment-receipt\ndata: {_json(receipt.to_wire())}\n\n"
-
-
-def format_need_voucher_event(event: NeedVoucherEvent) -> str:
-    """Format a need-voucher event as a `payment-need-voucher` Server-Sent Event."""
-    return f"event: payment-need-voucher\ndata: {_json(event.to_wire())}\n\n"

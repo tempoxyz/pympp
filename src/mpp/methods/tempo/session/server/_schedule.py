@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from mpp._units import parse_units
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session.server._store import (
     ChannelState,
     ChannelStore,
     ScheduledSettlementLease,

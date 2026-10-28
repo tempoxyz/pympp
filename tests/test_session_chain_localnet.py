@@ -14,9 +14,10 @@ import httpx
 import pytest
 
 from mpp.methods.tempo.account import TempoAccount
-from mpp.methods.tempo.session import chain, voucher
-from mpp.methods.tempo.session.channel import compute_channel_id
-from mpp.methods.tempo.session.protocol import ESCROW_ADDRESS, ChannelDescriptor
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session import _voucher as voucher
+from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS, ChannelDescriptor
 from tests import INTEGRATION
 from tests.conftest import _fund_account  # pyright: ignore[reportPrivateUsage]
 

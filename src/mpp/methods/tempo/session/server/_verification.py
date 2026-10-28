@@ -22,9 +22,9 @@ from pydantic import BaseModel
 
 from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session import chain
-from mpp.methods.tempo.session.channel import compute_channel_id, resolve_authorized_signer
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id, resolve_authorized_signer
+from mpp.methods.tempo.session._protocol import (
     ZERO_ADDRESS,
     ChannelDescriptor,
     ClosePayload,
@@ -38,9 +38,14 @@ from mpp.methods.tempo.session.protocol import (
     create_session_receipt,
     uint96,
 )
-from mpp.methods.tempo.session.server.request_state import get_challenge_payment_fields
-from mpp.methods.tempo.session.server.schedule import ResolvedSettlementSchedule
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session._voucher import (
+    parse_voucher_from_payload,
+    verify_close_authorization,
+    verify_voucher,
+)
+from mpp.methods.tempo.session.server._request_state import get_challenge_payment_fields
+from mpp.methods.tempo.session.server._schedule import ResolvedSettlementSchedule
+from mpp.methods.tempo.session.server._settlement import (
     OnSessionSettlement,
     OnSessionSettlementFailure,
     SessionSettlementContext,
@@ -50,7 +55,7 @@ from mpp.methods.tempo.session.server.settlement import (
     maybe_settle_scheduled,
     report_session_settlement_failure,
 )
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session.server._store import (
     PENDING_CLOSE_VALIDITY_SECONDS,
     AmountExceedsDepositError,
     ChannelClosedError,
@@ -72,11 +77,6 @@ from mpp.methods.tempo.session.server.store import (
     open_channel_state,
     reconcile_expired_pending_close,
     top_up_channel_state,
-)
-from mpp.methods.tempo.session.voucher import (
-    parse_voucher_from_payload,
-    verify_close_authorization,
-    verify_voucher,
 )
 
 if TYPE_CHECKING:

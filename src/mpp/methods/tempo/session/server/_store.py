@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
 from mpp.errors import PaymentError, VerificationFailedError
-from mpp.methods.tempo.session.protocol import ChannelDescriptor, SignedVoucher, uint96
+from mpp.methods.tempo.session._protocol import ChannelDescriptor, SignedVoucher, uint96
 from mpp.store import CompareAndSetStore, Store
 
 _R = TypeVar("_R")
@@ -184,15 +184,6 @@ class PendingSettlement:
 
 
 @dataclass(frozen=True, slots=True)
-class StreamReservation:
-    """An uncommitted stream charge shared across workers."""
-
-    amount: int
-    units: int
-    expires_at: int
-
-
-@dataclass(frozen=True, slots=True)
 class IdempotencyMarker:
     """Recorded outcome of one keyed charge or credit."""
 
@@ -236,7 +227,6 @@ class ChannelState:
     salt: str | None = None
     on_chain_verified_at: int | None = None
     """Unix milliseconds when deposit, settlement and close state were last read on-chain."""
-    stream_reservations: Mapping[str, StreamReservation] | None = None
     scheduled_settlement_lease: ScheduledSettlementLease | None = None
     last_settlement_at: str | None = None
     last_settlement_spent: int | None = None
@@ -297,12 +287,6 @@ class PendingCloseUpdate:
 @dataclass(frozen=True, slots=True)
 class VoucherValidation:
     already_accepted: bool
-
-
-@dataclass(frozen=True, slots=True)
-class VoucherAcceptance:
-    channel: ChannelState
-    charged: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,71 +690,6 @@ def finalize_closed_channel_state(
     )
 
 
-def _validate_channel_state(state: OnChainChannelState) -> None:
-    # mppx CredentialVerification.validateChannelState, without the amount check.
-    if state.deposit == 0:
-        raise ChannelNotFoundError("channel not funded on-chain")
-    if state.close_requested_at != 0:
-        raise ChannelClosedError("channel has a pending close request")
-
-
-def assert_voucher_amounts(
-    *,
-    channel: ChannelState,
-    channel_state: OnChainChannelState,
-    min_voucher_delta: int,
-    cumulative_amount: int,
-) -> VoucherValidation:
-    """Checks a voucher's amounts against channel state, without its signature.
-
-    Runs inside the store update that accepts the voucher.
-    """
-    _validate_channel_state(channel_state)
-    if cumulative_amount > channel_state.deposit:
-        raise AmountExceedsDepositError("voucher amount exceeds on-chain deposit")
-    if cumulative_amount < channel.highest_voucher_amount:
-        raise VerificationFailedError(
-            "voucher cumulativeAmount must be strictly greater than highest accepted voucher"
-        )
-    if cumulative_amount <= channel_state.settled:
-        raise VerificationFailedError("voucher cumulativeAmount is below on-chain settled amount")
-    if cumulative_amount == channel.highest_voucher_amount:
-        return VoucherValidation(already_accepted=True)
-    delta = cumulative_amount - channel.highest_voucher_amount
-    if delta < min_voucher_delta:
-        raise DeltaTooSmallError(f"voucher delta {delta} below minimum {min_voucher_delta}")
-    return VoucherValidation(already_accepted=False)
-
-
-def plan_voucher_acceptance(
-    *, accepted: ChannelState, charge_amount: int | None = None
-) -> VoucherAcceptance:
-    """Charges ``charge_amount`` to a state that just accepted a voucher, in the same update.
-
-    A charge the available balance cannot cover leaves the accepted state uncharged.
-    """
-    if charge_amount is None:
-        return VoucherAcceptance(accepted, False)
-    deduction = _plan_deduction(accepted, charge_amount)
-    if deduction.op != "set" or deduction.value is None:
-        return VoucherAcceptance(accepted, False)
-    return VoucherAcceptance(deduction.value, True)
-
-
-def insufficient_balance_for_charge(
-    channel: ChannelState, charge_amount: int
-) -> InsufficientBalanceError:
-    """The error for a request charge the channel's available balance could not cover."""
-    available = channel.highest_voucher_amount - channel.spent - reserved_stream_amount(channel)
-    return InsufficientBalanceError(f"requested {charge_amount}, available {available}")
-
-
-def reserved_stream_amount(state: ChannelState) -> int:
-    """Unexpired stream reservations that ordinary deductions must respect."""
-    now = _now_ms()
-    return sum(r.amount for r in (state.stream_reservations or {}).values() if r.expires_at > now)
-
-
 # --------------------------------------------------------------------------------------------
 # JSON codec
 # --------------------------------------------------------------------------------------------
@@ -818,11 +737,6 @@ def channel_state_to_json(state: ChannelState) -> dict[str, Any]:
         data["salt"] = state.salt
     if state.on_chain_verified_at is not None:
         data["onChainVerifiedAt"] = state.on_chain_verified_at
-    if state.stream_reservations is not None:
-        data["streamReservations"] = {
-            key: {"amount": str(r.amount), "units": r.units, "expiresAt": r.expires_at}
-            for key, r in state.stream_reservations.items()
-        }
     if state.scheduled_settlement_lease is not None:
         lease = state.scheduled_settlement_lease
         data["scheduledSettlementLease"] = {"expiresAt": lease.expires_at, "owner": lease.owner}
@@ -896,13 +810,6 @@ def _voucher_from_json(value: Any) -> SignedVoucher:
     )
 
 
-def _reservation_from_json(value: Any) -> StreamReservation:
-    data = _obj(value)
-    return StreamReservation(
-        amount=_int(data["amount"]), units=_int(data["units"]), expires_at=_int(data["expiresAt"])
-    )
-
-
 def _marker_from_json(value: Any) -> IdempotencyMarker:
     data = _obj(value)
     outcome = data["outcome"]
@@ -928,7 +835,6 @@ def channel_state_from_json(value: Mapping[str, Any]) -> ChannelState:
     data = dict(value)
     highest = data.get("highestVoucher")
     descriptor = data.get("descriptor")
-    reservations = data.get("streamReservations")
     lease = data.get("scheduledSettlementLease")
     retained = data.get("retainedVouchers")
     pending = data.get("pendingSettlement")
@@ -961,11 +867,6 @@ def channel_state_from_json(value: Mapping[str, Any]) -> ChannelState:
         operator=_opt_str(data, "operator"),
         salt=_opt_str(data, "salt"),
         on_chain_verified_at=_opt_int(data, "onChainVerifiedAt"),
-        stream_reservations=(
-            None
-            if reservations is None
-            else {str(k): _reservation_from_json(r) for k, r in _obj(reservations).items()}
-        ),
         scheduled_settlement_lease=(
             None
             if lease_data is None
@@ -1088,7 +989,6 @@ class StoreChannelStore:
         self._cas_probe_lock = asyncio.Lock()
         self._cas_probe_key = f"{_CAS_PROBE_KEY}:{secrets.token_hex(8)}"
         self._locks: dict[str, asyncio.Lock] = {}
-        self._waiters: dict[str, set[asyncio.Future[None]]] = {}
 
     @property
     def store(self) -> Store:
@@ -1131,8 +1031,6 @@ class StoreChannelStore:
                 await self._store.put(key, encode_channel_state(value))
             elif change.op == "delete":
                 await self._store.delete(key)
-            if change.op != "noop":
-                self._notify(key)
             return change.result
 
     async def check_atomic_update(self, channel_id: str) -> None:
@@ -1194,41 +1092,13 @@ class StoreChannelStore:
                     raise ValueError("a set change needs a value")
                 value = encode_channel_state(normalized)
             if raw is None and value is None:
-                self._notify(key)
                 return change.result
             try:
                 written = await self._compare_and_set_raw(key, raw, value)
             except NotImplementedError as error:
                 raise NotImplementedError(_CAS_REFUSED) from error
             if written:
-                self._notify(key)
                 return change.result
-
-    def wait_for_update(self, channel_id: str) -> asyncio.Future[None]:
-        """A future resolved by the next update to ``channel_id`` through this adapter.
-
-        It is registered when called, so an update before it is awaited still resolves it.
-        Cancelling it releases the subscription.
-        """
-        key = normalize_channel_id(channel_id)
-        future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._waiters.setdefault(key, set()).add(future)
-
-        def release(done: asyncio.Future[None]) -> None:
-            current = self._waiters.get(key)
-            if current is None:
-                return
-            current.discard(done)
-            if not current:
-                del self._waiters[key]
-
-        future.add_done_callback(release)
-        return future
-
-    def _notify(self, key: str) -> None:
-        for future in self._waiters.pop(key, None) or ():
-            if not future.done():
-                future.set_result(None)
 
 
 # Adapters by store identity, held weakly: the adapter references its store, so a weak-key
@@ -1316,7 +1186,7 @@ def _plan_deduction(current: ChannelState | None, amount: int) -> StoreChange[De
         return StoreChange("noop", None)
     if current.finalized or current.close_requested_at != 0:
         return StoreChange("noop", DeductResult(False, current))
-    if current.highest_voucher_amount - current.spent - reserved_stream_amount(current) < amount:
+    if current.highest_voucher_amount - current.spent < amount:
         return StoreChange("noop", DeductResult(False, current))
     next_state = replace(current, spent=current.spent + amount, units=current.units + 1)
     return StoreChange("set", DeductResult(True, next_state), next_state)

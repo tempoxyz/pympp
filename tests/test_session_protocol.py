@@ -15,13 +15,15 @@ from eth_account import Account
 from pydantic import ValidationError
 
 from mpp.methods.tempo import TempoAccount
-from mpp.methods.tempo.session import abi, protocol, voucher
-from mpp.methods.tempo.session.channel import (
+from mpp.methods.tempo.session import _abi as abi
+from mpp.methods.tempo.session import _protocol as protocol
+from mpp.methods.tempo.session import _voucher as voucher
+from mpp.methods.tempo.session._channel import (
     compute_channel_id,
     expiring_nonce_hash,
     sender_signing_preimage,
 )
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -116,11 +118,6 @@ class TestPayloads:
             assert protocol.is_session_credential_action(action)
         assert not protocol.is_session_credential_action("settle")
         assert not protocol.is_session_credential_action(None)
-
-    def test_read_session_challenge_amount(self) -> None:
-        assert protocol.read_session_challenge_amount({"amount": "25"}) == 25
-        with pytest.raises(ValueError, match="missing amount"):
-            protocol.read_session_challenge_amount({"amount": 25})
 
 
 class TestSessionRequest:
@@ -242,19 +239,6 @@ class TestReceipts:
         # JavaScript Date.toISOString(): millisecond precision with a Z suffix.
         assert len(receipt.timestamp) == 24 and receipt.timestamp.endswith("Z")
 
-    def test_sse_events(self) -> None:
-        receipt = SessionReceipt.from_wire(receipt_wire())
-        event = protocol.format_receipt_event(receipt)
-        assert event.startswith("event: payment-receipt\ndata: {")
-        assert json.loads(event.split("data: ", 1)[1]) == receipt.to_wire()
-        need = NeedVoucherEvent(
-            channel_id=CHANNEL_ID, required_cumulative=20, accepted_cumulative=10, deposit=100
-        )
-        formatted = protocol.format_need_voucher_event(need)
-        assert formatted.startswith("event: payment-need-voucher\n")
-        wire = json.loads(formatted.split("data: ", 1)[1])
-        assert NeedVoucherEvent.from_wire(wire) == need
-
     def test_need_voucher_event_rejects_non_string_amounts(self) -> None:
         with pytest.raises(ValueError, match="need-voucher"):
             NeedVoucherEvent.from_wire({"channelId": CHANNEL_ID, "requiredCumulative": 1})
@@ -263,14 +247,6 @@ class TestReceipts:
 
 
 class TestVoucherSigning:
-    def test_domain(self) -> None:
-        assert voucher.get_voucher_domain(ESCROW_ADDRESS, CHAIN_ID) == {
-            "name": "TIP20 Channel Reserve",
-            "version": "1",
-            "chainId": CHAIN_ID,
-            "verifyingContract": ESCROW_ADDRESS,
-        }
-
     def test_digest_requires_a_32_byte_channel_and_uint96_amount(self) -> None:
         with pytest.raises(ValueError, match="32 bytes"):
             voucher.voucher_digest(channel_id="0x1234", cumulative_amount=1, chain_id=CHAIN_ID)
@@ -380,7 +356,7 @@ class TestAbi:
         with pytest.raises(ValueError, match="32 bytes"):
             abi.encode_get_channel_state("0x1234")
 
-    @pytest.mark.parametrize("data", ["0xzz", "0x00000000", abi.encode_withdraw(DESCRIPTOR)])
+    @pytest.mark.parametrize("data", ["0xzz", "0x00000000", abi.encode_request_close(DESCRIPTOR)])
     def test_decode_open_rejects_other_calldata(self, data: str) -> None:
         with pytest.raises(ValueError, match="Expected TIP-1034 open calldata"):
             abi.decode_open(data)

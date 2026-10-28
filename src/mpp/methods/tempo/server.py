@@ -24,7 +24,7 @@ from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp.methods.tempo.client import _CHAIN_ID_UNSET, _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent, ValidateSender
 from mpp.methods.tempo.schemas import charge as definition
-from mpp.methods.tempo.session.server.session import session
+from mpp.methods.tempo.session.server._session import session
 from mpp.server.method import RequestContext, ServerMethod, ValidateContext, VerifyContext
 
 if TYPE_CHECKING:

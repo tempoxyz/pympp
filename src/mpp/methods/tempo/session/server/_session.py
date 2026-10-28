@@ -23,22 +23,22 @@ from mpp import Receipt
 from mpp._units import parse_units
 from mpp._validation import Validation
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session._protocol import (
     SessionReceipt,
     definition,
     serialize_session_receipt,
 )
-from mpp.methods.tempo.session.server.request_state import (
+from mpp.methods.tempo.session.server._request_state import (
     capture_request_probe,
     resolve_credential_verification_context,
     resolve_session_payment_request,
     respond_to_session_credential,
 )
-from mpp.methods.tempo.session.server.schedule import (
+from mpp.methods.tempo.session.server._schedule import (
     SettlementSchedule,
     resolve_settlement_schedule,
 )
-from mpp.methods.tempo.session.server.settlement import (
+from mpp.methods.tempo.session.server._settlement import (
     OnSessionSettlement,
     OnSessionSettlementFailure,
     apply_verified_http_accounting,
@@ -48,7 +48,7 @@ from mpp.methods.tempo.session.server.settlement import (
     resolve_channel_store,
     should_apply_verified_http_accounting,
 )
-from mpp.methods.tempo.session.server.store import (
+from mpp.methods.tempo.session.server._store import (
     ChannelState,
     CreditResult,
     StoreChannelStore,
@@ -56,7 +56,7 @@ from mpp.methods.tempo.session.server.store import (
     from_store,
     normalize_channel_id,
 )
-from mpp.methods.tempo.session.server.verification import (
+from mpp.methods.tempo.session.server._verification import (
     CredentialContext,
     broadcast_credential_payload,
     require_session_credential_payload,
@@ -253,7 +253,7 @@ def session(
 
     async def resolve_chain_id() -> int:
         if not chain_ids:
-            from mpp.methods.tempo.session import chain
+            from mpp.methods.tempo.session import _chain as chain
 
             result = await chain._rpc(  # pyright: ignore[reportPrivateUsage]
                 resolved_rpc_url, "eth_chainId", [], http_client
@@ -437,7 +437,7 @@ async def charge(
 
     With ``idempotency_key`` the channel is charged at most once per key: a retry with the same
     key and amount returns the channel without charging again; the same key with another
-    amount raises :class:`~mpp.methods.tempo.session.server.store.IdempotencyKeyConflictError`.
+    amount raises :class:`~mpp.methods.tempo.session.server._store.IdempotencyKeyConflictError`.
     ``retention`` (ms, default a day) must cover every retry.
 
     Raises:

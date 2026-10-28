@@ -18,7 +18,7 @@ import httpx
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.errors import VerificationFailedError
-from mpp.methods.tempo.session.protocol import (
+from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     SESSION_PROTOCOL_V2,
     is_session_credential_action,
@@ -187,7 +187,7 @@ def resolve_credential_fee_payer(
 
 def normalize_session_channel_id(value: Any) -> str | None:
     """A lowercase channel ID when ``value`` is one, else None."""
-    from mpp.methods.tempo.session.server.store import normalize_channel_id
+    from mpp.methods.tempo.session.server._store import normalize_channel_id
 
     if not isinstance(value, str):
         return None

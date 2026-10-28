@@ -10,23 +10,23 @@ from typing import TYPE_CHECKING, Any
 from mpp._lazy_exports import load_lazy_attr
 
 if TYPE_CHECKING:
-    from mpp.methods.tempo.session.server.close_supervisor import (
+    from mpp.methods.tempo.session.server._close_supervisor import (
         CloseSupervision,
         CloseSupervisionOutcome,
         supervise_closes,
     )
-    from mpp.methods.tempo.session.server.schedule import (
+    from mpp.methods.tempo.session.server._schedule import (
         ResolvedSettlementSchedule,
         SettlementSchedule,
         resolve_settlement_schedule,
     )
-    from mpp.methods.tempo.session.server.session import (
+    from mpp.methods.tempo.session.server._session import (
         SessionPaymentReceipt,
         charge,
         credit,
         session,
     )
-    from mpp.methods.tempo.session.server.settlement import (
+    from mpp.methods.tempo.session.server._settlement import (
         OnSessionSettlement,
         OnSessionSettlementFailure,
         SessionSettlementContext,
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
         settle,
         settle_batch,
     )
-    from mpp.methods.tempo.session.server.store import (
+    from mpp.methods.tempo.session.server._store import (
         ChannelState,
         CreditResult,
         IdempotencyKeyConflictError,
@@ -44,13 +44,13 @@ if TYPE_CHECKING:
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_EXPORTS = {
-    "mpp.methods.tempo.session.server.session": (
+    "mpp.methods.tempo.session.server._session": (
         "SessionPaymentReceipt",
         "charge",
         "credit",
         "session",
     ),
-    "mpp.methods.tempo.session.server.settlement": (
+    "mpp.methods.tempo.session.server._settlement": (
         "OnSessionSettlement",
         "OnSessionSettlementFailure",
         "SessionSettlementContext",
@@ -58,17 +58,17 @@ _LAZY_EXPORTS = {
         "settle",
         "settle_batch",
     ),
-    "mpp.methods.tempo.session.server.close_supervisor": (
+    "mpp.methods.tempo.session.server._close_supervisor": (
         "CloseSupervision",
         "CloseSupervisionOutcome",
         "supervise_closes",
     ),
-    "mpp.methods.tempo.session.server.schedule": (
+    "mpp.methods.tempo.session.server._schedule": (
         "ResolvedSettlementSchedule",
         "SettlementSchedule",
         "resolve_settlement_schedule",
     ),
-    "mpp.methods.tempo.session.server.store": (
+    "mpp.methods.tempo.session.server._store": (
         "ChannelState",
         "CreditResult",
         "IdempotencyKeyConflictError",

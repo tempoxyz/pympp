@@ -888,482 +888,11 @@ module mpp.methods.tempo.schemas
 
 module mpp.methods.tempo.server
     def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
-    session -> mpp.methods.tempo.session.server.session.session
+    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
 
 module mpp.methods.tempo.session
 
-module mpp.methods.tempo.session.abi
-    DESCRIPTOR_TYPE = '(address,address,address,address,bytes32,address,bytes32)'
-    STATE_TYPE = '(uint96,uint96,uint32)'
-    SELECTORS: dict
-    EventName = typing.Literal['ChannelOpened', 'Settled', 'TopUp', 'CloseRequested', 'ChannelClosed', 'CloseRequestCancelled']
-    EVENT_TOPICS: dict
-    class ChannelStateTuple
-        @dataclass(frozen=True, slots=True)
-        field settled: int
-        field deposit: int
-        field close_requested_at: int
-    class DecodedEvent
-        @dataclass(frozen=True, slots=True)
-        field name: str
-        field args: dict[str, Any]
-    def descriptor_tuple(descriptor: ChannelDescriptor) -> tuple[str, str, str, str, bytes, str, bytes]
-    def encode_open(*, payee: str, operator: str, token: str, deposit: int, salt: str, authorized_signer: str) -> str
-    def encode_top_up(descriptor: ChannelDescriptor, additional_deposit: int) -> str
-    def encode_settle(descriptor: ChannelDescriptor, cumulative_amount: int, signature: str) -> str
-    def encode_close(descriptor: ChannelDescriptor, cumulative_amount: int, capture_amount: int, signature: str) -> str
-    def encode_request_close(descriptor: ChannelDescriptor) -> str
-    def encode_withdraw(descriptor: ChannelDescriptor) -> str
-    def encode_get_channel(descriptor: ChannelDescriptor) -> str
-    def encode_get_channel_state(channel_id: str) -> str
-    def encode_get_channel_states_batch(channel_ids: Sequence[str]) -> str
-    def encode_compute_channel_id(descriptor: ChannelDescriptor) -> str
-    def decode_get_channel(data: str) -> tuple[ChannelDescriptor, ChannelStateTuple]
-    def decode_get_channel_state(data: str) -> ChannelStateTuple
-    def decode_get_channel_states_batch(data: str) -> list[ChannelStateTuple]
-    def decode_bytes32(data: str) -> str
-    def decode_open(data: str) -> dict[str, Any]
-    def decode_top_up(data: str) -> tuple[ChannelDescriptor, int]
-    def decode_event(topics: Sequence[str], data: str) -> DecodedEvent | None
-
-module mpp.methods.tempo.session.chain
-    T = ~T
-    EXPIRING_NONCE_KEY = 115792089237316195423570985008687907853269984665640564039457584007913129639935
-    EXPIRING_NONCE_VALID_BEFORE_SECS = 60
-    DEFAULT_GAS_LIMIT = 1000000
-    RECEIPT_POLL_INTERVAL = 0.5
-    STABLECOIN_DEX = '0xdec0000000000000000000000000000000000000'
-    TransactionLabel = typing.Literal['open', 'topUp']
-    class ChannelState
-        @dataclass(frozen=True, slots=True)
-        field settled: int
-        field deposit: int
-        field close_requested_at: int
-    class Channel
-        @dataclass(frozen=True, slots=True)
-        field descriptor: ChannelDescriptor
-        field state: ChannelState
-    async def get_channel(rpc_url: str, descriptor: ChannelDescriptor, *, escrow: str = '0x4d50500000000000000000000000000000000000', block: int | str | None = None, client: httpx.AsyncClient | None = None) -> Channel
-    async def get_channel_state(rpc_url: str, channel_id: str, *, escrow: str = '0x4d50500000000000000000000000000000000000', block: int | str | None = None, client: httpx.AsyncClient | None = None) -> ChannelState
-    async def get_channel_states_batch(rpc_url: str, channel_ids: Sequence[str], *, escrow: str = '0x4d50500000000000000000000000000000000000', block: int | str | None = None, client: httpx.AsyncClient | None = None) -> list[ChannelState]
-    async def compute_channel_id_on_chain(rpc_url: str, descriptor: ChannelDescriptor, *, escrow: str = '0x4d50500000000000000000000000000000000000', client: httpx.AsyncClient | None = None) -> str
-    async def readback_with_retry(read: Callable[[], Awaitable[T]], *, retries: int = 5, delay: float = 0.25, should_retry: Callable[[Exception], bool] | None = None) -> T
-    async def send_raw_transaction(rpc_url: str, raw_tx: str, *, client: httpx.AsyncClient | None = None) -> str
-    async def wait_for_successful_receipt(rpc_url: str, tx_hash: str, *, client: httpx.AsyncClient | None = None, timeout: float = 30.0) -> dict[str, Any]
-    ChannelEventName = typing.Literal['ChannelOpened', 'TopUp', 'Settled', 'ChannelClosed', 'CloseRequested']
-    def get_channel_event(receipt: Mapping[str, Any], name: ChannelEventName, channel_id: str, *, escrow: str | None = None) -> dict[str, Any]
-    def validate_channel_opened_receipt(*, chain_id: int, descriptor: ChannelDescriptor, emitted_channel_id: str, emitted_deposit: int, emitted_expiring_nonce_hash: str, escrow: str, expected_channel_id: str, open_deposit: int) -> None
-    def validate_open_readback_state(*, emitted_deposit: int, state: ChannelState) -> None
-    def validate_top_up_receipt(*, emitted_channel_id: str, expected_channel_id: str) -> None
-    def validate_top_up_readback_state(*, new_deposit: int, state: ChannelState) -> None
-    class OpenCall
-        @dataclass(frozen=True, slots=True)
-        field payee: str
-        field operator: str
-        field token: str
-        field deposit: int
-        field salt: str
-        field authorized_signer: str
-    def parse_open_call(data: str, *, payee: str | None = None, operator: str | None = None, token: str | None = None, authorized_signer: str | None = None, deposit: int | None = None) -> OpenCall
-    def same_channel_descriptor(actual: ChannelDescriptor, expected: ChannelDescriptor) -> bool
-    def parse_top_up_call(data: str, *, descriptor: ChannelDescriptor | None = None, additional_deposit: int | None = None) -> tuple[ChannelDescriptor, int]
-    def descriptor_from_open(*, open_call: OpenCall, payer: str, expiring_nonce_hash: str, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000', channel_id: str | None = None) -> ChannelDescriptor
-    class ParsedCredentialTransaction
-        @dataclass(frozen=True, slots=True)
-        field raw: str
-        field type_id: int
-        field sender: str
-        field chain_id: int
-        field calls: tuple[tuple[str, int, bytes], ...]
-        field valid_before: int | None
-        property management_call: tuple[str, int, bytes]
-    def parse_credential_transaction(serialized_transaction: str, *, escrow_contract: str, label: TransactionLabel, fee_payer: bool = False) -> ParsedCredentialTransaction
-    class ValidatedOpenTransaction
-        @dataclass(frozen=True, slots=True)
-        field descriptor: ChannelDescriptor
-        field expiring_nonce_hash: str
-        field open_deposit: int
-        field transaction: ParsedCredentialTransaction
-    def validate_open_credential_transaction(*, serialized_transaction: str, chain_id: int, escrow_contract: str, expected_authorized_signer: str, expected_channel_id: str, expected_currency: str, expected_expiring_nonce_hash: str, expected_operator: str, expected_payee: str, expected_payer: str, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, allowed_fee_tokens: Sequence[str] | None = None, challenge_expires: str | None = None) -> ValidatedOpenTransaction
-    class ValidatedTopUpTransaction
-        @dataclass(frozen=True, slots=True)
-        field additional_deposit: int
-        field transaction: ParsedCredentialTransaction
-    def validate_top_up_credential_transaction(*, serialized_transaction: str, additional_deposit: int, chain_id: int, descriptor: ChannelDescriptor, escrow_contract: str, expected_channel_id: str, expected_currency: str, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, allowed_fee_tokens: Sequence[str] | None = None, challenge_expires: str | None = None) -> ValidatedTopUpTransaction
-    async def simulate_credential_transaction(rpc_url: str, transaction: ParsedCredentialTransaction, *, fee_payer: TempoAccount | None = None, client: httpx.AsyncClient | None = None) -> None
-    async def send_credential_transaction(rpc_url: str, transaction: ParsedCredentialTransaction, *, chain_id: int, label: TransactionLabel, expected_currency: str, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, allowed_fee_tokens: Sequence[str] | None = None, challenge_expires: str | None = None, client: httpx.AsyncClient | None = None) -> dict[str, Any]
-    class BroadcastOpenResult
-        @dataclass(frozen=True, slots=True)
-        field tx_hash: str
-        field descriptor: ChannelDescriptor
-        field state: ChannelState
-        field expiring_nonce_hash: str
-        field open_deposit: int
-    async def broadcast_open_transaction(rpc_url: str, *, serialized_transaction: str, chain_id: int, escrow_contract: str, expected_authorized_signer: str, expected_channel_id: str, expected_currency: str, expected_expiring_nonce_hash: str, expected_operator: str, expected_payee: str, expected_payer: str, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, allowed_fee_tokens: Sequence[str] | None = None, challenge_expires: str | None = None, before_broadcast: Callable[[ValidatedOpenTransaction], Awaitable[None] | None] | None = None, client: httpx.AsyncClient | None = None) -> BroadcastOpenResult
-    class BroadcastTopUpResult
-        @dataclass(frozen=True, slots=True)
-        field tx_hash: str
-        field new_deposit: int
-        field state: ChannelState
-    async def broadcast_top_up_transaction(rpc_url: str, *, serialized_transaction: str, additional_deposit: int, chain_id: int, descriptor: ChannelDescriptor, escrow_contract: str, expected_channel_id: str, expected_currency: str, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, allowed_fee_tokens: Sequence[str] | None = None, challenge_expires: str | None = None, client: httpx.AsyncClient | None = None) -> BroadcastTopUpResult
-    async def build_open_transaction(account: TempoAccount, *, rpc_url: str, payee: str, token: str, deposit: int, chain_id: int | None = None, escrow: str = '0x4d50500000000000000000000000000000000000', operator: str = '0x0000000000000000000000000000000000000000', authorized_signer: str | None = None, salt: str | None = None, fee_payer: bool = False, fee_token: str | None = None, prefix_calls: Sequence[tuple[str, str]] = (), root_account: str | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> tuple[str, ChannelDescriptor, str]
-    async def build_top_up_transaction(account: TempoAccount, descriptor: ChannelDescriptor, additional_deposit: int, *, rpc_url: str, chain_id: int | None = None, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: bool = False, fee_token: str | None = None, prefix_calls: Sequence[tuple[str, str]] = (), root_account: str | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-    async def resolve_fee_token(rpc_url: str, account: str, candidates: Sequence[str], *, client: httpx.AsyncClient | None = None) -> str | None
-    async def settle_on_chain(rpc_url: str, account: TempoAccount, descriptor: ChannelDescriptor, cumulative_amount: int, signature: str, *, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-    async def close_on_chain(rpc_url: str, account: TempoAccount, descriptor: ChannelDescriptor, cumulative_amount: int, capture_amount: int, signature: str, *, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-    async def top_up_on_chain(rpc_url: str, account: TempoAccount, descriptor: ChannelDescriptor, additional_deposit: int, *, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-    async def request_close_on_chain(rpc_url: str, account: TempoAccount, descriptor: ChannelDescriptor, *, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-    async def withdraw_on_chain(rpc_url: str, account: TempoAccount, descriptor: ChannelDescriptor, *, escrow: str = '0x4d50500000000000000000000000000000000000', fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, valid_before: int | None = None, client: httpx.AsyncClient | None = None) -> str
-
-module mpp.methods.tempo.session.channel
-    def resolve_authorized_signer(descriptor: ChannelDescriptor) -> str
-    def compute_channel_id(descriptor: ChannelDescriptor, *, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000') -> str
-    def sender_signing_preimage(raw_tx: str, *, fee_payer: bool | None = None) -> bytes
-    def expiring_nonce_hash(raw_signed_tx: str, sender: str, *, fee_payer: bool | None = None) -> str
-
-module mpp.methods.tempo.session.protocol
-    ESCROW_ADDRESS = '0x4d50500000000000000000000000000000000000'
-    CLOSE_GRACE_PERIOD = 900
-    UINT96_MAX = 79228162514264337593543950335
-    ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
-    SESSION_PROTOCOL_V1 = 'v1'
-    SESSION_PROTOCOL_V2 = 'v2'
-    SessionCredentialAction = typing.Literal['open', 'topUp', 'voucher', 'close']
-    SESSION_CREDENTIAL_ACTIONS = frozenset({'close', 'open', 'topUp', 'voucher'})
-    def is_uint96(value: int) -> bool
-    def uint96(value: int) -> int
-    def parse_uint96_amount(value: str) -> int | None
-    class ChannelDescriptor
-        @dataclass(frozen=True, slots=True)
-        field kw_only payer: str
-        field kw_only payee: str
-        field kw_only operator: str
-        field kw_only token: str
-        field kw_only salt: str
-        field kw_only authorized_signer: str
-        field kw_only expiring_nonce_hash: str
-        @classmethod def from_wire(cls, value: Any) -> ChannelDescriptor
-        def to_wire(self) -> dict[str, str]
-    class SignedVoucher
-        @dataclass(frozen=True, slots=True)
-        field kw_only channel_id: str
-        field kw_only cumulative_amount: int
-        field kw_only signature: str
-    class OpenPayload(mpp.methods.tempo.session.protocol._PayloadBase)
-        field channel_id: str (alias 'channelId')
-        field descriptor: dict[str, typing.Any] | None = None
-        field action: Literal['open'] = 'open'
-        field type: Literal['transaction'] = 'transaction'
-        field transaction: str
-        field signature: str
-        field cumulative_amount: str (alias 'cumulativeAmount')
-        field authorized_signer: str | None = None (alias 'authorizedSigner')
-        model_config = {'populate_by_name': True}
-    class TopUpPayload(mpp.methods.tempo.session.protocol._PayloadBase)
-        field channel_id: str (alias 'channelId')
-        field descriptor: dict[str, typing.Any] | None = None
-        field action: Literal['topUp'] = 'topUp'
-        field type: Literal['transaction'] = 'transaction'
-        field transaction: str
-        field additional_deposit: str (alias 'additionalDeposit')
-        model_config = {'populate_by_name': True}
-    class VoucherPayload(mpp.methods.tempo.session.protocol._PayloadBase)
-        field channel_id: str (alias 'channelId')
-        field descriptor: dict[str, typing.Any] | None = None
-        field action: Literal['voucher'] = 'voucher'
-        field cumulative_amount: str (alias 'cumulativeAmount')
-        field signature: str
-        model_config = {'populate_by_name': True}
-    class ClosePayload(mpp.methods.tempo.session.protocol._PayloadBase)
-        field channel_id: str (alias 'channelId')
-        field descriptor: dict[str, typing.Any] | None = None
-        field action: Literal['close'] = 'close'
-        field cumulative_amount: str (alias 'cumulativeAmount')
-        field signature: str
-        field close_signature: str (alias 'closeSignature')
-        model_config = {'populate_by_name': True}
-    SessionCredentialPayload = mpp.methods.tempo.session.protocol.OpenPayload | mpp.methods.tempo.session.protocol.TopUpPayload | mpp.methods.tempo.session.protocol.VoucherPayload | mpp.methods.tempo.session.protocol.ClosePayload
-    class SessionPayload(pydantic.main.BaseModel, typing.Generic[~RootModelRootType])
-        field root: mpp.methods.tempo.session.protocol.OpenPayload | mpp.methods.tempo.session.protocol.TopUpPayload | mpp.methods.tempo.session.protocol.VoucherPayload | mpp.methods.tempo.session.protocol.ClosePayload
-        model_config = {}
-    class SessionRequest(pydantic.main.BaseModel)
-        field amount: str
-        field unit_type: str (alias 'unitType')
-        field currency: str
-        field decimals: int
-        field recipient: str | None = None
-        field chain_id: int | None = None (alias 'chainId')
-        field channel_id: Optional[Annotated[str, FieldInfo(annotation=NoneType, required=True, metadata=[_PydanticGeneralMetadata(pattern='^0x[0-9a-fA-F]{64}$')])]] = None (alias 'channelId')
-        field escrow_contract: str | None = None (alias 'escrowContract')
-        field fee_payer: Any = None (alias 'feePayer')
-        field fee_token: Optional[Annotated[str, FieldInfo(annotation=NoneType, required=True, metadata=[_PydanticGeneralMetadata(pattern='^0x[0-9a-fA-F]{40}$')])]] = None (alias 'feeToken')
-        field min_voucher_delta: Optional[Annotated[str, FieldInfo(annotation=NoneType, required=True, metadata=[_PydanticGeneralMetadata(pattern='^\\d+(\\.\\d+)?$')])]] = None (alias 'minVoucherDelta')
-        field operator: Optional[Annotated[str, FieldInfo(annotation=NoneType, required=True, metadata=[_PydanticGeneralMetadata(pattern='^0x[0-9a-fA-F]{40}$')])]] = None
-        field session_protocol: Optional[Literal['v2', 'v1']] = None (alias 'sessionProtocol')
-        field session_snapshot: Any = None (alias 'sessionSnapshot')
-        field suggested_deposit: Optional[Annotated[str, FieldInfo(annotation=NoneType, required=True, metadata=[_PydanticGeneralMetadata(pattern='^\\d+(\\.\\d+)?$')])]] = None (alias 'suggestedDeposit')
-        model_config = {'populate_by_name': True, 'arbitrary_types_allowed': True}
-    definition: mpp.methods.Method
-    def is_session_credential_action(value: object) -> bool
-    def read_session_challenge_amount(request: dict[str, Any]) -> int
-    class NeedVoucherEvent
-        @dataclass(frozen=True, slots=True)
-        field kw_only channel_id: str
-        field kw_only required_cumulative: int
-        field kw_only accepted_cumulative: int
-        field kw_only deposit: int
-        @classmethod def from_wire(cls, value: Any) -> NeedVoucherEvent
-        def to_wire(self) -> dict[str, str]
-    class SessionReceipt
-        @dataclass(frozen=True, slots=True)
-        field kw_only timestamp: str
-        field kw_only reference: str
-        field kw_only challenge_id: str
-        field kw_only channel_id: str
-        field kw_only accepted_cumulative: str
-        field kw_only spent: str
-        field kw_only units: int | None = None
-        field kw_only tx_hash: str | None = None
-        field kw_only method: Literal['tempo'] = 'tempo'
-        field kw_only intent: Literal['session'] = 'session'
-        field kw_only status: Literal['success'] = 'success'
-        @classmethod def from_wire(cls, value: Any) -> SessionReceipt
-        def to_wire(self) -> dict[str, Any]
-    def is_session_receipt(value: object) -> bool
-    def create_session_receipt(*, challenge_id: str, channel_id: str, accepted_cumulative: int, spent: int, units: int | None = None, tx_hash: str | None = None) -> SessionReceipt
-    def serialize_session_receipt(receipt: SessionReceipt) -> str
-    def deserialize_session_receipt(encoded: str) -> SessionReceipt
-    def format_receipt_event(receipt: SessionReceipt) -> str
-    def format_need_voucher_event(event: NeedVoucherEvent) -> str
-
 module mpp.methods.tempo.session.server
-    ChannelState -> mpp.methods.tempo.session.server.store.ChannelState
-    CloseSupervision -> mpp.methods.tempo.session.server.close_supervisor.CloseSupervision
-    CloseSupervisionOutcome = typing.Literal['open', 'settled', 'closing', 'cancelled', 'closed', 'unrecovered', 'finalized', 'missing', 'failed']
-    CreditResult -> mpp.methods.tempo.session.server.store.CreditResult
-    IdempotencyKeyConflictError -> mpp.methods.tempo.session.server.store.IdempotencyKeyConflictError
-    OnSessionSettlement = collections.abc.Callable[[mpp.methods.tempo.session.server.settlement.SessionSettlementContext], collections.abc.Awaitable[None] | None]
-    OnSessionSettlementFailure = collections.abc.Callable[[mpp.methods.tempo.session.server.settlement.SessionSettlementFailureContext], collections.abc.Awaitable[None] | None]
-    ResolvedSettlementSchedule -> mpp.methods.tempo.session.server.schedule.ResolvedSettlementSchedule
-    SessionPaymentReceipt -> mpp.methods.tempo.session.server.session.SessionPaymentReceipt
-    SessionSettlementContext -> mpp.methods.tempo.session.server.settlement.SessionSettlementContext
-    SessionSettlementFailureContext -> mpp.methods.tempo.session.server.settlement.SessionSettlementFailureContext
-    SettlementSchedule -> mpp.methods.tempo.session.server.schedule.SettlementSchedule
-    charge -> mpp.methods.tempo.session.server.session.charge
-    credit -> mpp.methods.tempo.session.server.session.credit
-    resolve_settleable_voucher -> mpp.methods.tempo.session.server.store.resolve_settleable_voucher
-    resolve_settlement_schedule -> mpp.methods.tempo.session.server.schedule.resolve_settlement_schedule
-    session: module
-    settle -> mpp.methods.tempo.session.server.settlement.settle
-    settle_batch -> mpp.methods.tempo.session.server.settlement.settle_batch
-    supervise_closes -> mpp.methods.tempo.session.server.close_supervisor.supervise_closes
-
-module mpp.methods.tempo.session.server.close_supervisor
-    DEFAULT_BATCH_SIZE = 50
-    DEFAULT_CLOSE_SEARCH_MARGIN_BLOCKS = 2000
-    DEFAULT_LOG_BLOCK_RANGE = 100000
-    class CloseSupervision
-        @dataclass(frozen=False, slots=True)
-        field block: int
-        field timestamp: int
-        field complete: bool = False
-        field supervised: int = 0
-        field cancelled: int = 0
-        field closed: int = 0
-        field failed: int = 0
-        field settled: int = 0
-        field unrecovered: int = 0
-        field channels: list[SupervisedChannel] = <factory list>
-    CloseSupervisionOutcome = typing.Literal['open', 'settled', 'closing', 'cancelled', 'closed', 'unrecovered', 'finalized', 'missing', 'failed']
-    class SupervisedChannel
-        @dataclass(frozen=True, slots=True)
-        field channel_id: str
-        field outcome: CloseSupervisionOutcome
-        field error: BaseException | None = None
-        field tx_hash: str | None = None
-    async def supervise_closes(*, channel_ids: Iterable[str] | AsyncIterable[str], store: Any, rpc_url: str, account: TempoAccount | None = None, http_client: httpx.AsyncClient | None = None, chain_id: int | None = None, batch_size: int = 50, close_search_margin_blocks: int = 2000, log_block_range: int = 100000, previous_block: int | None = None, settlement_schedule: ResolvedSettlementSchedule | None = None, candidate_fee_tokens: Sequence[str] | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None) -> CloseSupervision
-
-module mpp.methods.tempo.session.server.request_state
-    class ChallengePaymentFields
-        @dataclass(frozen=True, slots=True)
-        field amount: int
-        field currency: str
-        field recipient: str
-    class CredentialVerificationContext
-        @dataclass(frozen=True, slots=True)
-        field request: Mapping[str, Any]
-        field method_details: SessionMethodDetails
-        field chain_id: int
-        field escrow: str
-        field fee_payer: TempoAccount | None
-        field min_voucher_delta: int
-    class RequestProbe
-        @dataclass(frozen=True, slots=True)
-        field method: str
-        field headers: httpx.Headers
-        field has_body: bool | None = None
-        field url: str | None = None
-    class SessionMethodDetails
-        @dataclass(frozen=True, slots=True)
-        field chain_id: int
-        field escrow_contract: str
-        field fee_payer: bool | None = None
-        field fee_token: str | None = None
-        field min_voucher_delta: str | None = None
-        field operator: str | None = None
-        field session_protocol: str | None = None
-    def capture_request_probe(request: Request) -> RequestProbe
-    def get_challenge_payment_fields(challenge: Challenge) -> ChallengePaymentFields
-    def has_captured_request_body(probe: RequestProbe) -> bool
-    def is_session_content_request(probe: RequestProbe) -> bool
-    def normalize_session_channel_id(value: Any) -> str | None
-    def resolve_credential_fee_payer(*, method_details: Mapping[str, Any], fee_payer: TempoAccount | None, request_fee_payer: Any = None) -> TempoAccount | None
-    def resolve_credential_verification_context(*, challenge: Challenge, decimals: int, fee_payer: TempoAccount | None, min_voucher_delta: str | None, request_fee_payer: Any = None) -> CredentialVerificationContext
-    def resolve_request_fee_payer(*, default_fee_payer: TempoAccount | None, request_fee_payer: Any = None) -> TempoAccount | bool | None
-    def resolve_session_payment_request(*, request: Mapping[str, Any], chain_id: int, default_fee_payer: TempoAccount | None, parameter_escrow_contract: str | None, fee_token: str | None) -> dict[str, Any]
-    def respond_to_session_credential(*, payload_action: str, request: Request | RequestProbe | None) -> Response | None
-
-module mpp.methods.tempo.session.server.schedule
-    SCHEDULED_SETTLEMENT_LEASE_MS = 300000
-    class SettlementSchedule
-        @dataclass(frozen=True, slots=True)
-        field kw_only units: int | None = None
-        field kw_only amount: str | int | None = None
-        field kw_only interval_ms: int | None = None
-    class ResolvedSettlementSchedule
-        @dataclass(frozen=True, slots=True)
-        field kw_only amount: int | None = None
-        field kw_only interval_ms: int | None = None
-        field kw_only units: int | None = None
-    class SettlementProgress
-        @dataclass(frozen=True, slots=True)
-        field kw_only amount: int
-        field kw_only units: int
-        field kw_only elapsed_ms: int | None = None
-    def resolve_settlement_schedule(schedule: SettlementSchedule | None, decimals: int) -> ResolvedSettlementSchedule | None
-    def resolve_settlement_progress(channel: ChannelState) -> SettlementProgress | None
-    def is_settlement_due(channel: ChannelState, schedule: ResolvedSettlementSchedule | None) -> bool
-    async def mark_settlement_complete(*, channel_id: str, lease_owner: str, store: ChannelStore, settled_at: str | None = None) -> None
-    async def claim_scheduled_settlement(*, channel_id: str, schedule: ResolvedSettlementSchedule, store: ChannelStore, lease_ms: int = 300000) -> str | None
-    async def renew_scheduled_settlement(*, channel_id: str, lease_owner: str, store: ChannelStore, lease_ms: int = 300000) -> None
-    async def release_scheduled_settlement(*, channel_id: str, lease_owner: str, store: ChannelStore) -> None
-
-module mpp.methods.tempo.session.server.session
-    class SessionPaymentReceipt(mpp.Receipt)
-        @dataclass(frozen=True, slots=True)
-        field status: Literal['success']
-        field timestamp: datetime
-        field reference: str
-        field method: str = 'tempo'
-        field external_id: str | None = None
-        field subscription_id: str | None = None
-        field extra: dict[str, Any] | None = None
-        field extensions: dict[str, Any] | None = None
-        field payer: str | None = None
-        field funding_currency: str | None = None
-        field session: SessionReceipt | None = None
-        @classmethod def from_session(cls, session: SessionReceipt) -> SessionPaymentReceipt
-        def to_payment_receipt(self) -> str
-    async def charge(store: Any, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> ChannelState
-    async def credit(store: Any, channel_id: str, amount: int, *, idempotency_key: str, retention: int | None = None, units: int = 0) -> CreditResult
-    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
-
-module mpp.methods.tempo.session.server.settlement
-    OnSessionSettlement = collections.abc.Callable[[mpp.methods.tempo.session.server.settlement.SessionSettlementContext], collections.abc.Awaitable[None] | None]
-    OnSessionSettlementFailure = collections.abc.Callable[[mpp.methods.tempo.session.server.settlement.SessionSettlementFailureContext], collections.abc.Awaitable[None] | None]
-    class SessionSettlementContext
-        @dataclass(frozen=True, slots=True)
-        field kw_only tx_hash: str
-        field kw_only channel_id: str
-        field kw_only trigger: Literal['settle', 'close', 'scheduled']
-        field kw_only amount: int
-        field kw_only delta: int
-    class SessionSettlementFailureContext
-        @dataclass(frozen=True, slots=True)
-        field kw_only chain_id: int
-        field kw_only channel_id: str
-        field kw_only error: BaseException
-        field kw_only trigger: Literal['close', 'scheduled']
-    SessionStoreInput = 'Store | ChannelStore'
-    class SettlementCheckpointError(Exception)
-        def __init__(self, *, tx_hash: str, cause: BaseException) -> None
-    class SettlementLeaseError(Exception)
-        def __init__(self, *, cause: BaseException) -> None
-    async def apply_verified_http_accounting(*, receipt: SessionReceipt, request: RequestProbe | None, payload_action: str, request_amount: Callable[[], int], charge: Callable[[str, int], Awaitable[ChannelState]], settle_charged: SettleChargedSessionChannel) -> SessionReceipt
-    def assert_settlement_sender(*, operation: Literal['close', 'settle'], channel_id: str, operator: str, payee: str, sender: str | None) -> None
-    async def charge_session_channel(store: ChannelStore, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> ChannelState
-    def ignore_retryable_settlement_failure(error: BaseException) -> None
-    async def maybe_settle_scheduled(*, channel: ChannelState, schedule: ResolvedSettlementSchedule | None, store: ChannelStore, account: TempoAccount | None, rpc_url: str, http_client: httpx.AsyncClient | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, lease_ms: int = 300000) -> str | None
-    async def report_session_settlement_failure(on_failure: OnSessionSettlementFailure | None, context: SessionSettlementFailureContext) -> None
-    def resolve_channel_store(store: Any) -> ChannelStore
-    async def settle(store: Any, channel_id: str, *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> str
-    async def settle_batch(store: Any, channel_ids: Iterable[str], *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> list[str]
-    def should_apply_verified_http_accounting(*, request: RequestProbe | None, payload_action: str) -> bool
-
-module mpp.methods.tempo.session.server.store
-    class InsufficientBalanceError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 402
-        title = 'Insufficient Balance'
-        type = 'https://paymentauth.org/problems/session/insufficient-balance'
-    class InvalidSignatureError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 402
-        title = 'Invalid Signature'
-        type = 'https://paymentauth.org/problems/session/invalid-signature'
-    class AmountExceedsDepositError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 402
-        title = 'Amount Exceeds Deposit'
-        type = 'https://paymentauth.org/problems/session/amount-exceeds-deposit'
-    class DeltaTooSmallError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 402
-        title = 'Delta Too Small'
-        type = 'https://paymentauth.org/problems/session/delta-too-small'
-    class ChannelNotFoundError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 410
-        title = 'Channel Not Found'
-        type = 'https://paymentauth.org/problems/session/channel-not-found'
-    class ChannelClosedError(mpp.errors.PaymentError)
-        def __init__(self, reason: str | None = None) -> None
-        status = 410
-        title = 'Channel Closed'
-        type = 'https://paymentauth.org/problems/session/channel-finalized'
-    class IdempotencyKeyConflictError(Exception)
-        def __init__(self, *, idempotency_key: str, operation: Literal['charge', 'credit']) -> None
-    Backend = typing.Literal['precompile', 'contract', 'external']
-    CreditDeclineReason = typing.Literal['belowSettled', 'closing', 'exceedsSpent', 'finalized']
-    MarkerOutcome = typing.Literal['charged', 'credited', 'belowSettled', 'closing', 'exceedsSpent', 'finalized']
-    class OnChainChannelState(typing.Protocol)
-        def __init__(self, *args, **kwargs)
-        property close_requested_at: int
-        property deposit: int
-        property settled: int
-    class ScheduledSettlementLease
-        @dataclass(frozen=True, slots=True)
-        field expires_at: int
-        field owner: str
-    class RetainedVoucher
-        @dataclass(frozen=True, slots=True)
-        field cumulative_amount: int
-        field signature: str
-    class PendingSettlement
-        @dataclass(frozen=True, slots=True)
-        field amount: int
-        field expires_at: int
-    class StreamReservation
-        @dataclass(frozen=True, slots=True)
-        field amount: int
-        field units: int
-        field expires_at: int
-    class IdempotencyMarker
-        @dataclass(frozen=True, slots=True)
-        field amount: int
-        field expires_at: int
-        field outcome: MarkerOutcome
-        field units: int | None = None
     class ChannelState
         @dataclass(frozen=True, slots=True)
         field kw_only channel_id: str
@@ -1388,7 +917,6 @@ module mpp.methods.tempo.session.server.store
         field kw_only operator: str | None = None
         field kw_only salt: str | None = None
         field kw_only on_chain_verified_at: int | None = None
-        field kw_only stream_reservations: Mapping[str, StreamReservation] | None = None
         field kw_only scheduled_settlement_lease: ScheduledSettlementLease | None = None
         field kw_only last_settlement_at: str | None = None
         field kw_only last_settlement_spent: int | None = None
@@ -1397,11 +925,19 @@ module mpp.methods.tempo.session.server.store
         field kw_only pending_settlement: PendingSettlement | None = None
         field kw_only idempotency_markers: Mapping[str, IdempotencyMarker] | None = None
         field kw_only close_supervised_from_block: int | None = None
-    class DeductResult
-        @dataclass(frozen=True, slots=True)
-        field ok: bool
-        field channel: ChannelState
-        field replayed: bool = False
+    class CloseSupervision
+        @dataclass(frozen=False, slots=True)
+        field block: int
+        field timestamp: int
+        field complete: bool = False
+        field supervised: int = 0
+        field cancelled: int = 0
+        field closed: int = 0
+        field failed: int = 0
+        field settled: int = 0
+        field unrecovered: int = 0
+        field channels: list[SupervisedChannel] = <factory list>
+    CloseSupervisionOutcome = typing.Literal['open', 'settled', 'closing', 'cancelled', 'closed', 'unrecovered', 'finalized', 'missing', 'failed']
     class CreditResult
         @dataclass(frozen=True, slots=True)
         field status: Literal['credited', 'declined', 'unknown']
@@ -1409,149 +945,56 @@ module mpp.methods.tempo.session.server.store
         field replayed: bool = False
         field reason: CreditDeclineReason | None = None
         field error: BaseException | None = None
-    class HighestVoucher
+    class IdempotencyKeyConflictError(Exception)
+        def __init__(self, *, idempotency_key: str, operation: Literal['charge', 'credit']) -> None
+    OnSessionSettlement = collections.abc.Callable[[mpp.methods.tempo.session.server._settlement.SessionSettlementContext], collections.abc.Awaitable[None] | None]
+    OnSessionSettlementFailure = collections.abc.Callable[[mpp.methods.tempo.session.server._settlement.SessionSettlementFailureContext], collections.abc.Awaitable[None] | None]
+    class ResolvedSettlementSchedule
         @dataclass(frozen=True, slots=True)
-        field highest_voucher_amount: int
-        field highest_voucher: SignedVoucher | None
-    class ActiveOnChainState
+        field kw_only amount: int | None = None
+        field kw_only interval_ms: int | None = None
+        field kw_only units: int | None = None
+    class SessionPaymentReceipt(mpp.Receipt)
         @dataclass(frozen=True, slots=True)
-        field close_requested_at: int
-        field deposit: int
-        field settled_on_chain: int
-    class PendingCloseUpdate
+        field status: Literal['success']
+        field timestamp: datetime
+        field reference: str
+        field method: str = 'tempo'
+        field external_id: str | None = None
+        field subscription_id: str | None = None
+        field extra: dict[str, Any] | None = None
+        field extensions: dict[str, Any] | None = None
+        field payer: str | None = None
+        field funding_currency: str | None = None
+        field session: SessionReceipt | None = None
+        @classmethod def from_session(cls, session: SessionReceipt) -> SessionPaymentReceipt
+        def to_payment_receipt(self) -> str
+    class SessionSettlementContext
         @dataclass(frozen=True, slots=True)
-        field capture_amount: int
-        field state: ChannelState | None
-    class VoucherValidation
+        field kw_only tx_hash: str
+        field kw_only channel_id: str
+        field kw_only trigger: Literal['settle', 'close', 'scheduled']
+        field kw_only amount: int
+        field kw_only delta: int
+    class SessionSettlementFailureContext
         @dataclass(frozen=True, slots=True)
-        field already_accepted: bool
-    class VoucherAcceptance
-        @dataclass(frozen=True, slots=True)
-        field channel: ChannelState
-        field charged: bool
-    class StoreChange(typing.Generic[~_R])
-        @dataclass(frozen=True, slots=True)
-        field op: Literal['set', 'delete', 'noop']
-        field result: _R
-        field value: ChannelState | None = None
-    def is_precompile_state(state: ChannelState) -> bool
-    def keep_greater(current: int, next_value: int) -> int
-    def keep_greater_timestamp(current: int, next_value: int) -> int
-    def merge_active_on_chain_state(current: ChannelState | ActiveOnChainState | None, state: OnChainChannelState) -> ActiveOnChainState
-    def resolve_highest_voucher(*, channel_id: str, current: ChannelState | HighestVoucher | None, cumulative_amount: int, signature: str) -> HighestVoucher
-    class PrecompileChannelIdentity
-        @dataclass(frozen=True, slots=True)
-        field kw_only authorized_signer: str
-        field kw_only backend: Literal['precompile']
         field kw_only chain_id: int
         field kw_only channel_id: str
-        field kw_only descriptor: ChannelDescriptor
-        field kw_only escrow_contract: str
-        field kw_only expiring_nonce_hash: str
-        field kw_only operator: str
-        field kw_only payee: str
-        field kw_only payer: str
-        field kw_only salt: str
-        field kw_only token: str
-    def resolve_precompile_channel_identity(*, authorized_signer: str, chain_id: int, channel_id: str, descriptor: ChannelDescriptor, escrow: str, expiring_nonce_hash: str) -> PrecompileChannelIdentity
-    def open_channel_state(*, authorized_signer: str, chain_id: int, channel_id: str, current: ChannelState | None, descriptor: ChannelDescriptor, escrow: str, expiring_nonce_hash: str, cumulative_amount: int, signature: str, state: OnChainChannelState) -> ChannelState
-    def top_up_channel_state(*, current: ChannelState | None, state: OnChainChannelState) -> ChannelState | None
-    MAX_RETAINED_VOUCHERS = 16
-    def retain_vouchers(current: ChannelState, highest_voucher_amount: int, settled_on_chain: int | None = None) -> tuple[RetainedVoucher, ...]
-    def resolve_settleable_voucher(state: ChannelState) -> SignedVoucher | None
-    def accept_voucher_state_update(*, channel_state: OnChainChannelState, current: ChannelState | None, voucher: SignedVoucher, verified_at: int | None = None) -> ChannelState
-    def resolve_close_capture_amount(*, cumulative_amount: int, on_chain_deposit: int, on_chain_settled: int, spent: int) -> int
-    PENDING_CLOSE_VALIDITY_SECONDS = 25
-    PENDING_CLOSE_CLOCK_SKEW_SECONDS = 30
-    def reconcile_expired_pending_close(*, current: ChannelState | None, now: int, state: OnChainChannelState) -> ChannelState | None
-    def mark_pending_close(*, close_requested_at: int, cumulative_amount: int, current: ChannelState | None, on_chain_deposit: int, on_chain_settled: int) -> PendingCloseUpdate
-    def finalize_closed_channel_state(*, capture_amount: int, channel_id: str, cumulative_amount: int, current: ChannelState | None, signature: str) -> ChannelState | None
-    def assert_voucher_amounts(*, channel: ChannelState, channel_state: OnChainChannelState, min_voucher_delta: int, cumulative_amount: int) -> VoucherValidation
-    def plan_voucher_acceptance(*, accepted: ChannelState, charge_amount: int | None = None) -> VoucherAcceptance
-    def insufficient_balance_for_charge(channel: ChannelState, charge_amount: int) -> InsufficientBalanceError
-    def reserved_stream_amount(state: ChannelState) -> int
-    def channel_state_to_json(state: ChannelState) -> dict[str, Any]
-    def channel_state_from_json(value: Mapping[str, Any]) -> ChannelState
-    def encode_channel_state(state: ChannelState) -> str
-    def decode_channel_state(raw: str | bytes | Mapping[str, Any]) -> ChannelState
-    def normalize_channel_id(channel_id: str) -> str
-    class ChannelStore(typing.Protocol)
-        def __init__(self, *args, **kwargs)
-        async def get_channel(self, channel_id: str) -> ChannelState | None
-        async def update_channel(self, channel_id: str, fn: Callable[[ChannelState | None], ChannelState | None]) -> ChannelState | None
-    class StoreChannelStore
-        def __init__(self, store: Store) -> None
-        property atomic: bool
-        async def check_atomic_update(self, channel_id: str) -> None
-        async def get_channel(self, channel_id: str) -> ChannelState | None
-        property store: Store
-        async def update_channel(self, channel_id: str, fn: Callable[[ChannelState | None], ChannelState | None]) -> ChannelState | None
-        async def update_channel_result(self, channel_id: str, fn: Callable[[ChannelState | None], StoreChange[_R]]) -> _R
-        def wait_for_update(self, channel_id: str) -> asyncio.Future[None]
-    def from_store(store: Store) -> StoreChannelStore
-    async def check_atomic_update(store: ChannelStore, channel_id: str) -> None
-    DEFAULT_IDEMPOTENCY_RETENTION = 86400000
-    def assert_idempotency_options(*, idempotency_key: str | None = None, retention: float | None = None) -> None
-    async def deduct_from_channel(store: ChannelStore, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> DeductResult
-    async def credit_channel(store: ChannelStore, channel_id: str, amount: int, *, idempotency_key: str, retention: int | None = None, units: int = 0) -> CreditResult
-
-module mpp.methods.tempo.session.server.verification
-    class CredentialContext
-        @dataclass(frozen=False, slots=False)
-        field kw_only challenge: Challenge
-        field kw_only payload: SessionCredentialPayload
-        field kw_only chain_id: int
-        field kw_only escrow: str
-        field kw_only rpc_url: str
-        field kw_only store: ChannelStore
-        field kw_only account: TempoAccount | None = None
-        field kw_only http_client: httpx.AsyncClient | None = None
-        field kw_only channel_state_ttl: int = 5000
-        field kw_only credential_source: str | None = None
-        field kw_only expected_operator: str | None = None
-        field kw_only fee_payer: TempoAccount | None = None
-        field kw_only fee_payer_policy: Mapping[str, int] | None = None
-        field kw_only fee_token: str | None = None
-        field kw_only last_on_chain_verified: dict[str, int] = <factory dict>
-        field kw_only min_voucher_delta: int = 0
-        field kw_only on_session_settlement: OnSessionSettlement | None = None
-        field kw_only on_session_settlement_failure: OnSessionSettlementFailure | None = None
-        field kw_only require_voucher_advance: bool = False
-        field kw_only allow_pending_close: bool = False
-    class CredentialValidation
+        field kw_only error: BaseException
+        field kw_only trigger: Literal['close', 'scheduled']
+    class SettlementSchedule
         @dataclass(frozen=True, slots=True)
-        field action: str
-        field channel_id: str
-    def assert_credential_source_can_spend(*, chain_id: int, channel: ChannelState, source: str | None) -> None
-    def assert_open_credential_covers_request(*, cumulative_amount: int, open_deposit: int, request_amount: int) -> None
-    def assert_same_descriptor(a: ChannelDescriptor, b: ChannelDescriptor) -> None
-    def authorized_signer(descriptor: ChannelDescriptor) -> str
-    async def broadcast_credential_payload(context: CredentialContext) -> SessionReceipt
-    async def load_precompile_channel(*, store: ChannelStore, channel_id: str, descriptor: ChannelDescriptor, chain_id: int, escrow: str, validate_descriptor: bool = False) -> ChannelState
-    def require_session_credential_payload(payload: Any) -> SessionCredentialPayload
-    def validate_channel_descriptor(descriptor: ChannelDescriptor, channel_id: str, chain_id: int, escrow: str, recipient: str, currency: str, expected_operator: str | None = None) -> None
-    def validate_channel_state(state: OnChainChannelState, amount: int | None = None) -> None
-    async def validate_credential_payload(context: CredentialContext) -> CredentialValidation
-    def validate_voucher(*, channel: ChannelState, channel_state: OnChainChannelState, chain_id: int, escrow: str, min_voucher_delta: int, voucher: SignedVoucher) -> VoucherValidation
-    async def verify_and_accept_voucher(*, store: ChannelStore, challenge_id: str, channel: ChannelState, voucher: SignedVoucher, channel_state: OnChainChannelState, chain_id: int, escrow: str, min_voucher_delta: int, require_advance: bool = False, verified_at: int | None = None) -> SessionReceipt
-
-module mpp.methods.tempo.session.voucher
-    DOMAIN_NAME = 'TIP20 Channel Reserve'
-    DOMAIN_VERSION = '1'
-    VOUCHER_TYPEHASH = b'G0\xb4\xb2\xfe\x8d\xe5"G^\x80\xe0\x10\x87|[X\xad\x10\xeb\x07\xfd\x046a^\xe1#\xf7C\xbb\xe8'
-    CLOSE_AUTHORIZATION_TYPEHASH = b'\x15X\x8a\x02\xd9\xb0h\xecJE\x93\xa3\xd3\xbd\x10h\xf3aNl(\xe0\x13P\x0c\xe5T\x84oKFF'
-    class HashSigner(typing.Protocol)
-        def __init__(self, *args, **kwargs)
-        def sign_hash(self, msg_hash: bytes) -> bytes
-    def get_voucher_domain(escrow: str, chain_id: int) -> dict[str, Any]
-    def domain_separator(escrow: str, chain_id: int) -> bytes
-    def voucher_digest(*, channel_id: str, cumulative_amount: int, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000') -> str
-    def close_authorization_digest(*, channel_id: str, cumulative_amount: int, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000') -> str
-    def sign_voucher(account: Any, *, channel_id: str, cumulative_amount: int, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000') -> str
-    def sign_close_authorization(account: Any, *, channel_id: str, cumulative_amount: int, chain_id: int, escrow: str = '0x4d50500000000000000000000000000000000000') -> str
-    def verify_voucher(escrow: str, chain_id: int, voucher: SignedVoucher, expected_signer: str) -> bool
-    def verify_close_authorization(escrow: str, chain_id: int, authorization: SignedVoucher, expected_signers: Sequence[str]) -> bool
-    def parse_voucher_from_payload(channel_id: str, cumulative_amount: str, signature: str) -> SignedVoucher
+        field kw_only units: int | None = None
+        field kw_only amount: str | int | None = None
+        field kw_only interval_ms: int | None = None
+    async def charge(store: Any, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> ChannelState
+    async def credit(store: Any, channel_id: str, amount: int, *, idempotency_key: str, retention: int | None = None, units: int = 0) -> CreditResult
+    def resolve_settleable_voucher(state: ChannelState) -> SignedVoucher | None
+    def resolve_settlement_schedule(schedule: SettlementSchedule | None, decimals: int) -> ResolvedSettlementSchedule | None
+    def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+    async def settle(store: Any, channel_id: str, *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> str
+    async def settle_batch(store: Any, channel_ids: Iterable[str], *, account: TempoAccount, rpc_url: str, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, candidate_fee_tokens: Sequence[str] | None = None, on_session_settlement: OnSessionSettlement | None = None) -> list[str]
+    async def supervise_closes(*, channel_ids: Iterable[str] | AsyncIterable[str], store: Any, rpc_url: str, account: TempoAccount | None = None, http_client: httpx.AsyncClient | None = None, chain_id: int | None = None, batch_size: int = 50, close_search_margin_blocks: int = 2000, log_block_range: int = 100000, previous_block: int | None = None, settlement_schedule: ResolvedSettlementSchedule | None = None, candidate_fee_tokens: Sequence[str] | None = None, fee_payer: TempoAccount | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None) -> CloseSupervision
 
 module mpp.methods.tempo.sponsor_budget
     def process_store() -> MemoryStore
