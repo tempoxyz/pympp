@@ -45,6 +45,8 @@ async def handle(request: Request) -> Response:
     result = await server.charge(amount="0.50")(request)
     if result.status != 200:
         return result.challenge
+    if result.response is not None:
+        return result.response  # the method handled it, such as a session top-up or close
     return result.with_receipt(Response.json({"data": "..."}))
 ```
 

@@ -138,7 +138,13 @@ class PaymentVerified:
     ``response`` is set when the payment method fully handled the request (its
     ``respond`` hook returned a management response, such as for opening or closing a
     payment channel): it already carries the receipt headers, the route must not run, and
-    :meth:`with_receipt` returns it in place of the route's response.
+    :meth:`with_receipt` returns it in place of the route's response. ``status`` is
+    200 either way (as in mppx), and nothing was charged for such a request, so check
+    ``response`` before producing content::
+
+        if result.response is not None:
+            return result.response
+        return result.with_receipt(Response.json(content()))
     """
 
     credential: Credential

@@ -169,6 +169,8 @@ class Mpp:
         result = await mpp.charge(amount="0.50")(request)
         if result.status != 200:
             return result.challenge
+        if result.response is not None:
+            return result.response
         return result.with_receipt(Response.json({"data": "..."}))
     """
 

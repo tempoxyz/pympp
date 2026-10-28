@@ -10,6 +10,8 @@ Example:
         result = await mpp.charge(amount="0.50")(request)
         if result.status != 200:
             return result.challenge  # 402 with WWW-Authenticate
+        if result.response is not None:
+            return result.response  # handled by the method, such as a session close
         return result.with_receipt(Response.json({"data": "paid content"}))
 """
 
