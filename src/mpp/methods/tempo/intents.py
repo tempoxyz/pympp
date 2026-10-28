@@ -1980,14 +1980,20 @@ class ChargeIntent:
                 )
                 if prior is not None:
                     return prior
-                # Waiting for sponsor budget can take a while, so simulate after it:
-                # the sponsor must not pay gas for a transaction that now reverts.
+                # Simulate before reserving, like mppx, so a transaction that
+                # reverts (such as one from an unfunded key) never holds sponsor
+                # budget that honest charges wait on.
+                await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
+                prior = await self._check_sponsored_validity(
+                    client, raw_tx, broadcast_key, request, challenge_id, realm
+                )
+                if prior is not None:
+                    return prior
                 budget_store, reservation = await self._reserve_sponsor_budget(
                     client, raw_tx, sponsored_fee, request, recovery_expires_at
                 )
-                await self._simulate_before_broadcast(client, simulate_payload, rpc_url)
-                # The store reservation, budget wait and simulation can take a
-                # while: recheck the sponsored window right before submission.
+                # The store reservation and budget wait can take a while:
+                # recheck the sponsored window right before submission.
                 prior = await self._check_sponsored_validity(
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )

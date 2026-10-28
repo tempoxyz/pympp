@@ -4516,7 +4516,7 @@ class TestCosignAsFeePayer:
         assert entry["expiresAt"] == (valid_before + VALID_BEFORE_GRACE) * 1000
 
     @pytest.mark.asyncio
-    async def test_sponsor_budget_wait_precedes_simulation(self):
+    async def test_simulation_precedes_the_sponsor_budget_reservation(self):
         from mpp.methods.tempo import sponsor_budget
 
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
@@ -4540,8 +4540,8 @@ class TestCosignAsFeePayer:
             patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
         ):
             await intent.verify(credential, request)
-        # State can change while waiting for budget: simulate right before the send.
-        assert calls == ["reserve", "simulate"]
+        # Like mppx: a reverting transaction is refused before it holds budget.
+        assert calls == ["simulate", "reserve"]
 
     def test_sponsor_budget_must_be_a_sponsor_budget(self):
         with pytest.raises(TypeError, match="SponsorBudget"):
