@@ -4543,6 +4543,36 @@ class TestCosignAsFeePayer:
         # Like mppx: a reverting transaction is refused before it holds budget.
         assert calls == ["simulate", "reserve"]
 
+    @pytest.mark.asyncio
+    async def test_long_sponsor_budget_wait_is_followed_by_a_fresh_simulation(self):
+        from mpp.methods.tempo import sponsor_budget
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+
+        async def post(url, *, json):
+            return mock_response(200, {"result": receipt})
+
+        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        calls: list[str] = []
+        real_reserve = sponsor_budget.reserve
+        clock = [1000.0]
+
+        async def reserve(*args, **kwargs):
+            calls.append("reserve")
+            clock[0] += 2  # waited two seconds for budget
+            return await real_reserve(*args, **kwargs)
+
+        async def simulate(*args, **kwargs):
+            calls.append("simulate")
+
+        with (
+            patch("mpp.methods.tempo.intents.time.monotonic", side_effect=lambda: clock[0]),
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock(side_effect=simulate)),
+            patch.object(sponsor_budget, "reserve", AsyncMock(side_effect=reserve)),
+        ):
+            await intent.verify(credential, request)
+        assert calls == ["simulate", "reserve", "simulate"]
+
     def test_sponsor_budget_must_be_a_sponsor_budget(self):
         with pytest.raises(TypeError, match="SponsorBudget"):
             ChargeIntent(rpc_url="https://rpc.test", sponsor_budget=True)  # type: ignore[arg-type]
