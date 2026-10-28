@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import secrets
 import time
 import weakref
 from collections.abc import Callable, Mapping
@@ -1133,7 +1134,8 @@ class StoreChannelStore:
 
         Credential handlers call it before broadcasting a transaction whose outcome they
         must then record, so a store that cannot record it fails before any funds move.
-        The probe changes nothing: it deletes ``channel_id`` only while it is absent.
+        The probe writes and then deletes a throwaway key next to the channel's, so it
+        exercises the same write a channel update makes (Redis's ``SET ... KEEPTTL``).
 
         Raises:
             NotImplementedError: The backing store refused ``compare_and_set``.
@@ -1141,10 +1143,14 @@ class StoreChannelStore:
         if not self._cas or self._cas_checked:
             return
         store = cast(CompareAndSetStore, self._store)
+        probe = f"{normalize_channel_id(channel_id)}:cas-probe:{secrets.token_hex(8)}"
         try:
-            await store.compare_and_set(normalize_channel_id(channel_id), None, None)
+            written = await store.compare_and_set(probe, None, "1")
+            removed = written and await store.compare_and_set(probe, "1", None)
         except NotImplementedError as error:
             raise NotImplementedError(_CAS_REFUSED) from error
+        if not (written and removed):
+            raise NotImplementedError(_CAS_REFUSED)
         self._cas_checked = True
 
     async def _update_cas(

@@ -1049,7 +1049,11 @@ async def _estimate_gas(
     sender: str,
     calls: Sequence[tuple[str, str]],
     client: httpx.AsyncClient | None,
+    *,
+    valid_before: int,
+    required: bool = False,
 ) -> int:
+    """Estimated gas plus headroom; ``required`` raises instead of using the default limit."""
     try:
         estimated = int(
             await _rpc(
@@ -1060,6 +1064,8 @@ async def _estimate_gas(
                         "from": sender,
                         "calls": [{"to": to, "value": "0x0", "data": data} for to, data in calls],
                         "nonceKey": hex(EXPIRING_NONCE_KEY),
+                        # Expiring-nonce transactions must carry validBefore to execute.
+                        "validBefore": hex(valid_before),
                     },
                     "latest",
                 ],
@@ -1068,6 +1074,8 @@ async def _estimate_gas(
             16,
         )
     except Exception:
+        if required:
+            raise
         return DEFAULT_GAS_LIMIT
     # Headroom for the expiring-nonce and signature checks the estimate may not price.
     return estimated + estimated // 5 + 25_000
@@ -1085,6 +1093,7 @@ async def _build_signed_transaction(
     valid_before: int | None,
     valid_after: int | None,
     client: httpx.AsyncClient | None,
+    estimate_required: bool = False,
 ) -> tuple[Any, int]:
     """Build and sender-sign an expiring-nonce Tempo transaction; returns (tx, chain_id)."""
     # pytempo ships no type information.
@@ -1105,7 +1114,10 @@ async def _build_signed_transaction(
     if awaiting_fee_payer:
         # Keep sponsored envelopes inside the server's default policy.
         priority_fee = min(gas_price, get_policy(rpc_chain_id).max_priority_fee_per_gas)
-    gas_limit = await _estimate_gas(rpc_url, sender, calls, client)
+    valid_before = valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
+    gas_limit = await _estimate_gas(
+        rpc_url, sender, calls, client, valid_before=valid_before, required=estimate_required
+    )
     tx = TempoTransaction.create(
         chain_id=rpc_chain_id,
         gas_limit=gas_limit,
@@ -1115,7 +1127,7 @@ async def _build_signed_transaction(
         nonce_key=EXPIRING_NONCE_KEY,
         fee_token=fee_token,
         awaiting_fee_payer=awaiting_fee_payer,
-        valid_before=valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS,
+        valid_before=valid_before,
         valid_after=valid_after,
         calls=tuple(Call.create(to=to, value=0, data=data) for to, data in calls),
     )
@@ -1298,6 +1310,8 @@ async def _send_precompile_transaction(
         valid_before=valid_before,
         valid_after=None,
         client=client,
+        # Like viem, a call whose gas estimate fails (it would revert) is never sent.
+        estimate_required=True,
     )
     if sponsored:
         assert fee_payer is not None
