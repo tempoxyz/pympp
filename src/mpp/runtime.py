@@ -5,12 +5,40 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import InvalidChallengeError, PaymentExpiredError
 from mpp.events import CHALLENGE_RECEIVED, CREDENTIAL_CREATED, EventDispatcher
 from mpp.methods import Method as MethodDefinition
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptOutcome:
+    """What became of a credential a transport sent (mppx ``MethodResponse.AttemptOutcome``).
+
+    ``status`` is ``accepted`` (a successful response), ``rejected`` (a failed response,
+    an error, or a replacement challenge) or ``pending`` (an identical challenge again, or
+    a redirect). ``response`` is the response, when there is one; ``challenges`` are the
+    challenges it carried.
+    """
+
+    status: Literal["accepted", "pending", "rejected"]
+    response: Any = None
+    challenges: Sequence[Challenge] = ()
+
+
+@dataclass(slots=True, kw_only=True, eq=False)
+class PaymentAttempt:
+    """Response lifecycle of one credential a transport sends (mppx ``MethodResponse.Attempt``).
+
+    A method sets :attr:`settle` to keep state for the credential until the transport
+    reports its :class:`AttemptOutcome`. While ``settle`` returns ``False`` for a
+    ``pending`` outcome, the transport resends the same credential for an identical
+    challenge instead of creating another.
+    """
+
+    settle: Callable[[AttemptOutcome], Awaitable[bool]] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -27,6 +55,8 @@ class CredentialParams:
     Over HTTP it takes an ``httpx.Request`` and returns the read ``httpx.Response``. Methods
     use it for management requests a credential depends on, such as a session top-up.
     """
+    attempt: PaymentAttempt | None = None
+    """The response lifecycle of this credential, when a transport sends it and reports back."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -98,6 +128,7 @@ class PaymentRuntime:
         event_payload: dict[str, Any] | None = None,
         request: Any = None,
         fetch: Callable[[Any], Awaitable[Any]] | None = None,
+        attempt: PaymentAttempt | None = None,
     ) -> Credential:
         """Create a credential and emit its lifecycle events.
 
@@ -136,7 +167,7 @@ class PaymentRuntime:
             credential = supplied
         else:
             serialized = await method.create_credential(
-                CredentialParams(challenge=challenge, request=request, fetch=fetch)
+                CredentialParams(challenge=challenge, request=request, fetch=fetch, attempt=attempt)
             )
             credential = Credential.from_authorization(serialized)
         await self.events.emit(

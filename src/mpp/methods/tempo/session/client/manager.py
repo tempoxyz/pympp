@@ -8,8 +8,9 @@ topping up when needed), :meth:`~SessionManager.top_up` adds deposit and
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -77,6 +78,18 @@ class PaymentResponse:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.response, name)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FetchUse:
+    """One fetch's channel bookkeeping, for rolling it back (mppx ``ChannelUse``)."""
+
+    previous: ChannelEntry | None
+    previous_spent: int
+    committed: tuple[ChannelEntry | None, int] | None = None
+    """The state once a server snapshot referenced a channel this fetch opened."""
+    challenges_received: int = 0
+    created: list[ChannelEntry] = field(default_factory=list[ChannelEntry])
 
 
 def _is_hash(value: str | None) -> bool:
@@ -151,6 +164,9 @@ class SessionManager:
             rpc_url=rpc_url,
             http_client=http_client,
         )
+        # The manager keeps its own transaction boundary (mppx unregisters the
+        # response hook): opens are stored at once and rolled back on failure.
+        self._method._defer_opens = False  # pyright: ignore[reportPrivateUsage]
         self._decimals = decimals
         self._max_voucher_cumulative = self._method.max_deposit
         self._inner = transport if transport is not None else httpx.AsyncHTTPTransport()
@@ -164,8 +180,7 @@ class SessionManager:
         self._last_challenge: Challenge | None = None
         self._last_url: httpx.URL | None = None
         self._last_authorization: str | None = None
-        self._in_flight = False
-        self._created: list[ChannelEntry] | None = None
+        self._use: _FetchUse | None = None
         self._uncertain_funding: Exception | None = None
 
     # ── state ──────────────────────────────────────────────────────
@@ -208,14 +223,42 @@ class SessionManager:
     def _on_channel_update(self, entry: ChannelEntry) -> None:
         if self._channel is None or entry.channel_id != self._channel.channel_id:
             self._spent = 0
-            if self._created is not None and entry.opened:
-                self._created.append(entry)
+            if self._use is not None and entry.opened:
+                self._use.created.append(entry)
         self._channel = entry
 
-    def _on_challenge_received(self, payload: Any) -> None:
+    def _commit_referenced_channel(self, challenge: Challenge) -> bool:
+        """Keep a channel this fetch opened once a server snapshot references it."""
+        use, channel = self._use, self._channel
+        details = challenge.request.get("methodDetails")
+        snapshot = details.get("sessionSnapshot") if is_dict(details) else None
+        channel_id = snapshot.get("channelId") if is_dict(snapshot) else None
+        if not isinstance(channel_id, str) or use is None or not use.created or channel is None:
+            return False
+        for entry in use.created:
+            if entry.channel_id.lower() == channel_id.lower() == channel.channel_id.lower():
+                use.created.remove(entry)
+                use.committed = (channel.copy(), self._spent)
+                return True
+        return False
+
+    async def _on_challenge_received(self, payload: Any) -> None:
         challenge: object = payload.get("challenge") if is_dict(payload) else None
-        if isinstance(challenge, Challenge) and is_tip1034_session_challenge(challenge):
-            self._last_challenge = challenge
+        if not isinstance(challenge, Challenge) or not is_tip1034_session_challenge(challenge):
+            return
+        use, last = self._use, self._last_challenge
+        if use is not None:
+            # A replacement challenge on a paid retry: undo what the rejected credential
+            # changed before signing again (mppx SessionManager onChallenge).
+            retry = use.challenges_received > 0
+            use.challenges_received += 1
+            repeated = retry and last is not None and challenge.id == last.id
+            if repeated and challenge == last:
+                return
+            if retry and not self._commit_referenced_channel(challenge):
+                if use.created or repeated:
+                    await self._rollback()
+        self._last_challenge = challenge
 
     def _apply_receipt(self, receipt: SessionReceipt | None) -> None:
         channel = self._channel
@@ -225,6 +268,9 @@ class SessionManager:
         spent = int(receipt.spent)
         if spent > accepted:
             raise ValueError("session receipt spent exceeds accepted cumulative amount")
+        # A receipt may not raise the local signing boundary (mppx assertReceiptWithinLocalState).
+        if accepted > channel.cumulative_amount:
+            raise ValueError("receipt accepted cumulative exceeds local voucher state")
         assert_voucher_within_local_limit(accepted, self._max_voucher_cumulative)
         assert_voucher_within_local_limit(spent, self._max_voucher_cumulative)
         self._spent = max(self._spent, spent)
@@ -248,9 +294,15 @@ class SessionManager:
             cumulative=self.cumulative,
         )
 
-    async def _rollback(self, previous: ChannelEntry | None, previous_spent: int) -> None:
+    async def _rollback(self) -> None:
         """Undo a failed request: drop channels it created, restore the voucher boundary."""
-        created = self._created or []
+        use = self._use
+        if use is None:
+            return
+        previous, previous_spent = (
+            use.committed if use.committed is not None else (use.previous, use.previous_spent)
+        )
+        created = use.created
         if created:
             for entry in created:
                 if entry.uncertain_top_up:
@@ -284,17 +336,16 @@ class SessionManager:
         Keyword arguments go to ``httpx.AsyncClient.request``. Adds a
         ``Payment-Session`` header naming the open channel, as mppx does.
         """
-        if self._in_flight:
+        if self._use is not None:
             raise RuntimeError(
                 "SessionManager: a request is already in flight; concurrent requests on one "
                 "manager are not supported"
             )
         if self._uncertain_funding is not None:
             raise self._uncertain_funding
-        self._in_flight = True
-        previous = self._channel.copy() if self._channel else None
-        previous_spent = self._spent
-        self._created = []
+        self._use = _FetchUse(
+            previous=self._channel.copy() if self._channel else None, previous_spent=self._spent
+        )
         try:
             headers = httpx.Headers(kwargs.pop("headers", None))
             self._last_url = httpx.URL(url)
@@ -306,12 +357,15 @@ class SessionManager:
             except UncertainFundingError as error:
                 self._uncertain_funding = error
                 raise
+            except asyncio.CancelledError:
+                await self._note_cancelled_funding()
+                raise
             except Exception:
-                await self._rollback(previous, previous_spent)
+                await self._rollback()
                 raise
             result = self._response(response)
             if not response.is_success and result.receipt is None:
-                await self._rollback(previous, previous_spent)
+                await self._rollback()
                 result = PaymentResponse(
                     response=response,
                     receipt=None,
@@ -321,8 +375,18 @@ class SessionManager:
                 )
             return result
         finally:
-            self._created = None
-            self._in_flight = False
+            self._use = None
+
+    async def _note_cancelled_funding(self) -> None:
+        """Block funding when a cancelled top-up left its outcome unknown."""
+        channel = self._channel
+        if channel is None or self._uncertain_funding is not None:
+            return
+        stored = await store_get(self._store, entry_key(channel))
+        if stored is not None and stored.uncertain_top_up:
+            self._uncertain_funding = UncertainFundingError(
+                "Session top-up was cancelled; its payment outcome is unknown."
+            )
 
     async def top_up(self, amount: str | int) -> SessionReceipt | None:
         """Add deposit to the open channel.
@@ -370,6 +434,9 @@ class SessionManager:
                 )
             except UncertainFundingError as error:
                 self._uncertain_funding = error
+                raise
+            except asyncio.CancelledError:
+                await self._note_cancelled_funding()
                 raise
             self._apply_receipt(receipt)
             latest = self._channel if self._channel is not None else target

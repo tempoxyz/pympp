@@ -199,16 +199,48 @@ async def store_delete(store: ChannelStore, key: str) -> None:
 # In-process coordination
 # ──────────────────────────────────────────────────────────────────
 
-_locks: weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
-_funding_stores: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+
+class _StoreMap:
+    """Values per store object, by identity (mppx's ``WeakMap<ChannelStore, ...>``).
+
+    Stores need not be hashable or weak-referenceable; such stores are held strongly.
+    """
+
+    def __init__(self) -> None:
+        self._items: dict[int, tuple[Callable[[], object], Any]] = {}
+
+    def get(self, store: object) -> Any:
+        item = self._items.get(id(store))
+        return item[1] if item is not None and item[0]() is store else None
+
+    def set(self, store: object, value: Any) -> None:
+        key = id(store)
+
+        def forget(ref: object) -> None:
+            item = self._items.get(key)
+            if item is not None and item[0] is ref:
+                del self._items[key]
+
+        try:
+            ref: Callable[[], object] = weakref.ref(store, forget)
+        except TypeError:
+
+            def ref() -> object:
+                return store
+
+        self._items[key] = (ref, value)
+
+
+_locks = _StoreMap()
+_funding_stores = _StoreMap()
 
 
 def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
     """The in-process lock for ``key`` on ``store``, created on first use."""
-    locks = _locks.get(store)
+    locks: dict[str, asyncio.Lock] | None = _locks.get(store)
     if locks is None:
         locks = {}
-        _locks[store] = locks
+        _locks.set(store, locks)
     lock = locks.get(key)
     if lock is None:
         lock = asyncio.Lock()
@@ -218,14 +250,16 @@ def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
 
 def register_funding_store(view: ChannelStore, backing: ChannelStore) -> None:
     """Share funding coordination between a manager's store view and its backing store."""
-    _funding_stores[view] = _funding_stores.get(backing, backing)
+    shared = _funding_stores.get(backing)
+    _funding_stores.set(view, backing if shared is None else shared)
 
 
 async def with_funding_lock(
     store: ChannelStore, key: str, operation: Callable[[], Awaitable[T]]
 ) -> T:
     """Serialize funding decisions for callers sharing one backing store in this process."""
-    async with store_lock(_funding_stores.get(store, store), f"funding:{key}"):
+    shared = _funding_stores.get(store)
+    async with store_lock(store if shared is None else shared, f"funding:{key}"):
         return await operation()
 
 

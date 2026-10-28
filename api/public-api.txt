@@ -1089,7 +1089,7 @@ module mpp.methods.tempo.session.client.session
     def session_challenges(response: httpx.Response) -> list[Challenge]
     def read_receipt(response: httpx.Response) -> SessionReceipt | None
     CreateSessionCredential = collections.abc.Callable[[mpp.Challenge, mpp.methods.tempo.session.client.state.SessionContext], collections.abc.Awaitable[str]]
-    async def post_management_credential(*, challenge: Challenge, context: SessionContext, create_session_credential: CreateSessionCredential, send: Send, url: str | httpx.URL, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None) -> httpx.Response
+    async def post_management_credential(*, challenge: Challenge, context: SessionContext, create_session_credential: CreateSessionCredential, send: Send, url: str | httpx.URL, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None, on_cancelled_top_up: Callable[[], Awaitable[None]] | None = None) -> httpx.Response
     class SessionMethod
         def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None) -> None
         def can_handle_challenge(self, challenge: Challenge) -> bool
@@ -1768,12 +1768,21 @@ module mpp.methods.tempo.sponsor_budget
     async def reserve(store: CompareAndSetStore, budget: SponsorBudget, *, chain_id: int, sponsor: str, transaction_hash: str, fee: int, expires_at: int, wait_until: int, is_settled: IsSettled) -> Reservation
 
 module mpp.runtime
+    class AttemptOutcome
+        @dataclass(frozen=True, slots=True)
+        field kw_only status: Literal['accepted', 'pending', 'rejected']
+        field kw_only response: Any = None
+        field kw_only challenges: Sequence[Challenge] = ()
+    class PaymentAttempt
+        @dataclass(frozen=False, slots=True)
+        field kw_only settle: Callable[[AttemptOutcome], Awaitable[bool]] | None = None
     class CredentialParams
         @dataclass(frozen=True, slots=True)
         field kw_only challenge: Challenge
         field kw_only context: Any = None
         field kw_only request: Any = None
         field kw_only fetch: Callable[[Any], Awaitable[Any]] | None = None
+        field kw_only attempt: PaymentAttempt | None = None
     class ClientMethod
         @dataclass(frozen=True, slots=True)
         field kw_only method: MethodDefinition[Any, Any]
@@ -1785,7 +1794,7 @@ module mpp.runtime
         property name: str
     class PaymentRuntime
         def __init__(self, methods: Sequence[ClientMethod | Sequence[ClientMethod]] = (), *, events: EventDispatcher | None = None) -> None
-        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None) -> Credential
+        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None) -> Credential
         def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
 
 module mpp.server

@@ -20,7 +20,10 @@ from mpp.methods.tempo.session.client import (
     UncertainFundingError,
     create_channel_store,
 )
-from mpp.methods.tempo.session.client.manager import is_expected_close_receipt
+from mpp.methods.tempo.session.client.manager import (
+    _FetchUse,  # pyright: ignore[reportPrivateUsage]
+    is_expected_close_receipt,
+)
 from mpp.methods.tempo.session.protocol import (
     ChannelDescriptor,
     create_session_receipt,
@@ -174,11 +177,11 @@ class TestState:
     async def test_only_session_challenges_are_remembered(self) -> None:
         async with manager_for(FakeSessionServer().handler) as manager:
             observe = manager._on_challenge_received  # pyright: ignore[reportPrivateUsage]
-            observe({"challenge": make_challenge(protocol="v1")})
-            observe("not a payload")
+            await observe({"challenge": make_challenge(protocol="v1")})
+            await observe("not a payload")
             assert manager.last_challenge is None
             session_challenge = make_challenge()
-            observe({"challenge": session_challenge})
+            await observe({"challenge": session_challenge})
             assert manager.last_challenge is session_challenge
 
     async def test_receipts_for_other_channels_are_ignored(
@@ -210,20 +213,24 @@ class TestState:
             with pytest.raises(ValueError, match="spent exceeds accepted"):
                 await manager.fetch(URL)
 
-    async def test_receipt_beyond_local_max_is_rejected(
-        self, fake_chain: dict[str, list[Any]]
+    @pytest.mark.parametrize("max_deposit", [None, "1"])
+    async def test_receipt_beyond_local_voucher_state_is_rejected(
+        self, fake_chain: dict[str, list[Any]], max_deposit: str | None
     ) -> None:
+        # mppx assertReceiptWithinLocalState: a receipt never raises the signing boundary,
+        # even below max_deposit.
         def handler(request: httpx.Request) -> httpx.Response:
             if "authorization" not in request.headers:
                 return challenge_response(make_challenge())
             channel_id = payload_of(request.headers["authorization"])["channelId"]
             return httpx.Response(
-                200, headers=receipt_header(channel_id=channel_id, accepted=5000, spent=0)
+                200, headers=receipt_header(channel_id=channel_id, accepted=5000, spent=5000)
             )
 
-        async with manager_for(handler, max_deposit="0.001") as manager:
-            with pytest.raises(ValueError, match="exceeds local maxDeposit"):
+        async with manager_for(handler, max_deposit=max_deposit) as manager:
+            with pytest.raises(ValueError, match="exceeds local voucher state"):
                 await manager.fetch(URL)
+            assert manager.spent == 0
 
 
 # ── rollback ──────────────────────────────────────────────────────
@@ -284,9 +291,11 @@ class TestRollback:
         async with manager_for(FakeSessionServer().handler) as manager:
             entry = entry_for()
             entry.uncertain_top_up = True
-            manager._created = [entry]  # pyright: ignore[reportPrivateUsage]
+            manager._use = _FetchUse(  # pyright: ignore[reportPrivateUsage]
+                previous=None, previous_spent=0, created=[entry]
+            )
             with pytest.raises(UncertainFundingError, match="before discarding"):
-                await manager._rollback(None, 0)  # pyright: ignore[reportPrivateUsage]
+                await manager._rollback()  # pyright: ignore[reportPrivateUsage]
 
 
 # ── top-up ────────────────────────────────────────────────────────

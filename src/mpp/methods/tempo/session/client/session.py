@@ -9,7 +9,6 @@ up first when it cannot cover the next voucher.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
@@ -17,6 +16,7 @@ import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge
 from mpp._parsing import ParseError
+from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.session.client.ops import serialize_credential
 from mpp.methods.tempo.session.client.state import (
@@ -29,6 +29,7 @@ from mpp.methods.tempo.session.client.state import (
     execute_credential_plan,
     is_tip1034_session_challenge,
     plan_credential,
+    read_session_snapshot,
     resolve_automatic_top_up,
     resolve_challenge_context,
 )
@@ -38,6 +39,7 @@ from mpp.methods.tempo.session.client.store import (
     UncertainFundingError,
     create_channel_store,
     entry_key,
+    maybe_await,
     persist_channel,
     store_get,
     store_lock,
@@ -51,7 +53,7 @@ from mpp.methods.tempo.session.protocol import (
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
-    from mpp.runtime import ClientMethod, CredentialParams
+    from mpp.runtime import AttemptOutcome, ClientMethod, CredentialParams
 
 Send = Callable[[httpx.Request], Awaitable[httpx.Response]]
 """Sends a management request without payment handling and returns the read response."""
@@ -123,11 +125,14 @@ async def post_management_credential(
     url: str | httpx.URL,
     authorization: str | None = None,
     on_challenge: Callable[[Challenge], None] | None = None,
+    on_cancelled_top_up: Callable[[], Awaitable[None]] | None = None,
 ) -> httpx.Response:
     """POST a management credential (top-up or close), retrying once on a fresh challenge.
 
     A top-up whose request fails is reported as :class:`UncertainFundingError`,
-    since the server may have broadcast its transaction.
+    since the server may have broadcast its transaction. A top-up cancelled while
+    its request is in flight calls ``on_cancelled_top_up`` before the cancellation
+    propagates.
     """
     target = management_url(url)
 
@@ -138,6 +143,11 @@ async def post_management_credential(
         )
         try:
             return await asyncio.wait_for(send(request), MANAGEMENT_TIMEOUT)
+        except asyncio.CancelledError:
+            # Like mppx's aborted request: the server may still broadcast the deposit.
+            if context.action == "topUp" and on_cancelled_top_up is not None:
+                await on_cancelled_top_up()
+            raise
         except Exception as error:
             if context.action == "topUp":
                 raise UncertainFundingError(
@@ -194,6 +204,8 @@ class SessionMethod:
         self.rpc_url = rpc_url
         self.http_client = http_client
         self.sink = ChannelSink(store=self.store, notify_update=self._notify)
+        # SessionManager keeps its own transaction boundary and turns this off.
+        self._defer_opens = True
         self._rpc_chain_id: int | None = None
 
     def _notify(self, entry: ChannelEntry) -> None:
@@ -241,6 +253,10 @@ class SessionMethod:
         requests sign strictly increasing cumulative vouchers. When the request
         and an auxiliary sender are known, a deposit that cannot cover the next
         voucher is topped up first.
+
+        When a transport reports the credential's outcome (``params.attempt``), a
+        new channel is stored only once the server accepts or acknowledges its
+        open, and the scope stays locked until then (mppx Session.ts).
         """
         challenge = params.challenge
         context = params.context
@@ -248,20 +264,67 @@ class SessionMethod:
             raise TypeError("tempo session context must be a SessionContext")
         resolved = await self.resolve(challenge)
         automatic = context is None or (context.action is None and context.descriptor is None)
-        async with contextlib.AsyncExitStack() as stack:
-            lock = store_lock(self.store, f"channel:{resolved.key}")
+        lock = store_lock(self.store, f"channel:{resolved.key}")
+        held = False
+        try:
             if automatic:
-                await stack.enter_async_context(lock)
+                await lock.acquire()
+                held = True
                 await self._top_up_before_voucher(resolved, params)
             entry = await store_get(self.store, resolved.key)
             plan = self._plan(resolved, context, entry)
             if not automatic and plan.type == "open":
-                await stack.enter_async_context(lock)
+                await lock.acquire()
+                held = True
                 next_entry = await store_get(self.store, resolved.key)
                 if next_entry is not entry:
                     plan = self._plan(resolved, context, next_entry)
-            payload = await execute_credential_plan(plan, self.sink, client=self.http_client)
-            return serialize_credential(challenge, payload, resolved.chain_id, plan.account)
+            attempt = params.attempt
+            pending: list[ChannelEntry] = []
+            sink = self.sink
+            if attempt is not None and self._defer_opens and plan.type == "open":
+                sink = ChannelSink(
+                    store=_PendingOpenStore(self.store, pending), notify_update=_ignore
+                )
+            payload = await execute_credential_plan(plan, sink, client=self.http_client)
+            credential = serialize_credential(challenge, payload, resolved.chain_id, plan.account)
+            if attempt is not None:
+                if pending:
+                    attempt.settle = self._settle_open(challenge, resolved.key, pending[0], lock)
+                    held = False
+                else:
+                    attempt.settle = _settle_stateless
+            return credential
+        finally:
+            if held:
+                lock.release()
+
+    def _settle_open(
+        self, challenge: Challenge, key: str, opened: ChannelEntry, lock: asyncio.Lock
+    ) -> Callable[[AttemptOutcome], Awaitable[bool]]:
+        """Store a deferred open once the server accepts or acknowledges it."""
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            accepted = outcome.status == "accepted" or _acknowledges_open(
+                outcome, challenge, opened
+            )
+            if not accepted and outcome.status == "pending":
+                return False
+            try:
+                if accepted:
+                    current = await store_get(self.store, key)
+                    if (
+                        current is None
+                        or not current.opened
+                        or current.channel_id.lower() != opened.channel_id.lower()
+                    ):
+                        await persist_channel(self.store, opened)
+                        self._notify(opened)
+                return True
+            finally:
+                lock.release()
+
+        return settle
 
     def _plan(
         self,
@@ -395,6 +458,18 @@ class SessionMethod:
                 "Session funding outcome is unknown; reconcile the pending payment before "
                 "another top-up."
             )
+
+        async def mark_uncertain() -> None:
+            current = await store_get(self.store, entry_key(channel))
+            base = (
+                current
+                if current is not None and current.channel_id == channel.channel_id
+                else channel
+            )
+            unresolved = base.copy(uncertain_top_up=True)
+            await persist_channel(self.store, unresolved)
+            self._notify(unresolved)
+
         try:
             response = await post_management_credential(
                 challenge=challenge,
@@ -409,17 +484,10 @@ class SessionMethod:
                 url=url,
                 authorization=authorization,
                 on_challenge=on_challenge,
+                on_cancelled_top_up=mark_uncertain,
             )
         except UncertainFundingError:
-            current = await store_get(self.store, entry_key(channel))
-            base = (
-                current
-                if current is not None and current.channel_id == channel.channel_id
-                else channel
-            )
-            unresolved = base.copy(uncertain_top_up=True)
-            await persist_channel(self.store, unresolved)
-            self._notify(unresolved)
+            await mark_uncertain()
             raise
         if not response.is_success:
             raise RuntimeError(f"Top-up POST failed with status {response.status_code}")
@@ -434,6 +502,67 @@ class SessionMethod:
             create_credential=self.create_credential,
             can_handle_challenge=self.can_handle_challenge,
         )
+
+
+def _ignore(_: ChannelEntry) -> None:
+    """Drop update notifications for an open that is not stored yet."""
+
+
+async def _settle_stateless(outcome: AttemptOutcome) -> bool:
+    """Settle a credential that keeps no state (mppx ``settleAttempt`` without ``settle``)."""
+    return outcome.status != "pending"
+
+
+class _PendingOpenStore:
+    """A store view that holds back the open it is asked to persist."""
+
+    def __init__(self, store: ChannelStore, pending: list[ChannelEntry]) -> None:
+        self._store = store
+        self._pending = pending
+
+    async def get(self, key: str) -> ChannelEntry | None:
+        return await store_get(self._store, key)
+
+    def set(self, entry: ChannelEntry) -> None:
+        self._pending.append(entry)
+
+    async def delete(self, key: str) -> None:
+        await maybe_await(self._store.delete(key))
+
+
+def _matches_open(opened: ChannelEntry, channel_id: str, accepted_cumulative: str | int) -> bool:
+    try:
+        accepted = int(accepted_cumulative)
+    except ValueError:
+        return False
+    return channel_id.lower() == opened.channel_id.lower() and accepted == opened.cumulative_amount
+
+
+def _acknowledges_open(outcome: AttemptOutcome, challenge: Challenge, opened: ChannelEntry) -> bool:
+    """Whether the server acknowledged an open (mppx ``acknowledgesOpen``).
+
+    A receipt must match the open's challenge, channel and cumulative amount; a
+    replacement challenge may acknowledge the same channel and amount in its
+    session snapshot.
+    """
+    response = outcome.response
+    receipt = read_receipt(response) if isinstance(response, httpx.Response) else None
+    if (
+        receipt is not None
+        and receipt.challenge_id == challenge.id
+        and _matches_open(opened, receipt.channel_id, receipt.accepted_cumulative)
+    ):
+        return True
+    for candidate in outcome.challenges:
+        if not is_tip1034_session_challenge(candidate):
+            continue
+        details = candidate.request.get("methodDetails")
+        snapshot = read_session_snapshot(details) if is_dict(details) else None
+        if snapshot is not None and _matches_open(
+            opened, snapshot.channel_id, snapshot.accepted_cumulative
+        ):
+            return True
+    return False
 
 
 def session(
