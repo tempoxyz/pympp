@@ -1085,6 +1085,8 @@ class StoreChannelStore:
         self._store = store
         self._cas = isinstance(store, CompareAndSetStore)
         self._cas_checked = False
+        self._cas_probe_lock = asyncio.Lock()
+        self._cas_probe_key = f"{_CAS_PROBE_KEY}:{secrets.token_hex(8)}"
         self._locks: dict[str, asyncio.Lock] = {}
         self._waiters: dict[str, set[asyncio.Future[None]]] = {}
 
@@ -1146,27 +1148,24 @@ class StoreChannelStore:
         """
         if not self._cas or self._cas_checked:
             return
-        store = cast(CompareAndSetStore, self._store)
-        token = secrets.token_hex(8)
-        try:
-            # One fixed key per store, so a probe that cannot be cleaned up leaves one key
-            # behind rather than one per attempt.
-            written = False
-            for _ in range(3):
-                raw = await store.get(_CAS_PROBE_KEY)
-                if await self._compare_and_set_raw(_CAS_PROBE_KEY, raw, token):
-                    written = True
-                    break
-        except NotImplementedError as error:
-            raise NotImplementedError(_CAS_REFUSED) from error
-        if not written:
-            raise NotImplementedError(_CAS_REFUSED)
-        # The write path is what channel updates need; removing the probe is best effort.
-        with contextlib.suppress(Exception):
-            raw = await store.get(_CAS_PROBE_KEY)
-            if raw is not None:
-                await self._compare_and_set_raw(_CAS_PROBE_KEY, raw, None)
-        self._cas_checked = True
+        async with self._cas_probe_lock:
+            if self._cas_checked:
+                return
+            store = cast(CompareAndSetStore, self._store)
+            try:
+                # The adapter's own key: no other prober races it, so a False write is a
+                # refusal, and a probe that cannot be cleaned up leaves one key per adapter.
+                written = await store.compare_and_set(self._cas_probe_key, None, "1")
+            except NotImplementedError as error:
+                raise NotImplementedError(_CAS_REFUSED) from error
+            if not written:
+                raise NotImplementedError(_CAS_REFUSED)
+            # The write path is what channel updates need; removing the probe is best effort.
+            with contextlib.suppress(Exception):
+                raw = await store.get(self._cas_probe_key)
+                if raw is not None:
+                    await self._compare_and_set_raw(self._cas_probe_key, raw, None)
+            self._cas_checked = True
 
     async def _compare_and_set_raw(self, key: str, raw: Any | None, value: str | None) -> bool:
         """compare_and_set against a value read back, as bytes or as the text it holds."""
