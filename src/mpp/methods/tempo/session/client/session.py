@@ -265,17 +265,19 @@ class SessionMethod:
         resolved = await self.resolve(challenge)
         automatic = context is None or (context.action is None and context.descriptor is None)
         scope = f"channel:{resolved.key}"
-        lock = store_lock(self.store, scope)
+        # Fetched only right before acquiring it, so every lock in the map is released
+        # (and pruned) again; a manual non-open credential never takes one.
+        lock: asyncio.Lock | None = None
         held = False
         try:
             if automatic:
+                lock = store_lock(self.store, scope)
                 await lock.acquire()
                 held = True
                 await self._top_up_before_voucher(resolved, params)
             entry = await store_get(self.store, resolved.key)
             plan = self._plan(resolved, context, entry)
             if not automatic and plan.type == "open":
-                # Fetched again: an unacquired lock may have been dropped meanwhile.
                 lock = store_lock(self.store, scope)
                 await lock.acquire()
                 held = True
@@ -293,13 +295,15 @@ class SessionMethod:
             credential = serialize_credential(challenge, payload, resolved.chain_id, plan.account)
             if attempt is not None:
                 if pending:
+                    # Only open plans defer, and they always hold the scope lock.
+                    assert lock is not None
                     attempt.settle = self._settle_open(challenge, resolved.key, pending[0], lock)
                     held = False
                 else:
                     attempt.settle = _settle_stateless
             return credential
         finally:
-            if held:
+            if held and lock is not None:
                 lock.release()
 
     def _settle_open(

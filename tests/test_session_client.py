@@ -559,6 +559,10 @@ class TestSessionMethod:
         )
         assert close["action"] == "close" and close["closeSignature"].startswith("0x")
         assert not updates[-1].opened
+        # Neither the automatic open nor the manual close leaves a scope lock behind.
+        from mpp.methods.tempo.session.client import store as client_store
+
+        assert not client_store._locks.get(store)  # pyright: ignore[reportPrivateUsage]
         assert (
             store.get(
                 channel_key(payee=PAYEE, token=TOKEN, escrow=ESCROW_ADDRESS, chain_id=CHAIN_ID)
