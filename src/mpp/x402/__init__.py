@@ -6,6 +6,9 @@ endpoint, as mppx does. Unpaid responses carry ``PAYMENT-REQUIRED`` next to
 ``WWW-Authenticate``, x402 clients pay with ``PAYMENT-SIGNATURE``, and paid
 x402 responses carry ``PAYMENT-RESPONSE``.
 
+To add MPP to routes the official x402 FastAPI middleware already protects, use
+``mpp.x402.fastapi.payment_middleware`` (``x402`` extra).
+
 Example:
     from mpp.methods.evm import BASE_USDC
     from mpp.methods.evm import server as evm

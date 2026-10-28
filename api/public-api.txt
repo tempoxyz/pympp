@@ -133,6 +133,38 @@ module mpp.client.transport
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_response(self, handler: EventHandler) -> Unsubscribe
 
+module mpp.discovery
+    class HandlerRoute
+        @dataclass(frozen=True, slots=True)
+        field kw_only method: str
+        field kw_only path: str
+        field kw_only handler: ComposedHandler
+        field kw_only request_body: Mapping[str, Any] | None = None
+        field kw_only summary: str | None = None
+    class IntentRoute
+        @dataclass(frozen=True, slots=True)
+        field kw_only method: str
+        field kw_only path: str
+        field kw_only intent: str
+        field kw_only options: Mapping[str, Any] = <factory dict>
+        field kw_only request_body: Mapping[str, Any] | None = None
+        field kw_only summary: str | None = None
+    class ProxyRoute
+        @dataclass(frozen=True, slots=True)
+        field kw_only method: str
+        field kw_only path: str
+        field kw_only payment: Mapping[str, Any] | None = None
+        field kw_only request_body: Mapping[str, Any] | None = None
+        field kw_only summary: str | None = None
+    class ValidationIssue
+        @dataclass(frozen=True, slots=True)
+        field kw_only message: str
+        field kw_only path: str
+        field kw_only severity: Literal['error', 'warning']
+    def generate(mpp: Mpp, routes: Iterable[HandlerRoute | IntentRoute], *, title: str | None = None, version: str | None = None, service_info: Mapping[str, Any] | None = None) -> dict[str, Any]
+    def generate_proxy(routes: Iterable[ProxyRoute], *, base_path: str | None = None, title: str | None = None, version: str | None = None, service_info: Mapping[str, Any] | None = None) -> dict[str, Any]
+    def validate(document: Any) -> list[ValidationIssue]
+
 module mpp.errors
     class Hints
         malformed_credential = 'Use a supported wallet to construct valid credentials for one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'
@@ -513,6 +545,8 @@ module mpp.methods.evm.server
 
 module mpp.methods.stripe
     StripeMethod -> mpp.methods.stripe.client.StripeMethod
+    ConnectSettlement -> mpp.methods.stripe.connect.ConnectSettlement
+    TransferData -> mpp.methods.stripe.connect.TransferData
     ChargeIntent -> mpp.methods.stripe.intents.ChargeIntent
     DepositAddresses -> mpp.methods.stripe.machine_payments.DepositAddresses
     MachinePayments -> mpp.methods.stripe.machine_payments.MachinePayments
@@ -550,31 +584,50 @@ module mpp.methods.stripe.client
         async def create_credential(self, challenge: Challenge) -> Credential
     def charge(*, create_token: CreateTokenFn, payment_method: str, external_id: str | None = None) -> ClientMethod
 
+module mpp.methods.stripe.connect
+    class TransferData
+        @dataclass(frozen=True, slots=False)
+        field kw_only destination: str
+        field kw_only amount: int | None = None
+    class ConnectSettlement
+        @dataclass(frozen=True, slots=False)
+        field kw_only stripe_account: str | None = None
+        field kw_only application_fee_amount: int | None = None
+        field kw_only on_behalf_of: str | None = None
+        field kw_only transfer_data: TransferData | None = None
+        field kw_only transfer_group: str | None = None
+        def params(self) -> dict[str, Any]
+    ResolveConnect = collections.abc.Callable[[mpp.methods.stripe.payment_intent_options.PaymentIntentContext], mpp.methods.stripe.connect.ConnectSettlement | None | collections.abc.Awaitable[mpp.methods.stripe.connect.ConnectSettlement | None]]
+    ConnectInput = mpp.methods.stripe.connect.ConnectSettlement | collections.abc.Callable[[mpp.methods.stripe.payment_intent_options.PaymentIntentContext], mpp.methods.stripe.connect.ConnectSettlement | None | collections.abc.Awaitable[mpp.methods.stripe.connect.ConnectSettlement | None]] | None
+    async def resolve_settlement(value: ConnectInput, credential: Credential, request: dict[str, Any]) -> ConnectSettlement | None
+    def validate_settlement(value: ConnectSettlement, amount: int) -> ConnectSettlement
+
 module mpp.methods.stripe.crypto_payment_recorder
     logger: logging.Logger
-    async def record_crypto_payment(*, client: Any, network: str, metadata: dict[str, str] | None, credential: Credential | None, request: dict[str, Any], receipt: Receipt, payment_intent_options: dict[str, Any] | None = None, resolved_metadata: dict[str, str] | None = None) -> None
+    def recorded_cents(network: str, request: dict[str, Any]) -> int
+    async def record_crypto_payment(*, client: Any, network: str, metadata: dict[str, str] | None, credential: Credential | None, request: dict[str, Any], receipt: Receipt, payment_intent_options: dict[str, Any] | None = None, resolved_metadata: dict[str, str] | None = None, connect: ConnectSettlement | None = None) -> None
 
 module mpp.methods.stripe.intents
     class ChargeIntent
         def __init__(self, client: Any | None = None, secret_key: str | None = None, http_client: Any | None = None, timeout: float = 30.0) -> None
         async def aclose(self) -> None
         name = 'charge'
-        async def verify(self, credential: Credential, request: dict[str, Any], payment_intent_options: PaymentIntentInput = None) -> Receipt
+        async def verify(self, credential: Credential, request: dict[str, Any], payment_intent_options: PaymentIntentInput = None, connect: ConnectInput = None) -> Receipt
 
 module mpp.methods.stripe.machine_payments
     class DepositAddresses(TypedDict)
         optional keys: tempo
         tempo: str
     class SptPayments
-        def __init__(self, network_id: str, client: StripeClient, metadata: dict[str, str] | None) -> None
+        def __init__(self, network_id: str, client: StripeClient, metadata: dict[str, str] | None, connect: ConnectSettlement | None = None) -> None
         def charge(self) -> ServerMethod
     class TempoPayments
-        def __init__(self, livemode: bool, client: StripeClient, recipient: str | None, metadata: dict[str, str] | None, store: Store) -> None
+        def __init__(self, livemode: bool, client: StripeClient, recipient: str | None, metadata: dict[str, str] | None, store: Store, connect: ConnectSettlement | None = None) -> None
         def charge(self) -> ServerMethod
     class MachinePayments
-        def __init__(self, *, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None) -> None
+        def __init__(self, *, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None, connect: ConnectSettlement | None = None) -> None
         def default_methods(self) -> list[ServerMethod]
-    def create(*, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None) -> MachinePayments
+    def create(*, network_id: str, livemode: bool, client: StripeClient, store: Store, deposit_addresses: DepositAddresses | None = None, metadata: Mapping[str, str] | None = None, connect: ConnectSettlement | None = None) -> MachinePayments
 
 module mpp.methods.stripe.payment_intent_method
     RecordPayment = collections.abc.Callable[[mpp.Credential, dict[str, typing.Any], mpp.Receipt, dict[str, typing.Any], dict[str, str]], collections.abc.Awaitable[None]]
@@ -637,7 +690,7 @@ module mpp.methods.stripe.schemas
     charge: mpp.methods.Method
 
 module mpp.methods.stripe.server
-    def charge(*, network_id: str, client: Any | None = None, secret_key: str | None = None, payment_method_types: list[str] | None = None, currency: str | None = None, decimals: int = 2, recipient: str | None = None, external_id: str | None = None, metadata: dict[str, str] | None = None, http_client: Any | None = None, timeout: float = 30.0, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+    def charge(*, network_id: str, client: Any | None = None, secret_key: str | None = None, payment_method_types: list[str] | None = None, currency: str | None = None, decimals: int = 2, recipient: str | None = None, external_id: str | None = None, metadata: dict[str, str] | None = None, connect: ConnectInput = None, http_client: Any | None = None, timeout: float = 30.0, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
 
 module mpp.methods.tempo
     class PkhSource(NamedTuple)
@@ -669,6 +722,7 @@ module mpp.methods.tempo
     ChargeInput -> mpp.methods.tempo.schemas.ChargeInput
     ChargePayload -> mpp.methods.tempo.schemas.ChargePayload
     Split -> mpp.methods.tempo.schemas.Split
+    SponsorBudget -> mpp.methods.tempo.sponsor_budget.SponsorBudget
 
 module mpp.methods.tempo.account
     class TempoAccount
@@ -701,6 +755,14 @@ module mpp.methods.tempo.client
     FEE_PAYER_VALID_BEFORE_SECS = 60
     ATTODOLLARS_PER_MICRODOLLAR = 1000000000000
     class TransactionError(Exception)
+    class InsufficientFundsError(mpp.methods.tempo.client.TransactionError)
+        def __init__(self, currency: str) -> None
+    AUTO_SWAP_CURRENCIES = ('0x20c0000000000000000000000000000000000000', '0x20C000000000000000000000b9537d11c60E8b50')
+    class AutoSwap
+        @dataclass(frozen=True, slots=False)
+        field token_in: Sequence[str] | None = None
+        field slippage: float = 1
+        def currencies(self) -> tuple[str, ...]
     class TempoMethod
         @dataclass(frozen=False, slots=False)
         field name: str = 'tempo'
@@ -721,10 +783,11 @@ module mpp.methods.tempo.client
         field kw_only max_amount_decimals: int | None = None
         field kw_only expected_recipients: tuple[str, ...] | None = None
         field kw_only allowed_chain_ids: Sequence[int] | None = None
+        field kw_only auto_swap: AutoSwap | None = None
         def can_handle_challenge(self, challenge: Challenge) -> bool
         async def create_credential(self, challenge: Challenge) -> Credential
         def transaction_hash(self, credential: Credential) -> str | None
-    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None) -> ClientMethod
+    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False) -> ClientMethod
 
 module mpp.methods.tempo.fee_payer_envelope
     FEE_PAYER_ENVELOPE_TYPE_ID = 120
@@ -749,7 +812,7 @@ module mpp.methods.tempo.intents
     TRANSFER_SELECTOR = 'a9059cbb'
     TRANSFER_WITH_MEMO_SELECTOR = '95777d59'
     APPROVE_SELECTOR = '095ea7b3'
-    SWAP_EXACT_AMOUNT_OUT_SELECTOR = 'b30d91d5'
+    SWAP_EXACT_AMOUNT_OUT_SELECTOR = 'f0122b75'
     SELECTOR_HEX_LEN = 8
     ABI_WORD_HEX_LEN = 64
     TRANSFER_CALL_DATA_HEX_LEN = 136
@@ -784,7 +847,7 @@ module mpp.methods.tempo.intents
         field source: str | None
     ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
     class ChargeIntent
-        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None) -> None
+        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None) -> None
         async def aclose(self) -> None
         async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
         name = 'charge'
@@ -854,7 +917,24 @@ module mpp.methods.tempo.schemas
     charge: mpp.methods.Method
 
 module mpp.methods.tempo.server
-    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
+    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
+
+module mpp.methods.tempo.sponsor_budget
+    def process_store() -> MemoryStore
+    class SponsorBudget
+        @dataclass(frozen=True, slots=True)
+        field kw_only max_in_flight_reservations: int = 100
+        field kw_only max_in_flight_total_fee: int = 500000000000000000
+        field kw_only store: CompareAndSetStore | None = None
+    class Reservation
+        @dataclass(frozen=True, slots=True)
+        field key: str
+        field id: str
+        field owner: str
+    IsSettled = collections.abc.Callable[[str], collections.abc.Awaitable[bool]]
+    async def transition(store: CompareAndSetStore, reservation: Reservation, phase: Literal['broadcasting', 'pending']) -> bool
+    async def release(store: CompareAndSetStore, reservation: Reservation) -> bool
+    async def reserve(store: CompareAndSetStore, budget: SponsorBudget, *, chain_id: int, sponsor: str, transaction_hash: str, fee: int, expires_at: int, wait_until: int, is_settled: IsSettled) -> Reservation
 
 module mpp.runtime
     class CredentialParams
@@ -909,6 +989,9 @@ module mpp.server
     PaymentEventName -> mpp.events.PaymentEventName
     Method -> mpp.methods.Method
     ComposedHandler -> mpp.server.compose.ComposedHandler
+    OfferSelectionContext -> mpp.server.compose.OfferSelectionContext
+    SelectOffers = collections.abc.Callable[[tuple[mpp.server.compose.ServerOffer, ...], mpp.server.compose.OfferSelectionContext], collections.abc.Sequence[mpp.server.compose.ServerOffer] | collections.abc.Awaitable[collections.abc.Sequence[mpp.server.compose.ServerOffer]]]
+    ServerOffer -> mpp.server.compose.ServerOffer
     compose -> mpp.server.compose.compose
     pay -> mpp.server.decorator.pay
     PaymentRequired -> mpp.server.http.PaymentRequired
@@ -923,6 +1006,12 @@ module mpp.server
     HandlerFactory -> mpp.server.mpp.HandlerFactory
     Mpp -> mpp.server.mpp.Mpp
 
+module mpp.server.asgi
+    DEFAULT_MAX_BODY_SIZE = 10485760
+    class PaymentMiddleware
+        async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None
+        def __init__(self, app: ASGIApp, handler: ComposedHandler, *, route: str | None = None, max_body_size: int = 10485760) -> None
+
 module mpp.server.compose
     BodyType = str | bytes | dict[str, typing.Any]
     BodyParamsType = str | bytes | dict[str, typing.Any] | collections.abc.Callable[[mpp.server.http.Request], str | bytes | dict[str, typing.Any] | collections.abc.Awaitable[str | bytes | dict[str, typing.Any]]] | None
@@ -933,6 +1022,15 @@ module mpp.server.compose
         field challenges: tuple[Challenge, ...]
         field error: Exception | None = None
     ComposedResult = mpp.server.compose.ComposedChallenges | tuple[mpp.Credential, mpp.Receipt]
+    class ServerOffer
+        @dataclass(frozen=True, slots=True)
+        field key: str
+        field method: ServerMethod
+        field request: Mapping[str, Any]
+    class OfferSelectionContext
+        @dataclass(frozen=True, slots=True)
+        field request: Request
+    SelectOffers = collections.abc.Callable[[tuple[mpp.server.compose.ServerOffer, ...], mpp.server.compose.OfferSelectionContext], collections.abc.Sequence[mpp.server.compose.ServerOffer] | collections.abc.Awaitable[collections.abc.Sequence[mpp.server.compose.ServerOffer]]]
     class ComposedHandler
         async def __call__(self, request: Request) -> PaymentResult
         def __init__(self, *handlers: ComposedHandler) -> None
@@ -1030,7 +1128,7 @@ module mpp.server.mpp
         def __call__(self, **options: Any) -> ComposedHandler
         def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None
     class Mpp
-        def __init__(self, methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]], *, realm: str | None = None, secret_key: str | None = None, store: Store | None = None, requires_auth: bool = False, unique_challenges: bool = True) -> None
+        def __init__(self, methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]], *, realm: str | None = None, secret_key: str | None = None, store: Store | None = None, requires_auth: bool = False, unique_challenges: bool = True, select_offers: SelectOffers | None = None) -> None
         async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Receipt
         def compose(self, *entries: tuple[Any, Mapping[str, Any]]) -> ComposedHandler
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
@@ -1055,8 +1153,11 @@ module mpp.store
         async def put_if_absent(self, key: str, value: Any) -> bool
     class ExpiringStore(mpp.store.Store, typing.Protocol)
         async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+    class CompareAndSetStore(mpp.store.Store, typing.Protocol)
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
     class MemoryStore
         def __init__(self, *, max_entries: int | None = None) -> None
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
         async def delete(self, key: str) -> None
         async def get(self, key: str) -> Any | None
         async def put(self, key: str, value: Any) -> None
@@ -1072,6 +1173,7 @@ module mpp.stores
 module mpp.stores.redis
     class RedisStore
         def __init__(self, client: Any, *, key_prefix: str = 'mpp:', ttl_seconds: int | None = None) -> None
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
         async def delete(self, key: str) -> None
         async def get(self, key: str) -> Any | None
         async def put(self, key: str, value: Any) -> None
@@ -1083,6 +1185,7 @@ module mpp.stores.sqlite
     class SQLiteStore
         def __init__(self, db: Any, *, ttl_seconds: int | None = None) -> None
         async def close(self) -> None
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
         @classmethod async def create(cls, path: str = 'mpp.db', *, ttl_seconds: int | None = None) -> SQLiteStore
         async def delete(self, key: str) -> None
         async def get(self, key: str) -> Any | None
@@ -1177,3 +1280,6 @@ module mpp.x402.facilitator
         async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
         async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
     def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
+
+module mpp.x402.fastapi
+    def payment_middleware(routes: RoutesConfig, server: x402ResourceServer, *, secret_key: str, realm: str | None = None, paywall_config: PaywallConfig | None = None, paywall_provider: PaywallProvider | None = None, store: Store | None = None) -> Middleware

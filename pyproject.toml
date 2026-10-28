@@ -63,6 +63,13 @@ evm = [
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
+x402 = [
+    "eth-account>=0.13",
+    "eth-hash[pycryptodome]>=0.7",
+    "fastapi>=0.115",
+    "pydantic>=2.0",
+    "x402[evm,httpx]>=2.25,<3",
+]
 mcp = [
     "anyio>=4.5",
     "mcp>=1.1,<2",
@@ -134,10 +141,34 @@ include = ["src", "tests", "scripts"]
 branch = true
 
 [tool.pytest.ini_options]
+# Keeps a bare `pytest` out of mutmut's mutants/ copy of the tests.
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: requires TEMPO_NETWORK=localnet|moderato (real Tempo node; tests/network.py)",
     "redis: requires REDIS_URL (real Redis instance)",
     "x402_localnet: requires X402_ANVIL_RPC_URL (Anvil node for x402 settlement)",
+    "stress: heavy concurrency runs; requires MPP_STRESS=1",
+]
+
+# Mutation testing of the protocol-critical modules (`make mutation`). Runs
+# nightly and, for changed functions only, on pull requests.
+[tool.mutmut]
+source_paths = ["src"]
+only_mutate = [
+    "src/mpp/_body_digest.py",
+    "src/mpp/_parsing.py",
+    "src/mpp/client/transport.py",
+    "src/mpp/methods/tempo/intents.py",
+    "src/mpp/server/compose.py",
+    "src/mpp/server/verify.py",
+]
+pytest_add_cli_args = [
+    "-q",
+    "-p",
+    "no:cacheprovider",
+    "-m",
+    "not integration and not redis and not x402_localnet",
+    "--hypothesis-profile=mutmut",
 ]

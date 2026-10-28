@@ -21,6 +21,7 @@ from mpp.errors import (
     VerificationFailedError,
 )
 from mpp.methods.stripe.analytics import merge_metadata
+from mpp.methods.stripe.connect import ConnectInput, ConnectSettlement, resolve_settlement
 from mpp.methods.stripe.payment_intent_options import PaymentIntentInput, resolve_options
 from mpp.methods.stripe.schemas import ChargeRequest, StripeCredentialPayload
 
@@ -140,6 +141,7 @@ class ChargeIntent:
         credential: Credential,
         request: dict[str, Any],
         payment_intent_options: PaymentIntentInput = None,
+        connect: ConnectInput = None,
     ) -> Receipt:
         """Verify a Stripe charge credential.
 
@@ -151,6 +153,8 @@ class ChargeIntent:
             request: The original payment request parameters.
             payment_intent_options: Private PaymentIntent input, resolved
                 immediately before the PaymentIntent is created.
+            connect: Stripe Connect settlement, or a resolver for it, applied
+                to the PaymentIntent.
 
         Returns:
             A receipt indicating success.
@@ -192,6 +196,7 @@ class ChargeIntent:
             raise VerificationFailedError("Invalid credential payload: empty spt")
 
         user_metadata = parsed_request.methodDetails.metadata
+        settlement = await resolve_settlement(connect, credential, request)
         payment_options = await resolve_options(payment_intent_options, credential, request)
         resolved_metadata = merge_metadata(credential, user_metadata, payment_options)
 
@@ -203,6 +208,7 @@ class ChargeIntent:
                 spt=spt,
                 metadata=resolved_metadata,
                 payment_options=payment_options,
+                settlement=settlement,
             )
         else:
             pi = await self._create_with_secret_key(
@@ -212,6 +218,7 @@ class ChargeIntent:
                 spt=spt,
                 metadata=resolved_metadata,
                 payment_options=payment_options,
+                settlement=settlement,
             )
 
         if pi["replayed"] and pi["status"] == "succeeded":
@@ -237,6 +244,7 @@ class ChargeIntent:
         spt: str,
         metadata: dict[str, str],
         payment_options: dict[str, Any],
+        settlement: ConnectSettlement | None = None,
     ) -> dict[str, Any]:
         """Create a PaymentIntent using the Stripe SDK client."""
         try:
@@ -248,14 +256,17 @@ class ChargeIntent:
                 "metadata": metadata,
                 "payment_method_types": list(request.methodDetails.paymentMethodTypes),
                 "shared_payment_granted_token": spt,
+                **(settlement.params() if settlement else {}),
             }
-            options = {
+            options: dict[str, Any] = {
                 "headers": {"X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE},
                 "idempotency_key": f"mpp_{challenge_id}_{spt}",
                 # Keep replay responses attributable to separate verify calls.
                 "max_network_retries": 0,
                 "stripe_version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
             }
+            if settlement and settlement.stripe_account is not None:
+                options["stripe_account"] = settlement.stripe_account
 
             result = await _create_payment_intent(client, body, options)
             last_response = getattr(result, "last_response", None)
@@ -274,6 +285,7 @@ class ChargeIntent:
         spt: str,
         metadata: dict[str, str],
         payment_options: dict[str, Any],
+        settlement: ConnectSettlement | None = None,
     ) -> dict[str, Any]:
         """Create a PaymentIntent using raw HTTP with a secret key."""
         http_client = await self._get_http_client()
@@ -297,21 +309,30 @@ class ChargeIntent:
             body["hooks[inputs][tax][calculation]"] = payment_options["hooks"]["inputs"]["tax"][
                 "calculation"
             ]
+        headers = {
+            "Authorization": f"Basic {auth_value}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Idempotency-Key": f"mpp_{challenge_id}_{spt}",
+            "Stripe-Version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
+            "X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE,
+        }
+        if settlement:
+            for key, value in settlement.params().items():
+                if isinstance(value, dict):
+                    for field, item in value.items():
+                        body[f"{key}[{field}]"] = str(item)
+                else:
+                    body[key] = str(value)
+            if settlement.stripe_account is not None:
+                headers["Stripe-Account"] = settlement.stripe_account
 
         response = await http_client.post(
-            f"{stripe_defaults.STRIPE_API_BASE}/payment_intents",
-            headers={
-                "Authorization": f"Basic {auth_value}",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Idempotency-Key": f"mpp_{challenge_id}_{spt}",
-                "Stripe-Version": stripe_defaults.MACHINE_PAYMENTS_API_VERSION,
-                "X-Request-Source": stripe_defaults.STRIPE_REQUEST_SOURCE,
-            },
-            data=body,
+            f"{stripe_defaults.STRIPE_API_BASE}/payment_intents", headers=headers, data=body
         )
 
         if not response.is_success:
-            if not payment_options:
+            # Stripe's text can echo server-only options and Connect accounts.
+            if not payment_options and settlement is None:
                 try:
                     error = response.json().get("error", {})
                     detail = error.get("message") or error.get("code")
