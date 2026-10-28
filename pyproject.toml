@@ -63,6 +63,13 @@ evm = [
 server = ["pydantic>=2.0"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
+x402 = [
+    "eth-account>=0.13",
+    "eth-hash[pycryptodome]>=0.7",
+    "fastapi>=0.115",
+    "pydantic>=2.0",
+    "x402[evm,httpx]>=2.25,<3",
+]
 mcp = [
     "anyio>=4.5",
     "mcp>=1.1,<2",
