@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -121,8 +123,22 @@ def report(output: Path) -> None:
         f"{stats['total']} mutants in total.",
         "",
     ]
-    if stats.get("check_was_interrupted_by_user"):
-        lines += ["The run hit its time limit, so some mutants were not tested.", ""]
+    # mutmut records no verdict for mutants a time-boxed (SIGINT) run never
+    # reached; they stay "not checked" and are left out of the score. On a pull
+    # request only the MUTANTS globs were selected, so only those count.
+    selected = os.environ.get("MUTANTS", "").split()
+    unchecked = sum(
+        1
+        for name, status in results
+        if status == "not checked"
+        and (not selected or any(fnmatch.fnmatchcase(name, glob) for glob in selected))
+    )
+    if unchecked or stats.get("check_was_interrupted_by_user"):
+        lines += [
+            f"**Incomplete run:** {unchecked} mutants were not tested (time limit), "
+            "so the score covers only the tested ones.",
+            "",
+        ]
     if survivors:
         lines += ["### Surviving mutants", ""]
         for name in survivors[:MAX_DIFFS]:

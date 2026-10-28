@@ -28,6 +28,7 @@ from mpp.events import (
     EventDispatcher,
     EventHandler,
     Unsubscribe,
+    _SnapshotEventDispatcher,
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
@@ -218,7 +219,8 @@ class Mpp:
         self.select_offers = select_offers
         self.requires_auth = requires_auth
         self.credential_header = PAYMENT_AUTHORIZATION_HEADER if requires_auth else None
-        self._events = EventDispatcher()
+        # Like mppx, listeners get snapshots they can't use to alter the payment.
+        self._events: EventDispatcher = _SnapshotEventDispatcher()
         self._payment_success_hooks: set[tuple[str, str, int]] = set()
         for method in self.methods:
             self._register_payment_success_handler(method)

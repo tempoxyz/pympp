@@ -188,6 +188,18 @@ class TestDecodeFeePayerEnvelope:
         with pytest.raises(ValueError, match="Malformed"):
             decode_fee_payer_envelope(short)
 
+    def test_rejects_invalid_rlp(self) -> None:
+        """Malformed RLP raises ValueError, not rlp.DecodingError."""
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78, 0xC5, 0x01]))
+
+    def test_rejects_list_sender_fields(self) -> None:
+        """A list where the sender address or signature belongs raises ValueError."""
+        fields: list = [b""] * 14
+        fields[11] = [b"\x01"]
+        with pytest.raises(ValueError, match="Malformed fee payer envelope"):
+            decode_fee_payer_envelope(bytes([0x78]) + rlp.encode(fields))
+
 
 class TestEncoderDecoderIntegration:
     """Integration tests: encode → decode → cosign roundtrip."""

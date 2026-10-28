@@ -185,13 +185,6 @@ class TestSuccessPayloads:
         assert paid.receipt.reference == "tx-original"
         assert paid.credential.payload == {"token": "valid"}
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: every payment.success listener gets the same payload dict, so one "
-            "listener's edits are visible to the next (mppx snapshots payloads)"
-        ),
-    )
     async def test_listeners_do_not_share_payload_mutations(self) -> None:
         server = make_server()
         seen: list[tuple[Any, Any]] = []
@@ -212,13 +205,6 @@ class TestSuccessPayloads:
         assert receipt.reference == "tx-original"
         assert amount == "1"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: payment.success listeners get the live Credential, so mutating "
-            "credential.payload changes PaymentVerified.credential returned to the app"
-        ),
-    )
     async def test_listener_cannot_mutate_the_returned_credential(self) -> None:
         server = make_server()
         server.on_payment_success(
@@ -250,16 +236,6 @@ class TestFailureEvents:
         assert events == ["failed:MalformedCredentialError:None"]
         assert recorder.calls == 0
 
-    @pytest.mark.xfail(
-        # Not strict: json.loads hits the recursion limit at this depth on
-        # Python 3.12 and 3.13 only; 3.11 and 3.14 parse it.
-        strict=False,
-        raises=RecursionError,
-        reason=(
-            "BUG: a 64 KiB Authorization holding deeply nested JSON raises RecursionError "
-            "out of the route instead of a 402 with payment.failed"
-        ),
-    )
     async def test_deeply_nested_credential_reports_failure(self) -> None:
         server = make_server()
         failures: list[Exception] = []

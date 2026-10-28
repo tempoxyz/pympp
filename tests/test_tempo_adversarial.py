@@ -551,11 +551,6 @@ async def test_sponsored_call_pattern_rejected(
         await _validate(calls, splits)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="parity gap: mppx rejects nonzero call value on every sponsored call; "
-    "pympp only checks the value of payment transfers",
-)
 @pytest.mark.parametrize(
     "calls",
     [
@@ -598,12 +593,6 @@ def _extended_envelope() -> str:
     return raw_rlp_tx([*fields[:-1], b"\x01", b"\x02", fields[-1]], b"\x78")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason="bug: decode_fee_payer_envelope's ValueError escapes ChargeIntent.broadcast "
-    "unwrapped for a client-supplied sponsored transaction, instead of a VerificationError",
-)
 @pytest.mark.parametrize(
     "raw_tx",
     [_extended_envelope(), signed_tx((pay_call(),))],

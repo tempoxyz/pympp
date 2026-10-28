@@ -129,13 +129,18 @@ def decode_fee_payer_envelope(
     if not data or data[0] != FEE_PAYER_ENVELOPE_TYPE_ID:
         raise ValueError("Not a fee payer envelope (expected 0x78 prefix)")
 
-    decoded = rlp.decode(data[1:])
+    try:
+        decoded = rlp.decode(data[1:])
+    except rlp.exceptions.RLPException as error:
+        raise ValueError("Malformed fee payer envelope") from error
     # 14 fields = no key_authorization; 15 = key_authorization present.
     if not isinstance(decoded, list) or len(decoded) not in (14, 15):
         raise ValueError("Malformed fee payer envelope")
 
     sender_address = decoded[11]
     sender_signature = decoded[-1]
+    if not isinstance(sender_address, bytes) or not isinstance(sender_signature, bytes):
+        raise ValueError("Malformed fee payer envelope")
 
     # 15 fields = key_authorization present (index 13), signature at 14
     # 14 fields = no key_authorization, signature at 13
@@ -144,7 +149,7 @@ def decode_fee_payer_envelope(
     else:
         key_authorization = None
 
-    return decoded, bytes(sender_address), bytes(sender_signature), key_authorization  # type: ignore[arg-type]
+    return decoded, sender_address, sender_signature, key_authorization
 
 
 def _decode_signed_key_authorization(rlp_fields: list) -> _RawSignedKeyAuthorization:

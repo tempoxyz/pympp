@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -121,8 +122,34 @@ class PaymentEvent:
     payload: EventPayload
 
 
+def _identity(payload: Any) -> Any:
+    return payload
+
+
+def _snapshot(payload: Any) -> Any:
+    """Copy a payload's protocol data so a listener's edits stay its own.
+
+    mppx hands listeners frozen snapshots. Here each listener gets its own copy
+    of the payload dict and of the challenge, credential, receipt and request
+    data in it; other values (errors, methods, HTTP objects) are shared.
+    """
+    from mpp import Challenge, Credential, Receipt
+
+    if not isinstance(payload, dict):
+        return payload
+    return {
+        key: copy.deepcopy(value)
+        if isinstance(value, (dict, list, Challenge, Credential, Receipt))
+        else value
+        for key, value in payload.items()
+    }
+
+
 class EventDispatcher:
     """Dispatches payment lifecycle events."""
+
+    # Handlers receive _copy(payload); the identity unless a subclass snapshots.
+    _copy: Callable[[Any], Any] = staticmethod(_identity)
 
     def __init__(self) -> None:
         self._handlers: dict[str, list[AnyEventHandler]] = {}
@@ -168,7 +195,7 @@ class EventDispatcher:
         result = None
         for handler in tuple(self._handlers.get(name, ())):
             try:
-                value = handler(payload)
+                value = handler(self._copy(payload))
                 if inspect.isawaitable(value):
                     value = await value
                 if result is None and value is not None:
@@ -178,13 +205,22 @@ class EventDispatcher:
             except Exception:
                 logger.exception("Payment event handler failed for %s", name)
 
-        event = PaymentEvent(name=name, payload=payload)
         for handler in tuple(self._handlers.get("*", ())):
             try:
-                value = handler(event)
+                value = handler(PaymentEvent(name=name, payload=self._copy(payload)))
                 if inspect.isawaitable(value):
                     await value
             except Exception:
                 logger.exception("Payment wildcard event handler failed for %s", name)
 
         return result
+
+
+class _SnapshotEventDispatcher(EventDispatcher):
+    """Gives each handler its own copy of the payload's protocol data.
+
+    One handler's edits then reach neither the next handler nor the caller,
+    like mppx's frozen server event payloads.
+    """
+
+    _copy = staticmethod(_snapshot)

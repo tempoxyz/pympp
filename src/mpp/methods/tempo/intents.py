@@ -580,8 +580,11 @@ def _validate_call_scope(calls: list[tuple[str, int, str]]) -> int:
         raise VerificationError("Invalid transaction: disallowed call pattern")
 
     if has_swap_prefix:
-        approve_to, _, approve_data = calls[0]
-        swap_to, _, swap_data = calls[1]
+        approve_to, approve_value, approve_data = calls[0]
+        swap_to, swap_value, swap_data = calls[1]
+        # Like mppx, no call may carry a native value.
+        if approve_value or swap_value:
+            raise VerificationError("Invalid transaction: call value is not allowed")
         decoded_approve = _decode_static_call_args(
             approve_data,
             ("address", "uint256"),
@@ -1794,9 +1797,12 @@ class ChargeIntent:
                 # Tempo only accepts fee tokens with Fee AMM liquidity.
                 from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
 
-                fields, _, _, _ = decode_fee_payer_envelope(
-                    bytes.fromhex(raw_tx.removeprefix("0x"))
-                )
+                try:
+                    fields, _, _, _ = decode_fee_payer_envelope(
+                        bytes.fromhex(raw_tx.removeprefix("0x"))
+                    )
+                except ValueError as error:
+                    raise VerificationError(str(error)) from error
                 max_fee = int.from_bytes(fields[2], "big") * int.from_bytes(fields[3], "big")
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)

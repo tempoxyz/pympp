@@ -79,12 +79,12 @@ jobs:
         run: |
           set -f # MUTANTS holds mutant-name globs for mutmut, not paths.
           # shellcheck disable=SC2086 # Split MUTANTS into one argument per glob.
-          timeout --signal=INT "$TIME_BOX" uv run --with mutmut==3.8.0 mutmut run $MUTANTS || true
+          timeout --signal=INT "$TIME_BOX" uv run --with mutmut==3.8.0 --with "pytest<9.2" mutmut run $MUTANTS || true
 
       - name: Report surviving mutants
         if: github.event_name != 'pull_request' || env.MUTANTS != ''
         run: |
-          uv run --with mutmut==3.8.0 python scripts/mutation.py report mutants/report.md
+          uv run --with mutmut==3.8.0 --with "pytest<9.2" python scripts/mutation.py report mutants/report.md
           head -c 900000 mutants/report.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload mutation report
