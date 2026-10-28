@@ -23,8 +23,8 @@ from mpp.methods.tempo.session._protocol import (
     definition,
     deserialize_session_receipt,
 )
-from mpp.methods.tempo.session.client.ops import serialize_credential
-from mpp.methods.tempo.session.client.state import (
+from mpp.methods.tempo.session.client._ops import serialize_credential
+from mpp.methods.tempo.session.client._state import (
     ChallengeContext,
     ChannelSink,
     CredentialPlan,
@@ -38,7 +38,7 @@ from mpp.methods.tempo.session.client.state import (
     resolve_automatic_top_up,
     resolve_challenge_context,
 )
-from mpp.methods.tempo.session.client.store import (
+from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
     ChannelStore,
     UncertainFundingError,

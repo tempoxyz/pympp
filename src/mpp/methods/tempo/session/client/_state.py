@@ -26,7 +26,7 @@ from mpp.methods.tempo.session._protocol import (
     OpenPayload,
     TopUpPayload,
 )
-from mpp.methods.tempo.session.client.ops import (
+from mpp.methods.tempo.session.client._ops import (
     SessionCredentialPayload,
     create_close_payload,
     create_open_payload,
@@ -37,7 +37,7 @@ from mpp.methods.tempo.session.client.ops import (
     resolve_authorized_signer,
     resolve_escrow,
 )
-from mpp.methods.tempo.session.client.store import (
+from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
     ChannelStore,
     channel_key,

@@ -232,7 +232,6 @@ class _StoreMap:
 
 
 _locks = _StoreMap()
-_funding_stores = _StoreMap()
 
 
 class _ScopeLock(asyncio.Lock):
@@ -284,18 +283,11 @@ def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
     return lock
 
 
-def register_funding_store(view: ChannelStore, backing: ChannelStore) -> None:
-    """Share funding coordination between a manager's store view and its backing store."""
-    shared = _funding_stores.get(backing)
-    _funding_stores.set(view, backing if shared is None else shared)
-
-
 async def with_funding_lock(
     store: ChannelStore, key: str, operation: Callable[[], Awaitable[T]]
 ) -> T:
-    """Serialize funding decisions for callers sharing one backing store in this process."""
-    shared = _funding_stores.get(store)
-    async with store_lock(store if shared is None else shared, f"funding:{key}"):
+    """Serialize funding decisions for callers sharing ``store`` in this process."""
+    async with store_lock(store, f"funding:{key}"):
         return await operation()
 
 

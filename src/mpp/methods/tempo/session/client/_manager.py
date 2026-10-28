@@ -21,18 +21,18 @@ from mpp._units import parse_units
 from mpp.events import CHALLENGE_RECEIVED
 from mpp.methods.tempo.session._channel import compute_channel_id
 from mpp.methods.tempo.session._protocol import SessionReceipt, parse_uint96_amount
-from mpp.methods.tempo.session.client.session import (
+from mpp.methods.tempo.session.client._session import (
     SessionMethod,
     post_management_credential,
     read_receipt,
 )
-from mpp.methods.tempo.session.client.state import (
+from mpp.methods.tempo.session.client._state import (
     SessionContext,
     assert_voucher_within_local_limit,
     is_tip1034_session_challenge,
     read_session_snapshot,
 )
-from mpp.methods.tempo.session.client.store import (
+from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
     ChannelStore,
     UncertainFundingError,
@@ -577,7 +577,7 @@ def session_manager(
 ) -> SessionManager:
     """Create a :class:`SessionManager` (mppx ``tempo.session.manager``).
 
-    Options are those of :func:`~mpp.methods.tempo.session.client.session`, plus
+    Options are those of :func:`~mpp.methods.tempo.session.client._session`, plus
     ``transport``, the httpx transport requests go through (mppx ``fetch``).
 
     Example:

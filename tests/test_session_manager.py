@@ -25,11 +25,11 @@ from mpp.methods.tempo.session.client import (
     UncertainFundingError,
     create_channel_store,
 )
-from mpp.methods.tempo.session.client.manager import (
+from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
     is_expected_close_receipt,
 )
-from mpp.methods.tempo.session.client.store import entry_key
+from mpp.methods.tempo.session.client._store import entry_key
 from tests import test_session_client as client_tests
 from tests.test_session_client import (
     ACCOUNT,
