@@ -234,8 +234,8 @@ class FakeRpc:
             answer = {"result": self.receipts.get(params[0].lower())}
         elif method == "eth_getTransactionByHash":
             answer = {"result": None}
-        elif method == "tempo_simulateV1":
-            answer = {"result": {"blocks": [{"calls": [{"status": "0x1"}]}]}}
+        elif method == "eth_call":
+            answer = {"result": "0x"}
         elif method == "eth_sendRawTransactionSync":
             self.sent.append(params[0])
             answer = self.send(params[0])
@@ -428,7 +428,7 @@ async def test_sponsored_envelope_variants_are_replays() -> None:
             await intent.verify(_tx_credential(replay), _request(fee_payer=True))
 
     assert len(rpc.sent) == 1
-    assert rpc.count("tempo_simulateV1") == 1
+    assert rpc.count("eth_call") == 2
 
 
 # ──────────────────────────────────────────────────────────────────────

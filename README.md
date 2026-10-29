@@ -48,6 +48,10 @@ async def handle(request: Request) -> Response:
     return result.with_receipt(Response.json({"data": "..."}))
 ```
 
+A `tempo.charge(fee_payer=...)` server sponsors its payers' fees on every route, as
+mppx does; pass `fee_payer=False` to a route to opt out. Before broadcasting a
+sponsored charge it simulates it with `eth_call`, which every public Tempo RPC serves.
+
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
 ```python
@@ -84,6 +88,18 @@ server = Mpp(
 @pay(server.charge(amount="0.01"))
 async def handler(request, credential, receipt):
     return JSONResponse({"data": "..."})
+```
+
+To settle on Base mainnet through Coinbase's facilitator, install the `cdp` extra
+and pass `mpp.x402.cdp.facilitator()`. It reads `CDP_API_KEY_ID` and
+`CDP_API_KEY_SECRET` and signs a JWT for each request, as `@coinbase/x402` does.
+Other facilitators that need per-endpoint auth take
+`HttpFacilitator(url, create_auth_headers=...)`.
+
+```python
+from mpp.x402 import cdp
+
+method = evm.charge(currency=BASE_USDC, recipient="0x...", facilitator=cdp.facilitator())
 ```
 
 Routes bind x402 payments the way mppx does. Routes are scoped to their HTTP

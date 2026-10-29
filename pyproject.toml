@@ -61,6 +61,8 @@ evm = [
     "eth-hash[pycryptodome]>=0.7",
 ]
 server = ["pydantic>=2.0"]
+# Coinbase's x402 facilitator (mpp.x402.cdp): signs CDP API key JWTs.
+cdp = ["pyjwt[crypto]>=2.8"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
 x402 = [

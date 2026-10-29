@@ -509,7 +509,7 @@ class TestTempoAuthorizationListRoundtrip:
         result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
         assert result.startswith("0x76")
         assert simulate_payload is not None
-        assert "blockStateCalls" in simulate_payload
+        assert [r["type"] for r in simulate_payload] == ["0x76", "0x76"]
 
 
 class TestKeychainSignatureRejected:

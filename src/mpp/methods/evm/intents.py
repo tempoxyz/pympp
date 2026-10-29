@@ -220,6 +220,7 @@ class ChargeRequest(BaseModel):
     recipient: str = Field(pattern=r"^0x[0-9a-fA-F]{40}$")
     method_details: MethodDetails = Field(alias="methodDetails")
     extra: dict[str, str] | None = None
+    external_id: str | None = Field(default=None, alias="externalId")
 
 
 charge: Method[ChargeRequest, AuthorizationPayload] = Method(
