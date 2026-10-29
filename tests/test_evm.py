@@ -31,7 +31,7 @@ from mpp.methods.evm import client as evm_client
 from mpp.methods.evm import server as evm_server
 from mpp.methods.evm._eip3009 import authorization_domain, sign_authorization, to_source
 from mpp.runtime import ClientMethod, CredentialParams
-from mpp.server import Mpp
+from mpp.server import Mpp, PaymentRequired
 from mpp.server.method import RequestContext, ServerMethod
 from mpp.store import MemoryStore
 from mpp.x402 import FacilitatorError, PaymentPayload, PaymentRequirements
@@ -296,7 +296,6 @@ class TestRequestShape:
             ({"recipient": "bob"}, "recipient"),
             ({"chain_id": 1}, "chain_id"),
             ({"splits": [{"amount": "1", "recipient": RECIPIENT}]}, "splits"),
-            ({"fee_payer": True}, "fee_payer"),
             ({"amount": ""}, "amount"),
         ],
     )
@@ -308,10 +307,20 @@ class TestRequestShape:
         with pytest.raises(TypeError, match="unsupported option: nope"):
             resolve(server_method(), amount="0.01", nope=True)
 
-    async def test_mpp_rejects_splits_and_fee_payer(self) -> None:
+    # As in mppx, fee_payer is a Tempo option: an EVM offer composed with sponsored
+    # Tempo offers ignores it, and external_id reaches the wire request.
+    async def test_mpp_ignores_fee_payer_and_carries_external_id(self) -> None:
         server = Mpp(methods=server_method(), realm=REALM, secret_key="k")
-        with pytest.raises(ValueError, match="fee_payer"):
-            await server.charge(amount="0.01", fee_payer=True)(http_request())
+        result = await server.charge(amount="0.01", fee_payer=True, external_id="order-1")(
+            http_request()
+        )
+        assert isinstance(result, PaymentRequired)
+        [challenge] = [
+            Challenge.from_www_authenticate(v)
+            for v in result.challenge.headers.get_list("www-authenticate")
+        ]
+        assert "feePayer" not in challenge.request["methodDetails"]
+        assert challenge.request["externalId"] == "order-1"
 
     def test_x402_requirements(self) -> None:
         intent = charge_intent(server_method(max_timeout_seconds=60))

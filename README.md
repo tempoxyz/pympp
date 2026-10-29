@@ -50,6 +50,10 @@ async def handle(request: Request) -> Response:
     return result.with_receipt(Response.json({"data": "..."}))
 ```
 
+A `tempo.charge(fee_payer=...)` server sponsors its payers' fees on every route, as
+mppx does; pass `fee_payer=False` to a route to opt out. Before broadcasting a
+sponsored charge it simulates it with `eth_call`, which every public Tempo RPC serves.
+
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
 ```python
@@ -88,6 +92,18 @@ async def handler(request, credential, receipt):
     return JSONResponse({"data": "..."})
 ```
 
+To settle on Base mainnet through Coinbase's facilitator, install the `cdp` extra
+and pass `mpp.x402.cdp.facilitator()`. It reads `CDP_API_KEY_ID` and
+`CDP_API_KEY_SECRET` and signs a JWT for each request, as `@coinbase/x402` does.
+Other facilitators that need per-endpoint auth take
+`HttpFacilitator(url, create_auth_headers=...)`.
+
+```python
+from mpp.x402 import cdp
+
+method = evm.charge(currency=BASE_USDC, recipient="0x...", facilitator=cdp.facilitator())
+```
+
 Routes bind x402 payments the way mppx does. Routes are scoped to their HTTP
 method, path and query, and with the default `route_binding="required"` they only
 accept clients that sign mppx's `extensions.mppx` route binding. To accept
@@ -117,6 +133,28 @@ async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
 
 To use your own `httpx.AsyncClient`, pass it `transport=mpp.payment_transport`, or
 call `mpp.client()`.
+
+### Pay x402 servers
+
+The `evm` client method also pays x402 v2 `exact` servers (EIP-3009 USDC),
+such as ones built with Coinbase's x402 SDK, as mppx's client does. On a `402`
+carrying `PAYMENT-REQUIRED`, the client picks an offer in its currency and chain
+within `max_amount`, signs it and retries with `PAYMENT-SIGNATURE`. When a
+server offers both an MPP challenge the client can pay and x402, it pays MPP.
+
+```python
+from mpp.client import Mpp
+from mpp.methods.evm import BASE_USDC
+from mpp.methods.evm import client as evm
+from mpp.x402 import payment_response
+
+method = evm.charge(currency=BASE_USDC, account=account, max_amount="0.01")
+async with Mpp(methods=[method]) as mpp:
+    response = await mpp.fetch("https://api.example.com/x402/paid")
+    receipt = payment_response(response)  # PAYMENT-RESPONSE: transaction, payer, network
+```
+
+Permit2 offers are not paid.
 
 Custom transports can reuse method matching and credential creation without
 depending on HTTPX:
@@ -175,6 +213,7 @@ or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
 | [api-server](./examples/api-server/) | Payment-gated API server |
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
+| [x402-client](./examples/x402-client/) | pympp client paying an official x402 server |
 
 ## Protocol
 

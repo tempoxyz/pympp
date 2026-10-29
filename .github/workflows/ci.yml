@@ -165,6 +165,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --dev
 
+      # mppx's x402 server for tests/test_x402_client_mppx.py, run on the
+      # runner's preinstalled Node from the fixture's lockfile.
+      - name: Install mppx server fixture
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix tests/fixtures/x402/mppx-server
+
       - name: Wait for Tempo localnet, Anvil and Redis
         run: |
           for _ in {1..360}; do [[ -s "$RUNNER_TEMP/compose-up.status" ]] && break; sleep 0.5; done
@@ -184,6 +189,8 @@ jobs:
           TEMPO_NETWORK: localnet
           REDIS_URL: redis://localhost:6379
           X402_ANVIL_RPC_URL: http://localhost:18546
+          # Fail rather than skip when the mppx server fixture is missing.
+          X402_MPPX_SERVER: "1"
 
       - name: Check branch coverage against the baseline
         run: uv run python scripts/coverage_ratchet.py coverage.json

@@ -1152,19 +1152,6 @@ class TestFeePayerCosign:
         assert sender == PAYER.address
         assert "0x" + bytes(cosigned.fee_token).hex() == CURRENCY.lower()
 
-    def test_simulation_payload_keeps_call_order_and_validity(self) -> None:
-        from mpp.methods.tempo._fee_payer import build_simulate_payload
-
-        calls = (
-            Call.create(to=OTHER_TOKEN, value=0, data="0x02"),
-            Call.create(to=ESCROW_ADDRESS, value=0, data="0x01"),
-        )
-        _, cosigned, sender = self._cosign(envelope(calls=calls, valid_after=123))
-        (request,) = build_simulate_payload(cosigned, sender)["blockStateCalls"][0]["calls"]
-        assert request["to"] == ESCROW_ADDRESS.lower() and request["data"] == "0x01"
-        assert [c["to"] for c in request["calls"]] == [OTHER_TOKEN.lower()]
-        assert request["validAfter"] == hex(123)
-
     def test_rejects_fee_tokens_outside_the_allowed_list(self) -> None:
         with pytest.raises(VerificationError, match="feeToken is not allowed"):
             self._cosign(envelope(), allowed_fee_tokens=[OTHER_TOKEN])
@@ -1207,58 +1194,3 @@ class TestFeePayerCosign:
             "reverted: 0x12"
         )
         assert rpc_error_message({"error": {"name": "Halt"}}) == "Halt"
-
-    def test_simulation_payload_refuses_authorization_bearing_transactions(self) -> None:
-        from types import SimpleNamespace
-
-        from mpp.methods.tempo._fee_payer import build_simulate_payload
-
-        tx = SimpleNamespace(key_authorization=object(), tempo_authorization_list=())
-        with pytest.raises(VerificationError, match="authorization-bearing"):
-            build_simulate_payload(tx, PAYER.address)
-
-    @pytest.mark.parametrize(
-        ("answer", "error", "match"),
-        [
-            ({"result": {"blocks": [{"calls": [{"status": "0x1"}]}]}}, None, None),
-            ({"error": {"message": "nope"}}, "internal", None),
-            ({"result": {"blocks": []}}, "internal", None),
-            (
-                {"result": {"blocks": [{"calls": [{"status": "0x0", "error": {"message": "x"}}]}]}},
-                "verification",
-                "would revert in pre-broadcast simulation: x",
-            ),
-            (
-                {"result": {"blocks": [{"calls": [{"status": "0x0"}]}]}},
-                "verification",
-                "no revert reason returned",
-            ),
-        ],
-    )
-    async def test_simulate_before_broadcast(
-        self, answer: dict[str, Any], error: str | None, match: str | None
-    ) -> None:
-        from mpp.errors import InternalPaymentError
-        from mpp.methods.tempo._fee_payer import simulate_before_broadcast
-
-        def handle(request: httpx.Request) -> httpx.Response:
-            assert json.loads(request.content)["method"] == "tempo_simulateV1"
-            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, **answer})
-
-        client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        if error is None:
-            await simulate_before_broadcast(client, {}, RPC)
-            return
-        expected = InternalPaymentError if error == "internal" else VerificationError
-        with pytest.raises(expected, match=match):
-            await simulate_before_broadcast(client, {}, RPC)
-
-    async def test_simulation_transport_errors_fail_closed(self) -> None:
-        from mpp.errors import InternalPaymentError
-        from mpp.methods.tempo._fee_payer import simulate_before_broadcast
-
-        client = httpx.AsyncClient(
-            transport=httpx.MockTransport(lambda request: httpx.Response(502))
-        )
-        with pytest.raises(InternalPaymentError):
-            await simulate_before_broadcast(client, {}, RPC)

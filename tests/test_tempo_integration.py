@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -362,7 +363,7 @@ class TestChargeIntegration:
 
         # Spy on the simulate payload to catch request-shape regressions that
         # mocked-RPC unit tests cannot.
-        captured: list[dict] = []
+        captured: list[list[dict[str, Any]]] = []
         original_build = intent._build_simulate_payload
 
         def _spy(tx, sender):
@@ -380,12 +381,11 @@ class TestChargeIntegration:
         assert receipt.reference.startswith("0x")
         assert len(receipt.reference) >= 66
 
-        # Simulation must carry a top-level `to` (not a CREATE) or the node rejects it.
+        # Both eth_call simulations ran against the node and carry the payment call.
         assert captured, "pre-broadcast simulation payload was never built"
-        tx_request = captured[0]["blockStateCalls"][0]["calls"][0]
-        assert tx_request.get("to"), "simulate payload missing top-level `to` (CREATE)"
-        assert tx_request["to"].lower() == currency.lower()
-        assert tx_request["data"].startswith("0x")
+        for request in captured[0]:
+            assert request["calls"][-1]["to"].lower() == currency.lower()
+            assert request["calls"][-1]["data"].startswith("0x")
 
     async def test_legacy_server_memo_uses_challenge_bound_attribution(
         self, rpc_url, funded_payer, funded_recipient, currency, charge_intent, chain_id

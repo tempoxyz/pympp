@@ -511,6 +511,7 @@ module mpp.methods.evm.intents
         field recipient: str
         field method_details: mpp.methods.evm.intents.MethodDetails (alias 'methodDetails')
         field extra: dict[str, str] | None = None
+        field external_id: str | None = None (alias 'externalId')
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
     charge: mpp.methods.Method
     class ChargeIntent
@@ -1335,6 +1336,19 @@ module mpp.x402
         invalidReason: NotRequired[str]
         invalidMessage: NotRequired[str]
         payer: NotRequired[str]
+    class X402Challenge(mpp.Challenge)
+        @dataclass(frozen=True, slots=True)
+        field id: str
+        field method: str
+        field intent: str
+        field request: dict[str, Any]
+        field realm: str = ''
+        field request_b64: str = ''
+        field digest: str | None = None
+        field expires: str | None = None
+        field description: str | None = None
+        field opaque: dict[str, str] | None = None
+        field header: str | None = None
     class X402FormatError(ValueError)
     class X402Input
         @dataclass(frozen=True, slots=True)
@@ -1352,22 +1366,34 @@ module mpp.x402
     def encode_payment_required(value: PaymentRequired) -> str
     def encode_payment_response(value: SettleResponse) -> str
     def encode_payment_signature(value: PaymentPayload) -> str
+    def is_x402_challenge(challenge: object) -> bool
     def is_x402_credential(credential: Credential) -> bool
     def payment_required_header(accepts: Iterable[PaymentRequirements], resource_url: str, error: str | None = None, extensions: Mapping[str, Any] | None = None) -> str | None
+    def payment_response(response: Any) -> SettleResponse | None
     def payment_response_header(credential: Credential, receipt: Receipt) -> str | None
     resolve_facilitator -> mpp.x402.facilitator.resolve_facilitator
     def route_extensions(*, http_method: str, scope: Any = None, digest: str | None = None, meta: Mapping[str, Any] | None = None) -> dict[str, Any]
     def route_nonce(*, accepted: Mapping[str, Any], resource: Mapping[str, Any], extensions: Mapping[str, Any]) -> str
+    def x402_challenges(header: str) -> list[Challenge]
+
+module mpp.x402.cdp
+    COINBASE_FACILITATOR_URL = 'https://api.cdp.coinbase.com/platform/v2/x402'
+    def create_auth_header(api_key_id: str, api_key_secret: str, request_method: str, request_host: str, request_path: str, *, expires_in: int = 120) -> str
+    def create_cdp_auth_headers(api_key_id: str | None = None, api_key_secret: str | None = None) -> Callable[[], dict[str, dict[str, str]]]
+    def create_correlation_header() -> str
+    def facilitator(api_key_id: str | None = None, api_key_secret: str | None = None, *, timeout: float = 30.0, client: httpx.AsyncClient | None = None, **options: Any) -> HttpFacilitator
 
 module mpp.x402.facilitator
     HeadersInput = collections.abc.Mapping[str, str] | collections.abc.Callable[[], collections.abc.Mapping[str, str] | collections.abc.Awaitable[collections.abc.Mapping[str, str]]] | None
+    PathHeaders = collections.abc.Mapping[str, collections.abc.Mapping[str, str]]
+    CreateAuthHeaders = collections.abc.Callable[[], collections.abc.Mapping[str, collections.abc.Mapping[str, str]] | collections.abc.Awaitable[collections.abc.Mapping[str, collections.abc.Mapping[str, str]]]]
     class FacilitatorError(Exception)
     class Facilitator(typing.Protocol)
         def __init__(self, *args, **kwargs)
         async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
         async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
     class HttpFacilitator
-        def __init__(self, url: str, *, headers: HeadersInput = None, timeout: float = 30.0, client: httpx.AsyncClient | None = None) -> None
+        def __init__(self, url: str, *, headers: HeadersInput = None, create_auth_headers: CreateAuthHeaders | None = None, timeout: float = 30.0, client: httpx.AsyncClient | None = None) -> None
         async def settle(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> SettleResponse
         async def verify(self, payment_payload: PaymentPayload, payment_requirements: PaymentRequirements) -> VerifyResponse
     def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
