@@ -10,9 +10,11 @@ from mpp.methods.tempo.session.client._manager import (
     session_manager,
 )
 from mpp.methods.tempo.session.client._session import SessionMethod, session
+from mpp.methods.tempo.session.client._state import SessionContext
 from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
     ChannelStore,
+    JsonChannelKv,
     JsonChannelStore,
     MemoryChannelStore,
     UncertainFundingError,
@@ -23,9 +25,11 @@ from mpp.methods.tempo.session.client._store import (
 __all__ = [
     "ChannelEntry",
     "ChannelStore",
+    "JsonChannelKv",
     "JsonChannelStore",
     "MemoryChannelStore",
     "PaymentResponse",
+    "SessionContext",
     "SessionManager",
     "SessionMethod",
     "UncertainFundingError",

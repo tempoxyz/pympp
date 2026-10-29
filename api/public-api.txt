@@ -910,6 +910,11 @@ module mpp.methods.tempo.session.client
         def delete(self, key: str) -> None | Awaitable[None]
         def get(self, key: str) -> ChannelEntry | None | Awaitable[ChannelEntry | None]
         def set(self, entry: ChannelEntry) -> None | Awaitable[None]
+    class JsonChannelKv(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        def delete(self, key: str) -> None | Awaitable[None]
+        def get(self, key: str) -> str | None | Awaitable[str | None]
+        def set(self, key: str, value: str) -> None | Awaitable[None]
     class JsonChannelStore
         def __init__(self, kv: JsonChannelKv) -> None
         async def delete(self, key: str) -> None
@@ -929,6 +934,17 @@ module mpp.methods.tempo.session.client
         field kw_only cumulative: int
         property headers: httpx.Headers
         property status_code: int
+    class SessionContext
+        @dataclass(frozen=True, slots=True)
+        field kw_only action: SessionAction | None = None
+        field kw_only channel_id: str | None = None
+        field kw_only cumulative_amount: str | None = None
+        field kw_only cumulative_amount_raw: str | None = None
+        field kw_only transaction: str | None = None
+        field kw_only descriptor: ChannelDescriptor | None = None
+        field kw_only additional_deposit: str | None = None
+        field kw_only additional_deposit_raw: str | None = None
+        field kw_only deposit_raw: str | None = None
     class SessionManager
         def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None) -> None
         async def aclose(self) -> None
