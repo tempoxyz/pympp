@@ -122,6 +122,12 @@ def charge(
         input.setdefault("recipient", config.recipient)
         input.setdefault("chain_id", config.chain_id)
         input.setdefault("decimals", config.decimals)
+        # As mppx: a configured sponsor sponsors every route unless it passes
+        # fee_payer=False, and no route promises sponsorship nobody can give.
+        if fee_payer is None:
+            input.pop("fee_payer", None)
+        elif not input.get("splits"):
+            input.setdefault("fee_payer", True)
         return input
 
     def credential(context: VerifyContext) -> Credential:

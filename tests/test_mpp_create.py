@@ -299,10 +299,13 @@ class TestMppCharge:
 
     @pytest.mark.asyncio
     async def test_charge_includes_extra_and_fee_payer(self) -> None:
+        from mpp.methods.tempo import TempoAccount
+
         srv = Mpp(
             methods=tempo_server.charge(
                 currency="0x20c0000000000000000000000000000000000000",
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                fee_payer=TempoAccount.from_key("0x" + "ab" * 32),
             ),
             realm="test.com",
             secret_key="test-secret",

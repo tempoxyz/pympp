@@ -304,6 +304,49 @@ class TestHttpFacilitator:
             "Bearer two",
         ]
 
+    async def test_create_auth_headers_sends_each_endpoint_its_own(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(url="https://f.example/verify", json={"isValid": True})
+        httpx_mock.add_response(
+            url="https://f.example/settle",
+            json={"success": True, "transaction": "0xabc", "network": "eip155:8453"},
+        )
+        calls = 0
+
+        async def create() -> dict[str, dict[str, str]]:
+            nonlocal calls
+            calls += 1
+            return {
+                "verify": {"Authorization": f"Bearer verify-{calls}"},
+                "settle": {"Authorization": f"Bearer settle-{calls}"},
+            }
+
+        facilitator = HttpFacilitator(
+            "https://f.example", headers={"X-Static": "1"}, create_auth_headers=create
+        )
+        await facilitator.verify(payment(), requirements())  # type: ignore[arg-type]
+        await facilitator.settle(payment(), requirements())  # type: ignore[arg-type]
+        verify, settle = httpx_mock.get_requests()
+        assert verify.headers["authorization"] == "Bearer verify-1"
+        assert settle.headers["authorization"] == "Bearer settle-2"
+        assert verify.headers["x-static"] == settle.headers["x-static"] == "1"
+
+    async def test_create_auth_headers_must_be_keyed_by_endpoint(self) -> None:
+        facilitator = HttpFacilitator(
+            "https://f.example", create_auth_headers=lambda: {"Authorization": "Bearer t"}
+        )
+        with pytest.raises(FacilitatorError, match="keyed by facilitator endpoint"):
+            await facilitator.verify(payment(), requirements())  # type: ignore[arg-type]
+
+    async def test_create_auth_headers_failure_raises_facilitator_error(self) -> None:
+        def create() -> dict[str, dict[str, str]]:
+            raise RuntimeError("key store down")
+
+        facilitator = HttpFacilitator("https://f.example", create_auth_headers=create)
+        with pytest.raises(FacilitatorError, match="auth headers failed: key store down"):
+            await facilitator.settle(payment(), requirements())  # type: ignore[arg-type]
+
     async def test_uses_a_provided_client(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(json={"isValid": True})
         async with httpx.AsyncClient(headers={"X-Client": "mine"}) as client:

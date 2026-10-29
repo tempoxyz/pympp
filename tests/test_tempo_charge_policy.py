@@ -184,14 +184,9 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             id="cap-currency-pin-case-insensitive",
         ),
         pytest.param({}, make_challenge(currency=USDC), None, id="no-cap-any-currency"),
-        # chain pin (the default configuration pins mainnet)
-        pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-pinned"),
-        pytest.param(
-            {},
-            make_challenge(chain_id=TESTNET_CHAIN_ID),
-            f"client is restricted to {CHAIN_ID}",
-            id="chain-mismatch",
-        ),
+        # chain pin: as mppx, an unpinned client pays on the challenge's chain
+        pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-mainnet"),
+        pytest.param({}, make_challenge(chain_id=TESTNET_CHAIN_ID), None, id="chain-follows"),
         pytest.param(
             {"chain_id": TESTNET_CHAIN_ID},
             make_challenge(chain_id=CHAIN_ID),
@@ -459,9 +454,9 @@ UNDER = {"amount": "1000"}
         ),
         pytest.param(
             {},
-            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": CHAIN_ID}],
+            [{"chain_id": 1}, {"chain_id": TESTNET_CHAIN_ID}],
             1,
-            id="wrong-then-right-chain",
+            id="unknown-then-known-chain",
         ),
         pytest.param(
             {"chain_id": TESTNET_CHAIN_ID},
@@ -472,9 +467,9 @@ UNDER = {"amount": "1000"}
         pytest.param({"max_atomic_amount": 1000}, [OVER, {"amount": "2000"}], None, id="all-over"),
         pytest.param(
             {},
-            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": 1}],
+            [{"chain_id": 1}, {"chain_id": 5}],
             None,
-            id="all-wrong-chain",
+            id="all-unknown-chain",
         ),
         pytest.param(
             TOKEN_CAP, [{"amount": "1000001"}, {"amount": "2000000"}], None, id="token-all-over"

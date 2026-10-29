@@ -46,7 +46,7 @@ class AuthorizationConfig(TypedDict):
 
 
 _OPTION_KEYS = frozenset(
-    {"amount", "currency", "recipient", "splits", "fee_payer", "chain_id", "extra"}
+    {"amount", "currency", "recipient", "splits", "fee_payer", "chain_id", "extra", "external_id"}
 )
 
 
@@ -79,7 +79,6 @@ class _Config:
             for key, value in (
                 ("chainId", options.get("chain_id")),
                 ("splits", options.get("splits")),
-                ("feePayer", options.get("fee_payer")),
             )
             if value is not None
         }
@@ -91,6 +90,10 @@ class _Config:
         }
         if options.get("extra") is not None:
             request["extra"] = options["extra"]
+        if options.get("external_id") is not None:
+            request["externalId"] = options["external_id"]
+        # fee_payer is a Tempo option: EIP-3009 payers pay no gas, so like mppx an
+        # EVM offer composed with sponsored Tempo offers ignores it.
         return self.wire_request(request)
 
     def wire_request(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -107,8 +110,6 @@ class _Config:
         details = dict(raw_details)
         if details.get("splits"):
             raise ValueError("EVM charges do not support splits")
-        if details.get("feePayer"):
-            raise ValueError("EVM charges do not support fee_payer")
         details.pop("feePayer", None)
         details.pop("splits", None)
         chain_id = details.get("chainId", self.chain_id)

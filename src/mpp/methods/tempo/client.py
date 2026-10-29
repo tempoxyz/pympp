@@ -233,6 +233,9 @@ class TempoMethod:
         """
         if self._rpc_url_explicit and not self._chain_id_explicit:
             return await self._get_chain_id(self.rpc_url)
+        if not self._chain_id_explicit:
+            # As mppx: an unpinned client pays on the chain the challenge names.
+            return None
         if self.chain_id is not None:
             return self.chain_id
         if self.rpc_url:
@@ -247,6 +250,8 @@ class TempoMethod:
         """
         if self._rpc_url_explicit and not self._chain_id_explicit:
             return self._cached_chain_ids.get(self.rpc_url)
+        if not self._chain_id_explicit:
+            return None
         if self.chain_id is not None:
             return self.chain_id
         return self._cached_chain_ids.get(self.rpc_url)
@@ -456,9 +461,21 @@ class TempoMethod:
         """
         try:
             self._check_charge_policy(challenge.request, self._known_expected_chain_id())
+            self._rpc_url_for(challenge.request)
         except ValueError:
             return False
         return True
+
+    def _pinned(self) -> bool:
+        return self._chain_id_explicit or self._rpc_url_explicit
+
+    def _rpc_url_for(self, request: dict[str, Any]) -> str:
+        """The RPC to sign against: the configured one, or for an unpinned client the
+        default RPC of the challenge's chain (an unknown chain needs an explicit rpc_url)."""
+        chain_id = _challenge_chain_id(request)
+        if self._pinned() or chain_id is None or chain_id == self.chain_id:
+            return self.rpc_url
+        return rpc_url_for_chain(chain_id)
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Create a credential to satisfy the given challenge.
@@ -522,7 +539,7 @@ class TempoMethod:
 
         splits = method_details.get("splits") if is_dict(method_details) else None
 
-        rpc_url = self.rpc_url
+        rpc_url = self._rpc_url_for(request)
         raw_tx, chain_id = await self._build_tempo_transfer(
             amount=request["amount"],
             currency=request["currency"],

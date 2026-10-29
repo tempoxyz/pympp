@@ -456,6 +456,10 @@ def _rpc_error_msg(result: dict[str, Any]) -> str:
     return str(error_obj)
 
 
+# JSON-RPC ``execution reverted`` (EIP-1474); other execution errors say "revert".
+_EXECUTION_ERROR_CODES = frozenset({3})
+
+
 def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
     """Return true when a failed broadcast may have reached the mempool.
 
@@ -1781,7 +1785,7 @@ class ChargeIntent:
         raw_tx = payload.signature
 
         # Simulation payload for the locally co-signed tx, if we sponsor it.
-        simulate_payload: dict[str, Any] | None = None
+        simulate_payload: list[dict[str, Any]] | None = None
         # Outcome marker for a locally sponsored submission, keyed on the
         # client-signed envelope so it is stable across retries of a credential.
         broadcast_key: str | None = None
@@ -2416,7 +2420,7 @@ class ChargeIntent:
         *,
         require_remaining_validity: bool = True,
         allow_expired: bool = False,
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Co-sign a client-signed transaction as fee payer.
 
         Deserializes the client's 0x78 fee payer envelope, optionally validates
@@ -2575,40 +2579,44 @@ class ChargeIntent:
 
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
 
-    def _build_simulate_payload(self, tx: Any, sender: str) -> dict[str, Any]:
-        """Build a ``tempo_simulateV1`` payload for the co-signed 0x76 tx.
+    def _build_simulate_payload(self, tx: Any, sender: str) -> list[dict[str, Any]]:
+        """Build the ``eth_call`` requests that check a co-signed 0x76 tx.
 
-        Carries the recovered sender as ``from`` (the node needs it to model the
-        sender) plus the sponsor fields (``feeToken``, ``feePayerSignature``) so
-        the node simulates the same tx we are about to broadcast.
+        Like mppx's ``preflightSponsorship``, the calls are simulated twice:
+        first from the sender with no fee fields, so the sender's fee balance is
+        irrelevant, then as the final sponsored transaction with its concrete
+        fee payer and fee token. ``eth_call`` carries neither signature, and
+        every public Tempo RPC serves it (``tempo_simulateV1`` is refused).
 
         Must not be called for a tx that carries a ``key_authorization`` or a
         non-empty ``tempo_authorization_list``: those fields cannot yet be
-        faithfully serialized here, so the resulting payload would describe a
-        different transaction than the one broadcast. Local cosigning rejects
-        these envelopes before applying the sponsor signature.
+        faithfully serialized here, so the request would describe a different
+        transaction than the one broadcast. Local cosigning rejects these
+        envelopes before applying the sponsor signature.
         """
         if getattr(tx, "key_authorization", None) is not None or getattr(
             tx, "tempo_authorization_list", ()
         ):
             raise VerificationError(
-                "Cannot build a faithful tempo_simulateV1 payload for an "
+                "Cannot build a faithful simulation request for an "
                 "authorization-bearing transaction"
             )
-
-        sig = tx.fee_payer_signature
-        parity = sig.v if sig.v in (0, 1) else sig.v - 27
-
-        # The node rebuilds the batch as ``calls[]`` followed by the top-level
-        # call appended last; an absent top-level ``to`` is read as a CREATE and
-        # rejected. So we put the final call top-level and the rest in ``calls``
-        # to preserve order.
-        last_call = tx.calls[-1]
-        leading_calls = tx.calls[:-1]
-
-        tx_request: dict[str, Any] = {
-            "from": sender,
+        calls = [
+            {
+                "to": "0x" + bytes(c.to).hex(),
+                "value": hex(c.value),
+                "data": "0x" + c.data.hex(),
+            }
+            for c in tx.calls
+        ]
+        sender_request: dict[str, Any] = {"type": "0x76", "from": sender, "calls": calls}
+        if self.fee_payer is None:
+            raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
+        fee_payer = self.fee_payer.address
+        sponsored: dict[str, Any] = {
             "type": "0x76",
+            "from": sender,
+            "calls": calls,
             "chainId": hex(tx.chain_id),
             "nonce": hex(tx.nonce),
             "nonceKey": hex(tx.nonce_key),
@@ -2616,87 +2624,58 @@ class ChargeIntent:
             "maxFeePerGas": hex(tx.max_fee_per_gas),
             "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
             "feeToken": "0x" + bytes(tx.fee_token).hex(),
-            "feePayerSignature": {
-                # Fixed 32-byte r/s so leading zeros are not dropped.
-                "r": f"0x{sig.r:064x}",
-                "s": f"0x{sig.s:064x}",
-                "yParity": hex(parity),
-            },
-            # Top-level payment call so the node does not read this as a CREATE.
-            "to": "0x" + bytes(last_call.to).hex(),
-            "value": hex(last_call.value),
-            "data": "0x" + last_call.data.hex(),
+            # The node rejects ``feePayer: true`` in eth_call; name the sponsor.
+            "feePayer": fee_payer,
         }
-        if leading_calls:
-            tx_request["calls"] = [
-                {
-                    "to": "0x" + bytes(c.to).hex(),
-                    "value": hex(c.value),
-                    "data": "0x" + c.data.hex(),
-                }
-                for c in leading_calls
-            ]
         if tx.valid_before is not None:
-            tx_request["validBefore"] = hex(tx.valid_before)
+            sponsored["validBefore"] = hex(tx.valid_before)
         if tx.valid_after is not None:
-            tx_request["validAfter"] = hex(tx.valid_after)
-
-        return {
-            "blockStateCalls": [{"calls": [tx_request]}],
-            # We only care about execution outcome, not mempool admission.
-            "validation": False,
-            "traceTransfers": False,
-            "returnFullTransactions": False,
-        }
+            sponsored["validAfter"] = hex(tx.valid_after)
+        return [sender_request, sponsored]
 
     async def _simulate_before_broadcast(
-        self, client: Any, simulate_payload: dict[str, Any], rpc_url: str
+        self, client: Any, simulate_payload: list[dict[str, Any]], rpc_url: str
     ) -> None:
-        """Simulate the co-signed tx and raise if it would revert.
+        """Simulate the co-signed tx with ``eth_call`` and raise if it would fail.
 
-        Fails closed: any RPC/transport error is treated as a failed check.
+        Fails closed: a transport error or an unreadable reply is an internal
+        error; an execution error is a verification failure.
         """
-        try:
-            response = await client.post(
-                rpc_url,
-                json={
-                    "jsonrpc": "2.0",
-                    "method": "tempo_simulateV1",
-                    "params": [simulate_payload, "latest"],
-                    "id": 1,
-                },
-            )
-            response.raise_for_status()
-            result = response.json()
-        except Exception as err:
-            raise InternalPaymentError() from err
-
-        if "error" in result:
+        for request in simulate_payload:
+            try:
+                response = await client.post(
+                    rpc_url,
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "eth_call",
+                        "params": [request, "latest"],
+                        "id": 1,
+                    },
+                )
+                response.raise_for_status()
+                result = response.json()
+            except Exception as err:
+                raise InternalPaymentError() from err
+            if not is_dict(result):
+                raise InternalPaymentError() from RuntimeError(
+                    "Pre-broadcast simulation returned an unreadable reply"
+                )
+            if "error" not in result:
+                if "result" not in result:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Pre-broadcast simulation returned no result"
+                    )
+                continue
+            error = result.get("error")
+            code = error.get("code") if is_dict(error) else None
+            message = _rpc_error_msg(result)
+            if code in _EXECUTION_ERROR_CODES or "revert" in message.lower():
+                raise VerificationError(
+                    f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
+                )
             raise InternalPaymentError() from RuntimeError(
-                f"Pre-broadcast simulation failed: {_rpc_error_msg(result)}"
+                f"Pre-broadcast simulation failed: {message}"
             )
-
-        rpc_result = result.get("result")
-        blocks = rpc_result.get("blocks") if is_dict(rpc_result) else None
-        block0 = blocks[0] if is_list(blocks) and blocks else None
-        calls = block0.get("calls") if is_dict(block0) else None
-        call: dict[Any, Any] | None = None
-        if is_list(calls) and calls and is_dict(calls[0]):
-            call = calls[0]
-        if call is None:
-            raise InternalPaymentError() from RuntimeError(
-                "Pre-broadcast simulation returned no call results"
-            )
-
-        status = call.get("status")
-        if status in ("0x1", 1, True):
-            return
-
-        call_error: dict[str, Any] = call.get("error") or {}
-        detail = call_error.get("message") or "no revert reason returned"
-        raise VerificationError(
-            f"Sponsored transaction would revert in pre-broadcast simulation: {detail}"
-        )
 
     def _validate_calls(self, calls: tuple[Any, ...], request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""
