@@ -522,6 +522,15 @@ def test_challenge_selection_skips_offers_outside_policy(
     assert mcp_method is method
 
 
+def test_rpc_pinned_client_selects_a_chainless_challenge_before_resolving() -> None:
+    """A chain pinned by rpc_url alone is checked against allowed_chain_ids at signing,
+    once its RPC answers, not refused during selection."""
+    method = make_method(rpc_url="https://rpc.custom", allowed_chain_ids=[TESTNET_CHAIN_ID])
+    assert method.can_handle_challenge(make_challenge())
+    method._cached_chain_ids["https://rpc.custom"] = CHAIN_ID
+    assert not method.can_handle_challenge(make_challenge())
+
+
 @pytest.mark.parametrize(
     ("cached_chain_id", "expected"),
     [

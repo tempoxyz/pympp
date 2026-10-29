@@ -388,11 +388,16 @@ class TempoMethod:
             )
         # A challenge without a chain is paid on the pinned chain or, unpinned,
         # the configured default (mainnet), which the allowlist must also admit.
+        # A chain pinned only by a custom rpc_url is unknown until its RPC is asked;
+        # signing resolves it first and checks again.
+        rpc_pinned = self._rpc_url_explicit and not self._chain_id_explicit
         self._check_allowed_chain_id(
             challenge_chain_id
             if challenge_chain_id is not None
             else expected_chain_id
             if expected_chain_id is not None
+            else None
+            if rpc_pinned
             else self.chain_id
         )
         _check_recipient_addresses(request)
