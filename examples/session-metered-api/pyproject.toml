@@ -1,0 +1,16 @@
+[project]
+name = "session-metered-api-example"
+version = "0.1.0"
+description = "Sub-cent metered API paid through one Machine Payments Protocol session"
+requires-python = ">=3.12"
+dependencies = [
+    "pympp[tempo,server,sqlite]",
+    "starlette",
+    "uvicorn",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pympp = { path = "../.." }

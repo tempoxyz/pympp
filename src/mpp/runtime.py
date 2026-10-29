@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
 from mpp.errors import InvalidChallengeError, PaymentExpiredError
@@ -15,11 +15,49 @@ from mpp.x402._client import is_x402_challenge, x402_credential
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class AttemptOutcome:
+    """What became of a credential a transport sent (mppx ``MethodResponse.AttemptOutcome``).
+
+    ``status`` is ``accepted`` (a successful response), ``rejected`` (a failed response,
+    an error, or a replacement challenge) or ``pending`` (an identical challenge again, or
+    a redirect). ``response`` is the response, when there is one; ``challenges`` are the
+    challenges it carried.
+    """
+
+    status: Literal["accepted", "pending", "rejected"]
+    response: Any = None
+    challenges: Sequence[Challenge] = ()
+
+
+@dataclass(slots=True, kw_only=True, eq=False)
+class PaymentAttempt:
+    """Response lifecycle of one credential a transport sends (mppx ``MethodResponse.Attempt``).
+
+    A method sets :attr:`settle` to keep state for the credential until the transport
+    reports its :class:`AttemptOutcome`. While ``settle`` returns ``False`` for a
+    ``pending`` outcome, the transport resends the same credential for an identical
+    challenge instead of creating another.
+    """
+
+    settle: Callable[[AttemptOutcome], Awaitable[bool]] | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CredentialParams:
     """Arguments passed to :attr:`ClientMethod.create_credential`."""
 
     challenge: Challenge
     context: Any = None
+    request: Any = None
+    """The request that received the challenge (an ``httpx.Request`` over HTTP), when known."""
+    fetch: Callable[[Any], Awaitable[Any]] | None = None
+    """Sends an auxiliary request to the challenging server without payment handling.
+
+    Over HTTP it takes an ``httpx.Request`` and returns the read ``httpx.Response``. Methods
+    use it for management requests a credential depends on, such as a session top-up.
+    """
+    attempt: PaymentAttempt | None = None
+    """The response lifecycle of this credential, when a transport sends it and reports back."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -96,8 +134,14 @@ class PaymentRuntime:
         method: ClientMethod,
         *,
         event_payload: dict[str, Any] | None = None,
+        request: Any = None,
+        fetch: Callable[[Any], Awaitable[Any]] | None = None,
+        attempt: PaymentAttempt | None = None,
     ) -> Credential:
-        """Create a credential and emit its lifecycle events."""
+        """Create a credential and emit its lifecycle events.
+
+        ``request`` and ``fetch`` are passed to the method in :class:`CredentialParams`.
+        """
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
         if challenge.method != method.name or challenge.intent != method.intent:
@@ -130,7 +174,9 @@ class PaymentRuntime:
         if isinstance(supplied, Credential):
             credential = supplied
         else:
-            serialized = await method.create_credential(CredentialParams(challenge=challenge))
+            serialized = await method.create_credential(
+                CredentialParams(challenge=challenge, request=request, fetch=fetch, attempt=attempt)
+            )
             if is_x402_challenge(challenge):
                 # x402 methods return the PAYMENT-SIGNATURE header value.
                 credential = x402_credential(challenge, serialized)

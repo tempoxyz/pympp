@@ -893,6 +893,86 @@ module mpp.methods.tempo.server
 
 module mpp.methods.tempo.session
 
+module mpp.methods.tempo.session.client
+    class ChannelEntry
+        @dataclass(frozen=False, slots=True)
+        field kw_only channel_id: str
+        field kw_only cumulative_amount: int
+        field kw_only deposit: int
+        field kw_only descriptor: ChannelDescriptor
+        field kw_only escrow: str
+        field kw_only chain_id: int
+        field kw_only opened: bool
+        field kw_only uncertain_top_up: bool = False
+        def copy(self, **changes: Any) -> ChannelEntry
+    class ChannelStore(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        def delete(self, key: str) -> None | Awaitable[None]
+        def get(self, key: str) -> ChannelEntry | None | Awaitable[ChannelEntry | None]
+        def set(self, entry: ChannelEntry) -> None | Awaitable[None]
+    class JsonChannelKv(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        def delete(self, key: str) -> None | Awaitable[None]
+        def get(self, key: str) -> str | None | Awaitable[str | None]
+        def set(self, key: str, value: str) -> None | Awaitable[None]
+    class JsonChannelStore
+        def __init__(self, kv: JsonChannelKv) -> None
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> ChannelEntry | None
+        async def set(self, entry: ChannelEntry) -> None
+    class MemoryChannelStore
+        def __init__(self) -> None
+        def delete(self, key: str) -> None
+        def get(self, key: str) -> ChannelEntry | None
+        def set(self, entry: ChannelEntry) -> None
+    class PaymentResponse
+        @dataclass(frozen=True, slots=True)
+        field kw_only response: httpx.Response
+        field kw_only receipt: SessionReceipt | None
+        field kw_only challenge: Challenge | None
+        field kw_only channel_id: str | None
+        field kw_only cumulative: int
+        property headers: httpx.Headers
+        property status_code: int
+    class SessionContext
+        @dataclass(frozen=True, slots=True)
+        field kw_only action: SessionAction | None = None
+        field kw_only channel_id: str | None = None
+        field kw_only cumulative_amount: str | None = None
+        field kw_only cumulative_amount_raw: str | None = None
+        field kw_only transaction: str | None = None
+        field kw_only descriptor: ChannelDescriptor | None = None
+        field kw_only additional_deposit: str | None = None
+        field kw_only additional_deposit_raw: str | None = None
+        field kw_only deposit_raw: str | None = None
+    class SessionManager
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None) -> None
+        async def aclose(self) -> None
+        property channel: ChannelEntry | None
+        property channel_id: str | None
+        async def close(self) -> SessionReceipt | None
+        property cumulative: int
+        property deposit: int
+        async def fetch(self, url: str | httpx.URL, *, method: str = 'GET', **kwargs: Any) -> PaymentResponse
+        property last_challenge: Challenge | None
+        property opened: bool
+        property spent: int
+        async def top_up(self, amount: str | int) -> SessionReceipt | None
+    class SessionMethod
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None) -> None
+        def can_handle_challenge(self, challenge: Challenge) -> bool
+        def client_method(self) -> ClientMethod
+        async def create_credential(self, params: CredentialParams) -> str
+        async def create_session_credential(self, challenge: Challenge, context: SessionContext | None = None) -> str
+        async def post_top_up(self, *, challenge: Challenge, channel: ChannelEntry, additional_deposit: int, url: str | httpx.URL, send: Send, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None) -> SessionReceipt | None
+        async def resolve(self, challenge: Challenge) -> ChallengeContext
+        async def top_up_channel_if_needed(self, *, challenge: Challenge, channel: ChannelEntry, deposit: int, required_cumulative: int, url: str | httpx.URL, send: Send, authorization: str | None = None) -> SessionReceipt | None
+    class UncertainFundingError(Exception)
+    def create_channel_store() -> MemoryChannelStore
+    def create_json_channel_store(kv: JsonChannelKv) -> JsonChannelStore
+    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None) -> ClientMethod
+    def session_manager(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None) -> SessionManager
+
 module mpp.methods.tempo.session.server
     class ChannelState
         @dataclass(frozen=True, slots=True)
@@ -1016,10 +1096,21 @@ module mpp.methods.tempo.sponsor_budget
     async def reserve(store: CompareAndSetStore, budget: SponsorBudget, *, chain_id: int, sponsor: str, transaction_hash: str, fee: int, expires_at: int, wait_until: int, is_settled: IsSettled) -> Reservation
 
 module mpp.runtime
+    class AttemptOutcome
+        @dataclass(frozen=True, slots=True)
+        field kw_only status: Literal['accepted', 'pending', 'rejected']
+        field kw_only response: Any = None
+        field kw_only challenges: Sequence[Challenge] = ()
+    class PaymentAttempt
+        @dataclass(frozen=False, slots=True)
+        field kw_only settle: Callable[[AttemptOutcome], Awaitable[bool]] | None = None
     class CredentialParams
         @dataclass(frozen=True, slots=True)
         field kw_only challenge: Challenge
         field kw_only context: Any = None
+        field kw_only request: Any = None
+        field kw_only fetch: Callable[[Any], Awaitable[Any]] | None = None
+        field kw_only attempt: PaymentAttempt | None = None
     class ClientMethod
         @dataclass(frozen=True, slots=True)
         field kw_only method: MethodDefinition[Any, Any]
@@ -1031,7 +1122,7 @@ module mpp.runtime
         property name: str
     class PaymentRuntime
         def __init__(self, methods: Sequence[ClientMethod | Sequence[ClientMethod]] = (), *, events: EventDispatcher | None = None) -> None
-        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None) -> Credential
+        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None) -> Credential
         def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
 
 module mpp.server

@@ -1,0 +1,6 @@
+**
+!pyproject.toml
+!README.md
+!src/mpp/**
+!examples/session-metered-api/*.py
+**/__pycache__

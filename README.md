@@ -214,6 +214,7 @@ or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
 | [x402-client](./examples/x402-client/) | pympp client paying an official x402 server |
+| [session-metered-api](./examples/session-metered-api/) | Sub-cent metered API and an agent paying 500 calls through one session (Docker Compose) |
 
 ## Protocol
 
