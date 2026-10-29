@@ -382,8 +382,14 @@ class TempoMethod:
                 f"Challenge requests chain ID {challenge_chain_id}, "
                 f"but client is restricted to {expected_chain_id}"
             )
+        # A challenge without a chain is paid on the pinned chain or, unpinned,
+        # the configured default (mainnet), which the allowlist must also admit.
         self._check_allowed_chain_id(
-            challenge_chain_id if challenge_chain_id is not None else expected_chain_id
+            challenge_chain_id
+            if challenge_chain_id is not None
+            else expected_chain_id
+            if expected_chain_id is not None
+            else self.chain_id
         )
         _check_recipient_addresses(request)
         self._check_expected_recipients(request)
@@ -526,6 +532,8 @@ class TempoMethod:
         self._check_charge_policy(request, expected_chain_id)
         if expected_chain_id is None:
             expected_chain_id = _challenge_chain_id(request)
+        if expected_chain_id is None:
+            expected_chain_id = self.chain_id
         method_details = request.get("methodDetails", {})
         use_fee_payer = method_details.get("feePayer", False) if is_dict(method_details) else False
         if use_fee_payer:

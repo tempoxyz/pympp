@@ -188,6 +188,12 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
         pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-mainnet"),
         pytest.param({}, make_challenge(chain_id=TESTNET_CHAIN_ID), None, id="chain-follows"),
         pytest.param(
+            {"allowed_chain_ids": [TESTNET_CHAIN_ID]},
+            make_challenge(),
+            "Chain ID not allowed: 4217",
+            id="chainless-challenge-checks-default-against-allowlist",
+        ),
+        pytest.param(
             {"chain_id": TESTNET_CHAIN_ID},
             make_challenge(chain_id=CHAIN_ID),
             f"client is restricted to {TESTNET_CHAIN_ID}",
