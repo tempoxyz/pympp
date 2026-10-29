@@ -166,6 +166,10 @@ class TempoMethod:
     _currency_explicit: bool = field(default=True, init=False, repr=False)
     _chain_id_lock: asyncio.Lock | None = field(default=None, init=False, repr=False)
     _rpc_url_explicit: bool = field(default=False, init=False, repr=False)
+    # Set only by :func:`charge` built with neither ``chain_id`` nor ``rpc_url``: the
+    # client then pays on the chain each challenge names, as mppx does. A
+    # directly constructed method stays pinned to its own chain.
+    _follow_challenge_chain: bool = field(default=False, init=False, repr=False)
     _signing: dict[tuple[str, str], asyncio.Task[Credential]] = field(
         default_factory=dict[tuple[str, str], "asyncio.Task[Credential]"], init=False, repr=False
     )
@@ -233,7 +237,7 @@ class TempoMethod:
         """
         if self._rpc_url_explicit and not self._chain_id_explicit:
             return await self._get_chain_id(self.rpc_url)
-        if not self._chain_id_explicit:
+        if self._follow_challenge_chain:
             # As mppx: an unpinned client pays on the chain the challenge names.
             return None
         if self.chain_id is not None:
@@ -250,7 +254,7 @@ class TempoMethod:
         """
         if self._rpc_url_explicit and not self._chain_id_explicit:
             return self._cached_chain_ids.get(self.rpc_url)
-        if not self._chain_id_explicit:
+        if self._follow_challenge_chain:
             return None
         if self.chain_id is not None:
             return self.chain_id
@@ -473,7 +477,7 @@ class TempoMethod:
         return True
 
     def _pinned(self) -> bool:
-        return self._chain_id_explicit or self._rpc_url_explicit
+        return not self._follow_challenge_chain
 
     def _rpc_url_for(self, request: dict[str, Any]) -> str:
         """The RPC to sign against: the configured one, or for an unpinned client the
@@ -1141,6 +1145,7 @@ def _tempo_method(
     method._chain_id_explicit = chain_id_explicit
     method._currency_explicit = currency_explicit
     method._rpc_url_explicit = rpc_url_explicit
+    method._follow_challenge_chain = not chain_id_explicit and not rpc_url_explicit
     return method
 
 

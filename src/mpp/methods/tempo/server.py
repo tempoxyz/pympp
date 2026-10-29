@@ -122,12 +122,11 @@ def charge(
         input.setdefault("recipient", config.recipient)
         input.setdefault("chain_id", config.chain_id)
         input.setdefault("decimals", config.decimals)
-        # As mppx: a configured sponsor sponsors every route unless it passes
-        # fee_payer=False, and no route promises sponsorship nobody can give.
+        # No route promises sponsorship nobody can give (as mppx). Routes still opt in:
+        # local cosigning accepts only secp256k1 sender signatures, so sponsoring by
+        # default would refuse access-key and passkey payers.
         if fee_payer is None:
             input.pop("fee_payer", None)
-        elif not input.get("splits"):
-            input.setdefault("fee_payer", True)
         return input
 
     def credential(context: VerifyContext) -> Credential:

@@ -5971,6 +5971,31 @@ class TestChainIdPropagation:
         assert credential.source is not None
         assert credential.source.startswith("did:pkh:eip155:42431:")
 
+    def test_directly_built_method_stays_pinned(self) -> None:
+        """A TempoMethod built directly keeps its chain, as before."""
+        from mpp.methods.tempo._defaults import TESTNET_RPC_URL
+        from mpp.methods.tempo.client import TempoMethod
+
+        method = TempoMethod(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=42431,
+            rpc_url=TESTNET_RPC_URL,
+        )
+        challenge = Challenge(
+            id="test-direct-pin",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"chainId": 4217},
+            },
+            realm="test.example.com",
+            request_b64="e30",
+        )
+        assert not method.can_handle_challenge(challenge)
+
     def test_unpinned_client_skips_an_unknown_chain(self) -> None:
         method = _tempo_method(account=TempoAccount.from_key(TEST_PRIVATE_KEY))
         challenge = Challenge(
@@ -7518,7 +7543,7 @@ class TestSponsoredChallengeLifetime:
 
 
 class TestSponsorshipDefault:
-    """As mppx: a configured sponsor sponsors routes by default; none is never promised."""
+    """Routes opt in to sponsorship; a route never promises a sponsor nobody configured."""
 
     @staticmethod
     def _issued(server_methods, **options):
@@ -7534,13 +7559,13 @@ class TestSponsorshipDefault:
     @pytest.mark.parametrize(
         ("sponsor", "options", "sponsored"),
         [
-            (True, {}, True),
+            (True, {}, False),
+            (True, {"fee_payer": True}, True),
             (True, {"fee_payer": False}, False),
-            (True, {"splits": [{"amount": "1", "recipient": "0x" + "11" * 20}]}, False),
             (False, {}, False),
             (False, {"fee_payer": True}, False),
         ],
-        ids=["default", "opt-out", "splits", "no-sponsor", "no-sponsor-asked"],
+        ids=["opt-in-default", "opted-in", "opt-out", "no-sponsor", "no-sponsor-asked"],
     )
     async def test_fee_payer_follows_the_configured_sponsor(
         self, sponsor: bool, options: dict, sponsored: bool
