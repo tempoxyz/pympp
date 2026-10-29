@@ -184,13 +184,14 @@ TOKEN_CAP = {"max_amount": "1", "max_amount_decimals": 6}
             id="cap-currency-pin-case-insensitive",
         ),
         pytest.param({}, make_challenge(currency=USDC), None, id="no-cap-any-currency"),
-        # chain pin (the default configuration pins mainnet)
-        pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-pinned"),
+        # chain pin: as mppx, an unpinned client pays on the challenge's chain
+        pytest.param({}, make_challenge(chain_id=CHAIN_ID), None, id="chain-mainnet"),
+        pytest.param({}, make_challenge(chain_id=TESTNET_CHAIN_ID), None, id="chain-follows"),
         pytest.param(
-            {},
-            make_challenge(chain_id=TESTNET_CHAIN_ID),
-            f"client is restricted to {CHAIN_ID}",
-            id="chain-mismatch",
+            {"allowed_chain_ids": [TESTNET_CHAIN_ID]},
+            make_challenge(),
+            "Chain ID not allowed: 4217",
+            id="chainless-challenge-checks-default-against-allowlist",
         ),
         pytest.param(
             {"chain_id": TESTNET_CHAIN_ID},
@@ -459,9 +460,9 @@ UNDER = {"amount": "1000"}
         ),
         pytest.param(
             {},
-            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": CHAIN_ID}],
+            [{"chain_id": 1}, {"chain_id": TESTNET_CHAIN_ID}],
             1,
-            id="wrong-then-right-chain",
+            id="unknown-then-known-chain",
         ),
         pytest.param(
             {"chain_id": TESTNET_CHAIN_ID},
@@ -472,9 +473,9 @@ UNDER = {"amount": "1000"}
         pytest.param({"max_atomic_amount": 1000}, [OVER, {"amount": "2000"}], None, id="all-over"),
         pytest.param(
             {},
-            [{"chain_id": TESTNET_CHAIN_ID}, {"chain_id": 1}],
+            [{"chain_id": 1}, {"chain_id": 5}],
             None,
-            id="all-wrong-chain",
+            id="all-unknown-chain",
         ),
         pytest.param(
             TOKEN_CAP, [{"amount": "1000001"}, {"amount": "2000000"}], None, id="token-all-over"
@@ -519,6 +520,15 @@ def test_challenge_selection_skips_offers_outside_policy(
     mcp_challenge, mcp_method = mcp._match_challenge(mcp_challenges)
     assert mcp_challenge.id == f"offer-{expected}"
     assert mcp_method is method
+
+
+def test_rpc_pinned_client_selects_a_chainless_challenge_before_resolving() -> None:
+    """A chain pinned by rpc_url alone is checked against allowed_chain_ids at signing,
+    once its RPC answers, not refused during selection."""
+    method = make_method(rpc_url="https://rpc.custom", allowed_chain_ids=[TESTNET_CHAIN_ID])
+    assert method.can_handle_challenge(make_challenge())
+    method._cached_chain_ids["https://rpc.custom"] = CHAIN_ID
+    assert not method.can_handle_challenge(make_challenge())
 
 
 @pytest.mark.parametrize(

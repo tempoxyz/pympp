@@ -11,6 +11,7 @@ from mpp import Challenge, Credential
 from mpp.errors import InvalidChallengeError, PaymentExpiredError
 from mpp.events import CHALLENGE_RECEIVED, CREDENTIAL_CREATED, EventDispatcher
 from mpp.methods import Method as MethodDefinition
+from mpp.x402._client import is_x402_challenge, x402_credential
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -65,7 +66,8 @@ class ClientMethod:
 
     Attributes:
         method: The method definition.
-        create_credential: Returns the serialized credential (``"Payment ..."``) for a challenge.
+        create_credential: Returns the serialized credential (``"Payment ..."``) for a challenge,
+            or the ``PAYMENT-SIGNATURE`` header value for an x402 challenge.
         can_handle_challenge: Optional predicate selecting the challenges this method pays,
             such as those in a configured currency.
         transaction_hash: Optional derivation of the on-chain hash a credential settles with,
@@ -110,8 +112,14 @@ class PaymentRuntime:
         self,
         challenges: Sequence[Challenge],
     ) -> tuple[Challenge, ClientMethod]:
-        """Return the first challenge with a configured method and intent."""
-        for challenge in challenges:
+        """Return the first challenge with a configured method and intent.
+
+        Native Payment challenges come before x402 offers, as in mppx: a client
+        pays x402 only when no native challenge suits it.
+        """
+        native = [challenge for challenge in challenges if not is_x402_challenge(challenge)]
+        x402 = [challenge for challenge in challenges if is_x402_challenge(challenge)]
+        for challenge in (*native, *x402):
             methods = self._methods.get((challenge.method, challenge.intent), ())
             for method in methods:
                 if method.can_handle_challenge is None or method.can_handle_challenge(challenge):
@@ -169,7 +177,11 @@ class PaymentRuntime:
             serialized = await method.create_credential(
                 CredentialParams(challenge=challenge, request=request, fetch=fetch, attempt=attempt)
             )
-            credential = Credential.from_authorization(serialized)
+            if is_x402_challenge(challenge):
+                # x402 methods return the PAYMENT-SIGNATURE header value.
+                credential = x402_credential(challenge, serialized)
+            else:
+                credential = Credential.from_authorization(serialized)
         await self.events.emit(
             CREDENTIAL_CREATED,
             {**payload, "credential": credential},
