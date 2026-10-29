@@ -1257,7 +1257,7 @@ module mpp.x402
 module mpp.x402.cdp
     COINBASE_FACILITATOR_URL = 'https://api.cdp.coinbase.com/platform/v2/x402'
     def create_auth_header(api_key_id: str, api_key_secret: str, request_method: str, request_host: str, request_path: str, *, expires_in: int = 120) -> str
-    def create_cdp_auth_headers(api_key_id: str | None = None, api_key_secret: str | None = None) -> CreateAuthHeaders
+    def create_cdp_auth_headers(api_key_id: str | None = None, api_key_secret: str | None = None) -> Callable[[], dict[str, dict[str, str]]]
     def create_correlation_header() -> str
     def facilitator(api_key_id: str | None = None, api_key_secret: str | None = None, *, timeout: float = 30.0, client: httpx.AsyncClient | None = None, **options: Any) -> HttpFacilitator
 

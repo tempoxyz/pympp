@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -362,7 +363,7 @@ class TestChargeIntegration:
 
         # Spy on the simulate payload to catch request-shape regressions that
         # mocked-RPC unit tests cannot.
-        captured: list[dict] = []
+        captured: list[list[dict[str, Any]]] = []
         original_build = intent._build_simulate_payload
 
         def _spy(tx, sender):

@@ -24,12 +24,13 @@ import binascii
 import os
 import secrets
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
-from mpp.x402.facilitator import CreateAuthHeaders, HttpFacilitator
+from mpp.x402.facilitator import HttpFacilitator
 
 COINBASE_FACILITATOR_BASE_URL = "https://api.cdp.coinbase.com"
 COINBASE_FACILITATOR_V2_ROUTE = "/platform/v2/x402"
@@ -118,7 +119,7 @@ def create_auth_header(
 def create_cdp_auth_headers(
     api_key_id: str | None = None,
     api_key_secret: str | None = None,
-) -> CreateAuthHeaders:
+) -> Callable[[], dict[str, dict[str, str]]]:
     """Per-endpoint headers for Coinbase's facilitator, signed fresh on every call.
 
     The key defaults to ``CDP_API_KEY_ID`` and ``CDP_API_KEY_SECRET``, read when

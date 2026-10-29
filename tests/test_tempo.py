@@ -4077,6 +4077,7 @@ class TestCosignAsFeePayer:
         assert set(sender_request) == {"type", "from", "calls"}
         assert sponsored["from"].lower() == sender.lower()
         assert sponsored["feeToken"].lower() == currency.lower()
+        assert intent.fee_payer is not None
         assert sponsored["feePayer"].lower() == intent.fee_payer.address.lower()
         assert "feePayerSignature" not in sponsored and "signature" not in sponsored
         assert sponsored["nonceKey"].startswith("0x")
@@ -4650,7 +4651,7 @@ class TestCosignAsFeePayer:
         assert intent._sponsor_budget_store() is sponsor_budget.process_store()
         intent._http_client.post.assert_awaited()
 
-    def _cosign_payload(self, intent: ChargeIntent) -> dict:
+    def _cosign_payload(self, intent: ChargeIntent) -> list[dict[str, Any]]:
         currency = "0x20c0000000000000000000000000000000000000"
         raw_tx = self._build_client_tx(currency=currency)
         _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
@@ -5967,6 +5968,7 @@ class TestChainIdPropagation:
             credential = await method.create_credential(challenge)
         assert seen["rpc_url"] == TESTNET_RPC_URL
         assert seen["expected_chain_id"] == 42431
+        assert credential.source is not None
         assert credential.source.startswith("did:pkh:eip155:42431:")
 
     def test_unpinned_client_skips_an_unknown_chain(self) -> None:

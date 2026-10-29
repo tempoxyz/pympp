@@ -334,7 +334,8 @@ class TestHttpFacilitator:
 
     async def test_create_auth_headers_must_be_keyed_by_endpoint(self) -> None:
         facilitator = HttpFacilitator(
-            "https://f.example", create_auth_headers=lambda: {"Authorization": "Bearer t"}
+            "https://f.example",
+            create_auth_headers=lambda: {"Authorization": "Bearer t"},  # pyright: ignore[reportArgumentType]
         )
         with pytest.raises(FacilitatorError, match="keyed by facilitator endpoint"):
             await facilitator.verify(payment(), requirements())  # type: ignore[arg-type]
