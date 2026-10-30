@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.19.0 (2026-10-30)
+
+### Minor Changes
+
+- Added MPP session server support for the Tempo payment channel protocol, introducing a comprehensive set of new public modules and APIs (`mpp.methods.tempo.session`, `mpp.methods.tempo.session.abi`, `mpp.methods.tempo.session.chain`, `mpp.methods.tempo.session.protocol`, `mpp.methods.tempo.session.server`, and related submodules) for managing payment channel lifecycles including open, top-up, settle, close, and voucher operations. Also added CI support for mppx session interop harness tests. (by @brendanjryan, [#363](https://github.com/tempoxyz/pympp/pull/363))
+- Added the `mpp.methods.tempo.session.client` module with `SessionManager`, `SessionMethod`, `session`, `session_manager`, and supporting types (`ChannelEntry`, `ChannelStore`, `JsonChannelStore`, `MemoryChannelStore`, `PaymentResponse`, etc.) for paying metered APIs through a single TIP-1034 payment channel. Extended `ChallengeContext` with optional `request` and `fetch` fields, and updated `PaymentRuntime.create_credential` to accept matching optional parameters. Added a `session-metered-api` Docker Compose example demonstrating 500 sub-cent calls, automatic top-ups, and a cooperative close. (by @brendanjryan, [#363](https://github.com/tempoxyz/pympp/pull/363))
+
 ## 0.18.0 (2026-10-29)
 
 ### Minor Changes
