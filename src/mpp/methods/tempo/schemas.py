@@ -23,6 +23,13 @@ class Split(BaseModel):
     memo: str | None = None
 
 
+def _split_amount(amount: str) -> int:
+    """A split's base-unit amount, which must be a non-negative integer string."""
+    if not isinstance(amount, str) or not amount.isdigit():
+        raise ValueError("Invalid splits")
+    return int(amount)
+
+
 FIXED_ATTRIBUTION_MEMO_ERROR = "Fixed split memos must not use MPP attribution; omit the memo"
 
 
@@ -134,7 +141,13 @@ class ChargeInput(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> ChargeInput:
-        parse_units(self.amount, self.decimals)
+        total = parse_units(self.amount, self.decimals)
+        if self.splits is not None:
+            # As mppx's charge request schema: every split is positive and together
+            # they leave the primary recipient something, so a zero amount has none.
+            amounts = [_split_amount(split.amount) for split in self.splits]
+            if not self.splits or any(a <= 0 for a in amounts) or sum(amounts) >= total:
+                raise ValueError("Invalid splits")
         if any(is_fixed_attribution_memo(split.memo) for split in self.splits or ()):
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
         return self

@@ -474,3 +474,99 @@ class TestSupportedModes:
     def test_client_rejects_invalid_mode(self) -> None:
         with pytest.raises(ValueError, match="Invalid Tempo charge mode"):
             _tempo_method(account=ROOT, chain_id=CHAIN, mode="fast")  # pyright: ignore[reportArgumentType]
+
+
+class TestPushSafety:
+    """Push payments are on chain once broadcast: never pay twice, never lose the hash."""
+
+    async def test_lost_broadcast_response_is_an_unknown_outcome_with_the_hash(self) -> None:
+        import httpx
+        from eth_hash.auto import keccak
+
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        raw = "0x76" + "ab" * 40
+        with (
+            patch.object(method, "_build_tempo_transfer", AsyncMock(return_value=(raw, CHAIN))),
+            patch(
+                "mpp.methods.tempo.client._rpc_call",
+                AsyncMock(side_effect=httpx.ReadTimeout("lost")),
+            ),
+            pytest.raises(PaymentOutcomeUnknownError) as raised,
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+        assert raised.value.transaction_hash == "0x" + keccak(bytes.fromhex(raw[2:])).hex()
+
+    async def test_node_rejection_is_a_plain_transaction_error(self) -> None:
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        with (
+            patch.object(
+                method, "_build_tempo_transfer", AsyncMock(return_value=("0x76signed", CHAIN))
+            ),
+            patch(
+                "mpp.methods.tempo.client._rpc_call",
+                AsyncMock(side_effect=RuntimeError("RPC error: nonce too low")),
+            ),
+            pytest.raises(TransactionError, match="nonce too low"),
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+
+    def test_transaction_hash_reads_hash_credentials(self) -> None:
+        from mpp import Credential
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        tx_hash = "0x" + "cd" * 32
+        credential = Credential(
+            challenge=_challenge("1000").to_echo(), payload={"type": "hash", "hash": tx_hash}
+        )
+        assert method.transaction_hash(credential) == tx_hash
+
+    @pytest.mark.parametrize(
+        ("mode", "details", "payable"),
+        [
+            ("pull", {"supportedModes": ["push"]}, False),
+            ("push", {"supportedModes": ["pull"]}, False),
+            ("pull", {"supportedModes": ["push", "pull"]}, True),
+            ("pull", {}, True),
+        ],
+    )
+    def test_selection_skips_offers_without_the_client_mode(
+        self, mode: Any, details: dict, payable: bool
+    ) -> None:
+        method = _tempo_method(account=ROOT, chain_id=CHAIN, mode=mode)
+        assert method.can_handle_challenge(_challenge("1000", **details)) is payable
+        # A zero amount pays with a proof, whatever the modes.
+        assert method.can_handle_challenge(_challenge("0", **details))
+
+
+class TestZeroAmountSplits:
+    def test_routes_reject_splits_that_leave_nothing(self) -> None:
+        from mpp.methods.tempo.schemas import ChargeInput
+
+        def charge(amount: str, split_amount: str = "1") -> ChargeInput:
+            return ChargeInput.model_validate(
+                {
+                    "amount": amount,
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": ROOT.address,
+                    "splits": [{"amount": split_amount, "recipient": "0x" + "11" * 20}],
+                }
+            )
+
+        for amount, split_amount in (("0", "1"), ("0.000001", "1"), ("1", "0")):
+            with pytest.raises(ValueError, match="Invalid splits"):
+                charge(amount, split_amount)
+        assert charge("0.000002")
+
+    async def test_proof_on_a_wire_request_with_splits_is_rejected(self) -> None:
+        credential = make_credential(
+            {"type": "proof", "signature": "0x" + "00" * 65},
+            CHALLENGE_ID,
+            REALM,
+            expires=_expires(),
+            source=f"did:pkh:eip155:{CHAIN}:{ROOT.address}",
+        )
+        request = _request("0", splits=[{"amount": "1", "recipient": "0x" + "11" * 20}])
+        with pytest.raises(VerificationError, match="Invalid splits"):
+            await _intent().validate(credential, request)

@@ -1017,6 +1017,27 @@ class TestPaymentTransport:
         assert failed == []
 
     @pytest.mark.asyncio
+    async def test_never_pays_again_after_a_pushed_payment_is_refused(self) -> None:
+        """A hash credential reports a payment already on chain: a 402 answering it is
+        final, so the client must not sign and broadcast a second payment."""
+        challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
+        offer = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+        inner = MockTransport(
+            [httpx.Response(402, headers=offer), httpx.Response(402, headers=offer)]
+        )
+        method = MockMethod()
+        method.create_credential.return_value = make_credential(
+            payload={"type": "hash", "hash": "0x" + "ab" * 32}, challenge_id="test-id"
+        )
+        transport = PaymentTransport(methods=[method.client], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 402
+        assert method.create_credential.await_count == 1
+        assert len(inner.requests) == 2
+
+    @pytest.mark.asyncio
     async def test_order_challenges_selects_the_paid_challenge(self) -> None:
         """order_challenges filters and sorts candidates before signing (mppx)."""
         first = Challenge(id="first", method="tempo", intent="charge", request={"n": 1})

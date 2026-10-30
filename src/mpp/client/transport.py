@@ -192,6 +192,12 @@ async def _buffer_error_body(response: httpx.Response) -> None:
     response.stream = httpx.ByteStream(bytes(body[:_MAX_BUFFERED_ERROR_BODY]))
 
 
+def _is_pushed(credential: Credential) -> bool:
+    """Whether the credential reports a payment the client already broadcast."""
+    payload = credential.payload
+    return is_dict(payload) and payload.get("type") == "hash"
+
+
 def _transaction_hash(method: ClientMethod, credential: Credential) -> str | None:
     """Return the credential's on-chain hash if the method can derive it."""
     try:
@@ -501,6 +507,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     if same and not settled:
                         # The method still holds this credential's state: resend it.
                         reused, sent = previous.credential, previous
+                    elif _is_pushed(previous.credential):
+                        # A pushed payment is already on chain: paying again for the
+                        # same request could pay twice, so the 402 is final.
+                        return response
 
                 try:
                     if reused is not None:

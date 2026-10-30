@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from mpp import Challenge as CoreChallenge
 from mpp._typing import is_dict, is_list
 from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
@@ -220,9 +221,18 @@ class McpClient:
             if not challenges:
                 raise ValueError("Server returned malformed payment challenges") from e
 
-            cores = [challenge.to_core() for challenge in challenges]
+            # A challenge that can't be converted (such as a request that won't
+            # canonicalize) is unpayable on its own; it doesn't block the others.
+            usable: list[MCPChallenge] = []
+            cores: list[CoreChallenge] = []
+            for offered in challenges:
+                try:
+                    cores.append(offered.to_core())
+                except Exception:  # noqa: BLE001 - any conversion failure means unpayable
+                    continue
+                usable.append(offered)
             candidates = await self._runtime.order_challenges(cores, self._order_challenges)
-            challenge, method = self._match_challenge(challenges, candidates)
+            challenge, method = self._match_challenge(usable, candidates)
 
             core_credential = await self._runtime.create_credential(challenge.to_core(), method)
             mcp_credential = MCPCredential.from_core(core_credential, challenge)

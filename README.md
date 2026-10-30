@@ -51,8 +51,11 @@ async def handle(request: Request) -> Response:
 ```
 
 A `tempo.charge(fee_payer=...)` server sponsors its payers' fees on every route, as
-mppx does; pass `fee_payer=False` to a route to opt out. Before broadcasting a
-sponsored charge it simulates it with `eth_call`, which every public Tempo RPC serves.
+mppx does; pass `fee_payer=False` to a route to opt out. As in mppx, a sponsored
+challenge must expire at least 15 seconds after it is issued, so a shorter-lived route
+on such a server raises unless it passes `fee_payer=False` (zero-amount and push-only
+routes are exempt). Before broadcasting a sponsored charge it simulates it with
+`eth_call`, which every public Tempo RPC serves.
 
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 

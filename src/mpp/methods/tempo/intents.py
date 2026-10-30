@@ -944,6 +944,10 @@ class ChargeIntent:
             raise VerificationError("Zero-amount challenges require a proof credential.")
         if is_proof and not is_zero_amount:
             raise VerificationError("Proof credentials are only valid for zero-amount challenges.")
+        if is_proof and req.methodDetails.splits:
+            # mppx never issues these (splits must total less than the amount); a
+            # proof pays no one, so it can't satisfy the splits either.
+            raise VerificationError("Invalid splits")
         modes = req.methodDetails.supportedModes
         if modes is not None:
             if isinstance(payload, HashCredentialPayload) and "push" not in modes:
@@ -1994,16 +1998,36 @@ class ChargeIntent:
                         raise
 
             elif self.remote_fee_payer is not None:
+                prior_hosted: Any = None
                 if self._store is not None:
-                    client_store_key = f"mpp:charge-client:{_raw_transaction_hash(raw_tx).lower()}"
+                    client_hash = _raw_transaction_hash(raw_tx).lower()
+                    broadcast_key = f"mpp:charge-broadcast:{client_hash}"
+                    client_store_key = f"mpp:charge-client:{client_hash}"
                     if await self._store.get(client_store_key) is not None:
                         raise CredentialReplayedError("Transaction hash already used")
-                (
-                    raw_tx,
-                    simulate_payload,
-                    sponsor,
-                    sponsored_fee,
-                ) = await self._fill_hosted_fee_payer(client, raw_tx, request)
+                    prior_hosted = await self._store.get(broadcast_key)
+                if isinstance(prior_hosted, bytes):
+                    try:
+                        prior_hosted = prior_hosted.decode("utf-8")
+                    except UnicodeDecodeError as error:
+                        raise InternalPaymentError() from error
+                if prior_hosted is not None:
+                    # A submission whose outcome was lost: reconcile the exact
+                    # transaction the sponsor signed, never ask it to sign again
+                    # (it could choose another fee token and pay twice).
+                    if not (isinstance(prior_hosted, str) and prior_hosted.startswith("0x76")):
+                        raise InternalPaymentError() from RuntimeError(
+                            "Recovery record lacks the original signed transaction"
+                        )
+                    raw_tx = prior_hosted
+                    reconciling = True
+                else:
+                    (
+                        raw_tx,
+                        simulate_payload,
+                        sponsor,
+                        sponsored_fee,
+                    ) = await self._fill_hosted_fee_payer(client, raw_tx, request)
             else:
                 raise InternalPaymentError() from RuntimeError(
                     "No fee payer configured: pass fee_payer to tempo.charge()"

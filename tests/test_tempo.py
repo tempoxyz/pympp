@@ -240,10 +240,15 @@ class TestTempoMethod:
         assert TempoMethod().transaction_hash(credential) == expected
         assert TempoMethod().transaction_hash(trailing) is None
 
+    def test_transaction_hash_reads_a_pushed_hash(self) -> None:
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
+
+        assert TempoMethod().transaction_hash(credential) == "0xabc"
+
     @pytest.mark.parametrize(
         "payload",
         [
-            {"type": "hash", "hash": "0xabc"},
+            {"type": "hash"},
             {"type": "transaction"},
             {"type": "transaction", "signature": ""},
             {"type": "transaction", "signature": "0xnothex"},
@@ -264,7 +269,7 @@ class TestTempoMethod:
             },
         ],
         ids=[
-            "hash-payload",
+            "hash-without-hash",
             "missing",
             "empty",
             "not-hex",

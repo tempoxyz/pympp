@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from mpp import Challenge, Credential
 from mpp._typing import is_dict, is_list
-from mpp.errors import PaymentExpiredError
+from mpp.errors import PaymentExpiredError, PaymentOutcomeUnknownError
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -483,6 +483,10 @@ class TempoMethod:
         try:
             self._check_charge_policy(challenge.request, self._known_expected_chain_id())
             self._rpc_url_for(challenge.request)
+            # A zero amount pays with a proof, whatever the modes; otherwise an
+            # offer whose supportedModes exclude this client's mode is skipped.
+            if str(challenge.request.get("amount")) != "0":
+                self._resolve_mode(challenge.request.get("methodDetails"))
         except ValueError:
             return False
         return True
@@ -607,7 +611,7 @@ class TempoMethod:
         )
 
         if mode == "push":
-            tx_hash = await _send_raw_transaction_sync(rpc_url, raw_tx)
+            tx_hash = await _send_raw_transaction_sync(rpc_url, raw_tx, challenge)
             return Credential(
                 challenge=challenge.to_echo(),
                 payload={"type": "hash", "hash": tx_hash},
@@ -652,6 +656,9 @@ class TempoMethod:
         from mpp.methods.tempo import _rlp as rlp
 
         payload = credential.payload
+        if payload.get("type") == "hash":
+            tx_hash = payload.get("hash")
+            return tx_hash if isinstance(tx_hash, str) else None
         raw_tx = payload.get("signature")
         if payload.get("type") != "transaction" or not isinstance(raw_tx, str):
             return None
@@ -983,12 +990,26 @@ def _check_recipient_addresses(request: dict[str, Any]) -> None:
             )
 
 
-async def _send_raw_transaction_sync(rpc_url: str, raw_tx: str) -> str:
-    """Broadcast a signed transaction, wait for its receipt and return its hash."""
+async def _send_raw_transaction_sync(
+    rpc_url: str, raw_tx: str, challenge: Challenge | None = None
+) -> str:
+    """Broadcast a signed transaction, wait for its receipt and return its hash.
+
+    A node that answers with a JSON-RPC error refused the transaction. Any other
+    failure (a timeout or a lost response) may come after the node accepted it,
+    so it raises ``PaymentOutcomeUnknownError`` with the transaction's hash
+    rather than an error the caller could take as "nothing was paid".
+    """
+    import httpx
+    from eth_hash.auto import keccak
+
     try:
         receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx])
-    except Exception as error:
-        raise TransactionError(f"Transaction submission failed: {type(error).__name__}") from error
+    except RuntimeError as error:
+        raise TransactionError(f"Transaction submission failed: {error}") from error
+    except (httpx.HTTPError, ValueError) as error:
+        tx_hash = "0x" + keccak(bytes.fromhex(raw_tx.removeprefix("0x"))).hex()
+        raise PaymentOutcomeUnknownError(challenge, error, transaction_hash=tx_hash) from error
     tx_hash = receipt.get("transactionHash") if is_dict(receipt) else None
     if not isinstance(tx_hash, str):
         raise TransactionError("No transaction receipt returned.")

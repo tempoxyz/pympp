@@ -545,6 +545,48 @@ class TestMcpClientPaidTool:
                     sys.modules[mod_name] = orig
 
     @pytest.mark.asyncio
+    async def test_unconvertible_challenge_does_not_block_a_payable_one(self) -> None:
+        """A challenge whose request can't be canonicalized is unpayable on its own."""
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            unconvertible = {
+                **_make_challenge_dict(method="other"),
+                "id": "ch_other",
+                "request": {"amount": float("nan")},
+            }
+            payment_error = FakeMcpError(
+                -32042, data={"challenges": [unconvertible, _make_challenge_dict()]}
+            )
+            retry_result = FakeCallToolResult(
+                content=[{"type": "text", "text": "paid"}], meta=_make_receipt_meta()
+            )
+            session.call_tool = AsyncMock(side_effect=[payment_error, retry_result])
+
+            client = McpClient(session, methods=[fake_method()])
+            result = await client.call_tool("tool", {})
+
+            assert result.content[0]["text"] == "paid"
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
+    @pytest.mark.asyncio
     async def test_retry_failure_raises_payment_outcome_unknown(self) -> None:
         session = AsyncMock()
 

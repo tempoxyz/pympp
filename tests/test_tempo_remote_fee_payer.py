@@ -560,3 +560,44 @@ async def test_settled_hosted_credential_is_refused_before_asking_the_sponsor() 
         await _settle(network, raw_tx, store=store)
 
     assert network.methods == asked
+
+
+async def test_lost_hosted_broadcast_is_reconciled_without_asking_the_sponsor_again() -> None:
+    """A hosted sponsorship whose broadcast outcome was lost is retried with the exact
+    transaction the sponsor signed, never a second sponsorship (which could pick
+    another fee token and pay twice)."""
+    from mpp.errors import PaymentError
+    from mpp.store import MemoryStore
+
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    lost = {"count": 1}
+    answer = network.__call__
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["method"] == "eth_sendRawTransactionSync" and lost["count"]:
+            lost["count"] -= 1
+            network.broadcasts.append(body["params"][0])
+            raise httpx.ReadTimeout("response lost")
+        if body["method"] in ("eth_getTransactionReceipt", "eth_getTransactionByHash"):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": None})
+        return answer(request)
+
+    store = MemoryStore()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(flaky)) as client:
+        intent = ChargeIntent(
+            rpc_url=RPC_URL,
+            http_client=client,
+            fee_payer=FEE_PAYER_URL,
+            store=store,
+            confirmation_timeout=0.5,
+        )
+        with pytest.raises((PaymentError, httpx.HTTPError)):
+            await intent.broadcast(_credential(raw_tx), _request())
+        assert len(network.fill_requests) == 1
+        receipt = await intent.broadcast(_credential(raw_tx), _request())
+
+    assert receipt.status == "success"
+    assert len(network.fill_requests) == 1
+    assert len(set(network.broadcasts)) == 1
