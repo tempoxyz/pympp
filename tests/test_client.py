@@ -1023,7 +1023,10 @@ class TestPaymentTransport:
         challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
         offer = {"www-authenticate": challenge.to_www_authenticate("example.com")}
         inner = MockTransport(
-            [httpx.Response(402, headers=offer), httpx.Response(402, headers=offer)]
+            [
+                httpx.Response(402, headers=offer),
+                httpx.Response(402, headers=offer, content=b"payment refused"),
+            ]
         )
         method = MockMethod()
         method.create_credential.return_value = make_credential(
@@ -1034,6 +1037,7 @@ class TestPaymentTransport:
         response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
         assert response.status_code == 402
+        assert await response.aread() == b"payment refused"
         assert method.create_credential.await_count == 1
         assert len(inner.requests) == 2
 

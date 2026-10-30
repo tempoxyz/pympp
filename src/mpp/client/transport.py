@@ -483,6 +483,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         "Use a buffered body for paid requests."
                     )
 
+                if sent is not None and _is_pushed(sent.credential):
+                    # This 402 may be the final answer to a pushed payment:
+                    # keep its body readable for the caller.
+                    with suppress(Exception):
+                        await response.aread()
                 # Release the pool connection before callbacks can make auxiliary requests.
                 with suppress(Exception):
                     await response.aclose()

@@ -457,6 +457,44 @@ class TestSupportedModes:
         ):
             await method.create_credential(_challenge("1000", supportedModes=["push"]))
 
+    @pytest.mark.parametrize(
+        "rpc_error",
+        [
+            {"code": 4, "message": "transaction pooled but not yet confirmed"},
+            {"code": -32000, "message": "already known"},
+        ],
+    )
+    async def test_client_reports_pooled_push_as_unknown(self, rpc_error: dict) -> None:
+        from mpp.errors import PaymentOutcomeUnknownError
+        from mpp.methods.tempo._rpc import RpcError
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        rpc = AsyncMock(side_effect=RpcError({"jsonrpc": "2.0", "id": 1, "error": rpc_error}))
+        with (
+            patch.object(
+                method, "_build_tempo_transfer", AsyncMock(return_value=("0x76ab", CHAIN))
+            ),
+            patch("mpp.methods.tempo.client._rpc_call", rpc),
+            pytest.raises(PaymentOutcomeUnknownError) as raised,
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+        assert raised.value.transaction_hash is not None
+
+    async def test_client_reports_refused_push_as_failed(self) -> None:
+        from mpp.methods.tempo._rpc import RpcError
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        error = {"code": -32000, "message": "insufficient funds for gas"}
+        rpc = AsyncMock(side_effect=RpcError({"jsonrpc": "2.0", "id": 1, "error": error}))
+        with (
+            patch.object(
+                method, "_build_tempo_transfer", AsyncMock(return_value=("0x76signed", CHAIN))
+            ),
+            patch("mpp.methods.tempo.client._rpc_call", rpc),
+            pytest.raises(TransactionError, match="insufficient funds"),
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+
     @pytest.mark.parametrize("details", [{}, {"supportedModes": ["push", "pull"]}])
     async def test_client_pulls_by_default(self, details: dict) -> None:
         method = _tempo_method(account=ROOT, chain_id=CHAIN)

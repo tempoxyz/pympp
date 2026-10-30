@@ -995,21 +995,33 @@ async def _send_raw_transaction_sync(
 ) -> str:
     """Broadcast a signed transaction, wait for its receipt and return its hash.
 
-    A node that answers with a JSON-RPC error refused the transaction. Any other
-    failure (a timeout or a lost response) may come after the node accepted it,
-    so it raises ``PaymentOutcomeUnknownError`` with the transaction's hash
-    rather than an error the caller could take as "nothing was paid".
+    A node that answers with a definitive JSON-RPC error refused the
+    transaction. Any other failure (a timeout, a lost response, EIP-7966's
+    code 4 for a pooled but unconfirmed transaction, or "already known") may
+    come after the node accepted it, so it raises ``PaymentOutcomeUnknownError``
+    with the transaction's hash rather than an error the caller could take as
+    "nothing was paid". This classifies errors as the server's broadcast does.
     """
     import httpx
     from eth_hash.auto import keccak
 
+    from mpp.methods.tempo._rpc import RpcError
+    from mpp.methods.tempo.intents import _is_ambiguous_broadcast_error
+
+    def unknown(error: BaseException) -> PaymentOutcomeUnknownError:
+        tx_hash = "0x" + keccak(bytes.fromhex(raw_tx.removeprefix("0x"))).hex()
+        return PaymentOutcomeUnknownError(challenge, error, transaction_hash=tx_hash)
+
     try:
         receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx])
+    except RpcError as error:
+        if _is_ambiguous_broadcast_error(error.response):
+            raise unknown(error) from error
+        raise TransactionError(f"Transaction submission failed: {error}") from error
     except RuntimeError as error:
         raise TransactionError(f"Transaction submission failed: {error}") from error
     except (httpx.HTTPError, ValueError) as error:
-        tx_hash = "0x" + keccak(bytes.fromhex(raw_tx.removeprefix("0x"))).hex()
-        raise PaymentOutcomeUnknownError(challenge, error, transaction_hash=tx_hash) from error
+        raise unknown(error) from error
     tx_hash = receipt.get("transactionHash") if is_dict(receipt) else None
     if not isinstance(tx_hash, str):
         raise TransactionError("No transaction receipt returned.")
