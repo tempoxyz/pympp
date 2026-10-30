@@ -45,6 +45,8 @@ async def handle(request: Request) -> Response:
     result = await server.charge(amount="0.50")(request)
     if result.status != 200:
         return result.challenge
+    if result.response is not None:
+        return result.response  # the method handled it, such as a session top-up or close
     return result.with_receipt(Response.json({"data": "..."}))
 ```
 
@@ -212,6 +214,7 @@ or `validate` and `broadcast` hooks) or a `mpp.client.ClientMethod`
 | [fetch](./examples/fetch/) | CLI tool for fetching URLs with automatic payment handling |
 | [mcp-server](./examples/mcp-server/) | MCP server with payment-protected tools |
 | [x402-client](./examples/x402-client/) | pympp client paying an official x402 server |
+| [session-metered-api](./examples/session-metered-api/) | Sub-cent metered API and an agent paying 500 calls through one session (Docker Compose) |
 
 ## Protocol
 

@@ -16,7 +16,6 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-import attrs
 from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
 
@@ -31,8 +30,9 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
+from mpp.methods.tempo import _fee_payer
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
-from mpp.methods.tempo._defaults import PATH_USD, fee_tokens_for_chain, rpc_url_for_chain
+from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.schemas import (
@@ -2437,144 +2437,22 @@ class ChargeIntent:
         ``allow_expired=True`` as well, an expired one is not rejected either,
         so the caller can reconcile an earlier submission of it.
         """
-        # pytempo ships no type information.
-        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
-        from pytempo.models import (  # pyright: ignore[reportMissingTypeStubs]
-            Signature,
-            as_address,
-        )
-
-        from mpp.methods.tempo.fee_payer_envelope import decode_fee_payer_envelope
-
         if self.fee_payer is None:
             raise InternalPaymentError() from RuntimeError("No fee payer account configured")
 
-        try:
-            all_bytes = bytes.fromhex(raw_tx[2:] if raw_tx.startswith("0x") else raw_tx)
-            decoded, sender_addr_bytes, sender_sig, key_auth = decode_fee_payer_envelope(all_bytes)
-        except Exception as err:
-            raise VerificationError("Failed to deserialize client transaction") from err
+        def validate_calls(calls: tuple[Any, ...]) -> None:
+            if request is not None:
+                self._validate_calls(calls, request)
 
-        if key_auth is not None or decoded[12]:
-            raise VerificationError(
-                "Authorization-bearing transactions cannot be simulated and are not "
-                "supported by local fee-payer cosigning"
-            )
-
-        # Cosigning recovers the sender via secp256k1 ECDSA, so only a raw
-        # 65-byte signature is supported; other envelopes (keychain, P256,
-        # WebAuthn) are rejected up front.
-        if len(sender_sig) != 65:
-            if sender_sig and sender_sig[0] in (0x03, 0x04):
-                raise VerificationError(
-                    "Access-key (keychain) signed fee-payer envelopes are not "
-                    "supported by local cosigning"
-                )
-            raise VerificationError(
-                "Only 65-byte secp256k1 sender signatures are supported by local "
-                "fee-payer cosigning"
-            )
-
-        def _int(b: bytes) -> int:
-            return int.from_bytes(b, "big") if b else 0
-
-        # Fee-payer invariants (matches mpp-rs cosign_fee_payer_transaction)
-        if decoded[10]:
-            raise VerificationError(
-                "Fee payer transaction must not include fee_token (server sets it)"
-            )
-
-        nonce_key = _int(decoded[6])
-        if nonce_key != (1 << 256) - 1:
-            raise VerificationError("Fee payer envelope must use expiring nonce key (U256::MAX)")
-
-        valid_before_raw = decoded[8]
-        if not valid_before_raw:
-            raise VerificationError("Fee payer envelope must include valid_before")
-        valid_before = _int(valid_before_raw)
-        if require_remaining_validity:
-            _assert_remaining_validity(valid_before)
-        elif not allow_expired:
-            _assert_not_expired(valid_before)
-
-        chain_id = _int(decoded[0])
-        policy = get_policy(chain_id)
-
-        gas_limit = _int(decoded[3])
-        if gas_limit > policy.max_gas:
-            raise VerificationError("Invalid transaction: gas limit exceeds sponsor policy")
-
-        max_priority_fee_per_gas = _int(decoded[1])
-        max_fee_per_gas = _int(decoded[2])
-        if max_fee_per_gas > policy.max_fee_per_gas:
-            raise VerificationError("Invalid transaction: max fee per gas exceeds sponsor policy")
-        if max_priority_fee_per_gas > max_fee_per_gas:
-            raise VerificationError(
-                "Invalid transaction: max priority fee per gas exceeds max fee per gas"
-            )
-        if max_priority_fee_per_gas > policy.max_priority_fee_per_gas:
-            raise VerificationError(
-                "Invalid transaction: max priority fee per gas exceeds sponsor policy"
-            )
-        if gas_limit * max_fee_per_gas > policy.max_total_fee:
-            raise VerificationError("Invalid transaction: total fee budget exceeds sponsor policy")
-        if valid_before > int(time.time()) + policy.max_validity_window_seconds:
-            raise VerificationError("Invalid transaction: validity window exceeds sponsor policy")
-
-        if decoded[5]:
-            raise VerificationError("Invalid transaction: access list is not allowed")
-
-        calls = tuple(Call(to=c[0], value=_int(c[1]), data=c[2]) for c in decoded[4])
-
-        if request is not None:
-            self._validate_calls(calls, request)
-
-        tx_for_recovery = TempoTransaction(
-            chain_id=chain_id,
-            max_priority_fee_per_gas=max_priority_fee_per_gas,
-            max_fee_per_gas=max_fee_per_gas,
-            gas_limit=gas_limit,
-            calls=calls,
-            access_list=(),
-            nonce_key=_int(decoded[6]),
-            nonce=_int(decoded[7]),
-            valid_before=_int(decoded[8]) if decoded[8] else None,
-            valid_after=_int(decoded[9]) if decoded[9] else None,
-            fee_token=decoded[10] if decoded[10] else None,
-            # Part of the sender's signing hash; must be carried through.
-            tempo_authorization_list=tuple(decoded[12]),
-            awaiting_fee_payer=True,
-            key_authorization=key_auth,  # type: ignore[arg-type]
+        _raw, cosigned, recovered_address = _fee_payer.cosign_fee_payer_envelope(
+            raw_tx,
+            fee_payer=self.fee_payer,
+            policy=get_policy,
+            fee_token=fee_token,
+            validate_calls=validate_calls,
+            require_remaining_validity=require_remaining_validity,
+            allow_expired=allow_expired,
         )
-        sender_hash = tx_for_recovery.get_signing_hash(for_fee_payer=False)
-
-        from eth_account import Account
-
-        try:
-            recovered_address = Account._recover_hash(sender_hash, signature=sender_sig)
-        except Exception as err:
-            raise VerificationError("Invalid sender signature") from err
-        envelope_address = "0x" + sender_addr_bytes.hex()
-
-        if recovered_address.lower() != envelope_address.lower():
-            raise VerificationError("Sender address does not match recovered signer")
-
-        tx_to_sign = attrs.evolve(
-            tx_for_recovery,
-            sender_signature=Signature(
-                r=int.from_bytes(sender_sig[:32], "big"),
-                s=int.from_bytes(sender_sig[32:64], "big"),
-                v=sender_sig[64],
-            ),
-            sender_address=as_address(recovered_address),
-            fee_token=fee_token or PATH_USD,
-        )
-
-        try:
-            cosigned = tx_to_sign.sign(self.fee_payer.private_key, for_fee_payer=True)
-        except Exception as err:
-            raise InternalPaymentError() from err
-
         raw_cosigned = "0x" + cosigned.encode().hex()
 
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)

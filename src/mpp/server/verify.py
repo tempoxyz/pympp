@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -76,6 +77,7 @@ async def verify_or_challenge(
     header: str | None = None,
     unique_challenges: bool = True,
     x402: X402Input | None = None,
+    stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -114,6 +116,9 @@ async def verify_or_challenge(
             (:class:`~mpp.x402.X402Intent`) and the request carries no Payment
             credential, its ``PAYMENT-SIGNATURE`` value is bound to this route
             and verified instead.
+        stable_binding: Compare only these fields of the echoed request with ``request``
+            (plus the route scope) instead of requiring the two to be equal, as mppx does for
+            a method's ``stableBinding``.
 
     Returns:
         If no valid Authorization header:
@@ -294,7 +299,7 @@ async def verify_or_challenge(
 
     # Assert echoed request matches server's current request.
     # expires is a challenge-level auth-param, not in the request body.
-    if echo_request != request:
+    if not _requests_match(echo_request, request, stable_binding):
         return await fail(
             InvalidChallengeError(echo.id, "credential request does not match this route"),
             credential,
@@ -361,6 +366,22 @@ async def verify_or_challenge(
         )
 
     return (credential, receipt)
+
+
+def _requests_match(
+    echoed: dict[str, Any],
+    expected: dict[str, Any],
+    stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
+) -> bool:
+    """Whether an echoed wire request pays for the route's current one."""
+    if stable_binding is None:
+        return echoed == expected
+    if echoed.get("_mppx_scope") != expected.get("_mppx_scope"):
+        return False
+    try:
+        return dict(stable_binding(echoed)) == dict(stable_binding(expected))
+    except Exception:
+        return False
 
 
 def _authenticate_echo(

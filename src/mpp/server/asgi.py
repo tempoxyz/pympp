@@ -168,6 +168,11 @@ class PaymentMiddleware:
         if isinstance(result, PaymentRequired):
             await _send_response(send, result.challenge)
             return
+        if result.response is not None:
+            # The payment method handled the request (a management action): the app
+            # doesn't run.
+            await _send_response(send, result.response)
+            return
 
         async def send_with_receipt(message: Message) -> None:
             if message["type"] == "http.response.start":

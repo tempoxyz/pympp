@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -29,6 +30,7 @@ from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Req
 from mpp.server.method import (
     SETTLING_METHOD,
     RequestContext,
+    RespondContext,
     ServerMethod,
     VerifyContext,
     resolve,
@@ -38,6 +40,7 @@ from mpp.server.verify import (
     _authenticate_echo,
     _challenge_from_echo,
     _extract_payment_scheme,
+    _requests_match,
     verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
@@ -79,10 +82,15 @@ ComposedResult: TypeAlias = ComposedChallenges | tuple[Credential, Receipt]
 class _MethodIntent:
     """Runs a server method's hooks for one prepared offer."""
 
-    def __init__(self, method: ServerMethod, input: dict[str, Any]) -> None:
+    def __init__(
+        self, method: ServerMethod, input: dict[str, Any], http_request: Request | None = None
+    ) -> None:
         self.name = method.intent
         self._method = method
         self._input = input
+        self._http_request = http_request
+        # The management response the method's ``respond`` hook returned, if any.
+        self.response: Response | None = None
 
     async def verify(self, credential: Credential, request: dict[str, Any]) -> Receipt:
         try:
@@ -94,15 +102,38 @@ class _MethodIntent:
             opaque = _b64_decode(echo.opaque) if echo.opaque else None
         except ParseError:
             opaque = None
-        receipt, _ = await self._method.settle(
-            VerifyContext(
-                credential=replace(credential, payload=payload),
-                request=self._input,
-                challenge=_challenge_from_echo(
-                    echo, request, opaque if isinstance(opaque, dict) else None
-                ),
-            )
+        if self._method.stable_binding is not None and echo.request:
+            # The challenge pays this request by binding, so it is the echoed request the
+            # client signed, not the route's current one.
+            with contextlib.suppress(ParseError):
+                echoed = _b64_decode(echo.request)
+                if is_dict(echoed):
+                    request = echoed
+        context = VerifyContext(
+            credential=replace(credential, payload=payload),
+            request=self._input,
+            challenge=_challenge_from_echo(
+                echo, request, opaque if isinstance(opaque, dict) else None
+            ),
+            input=self._http_request,
         )
+        receipt, _ = await self._method.settle(context)
+        if self._method.respond is not None:
+            # Like mppx, after verification and before ``payment.success``.
+            response = await resolve(
+                self._method.respond(
+                    RespondContext(
+                        credential=context.credential,
+                        request=context.request,
+                        challenge=context.challenge,
+                        input=context.input,
+                        receipt=receipt,
+                    )
+                )
+            )
+            if response is not None and not isinstance(response, Response):
+                raise TypeError("respond must return a Response or None")
+            self.response = response
         return receipt
 
 
@@ -229,6 +260,7 @@ class _PreparedOffer:
             header=self.header,
             unique_challenges=server.unique_challenges,
             x402=x402,
+            stable_binding=self.offer.method.stable_binding,
         )
 
 
@@ -298,16 +330,16 @@ async def _prepare_offer(
     # MCP tool calls carry credentials in _meta, not an HTTP field: bind no header.
     header = None if request.url.startswith(MCP_URL_PREFIX) else offer.server.credential_header
     prepared = _PreparedOffer(
-        offer, _intent(method, input), wire, expires, call.bodies[key], header
+        offer, _intent(method, input, request), wire, expires, call.bodies[key], header
     )
     call.prepared.append(prepared)
     return prepared
 
 
-def _intent(method: ServerMethod, input: dict[str, Any]) -> _MethodIntent:
+def _intent(method: ServerMethod, input: dict[str, Any], request: Request) -> _MethodIntent:
     if method.x402 is not None:
-        return _X402MethodIntent(method, input)
-    return _MethodIntent(method, input)
+        return _X402MethodIntent(method, input, request)
+    return _MethodIntent(method, input, request)
 
 
 def _validate_options(  # pyright: ignore[reportUnusedFunction]  # used by mpp.server.mpp
@@ -414,7 +446,15 @@ class ComposedHandler:
                 self._challenge_response(request, result.challenges, result.error, call)
             )
         credential, receipt = result
-        return PaymentVerified(credential=credential, receipt=receipt)
+        verified = PaymentVerified(credential=credential, receipt=receipt)
+        response = next(
+            (offer.intent.response for offer in call.prepared if offer.intent.response is not None),
+            None,
+        )
+        if response is None:
+            return verified
+        # The management response carries the receipt headers the route's would.
+        return replace(verified, response=verified.with_receipt(response))
 
     def _challenge_response(
         self,
@@ -423,7 +463,7 @@ class ComposedHandler:
         error: Exception | None,
         call: _Call,
     ) -> Response:
-        """Build a 402 response with RFC 9457 problem details."""
+        """Build a 402 (or 410) challenge response with RFC 9457 problem details."""
         realm = self._offers[0].server.realm
         problem = (
             error
@@ -445,8 +485,10 @@ class ComposedHandler:
             )
             if x402 is not None:
                 headers.append((PAYMENT_REQUIRED_HEADER, x402))
+        # A channel that is gone (session channel-not-found or channel-finalized) answers 410
+        # as mppx's HTTP transport does; every other rejection stays a retryable 402.
         return Response(
-            status=402,
+            status=410 if problem.status == 410 else 402,
             headers=headers,
             body=json.dumps(problem.to_problem_details(challenges[0].id)),
         )
@@ -599,7 +641,11 @@ class ComposedHandler:
 
         if echoed_meta is not None and not isinstance(echoed_meta, dict):
             return None
-        request_matches = [offer for offer in offers if offer.request == echoed_request]
+        request_matches = [
+            offer
+            for offer in offers
+            if _requests_match(echoed_request, offer.request, offer.offer.method.stable_binding)
+        ]
         digest = credential.challenge.digest
         binding_matches = [
             offer
@@ -613,6 +659,19 @@ class ComposedHandler:
         ]
         authenticated_matches = [offer for offer in binding_matches if offer.offer.owns(credential)]
         if len(authenticated_matches) > 1:
+            # Like mppx, offers matched by stable binding (reusable challenges) may differ only
+            # in unbound fields such as the quoted amount: the first configured one pays.
+            if all(
+                offer.offer.method.stable_binding is not None for offer in authenticated_matches
+            ):
+                # The offer whose request the client signed pays at that price; a reusable
+                # challenge quoting a since-changed price falls back to the first.
+                exact = [
+                    offer
+                    for offer in authenticated_matches
+                    if _requests_match(echoed_request, offer.request, None)
+                ]
+                return (exact or authenticated_matches)[0]
             raise _AmbiguousOffersError(authenticated_matches)
         if authenticated_matches:
             return authenticated_matches[0]

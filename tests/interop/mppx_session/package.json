@@ -1,0 +1,17 @@
+{
+  "name": "pympp-mppx-session-interop",
+  "private": true,
+  "type": "module",
+  "description": "mppx session server and client used by pympp's session interop tests",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "server": "node server.mjs",
+    "client": "node client.mjs"
+  },
+  "dependencies": {
+    "mppx": "0.15.0",
+    "viem": "2.57.1"
+  }
+}

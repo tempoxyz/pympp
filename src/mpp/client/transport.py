@@ -13,7 +13,9 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import asyncio
+import inspect
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -38,7 +40,7 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import ClientMethod, PaymentRuntime
+from mpp.runtime import AttemptOutcome, ClientMethod, PaymentAttempt, PaymentRuntime
 from mpp.x402._client import CREDENTIAL_HEADERS as X402_CREDENTIAL_HEADERS
 from mpp.x402._client import is_x402_challenge, x402_challenges
 from mpp.x402._header import encode_payment_signature
@@ -283,6 +285,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
         self._paid_retry_timeout = paid_retry_timeout
+        self._credential_keywords = _accepted_keywords(
+            self._runtime.create_credential, ("request", "fetch", "attempt")
+        )
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
         """Register a client payment event handler."""
@@ -331,6 +336,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             await request.aread()
 
         response = await self._inner.handle_async_request(request)
+        # The last credential sent, until the method settles its outcome (mppx Fetch).
+        sent: _SentCredential | None = None
 
         try:
             for _ in range(self._max_payment_retries):
@@ -454,16 +461,71 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 with suppress(Exception):
                     await response.aclose()
 
-                try:
-                    credential = await self._runtime.create_credential(
-                        challenge,
-                        matched_method,
-                        event_payload={
-                            "challenges": challenges,
-                            "request": request,
-                            "response": response,
-                        },
+                reused: Credential | None = None
+                if sent is not None:
+                    previous, sent = sent, None
+                    # Only a method that tracks its credential can have it resent.
+                    same = (
+                        previous.attempt.settle is not None
+                        and previous.method is matched_method
+                        and previous.challenge == challenge
                     )
+                    settled = await _settle_attempt(
+                        previous.attempt,
+                        AttemptOutcome(
+                            status="pending" if same else "rejected",
+                            response=response,
+                            challenges=tuple(challenges),
+                        ),
+                    )
+                    if same and not settled:
+                        # The method still holds this credential's state: resend it.
+                        reused, sent = previous.credential, previous
+
+                try:
+                    if reused is not None:
+                        credential = reused
+                    else:
+                        attempt = PaymentAttempt()
+                        arguments: dict[str, Any] = {
+                            "request": request,
+                            "fetch": self._send_auxiliary,
+                            "attempt": attempt,
+                        }
+                        try:
+                            credential = await self._runtime.create_credential(
+                                challenge,
+                                matched_method,
+                                event_payload={
+                                    "challenges": challenges,
+                                    "request": request,
+                                    "response": response,
+                                },
+                                **{
+                                    key: value
+                                    for key, value in arguments.items()
+                                    if key in self._credential_keywords
+                                },
+                            )
+                        except BaseException:
+                            # A credential that never reaches the server is rejected, so the
+                            # method releases its state, even when an event handler fails or
+                            # the request is cancelled after signing (mppx Fetch).
+                            await _settle_attempt(
+                                attempt,
+                                AttemptOutcome(
+                                    status="rejected",
+                                    response=response,
+                                    challenges=tuple(challenges),
+                                ),
+                            )
+                            raise
+                        sent = _SentCredential(
+                            challenge=challenge,
+                            method=matched_method,
+                            credential=credential,
+                            attempt=attempt,
+                        )
                     if is_x402_challenge(challenge):
                         credential_header = PAYMENT_SIGNATURE_HEADER
                         credential_value = encode_payment_signature(
@@ -543,6 +605,25 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     raise error from cause
 
+                if sent is not None and payment_response.status_code != 402:
+                    # A redirect leaves the outcome unknown; settle it as rejected
+                    # rather than holding the method's state.
+                    finished, sent = sent, None
+                    status = (
+                        "pending"
+                        if payment_response.is_redirect
+                        else "accepted"
+                        if payment_response.is_success
+                        else "rejected"
+                    )
+                    if not await _settle_attempt(
+                        finished.attempt, AttemptOutcome(status=status, response=payment_response)
+                    ):
+                        await _settle_attempt(
+                            finished.attempt,
+                            AttemptOutcome(status="rejected", response=payment_response),
+                        )
+
                 if payment_response.is_success:
                     await self._events.emit(
                         PAYMENT_RESPONSE,
@@ -592,10 +673,83 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             with suppress(BaseException):
                 await response.aclose()
             raise
+        finally:
+            if sent is not None:
+                await _settle_attempt(
+                    sent.attempt,
+                    AttemptOutcome(
+                        status="rejected",
+                        response=response,
+                        challenges=_response_challenges(response),
+                    ),
+                )
+
+    async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:
+        """Send a request a payment method needs, without payment handling, and read it."""
+        response = await self._inner.handle_async_request(request)
+        try:
+            await response.aread()
+        finally:
+            await response.aclose()
+        return response
 
     async def aclose(self) -> None:
         """Close the inner transport."""
         await self._inner.aclose()
+
+
+@dataclass(slots=True, kw_only=True)
+class _SentCredential:
+    """A credential sent on a paid retry, with the attempt its method may settle."""
+
+    challenge: Challenge
+    method: ClientMethod
+    credential: Credential
+    attempt: PaymentAttempt
+
+
+async def _settle_attempt(attempt: PaymentAttempt, outcome: AttemptOutcome) -> bool:
+    """Report ``outcome`` to the method; whether it is settled (mppx ``settleAttempt``)."""
+    settle = attempt.settle
+    if settle is None:
+        return outcome.status != "pending"
+    attempt.settle = None
+    settled = await settle(outcome)
+    if not settled:
+        attempt.settle = settle
+    return settled
+
+
+def _response_challenges(response: httpx.Response) -> tuple[Challenge, ...]:
+    """The parseable payment challenges of a ``402`` response."""
+    if response.status_code != 402:
+        return ()
+    challenges: list[Challenge] = []
+    for header in response.headers.get_list("www-authenticate"):
+        for field in _payment_challenges(header):
+            with suppress(ParseError):
+                challenges.append(Challenge.from_www_authenticate(field))
+    return tuple(challenges)
+
+
+def _accepted_keywords(function: Any, names: tuple[str, ...]) -> frozenset[str]:
+    """The keyword arguments among ``names`` that ``function`` accepts.
+
+    Runtimes overriding ``create_credential`` with an older signature keep working.
+    """
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return frozenset(names)
+    if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters):
+        return frozenset(names)
+    accepted = {
+        parameter.name
+        for parameter in parameters
+        if parameter.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    }
+    return frozenset(name for name in names if name in accepted)
 
 
 class Mpp:
