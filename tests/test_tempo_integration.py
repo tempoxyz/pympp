@@ -706,3 +706,197 @@ class TestChargeIntegration:
 
         with pytest.raises(VerificationError):
             await intent.verify(credential, request_dict)
+
+
+class _P256Key:
+    """A P256 key signing Tempo P256 and WebAuthn sender signatures, as passkey wallets do."""
+
+    _N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+
+    def __init__(self) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from eth_hash.auto import keccak
+
+        self._key = ec.generate_private_key(ec.SECP256R1())
+        numbers = self._key.public_key().public_numbers()
+        self.public_key = numbers.x.to_bytes(32, "big") + numbers.y.to_bytes(32, "big")
+        self.address = "0x" + keccak(self.public_key)[-20:].hex()
+
+    def _sign(self, digest: bytes) -> bytes:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+        der = self._key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+        r, s = utils.decode_dss_signature(der)
+        s = min(s, self._N - s)  # Tempo requires low-s P256 signatures.
+        return r.to_bytes(32, "big") + s.to_bytes(32, "big")
+
+    def p256(self, digest: bytes) -> bytes:
+        return b"\x01" + self._sign(digest) + self.public_key + b"\x00"
+
+    def webauthn(self, digest: bytes) -> bytes:
+        import base64
+        import hashlib
+        import json
+
+        authenticator_data = hashlib.sha256(b"localhost").digest() + b"\x05" + bytes(4)
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        client_data = json.dumps(
+            {"type": "webauthn.get", "challenge": challenge, "origin": "http://localhost"},
+            separators=(",", ":"),
+        ).encode()
+        signed = hashlib.sha256(authenticator_data + hashlib.sha256(client_data).digest())
+        return (
+            b"\x02"
+            + authenticator_data
+            + client_data
+            + self._sign(signed.digest())
+            + self.public_key
+        )
+
+
+class TestSponsoredSignatureKinds:
+    """A local fee payer co-signs keychain, P256 and WebAuthn senders and key
+    authorizations, as mppx does; each payment settles on chain."""
+
+    AMOUNT = 10_000
+
+    @staticmethod
+    async def _unsigned_tx(
+        rpc_url: str,
+        currency: str,
+        recipient: str,
+        challenge_id: str,
+        key_authorization: Any = None,
+    ) -> Any:
+        from pytempo import Call, TempoTransaction
+
+        chain_id, _, gas_price = await get_tx_params(rpc_url, recipient)
+        memo = encode_attribution(challenge_id=challenge_id, server_id=TEST_REALM)
+        data = (
+            "0x95777d59"
+            + recipient[2:].lower().zfill(64)
+            + hex(TestSponsoredSignatureKinds.AMOUNT)[2:].zfill(64)
+            + memo[2:]
+        )
+        return TempoTransaction.create(
+            chain_id=chain_id,
+            gas_limit=1_000_000,
+            max_fee_per_gas=gas_price,
+            max_priority_fee_per_gas=min(gas_price, 10_000_000_000),
+            nonce=0,
+            nonce_key=(1 << 256) - 1,
+            awaiting_fee_payer=True,
+            valid_before=int(datetime.now(UTC).timestamp()) + 120,
+            calls=(Call.create(to=currency, value=0, data=data),),
+            key_authorization=key_authorization,
+        )
+
+    @staticmethod
+    def _request(currency: str, recipient: str, chain_id: int) -> dict[str, Any]:
+        return {
+            "amount": str(TestSponsoredSignatureKinds.AMOUNT),
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": chain_id},
+        }
+
+    async def _pay(
+        self,
+        intent: ChargeIntent,
+        signed: Any,
+        challenge_id: str,
+        currency: str,
+        recipient: str,
+        chain_id: int,
+    ) -> str:
+        from mpp.methods.tempo.fee_payer_envelope import encode_fee_payer_envelope
+
+        credential = make_credential(
+            payload={
+                "type": "transaction",
+                "signature": "0x" + encode_fee_payer_envelope(signed).hex(),
+            },
+            challenge_id=challenge_id,
+            expires=_future_expires(),
+        )
+        receipt = await intent.verify(credential, self._request(currency, recipient, chain_id))
+        assert receipt.status == "success"
+        return receipt.reference
+
+    async def test_access_key_authorized_in_the_sponsored_transaction(
+        self, rpc_url, funded_recipient, currency, chain_id
+    ):
+        import os
+
+        from pytempo.keychain import KeyAuthorization
+
+        sponsor = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        root = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        access = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        for account in (sponsor, root):
+            _fund_account(rpc_url, account.address, currency)
+        intent = ChargeIntent(rpc_url=rpc_url, fee_payer=sponsor)
+        recipient = funded_recipient.address
+
+        authorization = KeyAuthorization(key_id=access.address, chain_id=chain_id).sign(
+            root.private_key
+        )
+        tx = await self._unsigned_tx(
+            rpc_url, currency, recipient, "integ-key-auth", key_authorization=authorization
+        )
+        signed = tx.sign_access_key(access.private_key, root.address)
+        reference = await self._pay(intent, signed, "integ-key-auth", currency, recipient, chain_id)
+        receipt = await _wait_for_receipt(rpc_url, reference)
+        assert receipt["from"].lower() == root.address.lower()
+
+        # The authorized key now pays through pympp's access-key client.
+        expires = _future_expires()
+        challenge = Challenge(
+            id="integ-access-key",
+            method="tempo",
+            intent="charge",
+            realm=TEST_REALM,
+            request=self._request(currency, recipient, chain_id),
+            expires=expires,
+        )
+        method = _tempo_method(
+            account=access, root_account=root.address, chain_id=chain_id, rpc_url=rpc_url
+        )
+        credential = await method.create_credential(challenge)
+        receipt_ = await intent.verify(credential, self._request(currency, recipient, chain_id))
+        assert receipt_.status == "success"
+
+    @pytest.mark.parametrize("kind", ["p256", "webauthn"])
+    async def test_passkey_sender(self, rpc_url, funded_recipient, currency, chain_id, kind):
+        import os
+
+        import attrs
+
+        from mpp.methods.tempo._fee_payer import _RawSenderSignature
+
+        sponsor = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        key = _P256Key()
+        _fund_account(rpc_url, sponsor.address, currency)
+        _fund_account(rpc_url, key.address, currency)
+        intent = ChargeIntent(rpc_url=rpc_url, fee_payer=sponsor)
+        recipient = funded_recipient.address
+
+        tx = await self._unsigned_tx(rpc_url, currency, recipient, f"integ-{kind}")
+        tx = attrs.evolve(tx, sender_address=key.address)
+        digest = tx.get_signing_hash(for_fee_payer=False)
+        signature = key.p256(digest) if kind == "p256" else key.webauthn(digest)
+        signed = attrs.evolve(tx, sender_signature=_RawSenderSignature(signature))
+
+        sponsor_before = await _tip20(rpc_url, currency, sponsor.address)
+        reference = await self._pay(intent, signed, f"integ-{kind}", currency, recipient, chain_id)
+        receipt = await _wait_for_receipt(rpc_url, reference)
+        assert receipt["from"].lower() == key.address
+        assert await _tip20(rpc_url, currency, sponsor.address) < sponsor_before
+
+
+async def _tip20(rpc_url: str, token: str, address: str) -> int:
+    from tests.conftest import _tip20_balance
+
+    with httpx.Client(timeout=30) as client:
+        return _tip20_balance(rpc_url, token, address, client)

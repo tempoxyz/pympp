@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.schemas import ChargeMode
     from mpp.runtime import ClientMethod
 
 
@@ -159,6 +160,9 @@ class TempoMethod:
     # Buy the charge currency through the stablecoin DEX when the payer lacks
     # it. ``None`` disables auto-swap.
     auto_swap: AutoSwap | None = field(default=None, kw_only=True)
+    # Settlement mode to use. ``None`` pulls when the challenge allows it, else
+    # uses its first supported mode; an explicit mode it does not support fails.
+    mode: ChargeMode | None = field(default=None, kw_only=True)
     _cached_chain_ids: dict[str, int] = field(
         default_factory=dict[str, int], init=False, repr=False
     )
@@ -177,6 +181,8 @@ class TempoMethod:
     def __post_init__(self) -> None:
         """Validate charge policy at construction."""
         self._amount_caps()
+        if self.mode not in (None, "push", "pull"):
+            raise ValueError(f"Invalid Tempo charge mode: {self.mode!r}")
         if self.allowed_chain_ids is not None:
             if isinstance(self.allowed_chain_ids, (str, bytes)):
                 raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
@@ -497,7 +503,9 @@ class TempoMethod:
 
         For the charge intent, this builds and signs a TempoTransaction (type 0x76)
         using an expiring nonce. Sponsored charges carry a fee payer placeholder
-        for the server or fee payer service to co-sign before broadcast.
+        for the server or fee payer service to co-sign before broadcast. In push
+        mode the client broadcasts the transaction itself and sends its hash. A
+        zero-amount charge is paid with a signed EIP-712 proof instead.
 
         Concurrent calls for the same challenge and signer share one in-flight
         signing. Once it settles, a later call signs afresh.
@@ -544,7 +552,36 @@ class TempoMethod:
         if expected_chain_id is None:
             expected_chain_id = self.chain_id
         method_details = request.get("methodDetails", {})
-        use_fee_payer = method_details.get("feePayer", False) if is_dict(method_details) else False
+        # When signing with an access key, the credential source is the
+        # root account (the smart wallet), not the access key.
+        source_address = self.root_account if self.root_account else self.account.address
+
+        # Zero-amount: sign an EIP-712 proof instead of a transaction (mppx
+        # tempo/client/Charge.ts), bound to the payer named in the source.
+        if int(request["amount"]) == 0:
+            from mpp.methods.tempo._proof import proof_source, sign_proof
+
+            if expected_chain_id is None:
+                expected_chain_id = await self._get_chain_id(self._rpc_url_for(request))
+            signature = sign_proof(
+                self.account,
+                account=source_address,
+                chain_id=expected_chain_id,
+                challenge_id=challenge.id,
+                realm=challenge.realm,
+            )
+            return Credential(
+                challenge=challenge.to_echo(),
+                payload={"type": "proof", "signature": signature},
+                source=proof_source(source_address, expected_chain_id),
+            )
+
+        mode = self._resolve_mode(method_details)
+        use_fee_payer = (
+            mode == "pull" and method_details.get("feePayer", False)
+            if is_dict(method_details)
+            else False
+        )
         if use_fee_payer:
             _assert_sponsored_challenge_time_left(challenge.expires)
 
@@ -569,15 +606,39 @@ class TempoMethod:
             expires=challenge.expires,
         )
 
-        # When signing with an access key, the credential source is the
-        # root account (the smart wallet), not the access key.
-        source_address = self.root_account if self.root_account else self.account.address
+        if mode == "push":
+            tx_hash = await _send_raw_transaction_sync(rpc_url, raw_tx)
+            return Credential(
+                challenge=challenge.to_echo(),
+                payload={"type": "hash", "hash": tx_hash},
+                source=f"did:pkh:eip155:{chain_id}:{source_address}",
+            )
 
         return Credential(
             challenge=challenge.to_echo(),
             payload={"type": "transaction", "signature": raw_tx},
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
         )
+
+    def _resolve_mode(self, method_details: Any) -> ChargeMode:
+        """Pick push or pull from the challenge's ``supportedModes`` (both when absent).
+
+        As mppx, an explicit ``mode`` the challenge does not support fails, and a
+        local account prefers pull.
+        """
+        advertised = method_details.get("supportedModes") if is_dict(method_details) else None
+        supported: list[ChargeMode] = (
+            [mode for mode in advertised if mode in ("push", "pull")]
+            if is_list(advertised)
+            else ["pull", "push"]
+        )
+        if not supported:
+            raise ValueError("Challenge supportedModes names no known mode.")
+        if self.mode is not None:
+            if self.mode not in supported:
+                raise ValueError(f"Challenge does not support {self.mode} mode.")
+            return self.mode
+        return "pull" if "pull" in supported else supported[0]
 
     def transaction_hash(self, credential: Credential) -> str | None:
         """Return the on-chain hash of a credential's signed 0x76 transaction.
@@ -922,6 +983,20 @@ def _check_recipient_addresses(request: dict[str, Any]) -> None:
             )
 
 
+async def _send_raw_transaction_sync(rpc_url: str, raw_tx: str) -> str:
+    """Broadcast a signed transaction, wait for its receipt and return its hash."""
+    try:
+        receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx])
+    except Exception as error:
+        raise TransactionError(f"Transaction submission failed: {type(error).__name__}") from error
+    tx_hash = receipt.get("transactionHash") if is_dict(receipt) else None
+    if not isinstance(tx_hash, str):
+        raise TransactionError("No transaction receipt returned.")
+    if receipt.get("status") != "0x1":
+        raise TransactionError(f"Transaction {tx_hash} reverted")
+    return tx_hash
+
+
 def _abi_address(address: str) -> str:
     """ABI-encode a 20-byte hex address as one 32-byte word (64 hex chars)."""
     if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:
@@ -1000,6 +1075,7 @@ def _tempo_method(
     expected_recipients: Sequence[str] | None = None,
     allowed_chain_ids: Sequence[int] | None = None,
     auto_swap: bool | AutoSwap = False,
+    mode: ChargeMode | None = None,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
 
@@ -1034,9 +1110,9 @@ def _tempo_method(
             Independent of the charge currency. Requires ``fee_payer``.
         allowed_fee_tokens: Tokens a sponsored charge may pay gas in. A local
             ``fee_payer`` defaults to :func:`fee_tokens_for_chain` (pathUSD,
-            then USDC.e on mainnet). An external ``feePayerUrl`` sponsor picks
-            its own token unless this is set, in which case its token must be
-            explicitly set and in the list. Must contain at least one token.
+            then USDC.e on mainnet). A hosted fee payer picks its own token
+            unless this is set, in which case its token must be in the list.
+            Must contain at least one token.
         max_atomic_amount: Client-side cap on a charge's ``amount``, in base
             units of the challenge currency, as an int or a string of digits
             (e.g. ``1_000_000`` is 1.00 of a 6-decimal token). Includes splits,
@@ -1072,6 +1148,9 @@ def _tempo_method(
             Raises :class:`InsufficientFundsError` when no currency can fund it.
             With ``expected_recipients``, it only buys a currency the client
             pinned or swaps from.
+        mode: Settlement mode when paying (``"push"`` or ``"pull"``). ``None``
+            pulls when the challenge's ``supportedModes`` allow it, else uses
+            its first supported mode.
 
     Returns:
         A configured TempoMethod instance.
@@ -1144,6 +1223,7 @@ def _tempo_method(
         expected_recipients=resolved_expected_recipients,
         allowed_chain_ids=allowed_chain_ids,
         auto_swap=AutoSwap() if auto_swap is True else auto_swap or None,
+        mode=mode,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
@@ -1169,6 +1249,7 @@ def charge(
     expected_recipients: Sequence[str] | None = None,
     allowed_chain_ids: Sequence[int] | None = None,
     auto_swap: bool | AutoSwap = False,
+    mode: ChargeMode | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
 
@@ -1179,6 +1260,13 @@ def charge(
     ``allowed_chain_ids`` and the ``chain_id``/``rpc_url`` pin) skips other
     challenges during selection and rejects them before signing. ``auto_swap``
     buys a missing charge currency through the stablecoin DEX.
+
+    ``mode`` chooses how a charge settles: ``"pull"`` sends the signed
+    transaction for the server to broadcast, ``"push"`` broadcasts it and sends
+    its hash. By default the client pulls when the challenge's
+    ``supportedModes`` allow it and otherwise pushes; an explicit mode the
+    challenge does not support fails. Zero-amount charges are paid with a
+    signed EIP-712 proof, without a transaction.
 
     Example:
         from mpp.client import Mpp
@@ -1204,6 +1292,7 @@ def charge(
             expected_recipients=expected_recipients,
             allowed_chain_ids=allowed_chain_ids,
             auto_swap=auto_swap,
+            mode=mode,
         )
     )
 

@@ -769,33 +769,6 @@ def _rpc_calls(calls: Sequence[tuple[str, int, bytes]]) -> list[dict[str, str]]:
     return [{"to": to, "value": hex(value), "data": "0x" + data.hex()} for to, value, data in calls]
 
 
-def _sponsored_simulation_request(tx: Any, sender: str, fee_payer: str) -> dict[str, Any]:
-    """The co-signed envelope as an `eth_call` request, without either signature.
-
-    Mirrors mppx `FeePayer.sponsoredSimulationTransaction`.
-    """
-    request: dict[str, Any] = {
-        "from": sender,
-        "type": "0x76",
-        "chainId": hex(tx.chain_id),
-        "nonce": hex(tx.nonce),
-        "nonceKey": hex(tx.nonce_key),
-        "gas": hex(tx.gas_limit),
-        "maxFeePerGas": hex(tx.max_fee_per_gas),
-        "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
-        "feeToken": "0x" + bytes(tx.fee_token).hex(),
-        "feePayer": fee_payer,
-        "calls": _rpc_calls(
-            [("0x" + bytes(c.to).hex(), int(c.value), bytes(c.data)) for c in tx.calls]
-        ),
-    }
-    if tx.valid_before is not None:
-        request["validBefore"] = hex(tx.valid_before)
-    if tx.valid_after is not None:
-        request["validAfter"] = hex(tx.valid_after)
-    return request
-
-
 async def simulate_credential_transaction(
     rpc_url: str,
     transaction: ParsedCredentialTransaction,
@@ -859,7 +832,9 @@ async def send_credential_transaction(
                 challenge_expires=challenge_expires,
             )
             await _simulate_call(
-                rpc_url, _sponsored_simulation_request(cosigned, sender, fee_payer.address), http
+                rpc_url,
+                _fee_payer.sponsored_simulation_request(cosigned, sender, fee_payer.address),
+                http,
             )
             if transaction.valid_before is not None:
                 _fee_payer.assert_remaining_validity(transaction.valid_before)

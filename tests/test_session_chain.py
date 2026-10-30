@@ -1172,7 +1172,7 @@ class TestFeePayerCosign:
             self._cosign(envelope(max_priority_fee_per_gas=GAS_PRICE))
 
     def test_rejects_signatures_it_cannot_recover(self) -> None:
-        with pytest.raises(VerificationError, match="Only 65-byte"):
+        with pytest.raises(VerificationError, match="Invalid sender signature"):
             self._cosign(with_signature(envelope(), b"\x01" * 64))
         with pytest.raises(VerificationError, match="Invalid sender signature"):
             self._cosign(with_signature(envelope(), b"\x00" * 64 + b"\x1b"))

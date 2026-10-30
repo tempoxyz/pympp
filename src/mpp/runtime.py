@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
-from mpp.errors import InvalidChallengeError, PaymentExpiredError
+from mpp.errors import InvalidChallengeError, NoMethodFoundError, PaymentExpiredError
 from mpp.events import CHALLENGE_RECEIVED, CREDENTIAL_CREATED, EventDispatcher
 from mpp.methods import Method as MethodDefinition
 from mpp.x402._client import is_x402_challenge, x402_credential
@@ -93,6 +94,30 @@ class ClientMethod:
         return self.method.key
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChallengeCandidate:
+    """An offered challenge paired with a configured method that can pay it.
+
+    mppx ``AcceptPayment.ChallengeCandidate``. ``index`` is the challenge's position
+    among the offered challenges.
+    """
+
+    challenge: Challenge
+    method: ClientMethod
+    index: int
+
+
+OrderChallenges = Callable[
+    [Sequence[ChallengeCandidate]],
+    Sequence[ChallengeCandidate] | Awaitable[Sequence[ChallengeCandidate]],
+]
+"""Filters and sorts supported challenges before credential creation (mppx ``orderChallenges``).
+
+It receives the candidates in the default order and returns them in preference order; the
+client pays the first one. Returning an empty sequence rejects every offered challenge.
+"""
+
+
 class PaymentRuntime:
     """Match challenges and create credentials on the caller's event loop."""
 
@@ -108,6 +133,42 @@ class PaymentRuntime:
             self._methods.setdefault((method.name, method.intent), []).append(method)
         self.events = events if events is not None else EventDispatcher()
 
+    def challenge_candidates(self, challenges: Sequence[Challenge]) -> list[ChallengeCandidate]:
+        """Return every offered challenge a configured method can pay, in default order.
+
+        Challenges keep the server's order, except that native Payment challenges come
+        before x402 offers, as in mppx: a client pays x402 only when no native challenge
+        suits it. A challenge several methods can pay appears once per method, in
+        configured order.
+        """
+        candidates: list[ChallengeCandidate] = []
+        for x402 in (False, True):
+            for index, challenge in enumerate(challenges):
+                if is_x402_challenge(challenge) != x402:
+                    continue
+                for method in self._methods.get((challenge.method, challenge.intent), ()):
+                    if method.can_handle_challenge is None or method.can_handle_challenge(
+                        challenge
+                    ):
+                        candidates.append(
+                            ChallengeCandidate(challenge=challenge, method=method, index=index)
+                        )
+        return candidates
+
+    async def order_challenges(
+        self,
+        challenges: Sequence[Challenge],
+        order: OrderChallenges | None = None,
+    ) -> list[ChallengeCandidate]:
+        """Return the payable candidates in preference order, applying an ``order`` hook."""
+        candidates = self.challenge_candidates(challenges)
+        if order is None:
+            return candidates
+        ordered = order(candidates)
+        if inspect.isawaitable(ordered):
+            ordered = await ordered
+        return list(ordered)
+
     def match_challenge(
         self,
         challenges: Sequence[Challenge],
@@ -116,17 +177,14 @@ class PaymentRuntime:
 
         Native Payment challenges come before x402 offers, as in mppx: a client
         pays x402 only when no native challenge suits it.
-        """
-        native = [challenge for challenge in challenges if not is_x402_challenge(challenge)]
-        x402 = [challenge for challenge in challenges if is_x402_challenge(challenge)]
-        for challenge in (*native, *x402):
-            methods = self._methods.get((challenge.method, challenge.intent), ())
-            for method in methods:
-                if method.can_handle_challenge is None or method.can_handle_challenge(challenge):
-                    return challenge, method
 
-        offered = [challenge.method for challenge in challenges]
-        raise ValueError(f"No compatible payment method for challenges: {offered}")
+        Raises:
+            NoMethodFoundError: If no configured method can pay any challenge.
+        """
+        candidates = self.challenge_candidates(challenges)
+        if not candidates:
+            raise NoMethodFoundError(challenges, self.methods)
+        return candidates[0].challenge, candidates[0].method
 
     async def create_credential(
         self,

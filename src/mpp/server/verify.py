@@ -20,7 +20,7 @@ from mpp import (
     generate_challenge_id,
 )
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
-from mpp._typing import is_dict
+from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
 from mpp._validation import Validation
 from mpp.errors import (
@@ -496,6 +496,15 @@ def _assert_sponsored_challenge_lifetime(request: dict[str, Any], expires: str) 
     details = request.get("methodDetails")
     if not is_dict(details) or not details.get("feePayer"):
         return
+    # As mppx: zero-amount proofs and push-only routes never use the fee payer.
+    modes = details.get("supportedModes")
+    if is_list(modes) and "pull" not in modes:
+        return
+    try:
+        if int(request.get("amount", 0)) <= 0:
+            return
+    except (TypeError, ValueError):
+        pass
     try:
         expires_dt = datetime.fromisoformat(expires.replace("Z", "+00:00"))
     except ValueError:

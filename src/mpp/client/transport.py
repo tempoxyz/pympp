@@ -26,6 +26,7 @@ from mpp._parsing import ParseError
 from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
+    NoMethodFoundError,
     PaymentError,
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
@@ -40,7 +41,13 @@ from mpp.events import (
     EventHandler,
     Unsubscribe,
 )
-from mpp.runtime import AttemptOutcome, ClientMethod, PaymentAttempt, PaymentRuntime
+from mpp.runtime import (
+    AttemptOutcome,
+    ClientMethod,
+    OrderChallenges,
+    PaymentAttempt,
+    PaymentRuntime,
+)
 from mpp.x402._client import CREDENTIAL_HEADERS as X402_CREDENTIAL_HEADERS
 from mpp.x402._client import is_x402_challenge, x402_challenges
 from mpp.x402._header import encode_payment_signature
@@ -226,6 +233,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
     3. Creates credentials and retries the request
     4. Returns the final response (success or failure)
 
+    A ``402`` to the unpaid request without a challenge a configured method
+    pays raises :class:`~mpp.errors.NoMethodFoundError`; one answering a paid
+    retry is the server's final answer and is returned, as in mppx.
+
     The paid retry may legitimately wait up to the server's confirmation
     window (30s by default in pympp and mppx) while the payment settles. By
     default it inherits the request's timeout with the read timeout raised to
@@ -253,6 +264,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+        order_challenges: OrderChallenges | None = None,
     ) -> None:
         """Initialize the transport.
 
@@ -268,6 +280,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
                 at least 35s (``DEFAULT_PAID_RETRY_TIMEOUT``).
+            order_challenges: Filters and sorts the payable challenges of a ``402``
+                before credential creation (mppx ``orderChallenges``); the first
+                returned candidate is paid. An empty result pays nothing.
         """
         if (methods is None) == (runtime is None):
             raise TypeError("Provide exactly one of methods or runtime")
@@ -285,6 +300,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._events = self._runtime.events
         self._max_payment_retries = max_payment_retries
         self._paid_retry_timeout = paid_retry_timeout
+        self._order_challenges = order_challenges
         self._credential_keywords = _accepted_keywords(
             self._runtime.create_credential, ("request", "fetch", "attempt")
         )
@@ -340,7 +356,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         sent: _SentCredential | None = None
 
         try:
-            for _ in range(self._max_payment_retries):
+            for retry in range(self._max_payment_retries):
                 if response.status_code != 402:
                     return response
 
@@ -379,25 +395,29 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     except X402FormatError as error:
                         parse_error = parse_error or error
 
-                try:
-                    challenge, matched_method = self._runtime.match_challenge(challenges)
-                except ValueError as match_error:
-                    if parse_error is not None or challenges:
-                        # Surface parse/method-selection failures to observers while
-                        # preserving the 402 response for the caller.
-                        await self._events.emit(
-                            PAYMENT_FAILED,
-                            _client_payment_failed_payload(
-                                challenge=None,
-                                challenges=challenges,
-                                credential=None,
-                                error=parse_error or match_error,
-                                method=None,
-                                request=request,
-                                response=response,
-                            ),
-                        )
-                    return response
+                candidates = await self._runtime.order_challenges(
+                    challenges, self._order_challenges
+                )
+                if not candidates:
+                    # A 402 after a paid retry without a payable challenge (such as a
+                    # rejected credential) is the server's final answer (mppx Fetch).
+                    if retry > 0:
+                        return response
+                    error = NoMethodFoundError(challenges, self._runtime.methods)
+                    await self._events.emit(
+                        PAYMENT_FAILED,
+                        _client_payment_failed_payload(
+                            challenge=None,
+                            challenges=challenges,
+                            credential=None,
+                            error=error,
+                            method=None,
+                            request=request,
+                            response=response,
+                        ),
+                    )
+                    raise error from parse_error
+                challenge, matched_method = candidates[0].challenge, candidates[0].method
 
                 if (
                     self._allowed_origins is not None
@@ -418,10 +438,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     raise error
 
-                # A zero-value Tempo transaction still signs the challenge realm
-                # into its memo. Do not let a different host obtain a transaction
-                # that it can relay to the server named by that realm.
-                remaining = challenges
+                # A zero-amount Tempo proof signs the challenge realm. Do not let a
+                # different host obtain a proof that it can relay to the server
+                # named by that realm.
                 while (
                     _is_zero_tempo_charge(challenge)
                     and challenge.realm.lower() != request.url.host.lower()
@@ -433,10 +452,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         f"request host {request.url.host!r}; configure trusted_tempo_realms "
                         "for a known server origin"
                     )
-                    remaining = [offer for offer in remaining if offer is not challenge]
-                    try:
-                        challenge, matched_method = self._runtime.match_challenge(remaining)
-                    except ValueError:
+                    rejected = challenge
+                    candidates = [c for c in candidates if c.challenge is not rejected]
+                    if candidates:
+                        challenge, matched_method = candidates[0].challenge, candidates[0].method
+                    else:
                         await self._events.emit(
                             PAYMENT_FAILED,
                             _client_payment_failed_payload(
@@ -777,6 +797,7 @@ class Mpp:
         trusted_tempo_realms: Mapping[str, str] | None = None,
         max_payment_retries: int = _DEFAULT_MAX_PAYMENT_RETRIES,
         paid_retry_timeout: float | None = _PAID_RETRY_TIMEOUT_UNSET,
+        order_challenges: OrderChallenges | None = None,
     ) -> None:
         self.payment_transport = PaymentTransport(
             methods,
@@ -785,6 +806,7 @@ class Mpp:
             trusted_tempo_realms=trusted_tempo_realms,
             max_payment_retries=max_payment_retries,
             paid_retry_timeout=paid_retry_timeout,
+            order_challenges=order_challenges,
         )
         self._client: httpx.AsyncClient | None = None
 

@@ -11,7 +11,7 @@ import logging
 import math
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -35,10 +35,12 @@ from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
+from mpp.methods.tempo.remote_fee_payer import RemoteFeePayer
 from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
     HashCredentialPayload,
+    ProofCredentialPayload,
     Split,
     TransactionCredentialPayload,
 )
@@ -95,6 +97,9 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+ACCOUNT_KEYCHAIN = "0xaAAAaaAA00000000000000000000000000000000"
+# getKey(address account,address keyId) -> (uint8,address,uint64,bool,bool)
+GET_KEY_SELECTOR = "bc298553"
 STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 
 MAX_SPLITS = 10
@@ -195,25 +200,6 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
 
 
-def _transaction_fee_token(raw_tx: str) -> str | None:
-    """Return the fee token of a signed 0x76 Tempo transaction, if it sets one."""
-    from mpp.methods.tempo import _rlp as rlp
-
-    try:
-        tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
-        fields = rlp.decode(tx_bytes[1:])
-    except Exception as err:
-        raise RuntimeError("fee-sponsored transaction feeToken is invalid") from err
-    if tx_bytes[:1] != b"v" or not is_list(fields) or len(fields) < 11:
-        raise RuntimeError("fee-sponsored transaction feeToken is invalid")
-    fee_token = fields[10]
-    if fee_token == b"":
-        return None
-    if not isinstance(fee_token, bytes) or len(fee_token) != 20:
-        raise RuntimeError("fee-sponsored transaction feeToken is invalid")
-    return "0x" + fee_token.hex()
-
-
 def _transaction_sender(raw_tx: str) -> str | None:
     """Return the lowercase address of the account a Tempo transaction debits.
 
@@ -261,20 +247,7 @@ def _transaction_sender(raw_tx: str) -> str | None:
         except Exception:
             return None
     else:
-        type_id, data = signature[0], signature[1:]
-        if type_id in (0x03, 0x04) and len(data) > 20:
-            sender = "0x" + data[:20].hex()
-        elif type_id == 0x01 and len(data) == 129:
-            sender = "0x" + keccak(data[64:128])[-20:].hex()
-        elif type_id == 0x02 and len(data) >= 128:
-            sender = "0x" + keccak(data[-64:])[-20:].hex()
-        elif type_id == 0x05:
-            try:
-                account = rlp.decode(data)[0]
-            except Exception:
-                return None
-            if isinstance(account, bytes) and len(account) == 20:
-                sender = "0x" + account.hex()
+        sender = _fee_payer.signature_envelope_signer(signature)
     if sender is None:
         return None
     sender = sender.lower()
@@ -817,7 +790,7 @@ class ChargeIntent:
         store: Store | None = None,
         validate_sender: ValidateSender | None = None,
         confirmation_timeout: float = DEFAULT_CONFIRMATION_TIMEOUT,
-        fee_payer: TempoAccount | None = None,
+        fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None,
         fee_token: str | None = None,
         allowed_fee_tokens: Sequence[str] | None = None,
         sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None,
@@ -846,12 +819,16 @@ class ChargeIntent:
                 timeout or "already known"), polling for the receipt. Polling
                 also stops once the transaction's ``valid_before`` has passed.
                 Equivalent to mppx's ``confirmationTimeoutMs``.
-            fee_payer: Account that co-signs and broadcasts sponsored
-                (``feePayer``) transactions.
-            fee_token: Token ``fee_payer`` pays gas in; it must be allowed.
+            fee_payer: Sponsors (``feePayer``) transactions: an account that
+                co-signs them, or a hosted fee-payer service (a
+                :class:`~mpp.methods.tempo.remote_fee_payer.RemoteFeePayer`, its
+                URL, or a ``{"url", "headers"}`` mapping) asked to co-sign them
+                with ``eth_fillTransaction``. Either way the server simulates and
+                broadcasts them.
+            fee_token: Token a local ``fee_payer`` pays gas in; it must be allowed.
             allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
                 Defaults to :func:`fee_tokens_for_chain` for a local fee payer;
-                restricts an external ``feePayerUrl`` sponsor's token when set.
+                restricts a hosted fee payer's token choice when set.
             sponsor_budget: Caps the fees ``fee_payer`` has in flight (default:
                 :class:`~mpp.methods.tempo.sponsor_budget.SponsorBudget` on the
                 replay store). Pass ``False`` only when it is enforced elsewhere.
@@ -859,16 +836,22 @@ class ChargeIntent:
         if sponsor_budget is not None and sponsor_budget is not False:
             if not isinstance(sponsor_budget, _sponsor_budget.SponsorBudget):
                 raise TypeError("sponsor_budget must be a SponsorBudget, False or None")
+        local_fee_payer, remote_fee_payer = _fee_payer.resolve_fee_payer(fee_payer)
+        if fee_token is not None and remote_fee_payer is not None:
+            raise ValueError("fee_token can only be configured for a local fee_payer")
         if rpc_url is None and chain_id is not None:
             rpc_url = rpc_url_for_chain(chain_id)
         self.rpc_url = rpc_url
-        self.fee_payer = fee_payer
+        self.fee_payer = local_fee_payer
+        self.remote_fee_payer = remote_fee_payer
         self.fee_token = fee_token
         self.allowed_fee_tokens = None if allowed_fee_tokens is None else tuple(allowed_fee_tokens)
         self._http_client = http_client
         self._owns_client = http_client is None
         self._timeout = timeout
         self._store = store
+        # Proof replay protection needs an explicitly configured store, as in mppx.
+        self._fallback_store_used = False
         self._validate_sender = validate_sender
         self._confirmation_timeout = confirmation_timeout
         self._sponsor_budget = (
@@ -945,8 +928,30 @@ class ChargeIntent:
             payload = HashCredentialPayload.model_validate(payload_data)
         elif payload_data["type"] == "transaction":
             payload = TransactionCredentialPayload.model_validate(payload_data)
+        elif payload_data["type"] == "proof":
+            payload = ProofCredentialPayload.model_validate(payload_data)
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
+
+        # As mppx tempo/server/Charge.ts: zero-amount charges are paid only with
+        # proofs, and supportedModes limits hash (push) and transaction (pull) payloads.
+        try:
+            is_zero_amount = int(req.amount) == 0
+        except ValueError:
+            raise VerificationError("Invalid charge amount") from None
+        is_proof = isinstance(payload, ProofCredentialPayload)
+        if is_zero_amount and not is_proof:
+            raise VerificationError("Zero-amount challenges require a proof credential.")
+        if is_proof and not is_zero_amount:
+            raise VerificationError("Proof credentials are only valid for zero-amount challenges.")
+        modes = req.methodDetails.supportedModes
+        if modes is not None:
+            if isinstance(payload, HashCredentialPayload) and "push" not in modes:
+                raise VerificationError("Hash credentials are not supported for this challenge.")
+            if isinstance(payload, TransactionCredentialPayload) and "pull" not in modes:
+                raise VerificationError(
+                    "Transaction credentials are not supported for this challenge."
+                )
 
         return req, payload
 
@@ -959,7 +964,9 @@ class ChargeIntent:
 
         Push-mode credentials are verified against the chain without
         consuming the transaction hash's replay key; pull-mode transactions
-        are decoded and checked against the request without being broadcast.
+        are decoded and checked against the request without being broadcast;
+        zero-amount proofs are checked against their source without being
+        claimed.
 
         Args:
             credential: The payment credential from the client.
@@ -978,6 +985,16 @@ class ChargeIntent:
                 the RPC node is unreachable or misconfigured.
         """
         req, payload = self._prepare_credential(credential, request)
+
+        if isinstance(payload, ProofCredentialPayload):
+            await self._ensure_proof_unused(credential.challenge.id)
+            return Validation(
+                credential=credential,
+                details={"mode": "proof"},
+                intent=self.name,
+                request=dict(request),
+                payer=await self._validate_proof(credential, payload, req),
+            )
 
         if isinstance(payload, HashCredentialPayload):
             await self._ensure_hash_unused(payload.hash)
@@ -1021,7 +1038,8 @@ class ChargeIntent:
         Push-mode credentials reserve the transaction hash's replay key
         before re-verification — so concurrent duplicates fail fast — and
         release it again if verification fails. Pull-mode transactions are
-        broadcast to the network.
+        broadcast to the network. Zero-amount proofs are verified and, when a
+        store is configured, claimed once per challenge.
 
         Args:
             credential: The payment credential from the client.
@@ -1041,8 +1059,14 @@ class ChargeIntent:
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
             self._store = _fallback_store("tempo.charge")
+            self._fallback_store_used = True
 
         req, payload = self._prepare_credential(credential, request)
+
+        if isinstance(payload, ProofCredentialPayload):
+            payer = await self._validate_proof(credential, payload, req)
+            await self._claim_proof(credential.challenge.id, credential.challenge.expires)
+            return replace(Receipt.success(credential.challenge.id), payer=payer)
 
         if isinstance(payload, HashCredentialPayload):
             store_key = await self._reserve_hash(payload.hash)
@@ -1135,6 +1159,94 @@ class ChargeIntent:
     @staticmethod
     def _hash_store_key(tx_hash: str) -> str:
         return f"mpp:charge:{tx_hash.lower()}"
+
+    def _proof_store(self) -> Store | None:
+        """The store proofs are claimed in: only one configured explicitly (as mppx).
+
+        Without one, a proof stays reusable until its challenge expires.
+        """
+        return None if self._fallback_store_used else self._store
+
+    @staticmethod
+    def _proof_store_key(challenge_id: str) -> str:
+        return f"mpp:charge:proof:{challenge_id}"
+
+    async def _ensure_proof_unused(self, challenge_id: str) -> None:
+        store = self._proof_store()
+        if store is not None and await store.get(self._proof_store_key(challenge_id)) is not None:
+            raise CredentialReplayedError("Proof credential has already been used")
+
+    async def _claim_proof(self, challenge_id: str, expires: str | None) -> None:
+        """Claim a challenge's proof once, keeping the claim until the challenge expires."""
+        store = self._proof_store()
+        if store is None:
+            return
+        key = self._proof_store_key(challenge_id)
+        expires_at = (
+            None if expires is None else datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        )
+        if expires_at is not None and isinstance(store, ExpiringStore):
+            if expires_at.timestamp() <= time.time():
+                raise VerificationError("Request has expired")
+            claimed = await store.put_if_absent_until(key, challenge_id, expires_at.timestamp())
+        else:
+            claimed = await store.put_if_absent(key, challenge_id)
+        if not claimed:
+            raise CredentialReplayedError("Proof credential has already been used")
+
+    async def _validate_proof(
+        self, credential: Credential, payload: ProofCredentialPayload, request: ChargeRequest
+    ) -> str:
+        """Verify a zero-amount proof against its source and return the payer (lowercase).
+
+        As mppx, the proof must be signed by the source account itself, or by an
+        access key the source account has authorized, not revoked and not expired
+        (bare or wrapped in a Keychain envelope naming the source).
+        """
+        from eth_utils.address import is_address
+
+        from mpp.methods.tempo._proof import proof_hash, recover_proof_signer
+
+        if credential.source is None:
+            raise VerificationError("Proof credential must include a source.")
+        chain_id = request.methodDetails.chainId
+        source = parse_pkh_source(credential.source)
+        if source is None or source.chain_id != chain_id or not is_address(source.address):
+            raise VerificationError("Proof credential source is invalid.")
+        digest = proof_hash(
+            account=source.address,
+            chain_id=chain_id,
+            challenge_id=credential.challenge.id,
+            realm=credential.challenge.realm,
+        )
+        signer = recover_proof_signer(payload.signature, account=source.address, digest=digest)
+        payer = source.address.lower()
+        if signer is not None and not signer.keychain and signer.address.lower() == payer:
+            return payer
+        if signer is None or not await self._is_active_access_key(
+            source.address, signer.address, chain_id
+        ):
+            raise VerificationError("Proof signature does not match source.")
+        return payer
+
+    async def _is_active_access_key(self, account: str, access_key: str, chain_id: int) -> bool:
+        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``."""
+        await self._assert_rpc_chain_id(chain_id)
+        data = "0x" + GET_KEY_SELECTOR + _strip_0x(account).lower().zfill(64)
+        data += _strip_0x(access_key).lower().zfill(64)
+        try:
+            result = await _rpc_call(
+                self._get_rpc_url(),
+                "eth_call",
+                [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"],
+                client=await self._get_client(),
+            )
+            _, _, expiry, _, revoked = decode(
+                ["uint8", "address", "uint64", "bool", "bool"], bytes.fromhex(_strip_0x(result))
+            )
+        except Exception:
+            return False
+        return not revoked and expiry > int(time.time())
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
@@ -1767,12 +1879,11 @@ class ChargeIntent:
         Pre-validates the transaction contains the expected TIP-20 transfer call
         before broadcasting. For sponsored transactions (methodDetails.feePayer
         = True), co-signs locally if a fee payer account is configured, otherwise
-        forwards to an external fee payer service. The external service must
-        authorize the caller, validate and simulate the complete transaction,
-        and enforce gas and spending limits before releasing its signature.
-        A returned signature is broadcastable independently of this SDK, so
-        simulation here cannot enforce an external sponsor's spending policy.
-        For regular transactions, submits directly.
+        asks the hosted fee payer to co-sign with ``eth_fillTransaction``, then
+        simulates and broadcasts the co-signed transaction itself. The hosted
+        service must still authorize its callers and enforce its own spending
+        limits: the signature it returns is broadcastable independently of
+        this SDK. For regular transactions, submits directly.
         """
         legs = self._validate_transaction_payload(payload.signature, request)
         if legs is not None:
@@ -1792,6 +1903,7 @@ class ChargeIntent:
         reconciling = False
         legacy_record = False
         sponsored_fee: int | None = None
+        sponsor: str | None = None
         reservation: _sponsor_budget.Reservation | None = None
         budget_store: CompareAndSetStore | None = None
         client_store_key: str | None = None
@@ -1817,6 +1929,7 @@ class ChargeIntent:
                 # Gas prices are attodollars; TIP-20 balances are microdollars.
                 required_balance = max(1, (max_fee + 10**12 - 1) // 10**12)
                 sponsored_fee = max_fee
+                sponsor = self.fee_payer.address
                 prior_transaction: Any = None
                 if self._store is not None:
                     client_hash = _raw_transaction_hash(raw_tx).lower()
@@ -1880,52 +1993,21 @@ class ChargeIntent:
                             raise InternalPaymentError() from error
                         raise
 
+            elif self.remote_fee_payer is not None:
+                if self._store is not None:
+                    client_store_key = f"mpp:charge-client:{_raw_transaction_hash(raw_tx).lower()}"
+                    if await self._store.get(client_store_key) is not None:
+                        raise CredentialReplayedError("Transaction hash already used")
+                (
+                    raw_tx,
+                    simulate_payload,
+                    sponsor,
+                    sponsored_fee,
+                ) = await self._fill_hosted_fee_payer(client, raw_tx, request)
             else:
-                fee_payer_url = request.methodDetails.feePayerUrl
-                if not fee_payer_url:
-                    raise InternalPaymentError() from RuntimeError(
-                        "No fee payer configured: pass fee_payer to tempo.charge() "
-                        "or provide a feePayerUrl in methodDetails"
-                    )
-
-                try:
-                    sign_response = await client.post(
-                        fee_payer_url,
-                        json={
-                            "jsonrpc": "2.0",
-                            "method": "eth_signRawTransaction",
-                            "params": [raw_tx],
-                            "id": 1,
-                        },
-                    )
-                    sign_response.raise_for_status()
-                    sign_result = sign_response.json()
-                except Exception as err:
-                    raise InternalPaymentError() from err
-
-                if "error" in sign_result:
-                    raise InternalPaymentError() from RuntimeError(
-                        f"Fee payer signing failed: {_rpc_error_msg(sign_result)}"
-                    )
-
-                raw_tx = sign_result.get("result")
-                if not raw_tx:
-                    raise InternalPaymentError() from RuntimeError(
-                        "Fee payer returned no signed transaction"
-                    )
-
-                # A configured allowlist also restricts the external sponsor's
-                # token choice; without one, the sponsor picks its own token.
-                allowed_fee_tokens = self.allowed_fee_tokens
-                if allowed_fee_tokens is not None:
-                    try:
-                        sponsored_fee_token = _transaction_fee_token(raw_tx)
-                        if sponsored_fee_token is None or sponsored_fee_token.lower() not in {
-                            token.lower() for token in allowed_fee_tokens
-                        }:
-                            raise RuntimeError("fee-sponsored transaction feeToken is not allowed")
-                    except RuntimeError as error:
-                        raise InternalPaymentError() from error
+                raise InternalPaymentError() from RuntimeError(
+                    "No fee payer configured: pass fee_payer to tempo.charge()"
+                )
 
             # Fee payer signing must not change who the transaction debits.
             if sender is not None and _transaction_sender(raw_tx) != sender:
@@ -2000,7 +2082,7 @@ class ChargeIntent:
                 if prior is not None:
                     return prior
                 budget_store, reservation = await self._reserve_sponsor_budget(
-                    client, raw_tx, sponsored_fee, request, recovery_expires_at
+                    client, raw_tx, sponsored_fee, request, recovery_expires_at, sponsor
                 )
                 # Chain state can change while waiting for budget: re-simulate so
                 # the sponsor doesn't pay gas for a transaction that now reverts.
@@ -2204,9 +2286,9 @@ class ChargeIntent:
                     logger.exception("Sponsor budget cleanup failed")
 
     def _sponsor_budget_store(self) -> CompareAndSetStore | None:
-        """Return the store holding the local fee payer's in-flight budget, if enforced."""
+        """Return the store holding the fee payer's in-flight budget, if enforced."""
         budget = self._sponsor_budget
-        if budget is None or self.fee_payer is None:
+        if budget is None or (self.fee_payer is None and self.remote_fee_payer is None):
             return None
         if budget.store is not None:
             return budget.store
@@ -2227,15 +2309,20 @@ class ChargeIntent:
         fee: int | None,
         request: ChargeRequest,
         challenge_expires_at: float | None,
+        sponsor: str | None,
     ) -> tuple[CompareAndSetStore | None, _sponsor_budget.Reservation | None]:
-        """Reserve a locally sponsored transaction's fee before it is broadcast."""
+        """Reserve a sponsored transaction's fee against ``sponsor`` before it is broadcast.
+
+        A hosted fee payer's budget is keyed by the sponsor address recovered
+        from its signature, as mppx does.
+        """
         budget = self._sponsor_budget
         store = self._sponsor_budget_store()
         valid_before = _transaction_valid_before(raw_tx)
         if (
             budget is None
             or store is None
-            or self.fee_payer is None
+            or sponsor is None
             or fee is None
             or valid_before is None
         ):
@@ -2258,7 +2345,6 @@ class ChargeIntent:
         async def is_settled(tx_hash: str) -> bool:
             return await self._get_transaction_receipt(client, tx_hash) is not None
 
-        sponsor = self.fee_payer.address
         while True:
             try:
                 reservation = await _sponsor_budget.reserve(
@@ -2428,9 +2514,6 @@ class ChargeIntent:
         Returns ``(raw_0x76_hex, simulate_payload)`` where ``simulate_payload``
         is the ``tempo_simulateV1`` request for the co-signed tx.
 
-        Authorization-bearing envelopes are rejected before signing because
-        their authorization fields cannot yet be faithfully simulated.
-
         With ``require_remaining_validity=False`` only an already expired
         ``valid_before`` is rejected here; the caller must enforce
         ``MIN_REMAINING_VALIDITY_SECONDS`` before broadcasting. With
@@ -2457,7 +2540,9 @@ class ChargeIntent:
 
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
 
-    def _build_simulate_payload(self, tx: Any, sender: str) -> list[dict[str, Any]]:
+    def _build_simulate_payload(
+        self, tx: Any, sender: str, fee_payer: str | None = None
+    ) -> list[dict[str, Any]]:
         """Build the ``eth_call`` requests that check a co-signed 0x76 tx.
 
         Like mppx's ``preflightSponsorship``, the calls are simulated twice:
@@ -2465,20 +2550,17 @@ class ChargeIntent:
         irrelevant, then as the final sponsored transaction with its concrete
         fee payer and fee token. ``eth_call`` carries neither signature, and
         every public Tempo RPC serves it (``tempo_simulateV1`` is refused).
-
-        Must not be called for a tx that carries a ``key_authorization`` or a
-        non-empty ``tempo_authorization_list``: those fields cannot yet be
-        faithfully serialized here, so the request would describe a different
-        transaction than the one broadcast. Local cosigning rejects these
-        envelopes before applying the sponsor signature.
         """
-        if getattr(tx, "key_authorization", None) is not None or getattr(
-            tx, "tempo_authorization_list", ()
-        ):
-            raise VerificationError(
-                "Cannot build a faithful simulation request for an "
-                "authorization-bearing transaction"
-            )
+        if fee_payer is None:
+            if self.fee_payer is None:
+                raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
+            fee_payer = self.fee_payer.address
+        sponsored = _fee_payer.sponsored_simulation_request(tx, sender, fee_payer)
+        return [self._sender_simulation_request(tx, sender), sponsored]
+
+    @staticmethod
+    def _sender_simulation_request(tx: Any, sender: str) -> dict[str, Any]:
+        """Return the ``eth_call`` request executing ``tx``'s calls as the sender, without fees."""
         calls = [
             {
                 "to": "0x" + bytes(c.to).hex(),
@@ -2487,29 +2569,81 @@ class ChargeIntent:
             }
             for c in tx.calls
         ]
-        sender_request: dict[str, Any] = {"type": "0x76", "from": sender, "calls": calls}
-        if self.fee_payer is None:
-            raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
-        fee_payer = self.fee_payer.address
-        sponsored: dict[str, Any] = {
-            "type": "0x76",
-            "from": sender,
-            "calls": calls,
-            "chainId": hex(tx.chain_id),
-            "nonce": hex(tx.nonce),
-            "nonceKey": hex(tx.nonce_key),
-            "gas": hex(tx.gas_limit),
-            "maxFeePerGas": hex(tx.max_fee_per_gas),
-            "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
-            "feeToken": "0x" + bytes(tx.fee_token).hex(),
-            # The node rejects ``feePayer: true`` in eth_call; name the sponsor.
-            "feePayer": fee_payer,
-        }
-        if tx.valid_before is not None:
-            sponsored["validBefore"] = hex(tx.valid_before)
-        if tx.valid_after is not None:
-            sponsored["validAfter"] = hex(tx.valid_after)
-        return [sender_request, sponsored]
+        return {"type": "0x76", "from": sender, "calls": calls}
+
+    async def _fill_hosted_fee_payer(
+        self, client: Any, raw_tx: str, request: ChargeRequest
+    ) -> tuple[str, list[dict[str, Any]], str, int]:
+        """Have the hosted fee payer co-sign a client's 0x78 envelope.
+
+        Mirrors mppx's hosted sponsorship (``preflightSponsorship`` around
+        ``fillHostedFeePayerTransaction``): the local sponsor policy is
+        enforced and the calls are simulated from the sender before the
+        service is asked, so it never sees a transaction this server would
+        refuse. Only its signature and fee token are kept; every
+        sender-committed field comes from the client's envelope.
+
+        Returns ``(raw_0x76_hex, [sponsored simulation request], sponsor,
+        max_fee)``, where ``sponsor`` is recovered from the signature.
+        """
+        remote = self.remote_fee_payer
+        if remote is None:
+            raise InternalPaymentError() from RuntimeError("No hosted fee payer configured")
+        decoded, _, sender_signature, key_authorization = _fee_payer.decode_sponsored_envelope(
+            raw_tx
+        )
+        # Like mppx's hosted path, the sender signature (secp256k1, keychain,
+        # P256, WebAuthn or multisig) is not verified here: it names the sender,
+        # and the chain authenticates it when the transaction executes.
+        sender = _transaction_sender(raw_tx)
+        if sender is None:
+            raise VerificationError("Invalid sender signature")
+        _fee_payer.assert_envelope_policy(decoded, policy=get_policy)
+
+        rpc_url = self._get_rpc_url()
+        transaction = _fee_payer.envelope_transaction(decoded, key_authorization=key_authorization)
+        await self._simulate_before_broadcast(
+            client, [self._sender_simulation_request(transaction, sender)], rpc_url
+        )
+
+        try:
+            headers = await remote.resolve_headers()
+            response = await client.post(
+                remote.url,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "eth_fillTransaction",
+                    "params": [
+                        _fee_payer.hosted_fee_payer_request(decoded, sender, key_authorization)
+                    ],
+                    "id": 1,
+                },
+                headers=headers,
+            )
+            response.raise_for_status()
+            reply = response.json()
+        except Exception as err:
+            raise InternalPaymentError() from err
+        if not is_dict(reply):
+            raise InternalPaymentError() from RuntimeError("Fee payer returned an unreadable reply")
+        if "error" in reply:
+            raise InternalPaymentError() from RuntimeError(
+                f"Fee payer signing failed: {_rpc_error_msg(reply)}"
+            )
+
+        cosigned, sponsor, fee_token = _fee_payer.complete_hosted_fee_payer_envelope(
+            decoded,
+            sender_signature,
+            reply.get("result"),
+            key_authorization=key_authorization,
+            allowed_fee_tokens=self.allowed_fee_tokens,
+        )
+        sponsored = _fee_payer.envelope_transaction(
+            decoded, fee_token=fee_token, key_authorization=key_authorization
+        )
+        simulation = self._build_simulate_payload(sponsored, sender, sponsor)[1]
+        max_fee = sponsored.gas_limit * sponsored.max_fee_per_gas
+        return cosigned, [simulation], sponsor, max_fee
 
     async def _simulate_before_broadcast(
         self, client: Any, simulate_payload: list[dict[str, Any]], rpc_url: str

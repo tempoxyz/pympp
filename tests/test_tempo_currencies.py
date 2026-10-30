@@ -13,7 +13,7 @@ import pytest
 import rlp
 
 import mpp.methods.tempo as tempo_exports
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, NoMethodFoundError, Receipt
 from mpp.errors import InternalPaymentError, VerificationError
 from mpp.methods.tempo import (
     CHAIN_ID,
@@ -704,7 +704,7 @@ class TestClientSelection:
 
     def test_client_without_an_offered_currency_fails(self, offers: tuple[Challenge, ...]) -> None:
         client = tempo_client.charge(account=ACCOUNT, currencies=[PATH_USD, OTHER_TOKEN])
-        with pytest.raises(ValueError, match="No compatible payment method"):
+        with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
             PaymentRuntime([client]).match_challenge(offers)
 
 

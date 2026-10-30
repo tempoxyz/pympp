@@ -32,10 +32,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp._typing import is_dict, is_list
+from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpp.runtime import ClientMethod, PaymentRuntime
+from mpp.runtime import ChallengeCandidate, ClientMethod, OrderChallenges, PaymentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,8 @@ class McpClient:
             preference order (nested sequences are flattened).
         trusted_tempo_realms: Explicitly trusted realms for zero-amount Tempo
             charges; MCP has no authenticated HTTP host to compare.
+        order_challenges: Filters and sorts the payable challenges before credential
+            creation (mppx ``orderChallenges``); the first returned candidate is paid.
 
     Example:
         client = McpClient(session, methods=[tempo.charge(account=account)])
@@ -156,10 +159,12 @@ class McpClient:
         methods: Sequence[ClientMethod | Any],
         *,
         trusted_tempo_realms: Sequence[str] = (),
+        order_challenges: OrderChallenges | None = None,
     ) -> None:
         self._session = session
         self._runtime = PaymentRuntime(methods)
         self._trusted_tempo_realms = set(trusted_tempo_realms)
+        self._order_challenges = order_challenges
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session, name)
@@ -190,7 +195,8 @@ class McpClient:
         Raises:
             McpError: If the error is not payment-related or no method matches.
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
-            ValueError: If no installed method matches the server's challenge.
+            NoMethodFoundError: If no installed method matches the server's challenge.
+            ValueError: If the server's challenges are malformed.
         """
         from anyio import get_cancelled_exc_class
         from mcp.shared.exceptions import McpError
@@ -214,7 +220,9 @@ class McpClient:
             if not challenges:
                 raise ValueError("Server returned malformed payment challenges") from e
 
-            challenge, method = self._match_challenge(challenges)
+            cores = [challenge.to_core() for challenge in challenges]
+            candidates = await self._runtime.order_challenges(cores, self._order_challenges)
+            challenge, method = self._match_challenge(challenges, candidates)
 
             core_credential = await self._runtime.create_credential(challenge.to_core(), method)
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
@@ -234,31 +242,35 @@ class McpClient:
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
 
-    def _match_challenge(self, challenges: list[MCPChallenge]) -> tuple[MCPChallenge, ClientMethod]:
-        """Match a challenge to an installed method.
+    def _match_challenge(
+        self,
+        challenges: Sequence[MCPChallenge],
+        candidates: Sequence[ChallengeCandidate] | None = None,
+    ) -> tuple[MCPChallenge, ClientMethod]:
+        """Return the first payable challenge and the installed method that pays it.
 
-        Iterates installed methods in order (client preference) and returns
-        the first challenge with its ``name`` and ``intent`` that the method accepts.
+        ``candidates`` come from :meth:`PaymentRuntime.order_challenges` over
+        ``challenges``; by default challenges keep the server's order (mppx ``McpClient``).
+        Untrusted zero-amount Tempo charges are skipped.
         """
-        for method in self._runtime.methods:
-            for challenge in challenges:
-                if (
-                    challenge.method == method.name
-                    and challenge.intent == method.intent
-                    and (
-                        method.can_handle_challenge is None
-                        or method.can_handle_challenge(challenge.to_core())
-                    )
-                    and not self._is_untrusted_zero_tempo_charge(challenge)
-                ):
-                    return challenge, method
+        if candidates is None:
+            candidates = self._runtime.challenge_candidates([c.to_core() for c in challenges])
+        skipped_zero_tempo = False
+        for candidate in candidates:
+            challenge = challenges[candidate.index]
+            if self._is_untrusted_zero_tempo_charge(challenge):
+                skipped_zero_tempo = True
+                continue
+            return challenge, candidate.method
 
-        available = [challenge.method for challenge in challenges]
-        installed = list(dict.fromkeys(m.name for m in self._runtime.methods))
-        raise ValueError(
-            f"No compatible payment method. Server offered: {available}, client has: {installed}. "
-            "Zero-amount Tempo charges require a pinned trusted_tempo_realms entry."
+        available = ", ".join(f"{c.method}.{c.intent}" for c in challenges)
+        installed = ", ".join(f"{m.name}.{m.intent}" for m in self._runtime.methods)
+        message = (
+            f"No compatible payment method. Server offers: {available}. Client has: {installed}"
         )
+        if skipped_zero_tempo:
+            message += ". Zero-amount Tempo charges require a pinned trusted_tempo_realms entry."
+        raise NoMethodFoundError(challenges, self._runtime.methods, message=message)
 
     def _is_untrusted_zero_tempo_charge(self, challenge: MCPChallenge) -> bool:
         if challenge.method != "tempo" or challenge.intent != "charge":
