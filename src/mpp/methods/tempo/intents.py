@@ -111,6 +111,8 @@ SYNC_CONFIRMATION_TIMEOUT_CODE = 4
 RECEIPT_POLL_INTERVAL = 0.5
 # Seconds past a transaction's ``valid_before`` after which it cannot be included.
 VALID_BEFORE_GRACE = 2.0
+# Seconds a zero-amount proof claim outlives its challenge's expiry.
+_PROOF_CLAIM_GRACE = 300.0
 
 
 def _assert_not_expired(valid_before: int) -> None:
@@ -1192,7 +1194,11 @@ class ChargeIntent:
         if expires_at is not None and isinstance(store, ExpiringStore):
             if expires_at.timestamp() <= time.time():
                 raise VerificationError("Request has expired")
-            claimed = await store.put_if_absent_until(key, challenge_id, expires_at.timestamp())
+            # Keep the claim past expiry so a verifier whose clock runs behind
+            # cannot accept the proof again after the claim lapses.
+            claimed = await store.put_if_absent_until(
+                key, challenge_id, expires_at.timestamp() + _PROOF_CLAIM_GRACE
+            )
         else:
             claimed = await store.put_if_absent(key, challenge_id)
         if not claimed:

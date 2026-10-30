@@ -316,6 +316,19 @@ class TestProofVerification:
         with pytest.raises(CredentialReplayedError, match="already been used"):
             await intent.broadcast(credential, _request())
 
+    async def test_proof_claim_outlives_challenge_expiry(self) -> None:
+        from mpp.methods.tempo.intents import _PROOF_CLAIM_GRACE
+
+        store = MemoryStore()
+        intent = _intent(store=store)
+        credential = _proof_credential(VIEM_SIGNATURE)
+
+        await intent.broadcast(credential, _request())
+
+        deadline = store._expiry_deadlines[f"mpp:charge:proof:{CHALLENGE_ID}"]
+        expires = datetime.fromisoformat(credential.challenge.expires.replace("Z", "+00:00"))
+        assert deadline == expires.timestamp() + _PROOF_CLAIM_GRACE
+
     async def test_without_store_proof_stays_reusable(self) -> None:
         # As mppx: replay protection for proofs needs an explicitly configured store.
         intent = _intent()
