@@ -10,6 +10,7 @@ import asyncio
 import math
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -176,6 +177,11 @@ class TempoMethod:
     _follow_challenge_chain: bool = field(default=False, init=False, repr=False)
     _signing: dict[tuple[str, str], asyncio.Task[Credential]] = field(
         default_factory=dict[tuple[str, str], "asyncio.Task[Credential]"], init=False, repr=False
+    )
+    # Callers still awaiting each in-flight signing: a push payment is not
+    # broadcast once every caller has been cancelled.
+    _signing_waiters: dict[tuple[str, str], int] = field(
+        default_factory=dict[tuple[str, str], int], init=False, repr=False
     )
 
     def __post_init__(self) -> None:
@@ -539,12 +545,26 @@ class TempoMethod:
         key = ((self.root_account or self.account.address).lower(), challenge.id)
         task = self._signing.get(key)
         if task is None:
-            task = asyncio.ensure_future(self._create_credential(challenge))
+            task = asyncio.ensure_future(
+                self._create_credential(
+                    challenge, wanted=lambda: self._signing_waiters.get(key, 0) > 0
+                )
+            )
             self._signing[key] = task
             task.add_done_callback(lambda _: self._signing.pop(key, None))
-        return await asyncio.shield(task)
+        self._signing_waiters[key] = self._signing_waiters.get(key, 0) + 1
+        try:
+            return await asyncio.shield(task)
+        finally:
+            remaining = self._signing_waiters[key] - 1
+            if remaining:
+                self._signing_waiters[key] = remaining
+            else:
+                del self._signing_waiters[key]
 
-    async def _create_credential(self, challenge: Challenge) -> Credential:
+    async def _create_credential(
+        self, challenge: Challenge, wanted: Callable[[], bool] = lambda: True
+    ) -> Credential:
         if self.account is None:
             raise ValueError("No account configured for signing")
 
@@ -611,6 +631,10 @@ class TempoMethod:
         )
 
         if mode == "push":
+            # Every caller was cancelled while the transfer was built: a
+            # broadcast now would pay with no one left to receive the hash.
+            if not wanted():
+                raise asyncio.CancelledError("Push payment cancelled before broadcast")
             tx_hash = await _send_raw_transaction_sync(rpc_url, raw_tx, challenge)
             return Credential(
                 challenge=challenge.to_echo(),

@@ -487,6 +487,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     # This 402 may be the final answer to a pushed payment:
                     # keep its body readable for the caller.
                     with suppress(Exception):
+                        await _buffer_error_body(response)
                         await response.aread()
                 # Release the pool connection before callbacks can make auxiliary requests.
                 with suppress(Exception):

@@ -621,3 +621,35 @@ class TestZeroAmountSplits:
         request = _request("0", splits=[{"amount": "1", "recipient": "0x" + "11" * 20}])
         with pytest.raises(VerificationError, match="Invalid splits"):
             await _intent().validate(credential, request)
+
+
+class TestPushCancellation:
+    async def test_push_is_not_broadcast_after_every_caller_is_cancelled(self) -> None:
+        import asyncio
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        built = asyncio.Event()
+        release = asyncio.Event()
+
+        async def build(**_: Any) -> tuple[str, int]:
+            built.set()
+            await release.wait()
+            return ("0x76signed", CHAIN)
+
+        rpc = AsyncMock()
+        with (
+            patch.object(method, "_build_tempo_transfer", build),
+            patch("mpp.methods.tempo.client._rpc_call", rpc),
+        ):
+            caller = asyncio.ensure_future(
+                method.create_credential(_challenge("1000", supportedModes=["push"]))
+            )
+            await built.wait()
+            caller.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+            release.set()
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+        rpc.assert_not_awaited()
