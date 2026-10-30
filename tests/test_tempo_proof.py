@@ -653,3 +653,91 @@ class TestPushCancellation:
                 await asyncio.sleep(0)
 
         rpc.assert_not_awaited()
+
+
+class TestP256AndWebAuthnProofs:
+    """P256 and WebAuthn proof signatures, verified as Tempo verifies them."""
+
+    @staticmethod
+    def _key() -> tuple[int, bytes, str]:
+        from Crypto.PublicKey import ECC
+        from eth_hash.auto import keccak
+
+        key = ECC.generate(curve="P-256")
+        public = int(key.pointQ.x).to_bytes(32, "big") + int(key.pointQ.y).to_bytes(32, "big")
+        return int(key.d), public, "0x" + keccak(public)[12:].hex()
+
+    @staticmethod
+    def _sign(d: int, public: bytes, digest: bytes) -> bytes:
+        import secrets
+
+        from Crypto.PublicKey import ECC
+
+        from mpp.methods.tempo._proof import _P256_GX, _P256_GY, _P256_ORDER
+
+        n = _P256_ORDER
+        z = int.from_bytes(digest, "big") % n
+        while True:
+            k = secrets.randbelow(n - 1) + 1
+            point = ECC.EccPoint(_P256_GX, _P256_GY, "P-256") * k
+            r = int(point.x) % n
+            s = pow(k, -1, n) * (z + r * d) % n
+            if r and s:
+                break
+        s = min(s, n - s)
+        return r.to_bytes(32, "big") + s.to_bytes(32, "big") + public
+
+    def _p256(self, d: int, public: bytes, digest: bytes, pre_hash: bool = False) -> bytes:
+        import hashlib
+
+        message = hashlib.sha256(digest).digest() if pre_hash else digest
+        return bytes([0x01]) + self._sign(d, public, message) + bytes([int(pre_hash)])
+
+    def _webauthn(self, d: int, public: bytes, digest: bytes, kind: str = "webauthn.get") -> bytes:
+        import base64
+        import hashlib
+        import json
+
+        authenticator_data = bytes(32) + bytes([0x05]) + bytes([0, 0, 0, 1])
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        client_data = json.dumps({"type": kind, "challenge": challenge}).encode()
+        message = hashlib.sha256(authenticator_data + hashlib.sha256(client_data).digest()).digest()
+        return bytes([0x02]) + authenticator_data + client_data + self._sign(d, public, message)
+
+    @pytest.mark.parametrize("kind", ["p256", "p256-prehash", "webauthn"])
+    def test_access_key_proofs_recover_their_key(self, kind: str) -> None:
+        from eth_hash.auto import keccak
+
+        from mpp.methods.tempo._proof import proof_hash, recover_proof_signer
+
+        d, public, address = self._key()
+        digest = proof_hash(
+            account=ROOT.address, chain_id=CHAIN, challenge_id=CHALLENGE_ID, realm=REALM
+        )
+        wrapped = keccak(bytes([0x04]) + digest + bytes.fromhex(ROOT.address[2:]))
+        inner = (
+            self._webauthn(d, public, wrapped)
+            if kind == "webauthn"
+            else self._p256(d, public, wrapped, pre_hash=kind == "p256-prehash")
+        )
+        envelope = "0x" + (bytes([0x04]) + bytes.fromhex(ROOT.address[2:]) + inner).hex()
+
+        signer = recover_proof_signer(envelope, account=ROOT.address, digest=digest)
+
+        assert signer is not None and signer.keychain
+        assert signer.address == address
+        assert recover_proof_signer(envelope, account=ACCESS.address, digest=digest) is None
+        assert recover_proof_signer(envelope, account=ROOT.address, digest=bytes(32)) is None
+
+    def test_rejects_high_s_and_registration_assertions(self) -> None:
+        from mpp.methods.tempo._proof import _P256_ORDER, _recover_primitive
+
+        d, public, _ = self._key()
+        digest = bytes(range(32))
+        signature = bytearray(self._p256(d, public, digest))
+        s = int.from_bytes(signature[33:65], "big")
+        signature[33:65] = (_P256_ORDER - s).to_bytes(32, "big")
+        assert _recover_primitive(bytes(signature), digest) is None
+        assert (
+            _recover_primitive(self._webauthn(d, public, digest, "webauthn.create"), digest) is None
+        )
