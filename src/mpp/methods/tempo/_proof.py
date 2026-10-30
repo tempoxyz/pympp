@@ -198,6 +198,10 @@ def _verify_p256(message: bytes, data: bytes) -> str | None:
         )
     except ValueError:
         return None
+    # pycryptodome reads (0, 0) as the point at infinity, which would verify
+    # any signature; Tempo rejects it as an invalid key.
+    if key.pointQ.is_point_at_infinity():
+        return None
     w = pow(s, -1, _P256_ORDER)
     z = int.from_bytes(message, "big") % _P256_ORDER
     generator = ECC.EccPoint(_P256_GX, _P256_GY, "P-256")

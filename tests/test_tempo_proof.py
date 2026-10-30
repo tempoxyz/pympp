@@ -741,3 +741,15 @@ class TestP256AndWebAuthnProofs:
         assert (
             _recover_primitive(self._webauthn(d, public, digest, "webauthn.create"), digest) is None
         )
+
+    def test_rejects_the_point_at_infinity(self) -> None:
+        from Crypto.PublicKey import ECC
+
+        from mpp.methods.tempo._proof import _P256_GX, _P256_GY, _P256_ORDER, _recover_primitive
+
+        digest = bytes(range(32))
+        # With Q at infinity, u1*G alone must have x == r: pick s = 1, r = x(z*G).
+        z = int.from_bytes(digest, "big") % _P256_ORDER
+        r = int((ECC.EccPoint(_P256_GX, _P256_GY, "P-256") * z).x) % _P256_ORDER
+        forged = bytes([0x01]) + r.to_bytes(32, "big") + (1).to_bytes(32, "big") + bytes(65)
+        assert _recover_primitive(forged, digest) is None
