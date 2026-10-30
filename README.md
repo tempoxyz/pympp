@@ -51,8 +51,11 @@ async def handle(request: Request) -> Response:
 ```
 
 A `tempo.charge(fee_payer=...)` server sponsors its payers' fees on every route, as
-mppx does; pass `fee_payer=False` to a route to opt out. Before broadcasting a
-sponsored charge it simulates it with `eth_call`, which every public Tempo RPC serves.
+mppx does; pass `fee_payer=False` to a route to opt out. As in mppx, a sponsored
+challenge must expire at least 15 seconds after it is issued, so a shorter-lived route
+on such a server raises unless it passes `fee_payer=False` (zero-amount and push-only
+routes are exempt). Before broadcasting a sponsored charge it simulates it with
+`eth_call`, which every public Tempo RPC serves.
 
 If the endpoint already uses `Authorization` (API keys, Bearer tokens), create the server with `requires_auth=True`. Challenges then advertise `header="Payment-Authorization"`, and clients send the Payment credential in that header instead of `Authorization`.
 
@@ -133,6 +136,21 @@ async with Mpp(methods=[tempo.charge(account=account)]) as mpp:
 
 To use your own `httpx.AsyncClient`, pass it `transport=mpp.payment_transport`, or
 call `mpp.client()`.
+
+A `402` with no challenge a configured method can pay raises `NoMethodFoundError`
+(a `PaymentError`), as mppx does; a `402` answering a paid retry is returned. To
+choose among payable challenges, pass `order_challenges`: it gets the
+`ChallengeCandidate`s (challenge, method, index) in default order and returns them in
+preference order, and the first is paid.
+
+```python
+mpp = Mpp(
+    methods=[tempo.charge(account=account)],
+    order_challenges=lambda candidates: [
+        c for c in candidates if c.challenge.request.get("currency") == USDC
+    ],
+)
+```
 
 ### Pay x402 servers
 
@@ -244,22 +262,37 @@ is a protection-space name, not an authenticated origin. This policy prevents
 payments to unapproved origins; it cannot identify a relayed challenge served by
 an origin you have already approved.
 
-### External fee-payer services
+### Hosted fee-payer services
 
-An external `feePayerUrl` signs sponsored transactions through `eth_signRawTransaction`.
-Treat the returned transaction as a spending capability: callers can broadcast it
-without passing through pympp. Before returning a signature, the service must
-validate the complete transaction and caller authorization, simulate execution,
-and enforce gas-price, gas-limit, per-caller, and aggregate spending budgets.
-Simulation is a point-in-time check; state can change before inclusion, so it does
-not replace hard spending limits.
+`tempo.charge(fee_payer=...)` also takes a hosted fee payer: its URL, or
+`{"url": ..., "headers": ...}` (or a `RemoteFeePayer`), where `headers` may be a
+sync or async callable returning them per request. As with a local fee payer,
+routes then sponsor by default.
+The server enforces its sponsor policy and simulates the calls before asking the
+service to co-sign with `eth_fillTransaction`, keeps only the returned
+`feePayerSignature` and `feeToken` (`allowed_fee_tokens` restricts it), simulates
+the final transaction with the recovered sponsor, and broadcasts it itself.
+Challenges never name the service; a `feePayerUrl` in an old challenge is ignored.
 
-These requirements apply to any external sponsor. pympp validates the expected
-payment before requesting sponsorship, but its checks cannot protect a sponsor
-that also accepts direct signing requests. Local sponsorship uses pympp's local
-simulation path; externally signed transactions rely on the external service's
-pre-sign controls. Adding a simulation after receiving the signature would not
-prevent a caller from broadcasting that same transaction elsewhere.
+```python
+server = Mpp(
+    methods=tempo.charge(
+        recipient="0x...",
+        fee_payer={
+            "url": "https://sponsor.example/rpc",
+            "headers": {"Authorization": "Bearer ..."},
+        },
+    )
+)
+```
+
+Treat the returned signature as a spending capability: callers can broadcast it
+without passing through pympp. Before signing, the service must validate the
+complete transaction and caller authorization, simulate execution, and enforce
+gas-price, gas-limit, per-caller, and aggregate spending budgets. Simulation is a
+point-in-time check; state can change before inclusion, so it does not replace
+hard spending limits. pympp's checks cannot protect a sponsor that also accepts
+direct signing requests.
 
 ### Sponsored recovery records
 

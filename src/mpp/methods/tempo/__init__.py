@@ -48,6 +48,7 @@ _LAZY_EXPORTS = {
         "get_transfers",
     ),
     "mpp.methods.tempo.relay": ("Relay", "RelayErrorCode"),
+    "mpp.methods.tempo.remote_fee_payer": ("RemoteFeePayer",),
     "mpp.methods.tempo.schemas": ("ChargeInput", "ChargePayload", "Split"),
     "mpp.methods.tempo.sponsor_budget": ("SponsorBudget",),
 }

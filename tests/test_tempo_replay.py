@@ -192,7 +192,9 @@ class RouteTransport(httpx.AsyncBaseTransport):
     [
         ("ok", True, 403, 1),
         ("memo", False, 403, 1),
-        ("amount", False, 402, 3),
+        # A pushed payment is already on chain: a 402 answering it is final, so the
+        # client never broadcasts again for the same request.
+        ("amount", False, 402, 1),
     ],
     ids=["replay", "memo", "amount"],
 )

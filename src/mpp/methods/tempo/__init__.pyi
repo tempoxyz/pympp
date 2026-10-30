@@ -23,6 +23,7 @@ from mpp.methods.tempo.intents import ValidateSender as _ValidateSender
 from mpp.methods.tempo.intents import get_transfers as _get_transfers
 from mpp.methods.tempo.relay import Relay as _Relay
 from mpp.methods.tempo.relay import RelayErrorCode as _RelayErrorCode
+from mpp.methods.tempo.remote_fee_payer import RemoteFeePayer as _RemoteFeePayer
 from mpp.methods.tempo.schemas import ChargeInput as _ChargeInput
 from mpp.methods.tempo.schemas import ChargePayload as _ChargePayload
 from mpp.methods.tempo.schemas import Split as _Split
@@ -54,4 +55,5 @@ RelayErrorCode = _RelayErrorCode
 ChargeInput = _ChargeInput
 ChargePayload = _ChargePayload
 Split = _Split
+RemoteFeePayer = _RemoteFeePayer
 SponsorBudget = _SponsorBudget

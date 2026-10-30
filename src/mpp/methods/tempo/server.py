@@ -16,11 +16,12 @@ Sessions (pay-as-you-go over a TIP-1034 channel) use :func:`session`::
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
+from mpp.methods.tempo._fee_payer import resolve_fee_payer
 from mpp.methods.tempo.client import _CHAIN_ID_UNSET, _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent, ValidateSender
 from mpp.methods.tempo.schemas import charge as definition
@@ -35,6 +36,8 @@ if TYPE_CHECKING:
     from mpp.methods import CanOfferFn, PaymentSuccessHandler
     from mpp.methods.tempo.account import TempoAccount
     from mpp.methods.tempo.relay import Relay
+    from mpp.methods.tempo.remote_fee_payer import RemoteFeePayer
+    from mpp.methods.tempo.schemas import ChargeMode
     from mpp.methods.tempo.sponsor_budget import SponsorBudget
     from mpp.store import Store
 
@@ -49,7 +52,7 @@ def charge(
     currency: str | None = None,
     currencies: Sequence[str] | None = None,
     decimals: int = 6,
-    fee_payer: TempoAccount | None = None,
+    fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None,
     fee_token: str | None = None,
     allowed_fee_tokens: Sequence[str] | None = None,
     sponsor_budget: SponsorBudget | Literal[False] | None = None,
@@ -61,13 +64,14 @@ def charge(
     relay: Relay | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
+    supported_modes: Sequence[ChargeMode] | None = None,
 ) -> list[ServerMethod]:
     """Create Tempo charge server methods, one per accepted currency in offer order.
 
     Routes take ``amount`` (decimal string), and optionally ``currency``,
-    ``recipient``, ``chain_id``, ``fee_payer`` (sponsor the client's fees),
-    ``splits`` (base units) and ``external_id``. A route naming a ``currency``
-    offers only that one.
+    ``recipient``, ``chain_id``, ``fee_payer`` (``False`` stops sponsoring the
+    client's fees), ``splits`` (base units), ``external_id`` and ``supported_modes``.
+    A route naming a ``currency`` offers only that one.
 
     Args:
         recipient: Default payment recipient.
@@ -77,8 +81,15 @@ def charge(
         currencies: Ordered currency addresses to accept. Defaults to OUSD then
             USDC.e on mainnet, OUSD then pathUSD on Moderato.
         decimals: Token decimals used to convert route amounts (default: 6).
-        fee_payer: Account that co-signs and broadcasts sponsored transactions.
-        fee_token: Token ``fee_payer`` pays gas in. Requires ``fee_payer``.
+        fee_payer: Sponsors the client's fees: an account that co-signs
+            sponsored transactions, or a hosted fee-payer service that does,
+            given as a :class:`~mpp.methods.tempo.remote_fee_payer.RemoteFeePayer`,
+            its URL, or a ``{"url": ..., "headers": ...}`` mapping (``headers``
+            may be a callable returning them per request). The server
+            simulates and broadcasts either way. Routes are sponsored unless
+            they pass ``fee_payer=False``.
+        fee_token: Token a local ``fee_payer`` pays gas in. Requires a local
+            ``fee_payer``.
         allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
         sponsor_budget: Caps the fees ``fee_payer`` has in flight across every
             process sharing it (default: ``SponsorBudget()`` on ``store``).
@@ -93,9 +104,21 @@ def charge(
         relay: Serve validation and settlement through the Tempo API relay.
         can_offer: Decides whether to advertise an offer for a wire request.
         on_payment_success: Called with each successful Tempo charge event.
+        supported_modes: Settlement modes routes advertise in
+            ``methodDetails.supportedModes`` (``"pull"``: the server broadcasts a
+            signed transaction; ``"push"``: the client broadcasts and sends its
+            hash). Credentials for other modes are rejected. ``None`` advertises
+            nothing and accepts both.
     """
+    if supported_modes is not None:
+        if isinstance(supported_modes, str) or not supported_modes:
+            raise ValueError("supported_modes must be a non-empty sequence of modes")
+        for mode in supported_modes:
+            if mode not in ("push", "pull"):
+                raise ValueError(f"Invalid Tempo charge mode: {mode!r}")
+    local_fee_payer, _ = resolve_fee_payer(fee_payer)
     config = _tempo_method(
-        fee_payer=fee_payer,
+        fee_payer=local_fee_payer,
         chain_id=chain_id,
         rpc_url=rpc_url,
         currency=currency,
@@ -128,11 +151,14 @@ def charge(
         input.setdefault("recipient", config.recipient)
         input.setdefault("chain_id", config.chain_id)
         input.setdefault("decimals", config.decimals)
-        # No route promises sponsorship nobody can give (as mppx). Routes still opt in:
-        # local cosigning accepts only secp256k1 sender signatures, so sponsoring by
-        # default would refuse access-key and passkey payers.
+        if supported_modes is not None:
+            input.setdefault("supported_modes", list(supported_modes))
+        # As mppx's resolvedFeePayer: a configured fee payer sponsors every route
+        # unless it passes fee_payer=False; none promises a sponsor nobody configured.
         if fee_payer is None:
             input.pop("fee_payer", None)
+        else:
+            input.setdefault("fee_payer", True)
         return input
 
     def credential(context: VerifyContext) -> Credential:

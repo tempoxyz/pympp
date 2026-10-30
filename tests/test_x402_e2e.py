@@ -27,7 +27,7 @@ from x402 import x402Client
 from x402.http.clients import x402HttpxClient
 from x402.mechanisms.evm.exact import register_exact_evm_client
 
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, NoMethodFoundError, Receipt
 from mpp.client import Mpp as MppClient
 from mpp.events import PAYMENT_FAILED, PAYMENT_SUCCESS
 from mpp.methods.evm import BASE_SEPOLIA_USDC, CELO_USDT, evm
@@ -317,12 +317,8 @@ class TestMppClient:
     async def test_refuses_more_than_max_amount(self, live: Live) -> None:
         method = evm(currency=BASE_SEPOLIA_USDC, account=payer, max_amount="0.001")
         async with MppClient(methods=[method]) as client:
-            try:
-                response = await client.fetch(f"{live.url}/paid")
-            except ValueError as error:
-                assert "No compatible payment method" in str(error)
-            else:
-                assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
+                await client.fetch(f"{live.url}/paid")
         assert live.facilitator.settle_requests == []
 
     async def test_payment_credential_wins_over_payment_signature(self, live: Live) -> None:

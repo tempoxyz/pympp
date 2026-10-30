@@ -11,6 +11,9 @@ from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import Method
 
+ChargeMode = Literal["push", "pull"]
+"""How a charge settles: the client broadcasts (``push``) or the server does (``pull``)."""
+
 
 class Split(BaseModel):
     """A single split in a split payment."""
@@ -18,6 +21,13 @@ class Split(BaseModel):
     amount: str
     recipient: str
     memo: str | None = None
+
+
+def _split_amount(amount: str) -> int:
+    """A split's base-unit amount, which must be a non-negative integer string."""
+    if not isinstance(amount, str) or not amount.isdigit():
+        raise ValueError("Invalid splits")
+    return int(amount)
 
 
 FIXED_ATTRIBUTION_MEMO_ERROR = "Fixed split memos must not use MPP attribution; omit the memo"
@@ -60,15 +70,8 @@ class MethodDetails(BaseModel):
 
     chainId: int = 4217
     feePayer: bool = False
-    feePayerUrl: str | None = Field(
-        default=None,
-        description=(
-            "External signing service. It must authorize, validate, simulate, and enforce "
-            "gas and spending limits before returning a broadcastable signature; "
-            "pympp does not enforce the external sponsor's policy."
-        ),
-    )
     splits: list[Split] | None = None
+    supportedModes: Annotated[list[ChargeMode], Field(min_length=1)] | None = None
 
 
 class ChargeRequest(BaseModel):
@@ -101,16 +104,24 @@ class TransactionCredentialPayload(BaseModel):
     signature: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
 
 
-CredentialPayload = HashCredentialPayload | TransactionCredentialPayload
+class ProofCredentialPayload(BaseModel):
+    """Credential payload for a zero-amount charge: an EIP-712 proof signature."""
+
+    type: Literal["proof"]
+    signature: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+
+
+CredentialPayload = HashCredentialPayload | TransactionCredentialPayload | ProofCredentialPayload
 
 
 class ChargeInput(BaseModel):
     """Route input for a Tempo charge, serialized to its wire :class:`ChargeRequest`.
 
     ``amount`` is a decimal string converted to base units with ``decimals``;
-    ``splits`` are already in base units. ``chain_id``, ``fee_payer`` and
-    ``splits`` serialize under ``methodDetails``; ``extra`` is string metadata
-    embedded in the request.
+    ``splits`` are already in base units. ``chain_id``, ``fee_payer``,
+    ``splits`` and ``supported_modes`` serialize under ``methodDetails``;
+    ``extra`` is string metadata embedded in the request. Servers with a fee
+    payer sponsor routes that leave ``fee_payer`` unset; ``False`` opts a route out.
     """
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
@@ -120,16 +131,23 @@ class ChargeInput(BaseModel):
     recipient: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
     decimals: int = 6
     chain_id: int | None = Field(default=None, alias="chainId")
-    fee_payer: bool = Field(default=False, alias="feePayer")
+    fee_payer: bool | None = Field(default=None, alias="feePayer")
     splits: list[Split] | None = None
     external_id: str | None = Field(default=None, alias="externalId")
     extra: dict[str, str] | None = None
+    supported_modes: Annotated[list[ChargeMode], Field(min_length=1)] | None = Field(
+        default=None, alias="supportedModes"
+    )
 
     @model_validator(mode="after")
     def _check(self) -> ChargeInput:
-        parse_units(self.amount, self.decimals)
-        if self.splits and self.fee_payer:
-            raise ValueError("splits and fee_payer cannot be used together")
+        total = parse_units(self.amount, self.decimals)
+        if self.splits is not None:
+            # As mppx's charge request schema: every split is positive and together
+            # they leave the primary recipient something, so a zero amount has none.
+            amounts = [_split_amount(split.amount) for split in self.splits]
+            if not self.splits or any(a <= 0 for a in amounts) or sum(amounts) >= total:
+                raise ValueError("Invalid splits")
         if any(is_fixed_attribution_memo(split.memo) for split in self.splits or ()):
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
         return self
@@ -143,6 +161,8 @@ class ChargeInput(BaseModel):
             details["feePayer"] = True
         if self.chain_id is not None:
             details["chainId"] = self.chain_id
+        if self.supported_modes is not None:
+            details["supportedModes"] = list(self.supported_modes)
         wire: dict[str, Any] = {
             "amount": str(parse_units(self.amount, self.decimals)),
             "currency": self.currency,
@@ -158,7 +178,8 @@ class ChargeInput(BaseModel):
 
 
 class ChargePayload(RootModel[Annotated[CredentialPayload, Field(discriminator="type")]]):
-    """Charge credential payload: a pushed transaction ``hash`` or a signed ``transaction``."""
+    """Charge credential payload: a pushed transaction ``hash``, a signed ``transaction``,
+    or, for a zero-amount charge, a ``proof`` signature."""
 
 
 charge: Method[ChargeInput, ChargePayload] = Method(

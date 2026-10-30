@@ -3,7 +3,7 @@
 A Starlette app protected with `mpp.server.pay` runs on uvicorn, and
 `mpp.client.Mpp` pays it. Every payment settles on chain: pull (signed
 transaction), push (transaction hash), fee-sponsored, splits, a zero-amount
-charge, a two-currency offer paid by a pinned client, requires_auth with
+charge paid with a proof, a two-currency offer paid by a pinned client, requires_auth with
 Payment-Authorization, replay rejection, and replay rejection across two
 servers sharing one Redis store.
 
@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -37,6 +38,8 @@ from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._attribution import encode as encode_attribution
+from mpp.methods.tempo._rpc import _rpc_call
+from mpp.methods.tempo.client import EXPIRING_NONCE_KEY, _tempo_method
 from mpp.server import ComposedHandler, Mpp, pay
 from mpp.store import Store
 from tests import INTEGRATION
@@ -225,6 +228,19 @@ class TestE2ECharge:
                 assert _receipt(paid).reference == tx_hash
                 _refused(await http.get(f"{url}/paid", headers=headers))
 
+    async def test_push_only_route_is_paid_by_a_client_broadcast(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        async with _serve({"/paid": server.charge(amount="0.1", supported_modes=["push"])}) as url:
+            before = _balance(rpc_url, currency, funded_recipient.address)
+            async with _client(funded_payer, rpc_url) as client:
+                response = await client.fetch(f"{url}/paid")
+            receipt = _receipt(response)
+            credential = Credential.from_authorization(response.json()["authorization"])
+            assert credential.payload == {"type": "hash", "hash": receipt.reference}
+            assert _balance(rpc_url, currency, funded_recipient.address) == before + 100_000
+
     async def test_fee_sponsored_charge(
         self, rpc_url, chain_id, currency, funded_payer, funded_recipient
     ):
@@ -245,6 +261,32 @@ class TestE2ECharge:
         # The payer pays exactly the amount; the sponsor pays the gas.
         assert _balance(rpc_url, currency, funded_payer.address) == payer_before - 500_000
         assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 500_000
+        assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
+
+    async def test_fee_payer_sponsors_split_routes_by_default(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    ):
+        # As mppx: a configured fee payer sponsors routes that don't opt out, splits included.
+        sponsor = _new_account(rpc_url, currency)
+        partner = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency], fee_payer=sponsor)
+        splits = [{"amount": "150000", "recipient": partner.address}]
+        async with _serve({"/paid": server.charge(amount="1", splits=splits)}) as url:
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+            challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+            assert challenge.request["methodDetails"]["feePayer"] is True
+            assert challenge.request["methodDetails"]["splits"] == splits
+
+            payer_before = _balance(rpc_url, currency, funded_payer.address)
+            recipient_before = _balance(rpc_url, currency, funded_recipient.address)
+            sponsor_before = _balance(rpc_url, currency, sponsor.address)
+            async with _client(funded_payer, rpc_url) as client:
+                _receipt(await client.fetch(f"{url}/paid"))
+
+        assert _balance(rpc_url, currency, funded_payer.address) == payer_before - 1_000_000
+        assert _balance(rpc_url, currency, partner.address) == 150_000
+        assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 850_000
         assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
 
     async def test_split_charge_pays_every_recipient(
@@ -286,6 +328,64 @@ class TestE2ECharge:
             assert response.json()["payer"].endswith(funded_payer.address)
         assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before
         assert _balance(rpc_url, currency, funded_payer.address) <= payer_before
+
+    async def test_zero_amount_proof_signed_by_an_access_key(
+        self, rpc_url, chain_id, currency, funded_recipient
+    ):
+        from pytempo import Call, TempoTransaction
+        from pytempo.keychain import KeyAuthorization
+
+        root = _new_account(rpc_url, currency)
+        access_key = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        stranger = TempoAccount.from_key("0x" + os.urandom(32).hex())
+        # The root account authorizes the access key in a 1-unit self-transfer.
+        authorization = KeyAuthorization(key_id=access_key.address, chain_id=chain_id)
+        gas_price = int(await _rpc_call(rpc_url, "eth_gasPrice", []), 16)
+        tx = TempoTransaction.create(
+            chain_id=chain_id,
+            gas_limit=2_000_000,
+            max_fee_per_gas=gas_price,
+            max_priority_fee_per_gas=gas_price,
+            nonce=0,
+            nonce_key=EXPIRING_NONCE_KEY,
+            valid_before=int(time.time()) + 25,
+            fee_token=currency,
+            calls=(
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data="0xa9059cbb" + root.address[2:].lower().zfill(64) + "1".zfill(64),
+                ),
+            ),
+            key_authorization=authorization.sign(root.private_key),
+        ).sign(root.private_key)
+        raw = "0x" + tx.encode().hex()
+        receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw])
+        assert receipt["status"] == "0x1"
+
+        server = _server(rpc_url, chain_id, funded_recipient.address, [currency])
+        async with _serve({"/paid": server.charge(amount="0")}) as url:
+            method = tempo_client.charge(
+                account=access_key, rpc_url=rpc_url, root_account=root.address
+            )
+            async with Client(methods=[method], trusted_tempo_realms={url: REALM}) as client:
+                response = await client.fetch(f"{url}/paid")
+            _receipt(response)
+            credential = Credential.from_authorization(response.json()["authorization"])
+            assert credential.payload["signature"].startswith("0x04")
+            assert credential.source == f"did:pkh:eip155:{chain_id}:{root.address}"
+
+            # A key the root account never authorized cannot prove for it.
+            async with httpx.AsyncClient(timeout=30) as http:
+                unpaid = await http.get(f"{url}/paid")
+                challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
+                forged = await _tempo_method(
+                    account=stranger, rpc_url=rpc_url, root_account=root.address
+                ).create_credential(challenge)
+                headers = {"Authorization": forged.to_authorization()}
+                refused = await http.get(f"{url}/paid", headers=headers)
+            assert refused.status_code == 402
+            assert refused.json()["detail"] == "Proof signature does not match source."
 
     async def test_two_currency_offer_paid_by_a_pinned_client(
         self, rpc_url, chain_id, currency, funded_payer, funded_recipient
