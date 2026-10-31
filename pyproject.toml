@@ -261,3 +261,7 @@ pytest_add_cli_args = [
     "not integration and not redis and not x402_localnet",
     "--hypothesis-profile=mutmut",
 ]
+
+[tool.uv]
+# pytempo is our own package; it is exempt from CI's UV_EXCLUDE_NEWER cooldown.
+exclude-newer-package = { pytempo = false }
