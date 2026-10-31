@@ -530,14 +530,21 @@ def session(
             on_charged=accepted_charges.append,
             fee_payer=sponsor,
         )
+        from mpp.methods.tempo.session._chain import sponsored_sends
+
+        sends: list[str] = []
+        tracking = sponsored_sends.set(sends)
         try:
             receipt = await broadcast_credential_payload(verify_context)
         except BaseException:
-            # Only sponsored transactions that land count against the payer's daily limit.
-            if release_sponsorship is not None:
+            # A sponsored transaction never handed to the node does not count against the
+            # payer's daily limit; one that was sent may have landed, so it keeps its slot.
+            if release_sponsorship is not None and not sends:
                 with contextlib.suppress(Exception):
                     await release_sponsorship()
             raise
+        finally:
+            sponsored_sends.reset(tracking)
         if accepted_charges:
             tx_hash = await settle_charged(accepted_charges[-1], fee_payer)
             return SessionPaymentReceipt.from_session(

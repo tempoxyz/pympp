@@ -460,7 +460,19 @@ class TestThroughTheSessionMethod:
             assert isinstance(result, PaymentRequired)
             assert not life.rpc.sent
 
-    async def test_a_failed_sponsored_open_gives_its_slot_back(self) -> None:
+    @pytest.mark.parametrize("sent", [False, True])
+    async def test_only_an_unsent_sponsored_open_gives_its_slot_back(
+        self, monkeypatch: pytest.MonkeyPatch, sent: bool
+    ) -> None:
+        from mpp.errors import VerificationFailedError
+        from mpp.methods.tempo.session import _chain as chain
+
+        if not sent:
+
+            async def refuse(*args: Any, **kwargs: Any) -> None:
+                raise VerificationFailedError("simulation failed")
+
+            monkeypatch.setattr(chain, "_simulate_call", refuse)
         life = await Lifecycle().build(fee_payer=True)
         usage = MemoryStore()
         server = make_server(
@@ -471,12 +483,14 @@ class TestThroughTheSessionMethod:
         )
         handler = server.session(amount="0.0001", unit_type="request")
         challenge = await challenge_for(handler, Request("GET", URL))
-        # No Opened log: the open does not land and is rejected.
+        # No Opened log: a sent open lands without opening the channel and is rejected.
         result = await handler(
             Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
         )
         assert isinstance(result, PaymentRequired)
+        assert bool(life.rpc.sent) is sent
         payer = limits.verified_payer(life.transaction)
         assert payer is not None
         record = await read(usage, f"mppx:session:sponsorship:{CHAIN_ID}:{payer}")
-        assert record is None or json.loads(record)["open"] == 0
+        used = json.loads(record)["open"] if record is not None else 0
+        assert used == (1 if sent else 0)
