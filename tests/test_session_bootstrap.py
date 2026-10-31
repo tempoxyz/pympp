@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import secrets
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -1048,3 +1050,22 @@ class TestManagerBootstrap:
     def test_trusted_realms_must_be_origins(self) -> None:
         with pytest.raises(ValueError, match="trusted_tempo_realms"):
             session_manager(account=PAYER, trusted_tempo_realms={"https://a.test/path": "r"})
+
+
+@pytest.mark.redis
+@pytest.mark.skipif(not os.environ.get("REDIS_URL"), reason="REDIS_URL not set")
+async def test_redis_store_claims_proofs_once() -> None:
+    import redis.asyncio as aioredis
+
+    from mpp.methods.tempo.session.server import _bootstrap as bootstrap
+    from mpp.stores import RedisStore
+
+    client = aioredis.from_url(os.environ["REDIS_URL"])
+    try:
+        store = RedisStore(client, key_prefix=f"mpp-test-{secrets.token_hex(4)}:")
+        claim = bootstrap._claim_proof  # pyright: ignore[reportPrivateUsage]
+        expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+        assert await claim(store, "c", expires)
+        assert not await claim(store, "c", expires)
+    finally:
+        await client.aclose()

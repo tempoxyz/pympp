@@ -98,8 +98,8 @@ async def _claim_proof(store: Store, challenge_id: str, expires: str) -> bool:
     key = PROOF_CLAIM_PREFIX + challenge_id
     if isinstance(store, ExpiringStore):
         until = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
-        return await store.put_if_absent_until(key, True, until)
-    return await store.put_if_absent(key, True)
+        return await store.put_if_absent_until(key, "1", until)
+    return await store.put_if_absent(key, "1")
 
 
 async def _verify_proof_credential(
