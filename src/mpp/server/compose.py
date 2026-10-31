@@ -474,6 +474,21 @@ class ComposedHandler:
         if not hooks or request.url.startswith(MCP_URL_PREFIX):
             return None
         credential = _parse_credential(authorization)
+        if self._composed and any(
+            offer.method.can_offer is not None or offer.selection is not None
+            for offer in self._offers
+        ):
+            # Like mppx's compose, only offers can_offer and select_offers keep run their
+            # preflight hook.
+            call = _Call()
+            prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
+            try:
+                kept = {
+                    id(offer.offer) for offer in await self._advertised(prepared, request, call)
+                }
+            except ValueError:
+                return None
+            hooks = [offer for offer in hooks if id(offer) in kept]
         for offer in hooks:
             assert offer.method.preflight is not None
             options = {

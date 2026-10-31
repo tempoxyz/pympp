@@ -58,6 +58,9 @@ if TYPE_CHECKING:
 
 PAYMENT_SESSION_HEADER = "Payment-Session"
 
+_PROBE_OPTIONS = ("cookies", "extensions", "params", "timeout")
+"""Request options a bootstrap HEAD probe keeps from the paid request (mppx forwards its init)."""
+
 
 def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
     """A bootstrap response's zero-amount ``tempo/charge`` challenge (mppx's first charge one)."""
@@ -360,7 +363,7 @@ class SessionManager:
         return entry
 
     async def _bootstrap_session(
-        self, url: httpx.URL, headers: httpx.Headers
+        self, url: httpx.URL, headers: httpx.Headers, options: Mapping[str, Any] | None = None
     ) -> ChannelEntry | None:
         """Recover a server-held channel with a same-route ``HEAD`` (mppx ``bootstrapSession``).
 
@@ -373,8 +376,11 @@ class SessionManager:
             return None
         head = httpx.Headers(headers)
         head["Accept-Payment"] = "tempo/charge"
+        probe = {key: value for key, value in (options or {}).items() if key in _PROBE_OPTIONS}
         try:
-            response = await self._send(httpx.Request("HEAD", url, headers=head))
+            response = await self._send(
+                self._client.build_request("HEAD", url, headers=head, **probe)
+            )
             if response.status_code != 402:
                 return await self._store_snapshot_header(response)
             challenge = _zero_amount_charge(response)
@@ -394,7 +400,9 @@ class SessionManager:
                 source=proof_source(self._account.address, chain_id),
             ).to_authorization()
             head[challenge.credential_header] = credential
-            response = await self._send(httpx.Request("HEAD", url, headers=head))
+            response = await self._send(
+                self._client.build_request("HEAD", url, headers=head, **probe)
+            )
             if response.is_success:
                 return await self._store_snapshot_header(response)
             return None
@@ -465,7 +473,16 @@ class SessionManager:
             headers = httpx.Headers(kwargs.pop("headers", None))
             self._last_url = httpx.URL(url)
             self._last_authorization = headers.get(AUTHORIZATION_HEADER)
-            await self._bootstrap_session(self._last_url, headers)
+            await self._bootstrap_session(
+                self._last_url,
+                headers,
+                # Like mppx, the probe carries the request's options except its body and method.
+                {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in ("content", "data", "files", "json")
+                },
+            )
             if self._channel is not None and self._channel.opened:
                 headers.setdefault(PAYMENT_SESSION_HEADER, self._channel.channel_id)
             try:

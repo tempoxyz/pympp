@@ -51,7 +51,7 @@ from mpp.methods.tempo.session.server._request_state import (
     resolve_session_snapshot,
 )
 from mpp.methods.tempo.session.server._store import ChannelState, from_store
-from mpp.server import Mpp, PaymentRequired, PreflightContext, Request, Response
+from mpp.server import Mpp, PaymentRequired, PreflightContext, Request, Response, compose
 from mpp.server.verify import (
     _create_challenge,  # pyright: ignore[reportPrivateUsage]
     _requests_match,  # pyright: ignore[reportPrivateUsage]
@@ -719,6 +719,33 @@ class TestPreflightHook:
         with pytest.raises(TypeError, match="preflight must return"):
             await handler(http_request())
 
+    async def test_composed_offers_dropped_by_can_offer_skip_preflight(self) -> None:
+        calls: list[str] = []
+
+        def preflight_for(name: str) -> Any:
+            def preflight(context: PreflightContext) -> Response | None:
+                calls.append(name)
+                return Response(204) if context.input.method == "HEAD" else None
+
+            return preflight
+
+        hidden = Mpp(
+            methods=server_method(
+                verify=_paid, preflight=preflight_for("hidden"), can_offer=lambda _: False
+            ),
+            realm="example.com",
+            secret_key="secret",
+        )
+        shown = Mpp(
+            methods=server_method(verify=_paid, preflight=preflight_for("shown")),
+            realm="example.com",
+            secret_key="secret",
+        )
+        handler = compose(hidden.charge(amount="1"), shown.charge(amount="2"))
+        handled = await handler(http_request(method="HEAD"))
+        assert isinstance(handled, PaymentRequired) and handled.status == 204
+        assert calls == ["shown"]
+
     def test_preflight_must_be_callable(self) -> None:
         with pytest.raises(ValueError, match="preflight must be callable"):
             server_method(verify=_paid, preflight="x")
@@ -920,6 +947,18 @@ class TestManagerBootstrap:
             assert server.requests[2].headers["payment-session"] == CHANNEL_ID
             await client.fetch(URL)
             assert heads(server) == [False, True]
+
+    async def test_probes_keep_cookies_and_query_parameters(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server = FakeServer()
+        async with manager(server, monkeypatch) as client:
+            await client.fetch(URL, params={"user": "7"}, cookies={"sid": "abc"}, json={"q": 1})
+            probes = [r for r in server.requests if r.method == "HEAD"]
+            assert len(probes) == 2
+            for probe in probes:
+                assert probe.url.params["user"] == "7"
+                assert probe.headers["cookie"] == "sid=abc" and probe.content == b""
 
     async def test_a_snapshot_on_the_first_response_is_used_directly(
         self, monkeypatch: pytest.MonkeyPatch
