@@ -274,6 +274,38 @@ class TestEngineErrors:
         result = await server.validate_credential(credential, request={"amount": "1"})
         assert result.request["amount"] == "1"
 
+    async def test_validate_credential_prefers_exact_match_among_stable_bindings(self) -> None:
+        from mpp._validation import Validation
+
+        async def validate(context: Any) -> Validation:
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
+            )
+
+        def binding(request: Any) -> dict[str, Any]:
+            return {key: value for key, value in request.items() if key != "extra"}
+
+        def make(extra: str) -> Any:
+            async def broadcast(context: Any) -> Any:
+                return await _verified(context)
+
+            return replace(
+                server_method(
+                    broadcast=broadcast, validate=validate, request={"amount": "1", "extra": extra}
+                ),
+                stable_binding=binding,
+            )
+
+        first, second = make("a"), make("b")
+        server = Mpp(methods=[first, second], realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge(extra="b")(http_request()))
+        credential = Credential(challenge=issued.to_echo(), payload={})
+        result = await server.validate_credential(credential, request={"amount": "1"})
+        assert result.request["extra"] == "b"
+
     async def test_broadcast_credential_selects_among_async_resolve_request_methods(
         self,
     ) -> None:

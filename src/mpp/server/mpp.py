@@ -394,6 +394,7 @@ class Mpp:
             # input that reads both ways, such as `amount` in display or base units, is
             # always checked in its stricter route-input reading.
             matching: list[ServerMethod] = []
+            exact: list[ServerMethod] = []
             scopes: dict[int, Any] = {}
             normalized = False
             expected_scope: Any = None
@@ -408,6 +409,8 @@ class Mpp:
                 if _binding_matches(candidate, expected, echoed):
                     matching.append(candidate)
                     scopes[id(candidate)] = expected.get("_mppx_scope")
+                    if _comparable(expected) == echoed:
+                        exact.append(candidate)
             if not normalized and _comparable(request) == echoed:
                 # The wire form matches every candidate alike.
                 matching = list(candidates)
@@ -415,6 +418,9 @@ class Mpp:
                 wire_scope = True
             if not matching:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
+            if len(matching) > 1 and exact:
+                # Like compose, prefer the methods whose whole request the client signed.
+                matching = exact
             if len(matching) > 1 and not _settle_alike(matching):
                 raise InvalidChallengeError(
                     echo.id,
