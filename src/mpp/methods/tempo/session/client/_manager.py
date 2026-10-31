@@ -341,12 +341,28 @@ class SessionManager:
             cumulative=self.cumulative,
         )
 
-    async def _store_snapshot_header(self, response: httpx.Response) -> ChannelEntry | None:
-        """Check and cache the channel a bootstrap response's snapshot names."""
+    async def _store_snapshot_header(
+        self, response: httpx.Response, challenge: Challenge, chain_id: int
+    ) -> ChannelEntry | None:
+        """Check and cache the channel a bootstrap response's snapshot names.
+
+        The snapshot must pay the proven challenge's recipient in its currency on its chain,
+        and never replaces a channel the store already holds for that payee and token.
+        """
         header = response.headers.get(PAYMENT_SESSION_SNAPSHOT_HEADER)
         if not header:
             return None
         snapshot = deserialize_snapshot(header)
+        recipient = challenge.request.get("recipient")
+        currency = challenge.request.get("currency")
+        if (
+            not isinstance(recipient, str)
+            or not isinstance(currency, str)
+            or snapshot.descriptor.payee.lower() != recipient.lower()
+            or snapshot.descriptor.token.lower() != currency.lower()
+            or snapshot.chain_id != chain_id
+        ):
+            raise ValueError("bootstrap snapshot does not match the proven challenge")
         assert_allowed_chain_id(self._allowed_chain_ids, snapshot.chain_id)
         rpc_url, chain_id = await self._method._resolve_rpc(  # pyright: ignore[reportPrivateUsage]
             snapshot.chain_id
@@ -357,6 +373,9 @@ class SessionManager:
             self._account, snapshot, rpc_url=rpc_url, client=self._method.http_client
         )
         assert_voucher_within_local_limit(entry.cumulative_amount, self._max_voucher_cumulative)
+        if await store_get(self._store, entry_key(entry)) is not None:
+            # The store already holds this payee's channel: keep it rather than the server's.
+            return None
         await persist_channel(self._store, entry)
         self._channel = entry
         self._spent = spent
@@ -382,7 +401,8 @@ class SessionManager:
                 self._client.build_request("HEAD", url, headers=head, **probe)
             )
             if response.status_code != 402:
-                return await self._store_snapshot_header(response)
+                # Only a snapshot answering a proof the origin asked for is trusted.
+                return None
             challenge = _zero_amount_charge(response)
             if challenge is None or not self._owns_realm(url, challenge.realm):
                 return None
@@ -404,7 +424,7 @@ class SessionManager:
                 self._client.build_request("HEAD", url, headers=head, **probe)
             )
             if response.is_success:
-                return await self._store_snapshot_header(response)
+                return await self._store_snapshot_header(response, challenge, chain_id)
             return None
         except Exception:
             return None
@@ -473,7 +493,7 @@ class SessionManager:
             headers = httpx.Headers(kwargs.pop("headers", None))
             self._last_url = httpx.URL(url)
             self._last_authorization = headers.get(AUTHORIZATION_HEADER)
-            await self._bootstrap_session(
+            recovered = await self._bootstrap_session(
                 self._last_url,
                 headers,
                 # Like mppx, the probe carries the request's options except its body and method.
@@ -483,6 +503,9 @@ class SessionManager:
                     if key not in ("content", "data", "files", "json")
                 },
             )
+            if recovered is not None:
+                # The recovered channel is this request's baseline to roll back to.
+                self._use = _FetchUse(previous=recovered.copy(), previous_spent=self._spent)
             if self._channel is not None and self._channel.opened:
                 headers.setdefault(PAYMENT_SESSION_HEADER, self._channel.channel_id)
             try:

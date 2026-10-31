@@ -22,10 +22,19 @@ from mpp.methods.tempo.session._protocol import OpenPayload, TopUpPayload
 from mpp.store import CompareAndSetStore
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from mpp.methods.tempo.session._protocol import SessionCredentialPayload
     from mpp.store import Store
 
-__all__ = ["DEFAULT_PER_DAY", "SponsorshipLimit", "limit_fee_payer", "reserve", "verified_payer"]
+__all__ = [
+    "DEFAULT_PER_DAY",
+    "SponsorshipLimit",
+    "limit_fee_payer",
+    "release",
+    "reserve",
+    "verified_payer",
+]
 
 DEFAULT_PER_DAY = 5
 """Sponsored opens, and separately sponsored top-ups, each verified payer may make per UTC day.
@@ -235,17 +244,44 @@ def _lower(address: str | None) -> str | None:
 
 
 def _read_usage(raw: Any, day: str) -> dict[str, Any]:
+    """The stored usage for the day, or for a later day already recorded (so a reservation
+    that started before midnight counts against, not over, the new day's record)."""
     with contextlib.suppress(ValueError, TypeError):
         value: Any = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         if isinstance(value, dict):
             usage = cast(dict[str, Any], value)
-            if usage.get("day") == day:
+            stored = usage.get("day")
+            if isinstance(stored, str) and stored >= day:
                 return {
-                    "day": day,
+                    "day": stored,
                     "open": int(usage.get("open", 0)),
                     "topUp": int(usage.get("topUp", 0)),
                 }
     return {"day": day, "open": 0, "topUp": 0}
+
+
+async def _update_usage(store: Store, key: str, day: str, change: Any) -> Any:
+    """Apply change(usage) -> (usage or None, result) with compare-and-set until it sticks."""
+    cas = cast(CompareAndSetStore, store)
+    while True:
+        raw = await cas.get(key)
+        usage, result = change(_read_usage(raw, day))
+        if usage is None:
+            return result
+        value = json.dumps(usage, separators=(",", ":"))
+        if await cas.compare_and_set(key, raw, value) or (
+            # Stores returning bytes may compare either the bytes or the text they were given.
+            isinstance(raw, bytes) and await cas.compare_and_set(key, raw.decode(), value)
+        ):
+            return result
+
+
+def _usage_key(chain_id: int, payer: str) -> str:
+    return f"{_KEY_PREFIX}{chain_id}:{payer.lower()}"
+
+
+def _day(now: datetime | None) -> str:
+    return (now or datetime.now(UTC)).astimezone(UTC).date().isoformat()
 
 
 async def reserve(
@@ -257,25 +293,35 @@ async def reserve(
     per_day: int = DEFAULT_PER_DAY,
     now: datetime | None = None,
 ) -> bool:
-    """Record one sponsored ``action`` for ``payer`` on the current UTC day.
+    """Record one sponsored action for the payer on the current UTC day.
 
-    Returns False, recording nothing, once the payer has used ``per_day`` of them.
+    Returns False, recording nothing, once the payer has used per_day of them.
     """
-    cas = cast(CompareAndSetStore, store)
-    day = (now or datetime.now(UTC)).astimezone(UTC).date().isoformat()
-    key = f"{_KEY_PREFIX}{chain_id}:{payer.lower()}"
-    while True:
-        raw = await cas.get(key)
-        usage = _read_usage(raw, day)
+
+    def take(usage: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
         if usage[action] >= per_day:
-            return False
-        usage[action] += 1
-        value = json.dumps(usage, separators=(",", ":"))
-        if await cas.compare_and_set(key, raw, value) or (
-            # Stores returning bytes may compare either the bytes or the text they were given.
-            isinstance(raw, bytes) and await cas.compare_and_set(key, raw.decode(), value)
-        ):
-            return True
+            return None, False
+        return {**usage, action: usage[action] + 1}, True
+
+    return await _update_usage(store, _usage_key(chain_id, payer), _day(now), take)
+
+
+async def release(
+    store: Store,
+    *,
+    action: Literal["open", "topUp"],
+    chain_id: int,
+    payer: str,
+    now: datetime | None = None,
+) -> None:
+    """Give back one action that reserve recorded, when its sponsored broadcast failed."""
+
+    def give_back(usage: dict[str, Any]) -> tuple[dict[str, Any] | None, None]:
+        if usage[action] <= 0:
+            return None, None
+        return {**usage, action: usage[action] - 1}, None
+
+    await _update_usage(store, _usage_key(chain_id, payer), _day(now), give_back)
 
 
 async def limit_fee_payer(
@@ -284,25 +330,35 @@ async def limit_fee_payer(
     fee_payer: _FeePayer | None,
     limit: SponsorshipLimit | None,
     payload: SessionCredentialPayload,
-) -> _FeePayer | None:
-    """The fee payer when the credential's open or top-up may be sponsored, else None.
+) -> tuple[_FeePayer | None, Callable[[], Awaitable[None]] | None]:
+    """The fee payer when the credential's open or top-up may be sponsored, else None, and a
+    callback that gives the reserved slot back when the sponsored broadcast fails.
 
     None once its verified payer used the day's sponsored transactions, or when no signature
     proves a payer: the transaction is then broadcast as the payer signed it, paying its own
     fees.
     """
     if fee_payer is None or limit is None:
-        return fee_payer
+        return fee_payer, None
     if not isinstance(payload, (OpenPayload, TopUpPayload)):
-        return fee_payer
+        return fee_payer, None
     payer = verified_payer(payload.transaction)
     if payer is None:
-        return None
+        return None, None
+    action: Literal["open", "topUp"] = "open" if isinstance(payload, OpenPayload) else "topUp"
+    now = datetime.now(UTC)
     allowed = await reserve(
         limit.store,
-        action="open" if isinstance(payload, OpenPayload) else "topUp",
+        action=action,
         chain_id=chain_id,
         payer=payer,
         per_day=limit.per_day,
+        now=now,
     )
-    return fee_payer if allowed else None
+    if not allowed:
+        return None, None
+
+    async def undo() -> None:
+        await release(limit.store, action=action, chain_id=chain_id, payer=payer, now=now)
+
+    return fee_payer, undo

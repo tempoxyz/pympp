@@ -103,7 +103,12 @@ async def _claim_proof(store: Store, challenge_id: str, expires: str) -> bool:
 
 
 async def _verify_proof_credential(
-    credential: Credential, expected: Mapping[str, Any], *, secret_key: str, store: Store
+    credential: Credential,
+    expected: Mapping[str, Any],
+    *,
+    realm: str,
+    secret_key: str,
+    store: Store,
 ) -> None:
     """Authenticate a zero-amount charge proof answering this route's bootstrap challenge."""
     from mpp.server.verify import (
@@ -112,6 +117,9 @@ async def _verify_proof_credential(
 
     echo = credential.challenge
     actual, _ = _authenticate_echo(credential, secret_key=secret_key)
+    # Realms sharing a secret must not accept each other's proofs.
+    if echo.realm != realm:
+        raise InvalidChallengeError(echo.id, "bootstrap realm mismatch")
     _assert_not_expired(echo)
     _assert_matches(expected, echo, actual)
     payload = credential.payload
@@ -184,7 +192,11 @@ async def handle_bootstrap_preflight(
         if not is_address(recipient):
             raise VerificationFailedError("missing bootstrap recipient")
         await _verify_proof_credential(
-            credential, request, secret_key=context.secret_key, store=proof_store
+            credential,
+            request,
+            realm=context.realm,
+            secret_key=context.secret_key,
+            store=proof_store,
         )
     except PaymentError as error:
         return _respond_challenge(challenge, error)

@@ -809,7 +809,9 @@ class FakeServer:
         prove_status: int = 204,
         first_status: int = 402,
         header: str | None = None,
+        recipient: str = PAYEE.address,
     ) -> None:
+        self.recipient = recipient
         self.realm = realm
         self.amount = amount
         self.details = {"chainId": CHAIN_ID} if details is None else details
@@ -831,7 +833,12 @@ class FakeServer:
             issued = _create_challenge(
                 "tempo",
                 "charge",
-                {"amount": self.amount, "currency": CURRENCY, "methodDetails": self.details},
+                {
+                    "amount": self.amount,
+                    "currency": CURRENCY,
+                    "recipient": self.recipient,
+                    "methodDetails": self.details,
+                },
                 self.realm,
                 SECRET,
             )
@@ -910,8 +917,10 @@ class TestManagerBootstrap:
     @pytest.mark.parametrize(
         ("server_options", "options", "recovered", "probes"),
         [
-            # A snapshot on the first response is used directly.
-            ({"first_status": 204}, {}, True, [False]),
+            # A snapshot on an unproven first response is not trusted.
+            ({"first_status": 204}, {}, False, [False]),
+            # Nor one that pays another recipient than the challenge's.
+            ({"recipient": PAYER.address}, {}, False, [False, True]),
             # A realm the origin does not own gets no proof, unless it is trusted.
             ({"realm": "other.test"}, {}, False, [False]),
             (
@@ -946,6 +955,51 @@ class TestManagerBootstrap:
             assert (await client.fetch(URL)).status_code == 200
             assert client.channel_id == (CHANNEL_ID if recovered else None)
             assert heads(server) == probes
+
+    async def test_a_failed_first_request_rolls_back_to_the_recovered_channel(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        server = FakeServer()
+        async with manager(server, monkeypatch) as client:
+
+            async def failing(method: str, url: Any, **kwargs: Any) -> httpx.Response:
+                # As if a voucher past the recovered amount was signed, then refused.
+                assert client._channel is not None  # pyright: ignore[reportPrivateUsage]
+                client._channel = client._channel.copy(cumulative_amount=400)  # pyright: ignore[reportPrivateUsage]
+                return httpx.Response(500, request=httpx.Request(method, url))
+
+            monkeypatch.setattr(client._client, "request", failing)  # pyright: ignore[reportPrivateUsage]
+            response = await client.fetch(URL)
+            assert response.status_code == 500
+            assert client.channel_id == CHANNEL_ID and client.cumulative == 300
+
+    async def test_a_stored_channel_is_not_replaced_by_a_bootstrap_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mpp.methods.tempo.session.client._store import (
+            create_channel_store,
+            entry_key,
+            store_get,
+        )
+
+        store = create_channel_store()
+        async with manager(FakeServer(), monkeypatch, channel_store=store) as client:
+            await client.fetch(URL)
+            channel = client._channel  # pyright: ignore[reportPrivateUsage]
+            assert channel is not None
+            recovered = await store_get(store, entry_key(channel))
+        assert recovered is not None
+        # A new manager over the same store keeps the stored record, even when the server
+        # answers with a snapshot naming a different channel.
+        descriptor = replace(DESCRIPTOR, salt="0x" + "02" * 32)
+        other = compute_channel_id(descriptor, chain_id=CHAIN_ID)
+        replacement = snapshot(
+            descriptor=descriptor, channel_id=other, highest_voucher=voucher(other)
+        )
+        server = FakeServer(header=serialize_snapshot(replacement))
+        async with manager(server, monkeypatch, channel_store=store) as client:
+            await client.fetch(URL)
+            assert await store_get(store, entry_key(recovered)) == recovered
 
     async def test_a_snapshot_on_another_rpc_chain_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch

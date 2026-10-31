@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 import pytest
 
-from mpp.errors import VerificationFailedError
+from mpp.errors import PaymentError, VerificationFailedError
 from mpp.methods.tempo.session.server import _settlement as settlement
 from mpp.methods.tempo.session.server import _verification as verification
 from mpp.methods.tempo.session.server._request_state import RequestProbe
@@ -126,16 +126,21 @@ class TestVoucherStateMaxAge:
         with pytest.raises(ChannelClosedError, match="pending close"):
             await life.accept(life.voucher_payload(300), voucher_state_max_age=MAX_AGE)
 
-    async def test_background_reads_ignore_failures_and_unfunded_channels(
+    async def test_a_background_read_of_an_unfunded_channel_stops_trusting_it(
         self, life: Lifecycle
     ) -> None:
         await life.open(100)
         await verified_now(life)
-        stored = await life.channel()
         life.rpc.states[life.channel_id] = (0, 0, 0)
         await life.accept(life.voucher_payload(200), voucher_state_max_age=MAX_AGE)
         await settle_background()
-        assert (await life.channel()).on_chain_verified_at == stored.on_chain_verified_at
+        assert (await life.channel()).on_chain_verified_at is None
+        assert life.channel_id not in life.last_verified
+        with pytest.raises(PaymentError):
+            await life.accept(life.voucher_payload(300), voucher_state_max_age=MAX_AGE)
+
+    async def test_background_reads_ignore_failures(self, life: Lifecycle) -> None:
+        await life.open(100)
 
         def down(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("node down")

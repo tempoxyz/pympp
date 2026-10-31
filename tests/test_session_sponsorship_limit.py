@@ -278,6 +278,20 @@ class TestReserve:
         assert [await reserve() for _ in range(6)].count(True) == 5
         assert await reserve(datetime(2026, 10, 21, tzinfo=UTC)) is True
 
+    async def test_a_late_reservation_does_not_reset_the_next_days_usage(self) -> None:
+        store = MemoryStore()
+        tomorrow = datetime(2026, 10, 21, tzinfo=UTC)
+
+        async def reserve(now: datetime) -> bool:
+            return await limits.reserve(
+                store, action="open", chain_id=4217, payer=VICTIM, per_day=1, now=now
+            )
+
+        assert await reserve(tomorrow)
+        # A reservation stamped before midnight counts against the newer record.
+        assert not await reserve(NOW)
+        assert not await reserve(tomorrow)
+
     async def test_concurrent_reservations_respect_the_limit(self) -> None:
         import asyncio
 
@@ -344,13 +358,28 @@ class TestLimitFeePayer:
         payload = open_payload("0x" + unsigned().sign(PAYER_KEY).encode().hex())
 
         async def limit_fee_payer() -> Any:
-            return await limits.limit_fee_payer(
+            sponsor, _ = await limits.limit_fee_payer(
                 chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
             )
+            return sponsor
 
         assert await limit_fee_payer() is SPONSOR
         assert await limit_fee_payer() is SPONSOR
         assert await limit_fee_payer() is None
+
+    async def test_a_released_slot_can_be_used_again(self) -> None:
+        limit = SponsorshipLimit(store=MemoryStore(), per_day=1)
+        payload = open_payload("0x" + unsigned().sign(PAYER_KEY).encode().hex())
+        sponsor, undo = await limits.limit_fee_payer(
+            chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
+        )
+        assert sponsor is SPONSOR and undo is not None
+        await undo()
+        await undo()  # Never goes below zero.
+        again, _ = await limits.limit_fee_payer(
+            chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
+        )
+        assert again is SPONSOR
 
     async def test_does_not_spend_the_quota_of_the_descriptor_payer(self) -> None:
         store = MemoryStore()
@@ -363,15 +392,12 @@ class TestLimitFeePayer:
         assert await limits.reserve(store, action="open", chain_id=4217, payer=VICTIM, per_day=1)
 
     async def test_does_not_sponsor_a_transaction_whose_signatures_prove_no_payer(self) -> None:
-        assert (
-            await limits.limit_fee_payer(
-                chain_id=4217,
-                fee_payer=SPONSOR,
-                limit=SponsorshipLimit(store=MemoryStore()),
-                payload=open_payload("0x76deadbeef"),
-            )
-            is None
-        )
+        assert await limits.limit_fee_payer(
+            chain_id=4217,
+            fee_payer=SPONSOR,
+            limit=SponsorshipLimit(store=MemoryStore()),
+            payload=open_payload("0x76deadbeef"),
+        ) == (None, None)
 
     async def test_leaves_vouchers_unsponsored_requests_and_unlimited_servers_alone(
         self,
@@ -386,25 +412,16 @@ class TestLimitFeePayer:
                 "signature": "0x1234",
             }
         )
-        assert (
-            await limits.limit_fee_payer(
-                chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=voucher
-            )
-            is SPONSOR
-        )
+        assert await limits.limit_fee_payer(
+            chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=voucher
+        ) == (SPONSOR, None)
         payload = open_payload("0x" + unsigned().sign(PAYER_KEY).encode().hex())
-        assert (
-            await limits.limit_fee_payer(
-                chain_id=4217, fee_payer=None, limit=limit, payload=payload
-            )
-            is None
-        )
-        assert (
-            await limits.limit_fee_payer(
-                chain_id=4217, fee_payer=SPONSOR, limit=None, payload=payload
-            )
-            is SPONSOR
-        )
+        assert await limits.limit_fee_payer(
+            chain_id=4217, fee_payer=None, limit=limit, payload=payload
+        ) == (None, None)
+        assert await limits.limit_fee_payer(
+            chain_id=4217, fee_payer=SPONSOR, limit=None, payload=payload
+        ) == (SPONSOR, None)
 
     def test_validates_its_parameters(self) -> None:
         for per_day in (-1, 1.5, True):
@@ -442,3 +459,24 @@ class TestThroughTheSessionMethod:
             # Over the limit the sponsor does not co-sign, so the sponsored open cannot land.
             assert isinstance(result, PaymentRequired)
             assert not life.rpc.sent
+
+    async def test_a_failed_sponsored_open_gives_its_slot_back(self) -> None:
+        life = await Lifecycle().build(fee_payer=True)
+        usage = MemoryStore()
+        server = make_server(
+            life,
+            chain_id=CHAIN_ID,
+            fee_payer=SPONSOR,
+            sponsorship_limit=SponsorshipLimit(store=usage, per_day=1),
+        )
+        handler = server.session(amount="0.0001", unit_type="request")
+        challenge = await challenge_for(handler, Request("GET", URL))
+        # No Opened log: the open does not land and is rejected.
+        result = await handler(
+            Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
+        )
+        assert isinstance(result, PaymentRequired)
+        payer = limits.verified_payer(life.transaction)
+        assert payer is not None
+        record = await read(usage, f"mppx:session:sponsorship:{CHAIN_ID}:{payer}")
+        assert record is None or json.loads(record)["open"] == 0

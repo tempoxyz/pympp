@@ -1309,6 +1309,16 @@ def _record_on_chain_read_in_background(
             await _record_pending_close(context, channel_id, state)
             return
         if state.deposit == 0:
+            # A closed or missing channel: stop trusting the stored state, so the next voucher
+            # takes the foreground read and is rejected.
+            context.last_on_chain_verified.pop(channel_id, None)
+
+            def forget(current: ChannelState | None) -> ChannelState | None:
+                if current is None or current.on_chain_verified_at is None:
+                    return current
+                return replace(current, on_chain_verified_at=None)
+
+            await context.store.update_channel(channel_id, forget)
             return
 
         def update(current: ChannelState | None) -> ChannelState | None:

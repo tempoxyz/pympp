@@ -32,9 +32,14 @@ TOKEN = "0x20c0000000000000000000000000000000000001"
 CHAIN_ID = 4217
 ACCOUNT = TempoAccount.from_key("0x" + "ab" * 32)
 DEPOSIT = 1_000
+GAS_PRICE = 2 * 10**7
+FEE = chain.DEFAULT_GAS_LIMIT * GAS_PRICE // 10**12
+"""What an unsponsored open or top-up reserves for gas in the channel token (20 units)."""
 
 
-def make_challenge(*, suggested_deposit: str = str(DEPOSIT)) -> Challenge:
+def make_challenge(
+    *, suggested_deposit: str = str(DEPOSIT), fee_payer: bool | None = None
+) -> Challenge:
     return Challenge(
         id=os.urandom(8).hex(),
         method="tempo",
@@ -49,6 +54,7 @@ def make_challenge(*, suggested_deposit: str = str(DEPOSIT)) -> Challenge:
                 "sessionProtocol": "v2",
                 "chainId": CHAIN_ID,
                 "escrowContract": ESCROW_ADDRESS,
+                **({} if fee_payer is None else {"feePayer": fee_payer}),
             },
         },
         realm="api.test",
@@ -81,6 +87,11 @@ class FakeChain:
         monkeypatch.setattr(chain, "build_top_up_transaction", self.build_top_up_transaction)
         monkeypatch.setattr(tempo_client, "_tip20_balance", self.balance)
         monkeypatch.setattr(tempo_client, "_rpc_call", self.rpc_call)
+        monkeypatch.setattr(chain, "_rpc", self.chain_rpc)
+
+    async def chain_rpc(self, _url: str, name: str, params: list[Any], client: Any) -> str:
+        assert name == "eth_gasPrice"
+        return hex(GAS_PRICE)
 
     async def build_open_transaction(self, account: TempoAccount, **kwargs: Any) -> Any:
         self.opens.append(kwargs)
@@ -125,9 +136,11 @@ def word(data: str, index: int) -> int:
     return int(data[10 + 64 * index : 10 + 64 * (index + 1)], 16)
 
 
-async def pay(method: SessionMethod, context: SessionContext | None = None) -> dict[str, Any]:
+async def pay(
+    method: SessionMethod, context: SessionContext | None = None, *, fee_payer: bool | None = None
+) -> dict[str, Any]:
     authorization = await method.create_credential(
-        CredentialParams(challenge=make_challenge(), context=context)
+        CredentialParams(challenge=make_challenge(fee_payer=fee_payer), context=context)
     )
     return Credential.from_authorization(authorization).payload
 
@@ -166,7 +179,7 @@ async def test_open_buys_the_deposit_shortfall(fake: FakeChain) -> None:
     assert payload["action"] == "open"
     (open_call,) = fake.opens
     assert open_call["deposit"] == DEPOSIT
-    assert_swap(open_call["prefix_calls"], PATH_USD, DEPOSIT - 200, 808)
+    assert_swap(open_call["prefix_calls"], PATH_USD, DEPOSIT - 200 + FEE, 808)
     # Balance and quote reads go through the method's HTTP client.
     assert fake.rpc_clients and all(c is http for c in fake.rpc_clients)
     await http.aclose()
@@ -179,16 +192,31 @@ async def test_open_without_auto_swap_adds_no_calls(fake: FakeChain) -> None:
 
 
 async def test_funded_payer_needs_no_swap(fake: FakeChain) -> None:
-    fake.balances = {TOKEN: DEPOSIT}
+    fake.balances = {TOKEN: DEPOSIT + FEE}
     await pay(SessionMethod(account=ACCOUNT, auto_swap=True))
     assert fake.opens[0]["prefix_calls"] == []
+
+
+async def test_sponsored_opens_buy_only_the_deposit(fake: FakeChain) -> None:
+    fake.balances = {TOKEN: DEPOSIT, PATH_USD: 10_000}
+    fake.quotes = {PATH_USD.lower(): 1_000}
+    await pay(SessionMethod(account=ACCOUNT, auto_swap=True), fee_payer=True)
+    assert fake.opens[0]["prefix_calls"] == []
+
+
+async def test_unsponsored_opens_also_buy_their_fee(fake: FakeChain) -> None:
+    # Holding exactly the deposit leaves nothing to pay gas in the channel token.
+    fake.balances = {TOKEN: DEPOSIT, PATH_USD: 10_000}
+    fake.quotes = {PATH_USD.lower(): FEE}
+    await pay(SessionMethod(account=ACCOUNT, auto_swap=True))
+    assert_swap(fake.opens[0]["prefix_calls"], PATH_USD, FEE, FEE + FEE // 100)
 
 
 async def test_options_choose_currencies_and_slippage(fake: FakeChain) -> None:
     fake.balances = {USDC: 10_000, PATH_USD: 10_000}
     fake.quotes = {USDC.lower(): 1_000, PATH_USD.lower(): 1_000}
     await pay(SessionMethod(account=ACCOUNT, auto_swap=AutoSwap(token_in=[USDC], slippage=5)))
-    assert_swap(fake.opens[0]["prefix_calls"], USDC, DEPOSIT, 1_050)
+    assert_swap(fake.opens[0]["prefix_calls"], USDC, DEPOSIT + FEE, 1_050)
 
 
 async def test_context_overrides_the_method_option(fake: FakeChain) -> None:
@@ -197,7 +225,7 @@ async def test_context_overrides_the_method_option(fake: FakeChain) -> None:
     await pay(SessionMethod(account=ACCOUNT, auto_swap=True), SessionContext(auto_swap=False))
     await pay(SessionMethod(account=ACCOUNT), SessionContext(auto_swap=True))
     assert fake.opens[0]["prefix_calls"] == []
-    assert_swap(fake.opens[1]["prefix_calls"], PATH_USD, DEPOSIT, 1_010)
+    assert_swap(fake.opens[1]["prefix_calls"], PATH_USD, DEPOSIT + FEE, 1_010)
 
 
 async def test_no_route_fails_before_signing(fake: FakeChain) -> None:
@@ -217,7 +245,7 @@ async def test_top_up_buys_the_additional_deposit(fake: FakeChain) -> None:
     assert payload["action"] == "topUp"
     (top_up,) = fake.top_ups
     assert top_up["additional"] == 500
-    assert_swap(top_up["prefix_calls"], PATH_USD, 500, 505)
+    assert_swap(top_up["prefix_calls"], PATH_USD, 500 + FEE, 505)
 
 
 async def test_signed_top_up_transaction_is_sent_as_is(fake: FakeChain) -> None:

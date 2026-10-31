@@ -572,9 +572,34 @@ async def resolve_auto_swap_calls(
         amount_out=amount_out,
         token_out=resolved.token,
         rpc_url=resolved.rpc_url,
+        fee_headroom=await _unsponsored_fee_headroom(resolved, client),
         client=client,
     )
     return calls
+
+
+async def _unsponsored_fee_headroom(
+    resolved: ChallengeContext, client: httpx.AsyncClient | None
+) -> int:
+    """The fee, in channel token units, a transaction pays in the token it swaps for.
+
+    Unsponsored opens and top-ups pay their fee in the channel token unless the challenge
+    names another fee token, so a swap that bought only the deposit would leave none for gas.
+    The bound uses the gas limit the transaction falls back to when it cannot be estimated.
+    """
+    from mpp.methods.tempo.client import ATTODOLLARS_PER_MICRODOLLAR
+    from mpp.methods.tempo.session import _chain as chain
+
+    if resolved.fee_payer:
+        return 0
+    if resolved.fee_token is not None and resolved.fee_token.lower() != resolved.token.lower():
+        return 0
+    gas_price = int(
+        await chain._rpc(resolved.rpc_url, "eth_gasPrice", [], client),  # pyright: ignore[reportPrivateUsage]
+        16,
+    )
+    cost = chain.DEFAULT_GAS_LIMIT * gas_price
+    return max(1, -(-cost // ATTODOLLARS_PER_MICRODOLLAR))
 
 
 async def execute_credential_plan(

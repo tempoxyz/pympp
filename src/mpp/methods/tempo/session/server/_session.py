@@ -14,6 +14,7 @@ Not ported: SSE/WebSocket metering.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -381,7 +382,12 @@ def session(
                 escrow_contract=str(resolved["escrow_contract"]),
                 recipient=str(resolved.get("recipient")),
             ),
-            minimum_voucher_advance=parse_units(min_voucher_delta or "0", decimals),
+            # The delta verification enforces: the route's, in its decimals, else the method's.
+            minimum_voucher_advance=(
+                parse_units(str(route_delta), route_decimals)
+                if (route_delta := resolved.get("min_voucher_delta")) is not None
+                else parse_units(min_voucher_delta or "0", decimals)
+            ),
             require_voucher_advance=content,
         )
         return snapshot.to_wire() if snapshot is not None else None
@@ -512,18 +518,26 @@ def session(
         # Settlement keeps the fee payer the challenge allowed; only the open or top-up itself
         # goes unsponsored over the limit.
         fee_payer = verify_context.fee_payer
+        sponsor, release_sponsorship = await limit_fee_payer(
+            chain_id=verify_context.chain_id,
+            fee_payer=fee_payer,
+            limit=sponsorship_limit,
+            payload=payload,
+        )
         verify_context = replace(
             verify_context,
             charge_amount=charge_amount,
             on_charged=accepted_charges.append,
-            fee_payer=await limit_fee_payer(
-                chain_id=verify_context.chain_id,
-                fee_payer=fee_payer,
-                limit=sponsorship_limit,
-                payload=payload,
-            ),
+            fee_payer=sponsor,
         )
-        receipt = await broadcast_credential_payload(verify_context)
+        try:
+            receipt = await broadcast_credential_payload(verify_context)
+        except BaseException:
+            # Only sponsored transactions that land count against the payer's daily limit.
+            if release_sponsorship is not None:
+                with contextlib.suppress(Exception):
+                    await release_sponsorship()
+            raise
         if accepted_charges:
             tx_hash = await settle_charged(accepted_charges[-1], fee_payer)
             return SessionPaymentReceipt.from_session(
