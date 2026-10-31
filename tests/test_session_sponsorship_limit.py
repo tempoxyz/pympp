@@ -292,6 +292,15 @@ class TestReserve:
         assert not await reserve(NOW)
         assert not await reserve(tomorrow)
 
+    async def test_releasing_an_old_days_slot_leaves_the_new_day_alone(self) -> None:
+        store = MemoryStore()
+        tomorrow = datetime(2026, 10, 21, tzinfo=UTC)
+        common: dict[str, Any] = {"action": "topUp", "chain_id": 4217, "payer": VICTIM}
+        assert await limits.reserve(store, per_day=1, now=NOW, **common)
+        assert await limits.reserve(store, per_day=1, now=tomorrow, **common)
+        await limits.release(store, now=NOW, **common)
+        assert not await limits.reserve(store, per_day=1, now=tomorrow, **common)
+
     async def test_concurrent_reservations_respect_the_limit(self) -> None:
         import asyncio
 

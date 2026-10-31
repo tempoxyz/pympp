@@ -385,7 +385,12 @@ def session(
             # The delta verification enforces: the route's, in its decimals, else the method's.
             minimum_voucher_advance=(
                 parse_units(str(route_delta), route_decimals)
-                if (route_delta := resolved.get("min_voucher_delta")) is not None
+                if (
+                    route_delta := resolved.get(
+                        "min_voucher_delta", resolved.get("minVoucherDelta")
+                    )
+                )
+                is not None
                 else parse_units(min_voucher_delta or "0", decimals)
             ),
             require_voucher_advance=content,

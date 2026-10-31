@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mpp import Challenge
 from mpp.methods.tempo.session.server._store import from_store
 from mpp.server import Mpp, PaymentRequired, Request
@@ -32,7 +34,8 @@ async def test_bootstrap_rejects_proofs_issued_for_another_realm() -> None:
     assert boot.sources == []
 
 
-async def test_snapshots_use_the_routes_minimum_voucher_delta() -> None:
+@pytest.mark.parametrize("key", ["min_voucher_delta", "minVoucherDelta"])
+async def test_snapshots_use_the_routes_minimum_voucher_delta(key: str) -> None:
     raw = MemoryStore()
     await from_store(raw).update_channel(CHANNEL_ID, lambda _: stored())
     server = Mpp(
@@ -40,7 +43,7 @@ async def test_snapshots_use_the_routes_minimum_voucher_delta() -> None:
         realm=REALM,
         secret_key=SECRET,
     )
-    handler = server.session(amount="0.0001", unit_type="request", min_voucher_delta="0.00005")
+    handler = server.session(amount="0.0001", unit_type="request", **{key: "0.00005"})
     result = await handler(Request("GET", URL))
     assert isinstance(result, PaymentRequired)
     issued = Challenge.from_www_authenticate(result.challenge.headers["www-authenticate"])

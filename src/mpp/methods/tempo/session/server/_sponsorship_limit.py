@@ -316,12 +316,15 @@ async def release(
 ) -> None:
     """Give back one action that reserve recorded, when its sponsored broadcast failed."""
 
+    day = _day(now)
+
     def give_back(usage: dict[str, Any]) -> tuple[dict[str, Any] | None, None]:
-        if usage[action] <= 0:
+        # Only the day the slot was reserved on: a newer day's record holds other requests.
+        if usage["day"] != day or usage[action] <= 0:
             return None, None
         return {**usage, action: usage[action] - 1}, None
 
-    await _update_usage(store, _usage_key(chain_id, payer), _day(now), give_back)
+    await _update_usage(store, _usage_key(chain_id, payer), day, give_back)
 
 
 async def limit_fee_payer(
