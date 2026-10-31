@@ -9,18 +9,25 @@ topping up when needed), :meth:`~SessionManager.top_up` adds deposit and
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from mpp import AUTHORIZATION_HEADER, Challenge
+from mpp import AUTHORIZATION_HEADER, Challenge, Credential
+from mpp._parsing import ParseError
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.events import CHALLENGE_RECEIVED
 from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._proof import proof_source, sign_proof
 from mpp.methods.tempo.session._protocol import SessionReceipt, parse_uint96_amount
+from mpp.methods.tempo.session._snapshot import (
+    PAYMENT_SESSION_SNAPSHOT_HEADER,
+    deserialize_snapshot,
+    hydrate_session_snapshot,
+)
 from mpp.methods.tempo.session.client._session import (
     SessionMethod,
     post_management_credential,
@@ -28,6 +35,7 @@ from mpp.methods.tempo.session.client._session import (
 )
 from mpp.methods.tempo.session.client._state import (
     SessionContext,
+    assert_allowed_chain_id,
     assert_voucher_within_local_limit,
     is_tip1034_session_challenge,
     read_session_snapshot,
@@ -46,8 +54,30 @@ from mpp.methods.tempo.session.client._store import (
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.client import AutoSwap
 
 PAYMENT_SESSION_HEADER = "Payment-Session"
+
+_PROBE_OPTIONS = ("cookies", "extensions", "params", "timeout")
+"""Request options a bootstrap HEAD probe keeps from the paid request (mppx forwards its init)."""
+
+
+def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
+    """A bootstrap response's zero-amount ``tempo/charge`` challenge (mppx's first charge one)."""
+    from mpp.client.transport import (
+        _is_zero_tempo_charge,  # pyright: ignore[reportPrivateUsage]
+        _payment_challenges,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    for header in response.headers.get_list("www-authenticate"):
+        for value in _payment_challenges(header):
+            try:
+                challenge = Challenge.from_www_authenticate(value)
+            except ParseError:
+                continue
+            if challenge.method == "tempo" and challenge.intent == "charge":
+                return challenge if _is_zero_tempo_charge(challenge) else None
+    return None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -141,10 +171,13 @@ class SessionManager:
         escrow: str | None = None,
         allow_custom_escrow: bool = False,
         allowed_chain_ids: Sequence[int] | None = None,
+        auto_swap: bool | AutoSwap = False,
         channel_store: ChannelStore | None = None,
         rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        bootstrap: bool = False,
+        trusted_tempo_realms: Mapping[str, str] | None = None,
     ) -> None:
         from mpp.client.transport import PaymentTransport
 
@@ -159,6 +192,7 @@ class SessionManager:
             escrow=escrow,
             allow_custom_escrow=allow_custom_escrow,
             allowed_chain_ids=allowed_chain_ids,
+            auto_swap=auto_swap,
             channel_store=self._store,
             on_channel_update=self._on_channel_update,
             rpc_url=rpc_url,
@@ -182,6 +216,19 @@ class SessionManager:
         self._last_authorization: str | None = None
         self._use: _FetchUse | None = None
         self._uncertain_funding: Exception | None = None
+        self._account = account
+        self._allowed_chain_ids = self._method.allowed_chain_ids
+        self._bootstrap = bootstrap
+        from mpp.client.transport import (
+            _origin,  # pyright: ignore[reportPrivateUsage]
+            _payment_origins,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        _payment_origins(list(trusted_tempo_realms or ()), parameter="trusted_tempo_realms")
+        self._trusted_tempo_realms = {
+            _origin(httpx.URL(origin)): realm
+            for origin, realm in (trusted_tempo_realms or {}).items()
+        }
 
     # ── state ──────────────────────────────────────────────────────
 
@@ -294,6 +341,82 @@ class SessionManager:
             cumulative=self.cumulative,
         )
 
+    async def _store_snapshot_header(self, response: httpx.Response) -> ChannelEntry | None:
+        """Check and cache the channel a bootstrap response's snapshot names."""
+        header = response.headers.get(PAYMENT_SESSION_SNAPSHOT_HEADER)
+        if not header:
+            return None
+        snapshot = deserialize_snapshot(header)
+        assert_allowed_chain_id(self._allowed_chain_ids, snapshot.chain_id)
+        rpc_url, chain_id = await self._method._resolve_rpc(  # pyright: ignore[reportPrivateUsage]
+            snapshot.chain_id
+        )
+        if chain_id != snapshot.chain_id:
+            raise ValueError(f"Chain ID mismatch: expected {snapshot.chain_id}, got {chain_id}.")
+        entry, spent = await hydrate_session_snapshot(
+            self._account, snapshot, rpc_url=rpc_url, client=self._method.http_client
+        )
+        assert_voucher_within_local_limit(entry.cumulative_amount, self._max_voucher_cumulative)
+        await persist_channel(self._store, entry)
+        self._channel = entry
+        self._spent = spent
+        return entry
+
+    async def _bootstrap_session(
+        self, url: httpx.URL, headers: httpx.Headers, options: Mapping[str, Any] | None = None
+    ) -> ChannelEntry | None:
+        """Recover a server-held channel with a same-route ``HEAD`` (mppx ``bootstrapSession``).
+
+        Sends the request's headers (such as application auth) without its body, answers the
+        zero-amount ``tempo/charge`` challenge with a proof when its realm belongs to the request
+        origin (or ``trusted_tempo_realms`` pins it), and caches the validated snapshot the
+        server returns. Any failure leaves the manager to open a channel as usual.
+        """
+        if not self._bootstrap or self.opened:
+            return None
+        head = httpx.Headers(headers)
+        head["Accept-Payment"] = "tempo/charge"
+        probe = {key: value for key, value in (options or {}).items() if key in _PROBE_OPTIONS}
+        try:
+            response = await self._send(
+                self._client.build_request("HEAD", url, headers=head, **probe)
+            )
+            if response.status_code != 402:
+                return await self._store_snapshot_header(response)
+            challenge = _zero_amount_charge(response)
+            if challenge is None or not self._owns_realm(url, challenge.realm):
+                return None
+            details = challenge.request.get("methodDetails")
+            chain_id = details.get("chainId") if is_dict(details) else None
+            if not isinstance(chain_id, int) or isinstance(chain_id, bool):
+                _, chain_id = await self._method._resolve_rpc(None)  # pyright: ignore[reportPrivateUsage]
+            assert_allowed_chain_id(self._allowed_chain_ids, chain_id)
+            signature = sign_proof(
+                self._account, chain_id=chain_id, challenge_id=challenge.id, realm=challenge.realm
+            )
+            credential = Credential(
+                challenge=challenge.to_echo(),
+                payload={"signature": signature, "type": "proof"},
+                source=proof_source(self._account.address, chain_id),
+            ).to_authorization()
+            head[challenge.credential_header] = credential
+            response = await self._send(
+                self._client.build_request("HEAD", url, headers=head, **probe)
+            )
+            if response.is_success:
+                return await self._store_snapshot_header(response)
+            return None
+        except Exception:
+            return None
+
+    def _owns_realm(self, url: httpx.URL, realm: str) -> bool:
+        """Whether the request origin may ask for a proof at ``realm`` (mppx ``ProofRealm``)."""
+        from mpp.client.transport import _origin  # pyright: ignore[reportPrivateUsage]
+
+        if realm.lower() in (url.host.lower(), url.raw_host.decode("ascii").lower()):
+            return True
+        return self._trusted_tempo_realms.get(_origin(url)) == realm
+
     async def _rollback(self) -> None:
         """Undo a failed request: drop channels it created, restore the voucher boundary."""
         use = self._use
@@ -350,6 +473,16 @@ class SessionManager:
             headers = httpx.Headers(kwargs.pop("headers", None))
             self._last_url = httpx.URL(url)
             self._last_authorization = headers.get(AUTHORIZATION_HEADER)
+            await self._bootstrap_session(
+                self._last_url,
+                headers,
+                # Like mppx, the probe carries the request's options except its body and method.
+                {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key not in ("content", "data", "files", "json")
+                },
+            )
             if self._channel is not None and self._channel.opened:
                 headers.setdefault(PAYMENT_SESSION_HEADER, self._channel.channel_id)
             try:
@@ -570,15 +703,25 @@ def session_manager(
     escrow: str | None = None,
     allow_custom_escrow: bool = False,
     allowed_chain_ids: Sequence[int] | None = None,
+    auto_swap: bool | AutoSwap = False,
     channel_store: ChannelStore | None = None,
     rpc_url: str | None = None,
     http_client: httpx.AsyncClient | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    bootstrap: bool = False,
+    trusted_tempo_realms: Mapping[str, str] | None = None,
 ) -> SessionManager:
     """Create a :class:`SessionManager` (mppx ``tempo.session.manager``).
 
     Options are those of :func:`~mpp.methods.tempo.session.client._session`, plus
-    ``transport``, the httpx transport requests go through (mppx ``fetch``).
+    ``transport``, the httpx transport requests go through (mppx ``fetch``), and:
+
+    - ``bootstrap``: before opening a channel, recover the server's snapshot of this payer's
+      channel with a same-route ``HEAD`` (answering its zero-amount proof challenge), so a
+      client without local channel state resumes the channel instead of opening another.
+    - ``trusted_tempo_realms``: server origins allowed to request bootstrap proofs for a realm
+      other than their hostname, mapped to that realm, such as
+      ``{"https://api.example.com": "MPP Payment"}``.
 
     Example:
         from mpp.methods.tempo import TempoAccount
@@ -597,8 +740,11 @@ def session_manager(
         escrow=escrow,
         allow_custom_escrow=allow_custom_escrow,
         allowed_chain_ids=allowed_chain_ids,
+        auto_swap=auto_swap,
         channel_store=channel_store,
         rpc_url=rpc_url,
         http_client=http_client,
         transport=transport,
+        bootstrap=bootstrap,
+        trusted_tempo_realms=trusted_tempo_realms,
     )

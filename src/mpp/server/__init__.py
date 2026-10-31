@@ -59,6 +59,7 @@ from mpp.server.http import (
     Response,
 )
 from mpp.server.method import (
+    PreflightContext,
     RequestContext,
     RespondContext,
     ServerMethod,
@@ -96,6 +97,7 @@ __all__ = [
     "PaymentResult",
     "PaymentVerified",
     "Request",
+    "PreflightContext",
     "RequestContext",
     "RespondContext",
     "Response",

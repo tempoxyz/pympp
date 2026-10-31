@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -66,15 +66,21 @@ from mpp.methods.tempo.session.server._store import (
     InsufficientBalanceError,
     InvalidSignatureError,
     OnChainChannelState,
+    StoreChange,
+    StoreChannelStore,
+    VoucherAcceptance,
     VoucherValidation,
     accept_voucher_state_update,
     check_atomic_update,
     finalize_closed_channel_state,
+    insufficient_balance_for_charge,
     is_precompile_state,
     keep_greater,
     mark_pending_close,
+    merge_active_on_chain_state,
     normalize_channel_id,
     open_channel_state,
+    plan_voucher_acceptance,
     reconcile_expired_pending_close,
     top_up_channel_state,
 )
@@ -91,6 +97,7 @@ __all__ = [
     "assert_credential_source_can_spend",
     "assert_open_credential_covers_request",
     "assert_same_descriptor",
+    "assert_voucher_amounts",
     "authorized_signer",
     "broadcast_credential_payload",
     "load_precompile_channel",
@@ -402,6 +409,34 @@ def validate_voucher(
     return VoucherValidation(already_accepted=False)
 
 
+def assert_voucher_amounts(
+    *,
+    channel: ChannelState,
+    channel_state: OnChainChannelState,
+    min_voucher_delta: int,
+    voucher: SignedVoucher,
+) -> VoucherValidation:
+    """Check a voucher's amounts against channel state, without its signature.
+
+    The check can then run inside the store update that accepts the voucher.
+    """
+    validate_channel_state(channel_state)
+    if voucher.cumulative_amount > channel_state.deposit:
+        raise AmountExceedsDepositError("voucher amount exceeds on-chain deposit")
+    if voucher.cumulative_amount < channel.highest_voucher_amount:
+        raise VerificationFailedError(
+            "voucher cumulativeAmount must be strictly greater than highest accepted voucher"
+        )
+    if voucher.cumulative_amount <= channel_state.settled:
+        raise VerificationFailedError("voucher cumulativeAmount is below on-chain settled amount")
+    if voucher.cumulative_amount == channel.highest_voucher_amount:
+        return VoucherValidation(already_accepted=True)
+    delta = voucher.cumulative_amount - channel.highest_voucher_amount
+    if delta < min_voucher_delta:
+        raise DeltaTooSmallError(f"voucher delta {delta} below minimum {min_voucher_delta}")
+    return VoucherValidation(already_accepted=False)
+
+
 async def verify_and_accept_voucher(
     *,
     store: ChannelStore,
@@ -414,10 +449,15 @@ async def verify_and_accept_voucher(
     min_voucher_delta: int,
     require_advance: bool = False,
     verified_at: int | None = None,
+    charge_amount: int | None = None,
+    on_charged: Callable[[ChannelState], None] | None = None,
 ) -> SessionReceipt:
     """Verify a voucher and record it as the channel's highest; returns the session receipt.
 
     With ``require_advance`` a voucher must add new funds (a content request pays with it).
+    With ``charge_amount`` the same store update charges its request, and ``on_charged`` gets the
+    charged channel; a charge the accepted vouchers do not cover still accepts the voucher, and
+    then raises :class:`InsufficientBalanceError`.
     """
     validation = validate_voucher(
         channel=channel,
@@ -429,7 +469,7 @@ async def verify_and_accept_voucher(
     )
     if validation.already_accepted and require_advance:
         raise DeltaTooSmallError("voucher does not add new funds for this request")
-    if validation.already_accepted:
+    if validation.already_accepted and charge_amount is None:
         return create_session_receipt(
             challenge_id=challenge_id,
             channel_id=voucher.channel_id,
@@ -437,6 +477,7 @@ async def verify_and_accept_voucher(
             spent=channel.spent,
             units=channel.units,
         )
+    charged = [False]
 
     def accept(current: ChannelState | None) -> ChannelState | None:
         if (
@@ -445,13 +486,26 @@ async def verify_and_accept_voucher(
             and voucher.cumulative_amount <= current.highest_voucher_amount
         ):
             raise DeltaTooSmallError("voucher does not add new funds for this request")
-        return accept_voucher_state_update(
-            channel_state=channel_state, current=current, voucher=voucher, verified_at=verified_at
+        acceptance = plan_voucher_acceptance(
+            accepted=accept_voucher_state_update(
+                channel_state=channel_state,
+                current=current,
+                voucher=voucher,
+                verified_at=verified_at,
+            ),
+            charge_amount=charge_amount,
         )
+        charged[0] = acceptance.charged
+        return acceptance.channel
 
     updated = await store.update_channel(voucher.channel_id, accept)
     if updated is None:
         raise ChannelNotFoundError("channel not found")
+    if charge_amount is not None:
+        if not charged[0]:
+            raise insufficient_balance_for_charge(updated, charge_amount)
+        if on_charged is not None:
+            on_charged(updated)
     return create_session_receipt(
         challenge_id=challenge_id,
         channel_id=voucher.channel_id,
@@ -472,7 +526,10 @@ class CredentialContext:
 
     ``last_on_chain_verified`` (channel ID to Unix ms of the last successful on-chain read) is
     shared across a method's credentials; ``channel_state_ttl`` (ms) bounds how long a
-    non-mutating validation trusts it.
+    non-mutating validation trusts it. ``voucher_state_max_age`` (ms) lets a voucher be accepted
+    against on-chain state verified that recently while a fresh read finishes in the background.
+    ``charge_amount`` charges a voucher's request in the store update that accepts it, and
+    ``on_charged`` gets the charged channel.
     """
 
     challenge: Challenge
@@ -495,6 +552,9 @@ class CredentialContext:
     on_session_settlement_failure: OnSessionSettlementFailure | None = None
     require_voucher_advance: bool = False
     allow_pending_close: bool = False
+    voucher_state_max_age: int = 0
+    charge_amount: int | None = None
+    on_charged: Callable[[ChannelState], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -528,10 +588,35 @@ async def _resolve_voucher_channel_state(
         return state
     if channel is None:
         raise ChannelNotFoundError("channel not found")
+    return _stored_channel_state(channel)
+
+
+def _stored_channel_state(channel: ChannelState) -> chain.ChannelState:
     return chain.ChannelState(
         deposit=uint96(channel.deposit),
         settled=uint96(channel.settled_on_chain),
         close_requested_at=channel.close_requested_at,
+    )
+
+
+def _can_use_stored_channel_state(
+    context: CredentialContext, channel: ChannelState, voucher: SignedVoucher
+) -> bool:
+    """Whether a voucher may be checked against the stored channel instead of a chain read.
+
+    A payer can withdraw only after the escrow's close grace period, so a voucher within the
+    deposit of recently verified open state stays settleable while a fresh read finishes.
+    """
+    max_age = context.voucher_state_max_age
+    verified_at = max(
+        context.last_on_chain_verified.get(voucher.channel_id, 0),
+        channel.on_chain_verified_at or 0,
+    )
+    return (
+        max_age > 0
+        and channel.close_requested_at == 0
+        and _now_ms() - verified_at <= max_age
+        and voucher.cumulative_amount <= channel.deposit
     )
 
 
@@ -720,7 +805,11 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    state = await _resolve_voucher_channel_state(context, channel_id, channel, force=False)
+    state = (
+        _stored_channel_state(channel)
+        if _can_use_stored_channel_state(context, channel, voucher)
+        else await _resolve_voucher_channel_state(context, channel_id, channel, force=False)
+    )
     if context.allow_pending_close and state.close_requested_at != 0:
         return
     validate_voucher(
@@ -1010,32 +1099,56 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
         request.currency,
         _expected_operator(context),
     )
+    max_age = context.voucher_state_max_age
     # The on-chain read does not depend on the stored channel, so it overlaps the store read;
     # store errors still take precedence.
-    started_at = _now_ms()
-    reading = asyncio.ensure_future(
-        _resolve_voucher_channel_state(context, channel_id, None, force=True)
-    )
+    reads: list[_OnChainRead] = []
+
+    def read_channel_state() -> _OnChainRead:
+        if not reads:
+            started_at = _now_ms()
+            state = asyncio.ensure_future(
+                _resolve_voucher_channel_state(context, channel_id, None, force=True)
+            )
+            reads.append(_OnChainRead(started_at, state))
+        return reads[0]
+
+    recently_read = max_age > 0 and _now_ms() - context.last_on_chain_verified.get(
+        channel_id, 0
+    ) <= min(context.channel_state_ttl, max_age)
+    if not recently_read:
+        read_channel_state()
     try:
-        channel = await load_precompile_channel(
+        loaded = await _accept_or_load_voucher_channel(context, channel_id, voucher, descriptor)
+    except BaseException:
+        for read in reads:
+            read.state.cancel()
+            with contextlib.suppress(BaseException):
+                await read.state
+        raise
+    if isinstance(loaded, SessionReceipt) or _can_use_stored_channel_state(
+        context, loaded, voucher
+    ):
+        if reads:
+            _record_on_chain_read_in_background(context, channel_id, reads[0])
+        if isinstance(loaded, SessionReceipt):
+            return loaded
+        return await verify_and_accept_voucher(
             store=context.store,
-            channel_id=channel_id,
-            descriptor=descriptor,
+            challenge_id=context.challenge.id,
+            channel=loaded,
+            voucher=voucher,
+            channel_state=_stored_channel_state(loaded),
             chain_id=context.chain_id,
             escrow=context.escrow,
-            validate_descriptor=True,
+            min_voucher_delta=context.min_voucher_delta,
+            require_advance=context.require_voucher_advance,
+            charge_amount=context.charge_amount,
+            on_charged=context.on_charged,
         )
-        assert_credential_source_can_spend(
-            chain_id=context.chain_id, channel=channel, source=context.credential_source
-        )
-        if channel.finalized:
-            raise ChannelClosedError("channel is finalized")
-    except BaseException:
-        reading.cancel()
-        with contextlib.suppress(BaseException):
-            await reading
-        raise
-    state = await reading
+    channel = loaded
+    read = read_channel_state()
+    state = await read.state
     reconciled = channel
     if channel.close_requested_at != 0:
         now = int(time.time())
@@ -1061,8 +1174,164 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
         escrow=context.escrow,
         min_voucher_delta=context.min_voucher_delta,
         require_advance=context.require_voucher_advance,
-        verified_at=started_at,
+        verified_at=read.started_at,
+        charge_amount=context.charge_amount,
+        on_charged=context.on_charged,
     )
+
+
+async def _accept_or_load_voucher_channel(
+    context: CredentialContext,
+    channel_id: str,
+    voucher: SignedVoucher,
+    descriptor: ChannelDescriptor,
+) -> SessionReceipt | ChannelState:
+    """The receipt of a voucher accepted in one store update, or else its checked channel."""
+    if context.voucher_state_max_age > 0 and isinstance(context.store, StoreChannelStore):
+        receipt = await _accept_voucher_in_one_update(context, context.store, voucher, descriptor)
+        if receipt is not None:
+            return receipt
+    channel = await load_precompile_channel(
+        store=context.store,
+        channel_id=channel_id,
+        descriptor=descriptor,
+        chain_id=context.chain_id,
+        escrow=context.escrow,
+        validate_descriptor=True,
+    )
+    assert_credential_source_can_spend(
+        chain_id=context.chain_id, channel=channel, source=context.credential_source
+    )
+    if channel.finalized:
+        raise ChannelClosedError("channel is finalized")
+    return channel
+
+
+async def _accept_voucher_in_one_update(
+    context: CredentialContext,
+    store: StoreChannelStore,
+    voucher: SignedVoucher,
+    descriptor: ChannelDescriptor,
+) -> SessionReceipt | None:
+    """Accept a voucher, and charge its request, in one store update with no separate read.
+
+    The update checks the stored channel itself. Returns None without writing when the stored
+    on-chain state was not verified recently enough to accept against.
+    """
+    if not verify_voucher(context.escrow, context.chain_id, voucher, authorized_signer(descriptor)):
+        raise InvalidSignatureError("invalid voucher signature")
+    charge_amount = context.charge_amount
+
+    def change(current: ChannelState | None) -> StoreChange[VoucherAcceptance | None]:
+        if current is None:
+            raise ChannelNotFoundError("channel not found")
+        if not is_precompile_state(current) or current.descriptor is None:
+            raise VerificationFailedError("channel is not precompile-backed")
+        assert_same_descriptor(descriptor, current.descriptor)
+        validate_channel_descriptor(
+            descriptor,
+            voucher.channel_id,
+            context.chain_id,
+            context.escrow,
+            current.payee,
+            current.token,
+        )
+        assert_credential_source_can_spend(
+            chain_id=context.chain_id, channel=current, source=context.credential_source
+        )
+        if current.finalized:
+            raise ChannelClosedError("channel is finalized")
+        if not _can_use_stored_channel_state(context, current, voucher):
+            return StoreChange("noop", None)
+        if (
+            context.require_voucher_advance
+            and voucher.cumulative_amount <= current.highest_voucher_amount
+        ):
+            raise DeltaTooSmallError("voucher does not add new funds for this request")
+        channel_state = _stored_channel_state(current)
+        validation = assert_voucher_amounts(
+            channel=current,
+            channel_state=channel_state,
+            min_voucher_delta=context.min_voucher_delta,
+            voucher=voucher,
+        )
+        if validation.already_accepted and charge_amount is None:
+            return StoreChange("noop", VoucherAcceptance(current, False))
+        acceptance = plan_voucher_acceptance(
+            accepted=accept_voucher_state_update(
+                channel_state=channel_state, current=current, voucher=voucher
+            ),
+            charge_amount=charge_amount,
+        )
+        return StoreChange("set", acceptance, acceptance.channel)
+
+    outcome = await store.update_channel_result(voucher.channel_id, change)
+    if outcome is None:
+        return None
+    if charge_amount is not None:
+        if not outcome.charged:
+            raise insufficient_balance_for_charge(outcome.channel, charge_amount)
+        if context.on_charged is not None:
+            context.on_charged(outcome.channel)
+    return create_session_receipt(
+        challenge_id=context.challenge.id,
+        channel_id=voucher.channel_id,
+        accepted_cumulative=outcome.channel.highest_voucher_amount,
+        spent=outcome.channel.spent,
+        units=outcome.channel.units,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _OnChainRead:
+    """An on-chain channel read and when it was issued (Unix ms)."""
+
+    started_at: int
+    state: asyncio.Future[OnChainChannelState]
+
+
+_background_reads: set[asyncio.Future[None]] = set()
+"""Background read recordings, held so they are not collected before they finish."""
+
+
+def _record_on_chain_read_in_background(
+    context: CredentialContext, channel_id: str, read: _OnChainRead
+) -> None:
+    """Record an on-chain read a voucher did not wait for.
+
+    A pending close is persisted so later vouchers are rejected, and open state extends the
+    verified age of the stored channel.
+    """
+
+    async def record() -> None:
+        state = await read.state
+        if state.close_requested_at != 0:
+            await _record_pending_close(context, channel_id, state)
+            return
+        if state.deposit == 0:
+            return
+
+        def update(current: ChannelState | None) -> ChannelState | None:
+            if current is None or current.finalized or current.close_requested_at != 0:
+                return current
+            on_chain = merge_active_on_chain_state(current, state)
+            return replace(
+                current,
+                close_requested_at=on_chain.close_requested_at,
+                deposit=on_chain.deposit,
+                settled_on_chain=on_chain.settled_on_chain,
+                on_chain_verified_at=max(read.started_at, current.on_chain_verified_at or 0),
+            )
+
+        await context.store.update_channel(channel_id, update)
+
+    async def record_quietly() -> None:
+        with contextlib.suppress(Exception):
+            await record()
+
+    task = asyncio.ensure_future(record_quietly())
+    _background_reads.add(task)
+    task.add_done_callback(_background_reads.discard)
 
 
 _SEND_METHODS = frozenset(

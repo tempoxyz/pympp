@@ -10,10 +10,19 @@ from typing import TYPE_CHECKING, Any
 from mpp._lazy_exports import load_lazy_attr
 
 if TYPE_CHECKING:
+    from mpp.methods.tempo.session._snapshot import (
+        SessionSnapshot,
+        deserialize_snapshot,
+        serialize_snapshot,
+    )
     from mpp.methods.tempo.session.server._close_supervisor import (
         CloseSupervision,
         CloseSupervisionOutcome,
         supervise_closes,
+    )
+    from mpp.methods.tempo.session.server._request_state import (
+        ResolveSessionChannelId,
+        ResolveSessionChannelIdParameters,
     )
     from mpp.methods.tempo.session.server._schedule import (
         ResolvedSettlementSchedule,
@@ -34,6 +43,7 @@ if TYPE_CHECKING:
         settle,
         settle_batch,
     )
+    from mpp.methods.tempo.session.server._sponsorship_limit import SponsorshipLimit
     from mpp.methods.tempo.session.server._store import (
         ChannelState,
         CreditResult,
@@ -44,6 +54,15 @@ if TYPE_CHECKING:
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_EXPORTS = {
+    "mpp.methods.tempo.session._snapshot": (
+        "SessionSnapshot",
+        "deserialize_snapshot",
+        "serialize_snapshot",
+    ),
+    "mpp.methods.tempo.session.server._request_state": (
+        "ResolveSessionChannelId",
+        "ResolveSessionChannelIdParameters",
+    ),
     "mpp.methods.tempo.session.server._session": (
         "SessionPaymentReceipt",
         "charge",
@@ -68,6 +87,7 @@ _LAZY_EXPORTS = {
         "SettlementSchedule",
         "resolve_settlement_schedule",
     ),
+    "mpp.methods.tempo.session.server._sponsorship_limit": ("SponsorshipLimit",),
     "mpp.methods.tempo.session.server._store": (
         "ChannelState",
         "CreditResult",
@@ -89,15 +109,21 @@ __all__ = [
     "IdempotencyKeyConflictError",
     "OnSessionSettlement",
     "OnSessionSettlementFailure",
+    "ResolveSessionChannelId",
+    "ResolveSessionChannelIdParameters",
     "ResolvedSettlementSchedule",
     "SessionPaymentReceipt",
     "SessionSettlementContext",
     "SessionSettlementFailureContext",
+    "SessionSnapshot",
     "SettlementSchedule",
+    "SponsorshipLimit",
     "charge",
     "credit",
+    "deserialize_snapshot",
     "resolve_settleable_voucher",
     "resolve_settlement_schedule",
+    "serialize_snapshot",
     "session",
     "settle",
     "settle_batch",

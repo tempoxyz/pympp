@@ -1192,6 +1192,37 @@ def _plan_deduction(current: ChannelState | None, amount: int) -> StoreChange[De
     return StoreChange("set", DeductResult(True, next_state), next_state)
 
 
+@dataclass(frozen=True, slots=True)
+class VoucherAcceptance:
+    """A channel state that accepted a voucher, and whether its request was charged too."""
+
+    channel: ChannelState
+    charged: bool
+
+
+def plan_voucher_acceptance(
+    *, accepted: ChannelState, charge_amount: int | None = None
+) -> VoucherAcceptance:
+    """Charge ``charge_amount`` to a state that just accepted a voucher, in the same update.
+
+    A charge the available balance cannot cover leaves the accepted state uncharged.
+    """
+    if charge_amount is None:
+        return VoucherAcceptance(accepted, False)
+    deduction = _plan_deduction(accepted, charge_amount)
+    if deduction.op != "set" or deduction.value is None:
+        return VoucherAcceptance(accepted, False)
+    return VoucherAcceptance(deduction.value, True)
+
+
+def insufficient_balance_for_charge(
+    channel: ChannelState, charge_amount: int
+) -> InsufficientBalanceError:
+    """The error for a request charge the channel's available balance could not cover."""
+    available = channel.highest_voucher_amount - channel.spent
+    return InsufficientBalanceError(f"requested {charge_amount}, available {available}")
+
+
 _Conflict = Literal["conflict"]
 
 
