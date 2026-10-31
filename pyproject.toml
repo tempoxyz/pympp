@@ -30,7 +30,7 @@ Documentation = "https://github.com/tempoxyz/pympp#readme"
 
 [project.optional-dependencies]
 tempo = [
-    "pytempo>=0.2.1",
+    "pytempo>=0.7.0",
     "pydantic>=2.0",
     "eth-account>=0.11",
     "eth-abi>=5.0,<6",
@@ -44,7 +44,7 @@ tempo = [
 ]
 stripe = [
     "pydantic>=2.0",
-    "pytempo>=0.2.1",
+    "pytempo>=0.7.0",
     "eth-account>=0.11",
     "eth-abi>=5.0,<6",
     "eth-hash[pycryptodome]>=0.7",
