@@ -241,6 +241,39 @@ class TestEngineErrors:
         result = await server.validate_credential(credential, request={"amount": "1"})
         assert result.request["amount"] == "1"
 
+    async def test_validate_credential_request_compares_through_stable_binding(self) -> None:
+        from mpp._validation import Validation
+        from mpp.errors import InvalidChallengeError
+
+        calls = iter(range(100))
+
+        def resolve_request(context: Any) -> dict[str, Any]:
+            # Like a session snapshot: recomputed, and different, on every resolution.
+            return {**context.request, "volatile": str(next(calls))}
+
+        async def validate(context: Any) -> Validation:
+            return Validation(
+                credential=context.credential,
+                details=None,
+                intent="charge",
+                request=context.challenge.request,
+            )
+
+        method = replace(
+            server_method(broadcast=_verified, validate=validate, request={"amount": "1"}),
+            resolve_request=resolve_request,
+            stable_binding=lambda request: {
+                key: value for key, value in request.items() if key != "volatile"
+            },
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key=SECRET)
+        issued = challenge(await server.charge()(http_request()))
+        credential = Credential(challenge=issued.to_echo(), payload={})
+        with pytest.raises(InvalidChallengeError, match="request does not match"):
+            await server.validate_credential(credential, request={"amount": "2"})
+        result = await server.validate_credential(credential, request={"amount": "1"})
+        assert result.request["amount"] == "1"
+
     async def test_broadcast_credential_selects_among_async_resolve_request_methods(
         self,
     ) -> None:

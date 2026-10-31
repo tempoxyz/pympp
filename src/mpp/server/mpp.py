@@ -405,7 +405,7 @@ class Mpp:
                     # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True
-                if _comparable(expected) == echoed:
+                if _binding_matches(candidate, expected, echoed):
                     matching.append(candidate)
                     scopes[id(candidate)] = expected.get("_mppx_scope")
             if not normalized and _comparable(request) == echoed:
@@ -644,6 +644,23 @@ async def _expected_request(
             method.resolve_request(RequestContext(request=input, credential=parsed))
         )
     return method.method.normalize_request(input)
+
+
+def _binding_matches(
+    method: ServerMethod, expected: Mapping[str, Any], echoed: Mapping[str, Any]
+) -> bool:
+    """Whether an echoed request pays for the expected one, through the method's stable binding.
+
+    Like mppx's route validation, a method with a stable binding (such as a session whose
+    challenges carry a per-request snapshot) compares only the fields that binding keeps.
+    """
+    expected = _comparable(expected)
+    if method.stable_binding is None:
+        return expected == echoed
+    try:
+        return dict(method.stable_binding(expected)) == dict(method.stable_binding(echoed))
+    except Exception:
+        return False
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:
