@@ -75,10 +75,31 @@ class RespondContext(VerifyContext):
     receipt: Receipt
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PreflightContext:
+    """Arguments for :attr:`ServerMethod.preflight` (mppx ``PreflightFn``).
+
+    ``request`` is the route input: the method's defaults merged with the route options.
+    ``credential`` is the Payment credential the request carries, of any method, unverified.
+    ``expires`` is the route's challenge expiry, when it sets one; ``header`` is the field
+    credentials are sent in when it is not ``Authorization``. ``realm`` and ``secret_key`` are
+    the server's, so a preflight can issue and authenticate its own challenges.
+    """
+
+    input: Request
+    request: dict[str, Any]
+    credential: Credential | None
+    realm: str
+    secret_key: str
+    expires: str | None = None
+    header: str | None = None
+
+
 VerifyFn = Callable[[VerifyContext], Awaitable["Receipt"]]
 ValidateFn = Callable[[ValidateContext], Awaitable[Validation]]
 RespondFn = Callable[[RespondContext], "Response | None | Awaitable[Response | None]"]
 StableBindingFn = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+PreflightFn = Callable[[PreflightContext], "Response | None | Awaitable[Response | None]"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -113,6 +134,11 @@ class ServerMethod:
             match (mppx ``stableBinding``). Set, a challenge pays any request to its route whose
             binding matches, such as a reusable session challenge bound to its channel terms
             but not to its quoted amount; unset, the echoed request must equal the route's.
+        preflight: Called for each request before its challenge or credential is handled, for
+            method-specific management requests such as a session bootstrap (mppx
+            ``preflight``). A returned :class:`~mpp.server.Response` fully handles the request:
+            the route handler returns it as :class:`~mpp.server.PaymentRequired`, so the route
+            doesn't run. ``None`` continues with the normal payment flow.
     """
 
     method: Method[Any, Any]
@@ -131,6 +157,7 @@ class ServerMethod:
     needs_request_body: bool = False
     respond: RespondFn | None = None
     stable_binding: StableBindingFn | None = None
+    preflight: PreflightFn | None = None
 
     def __post_init__(self) -> None:
         if self.verify is None and self.broadcast is None:
@@ -145,6 +172,8 @@ class ServerMethod:
             raise ValueError("respond must be callable")
         if self.stable_binding is not None and not callable(self.stable_binding):
             raise ValueError("stable_binding must be callable")
+        if self.preflight is not None and not callable(self.preflight):
+            raise ValueError("preflight must be callable")
 
     @property
     def name(self) -> str:

@@ -29,6 +29,7 @@ from mpp.events import PAYMENT_FAILED
 from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
 from mpp.server.method import (
     SETTLING_METHOD,
+    PreflightContext,
     RequestContext,
     RespondContext,
     ServerMethod,
@@ -315,10 +316,7 @@ async def _prepare_offer(
         scope = {**scope, "custom": wire["_mppx_scope"]}
     wire = {**wire, "_mppx_scope": scope}
 
-    expires = offer.options.get("expires")
-    expires_in = offer.options.get("expires_in")
-    if expires_in is not None:
-        expires = (datetime.now(UTC) + expires_in).isoformat()
+    expires = _offer_expires(offer)
 
     body = offer.options.get("body")
     key = id(body)
@@ -334,6 +332,14 @@ async def _prepare_offer(
     )
     call.prepared.append(prepared)
     return prepared
+
+
+def _offer_expires(offer: _Offer) -> str | None:
+    """The challenge expiry an offer's route options set, if any."""
+    expires_in = offer.options.get("expires_in")
+    if expires_in is not None:
+        return (datetime.now(UTC) + expires_in).isoformat()
+    return offer.options.get("expires")
 
 
 def _intent(method: ServerMethod, input: dict[str, Any], request: Request) -> _MethodIntent:
@@ -421,6 +427,9 @@ class ComposedHandler:
             if request.url.startswith(("http://", "https://"))
             else None
         )
+        handled = await self._preflight(request, authorization)
+        if handled is not None:
+            return PaymentRequired(handled)
         call = _Call()
         try:
             result = await self._verify(authorization, request, x402, call)
@@ -455,6 +464,41 @@ class ComposedHandler:
             return verified
         # The management response carries the receipt headers the route's would.
         return replace(verified, response=verified.with_receipt(response))
+
+    async def _preflight(self, request: Request, authorization: str | None) -> Response | None:
+        """Run the offers' preflight hooks in order (mppx ``preflight``); the first response wins.
+
+        Like mppx, only HTTP requests are preflighted, not MCP tool calls.
+        """
+        hooks = [offer for offer in self._offers if offer.method.preflight is not None]
+        if not hooks or request.url.startswith(MCP_URL_PREFIX):
+            return None
+        credential = _parse_credential(authorization)
+        for offer in hooks:
+            assert offer.method.preflight is not None
+            options = {
+                key: value
+                for key, value in offer.options.items()
+                if key not in ROUTE_OPTION_KEYS and value is not None
+            }
+            response = await resolve(
+                offer.method.preflight(
+                    PreflightContext(
+                        input=request,
+                        request={**(offer.method.defaults or {}), **options},
+                        credential=credential,
+                        realm=offer.server.realm,
+                        secret_key=offer.server.secret_key,
+                        expires=_offer_expires(offer),
+                        header=offer.server.credential_header,
+                    )
+                )
+            )
+            if response is not None:
+                if not isinstance(response, Response):
+                    raise TypeError("preflight must return a Response or None")
+                return response
+        return None
 
     def _challenge_response(
         self,

@@ -73,6 +73,7 @@ __all__ = [
     "settle",
     "settle_batch",
     "should_apply_verified_http_accounting",
+    "should_charge_voucher_on_acceptance",
 ]
 
 
@@ -209,6 +210,19 @@ def should_apply_verified_http_accounting(
     if request is None:
         return False
     if payload_action not in ("open", "voucher"):
+        return False
+    return is_session_content_request(request)
+
+
+def should_charge_voucher_on_acceptance(
+    *, request: RequestProbe | None, payload_action: str, unit_type: Any
+) -> bool:
+    """Whether a voucher pays for its request in the store update that accepts it.
+
+    A request-priced content request is charged exactly once, so this is the charge the HTTP
+    accounting would make, without a second store update.
+    """
+    if request is None or payload_action != "voucher" or unit_type != "request":
         return False
     return is_session_content_request(request)
 

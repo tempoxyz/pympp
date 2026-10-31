@@ -35,6 +35,7 @@ from mpp.methods.tempo.session.client._state import (
     is_tip1034_session_challenge,
     plan_credential,
     read_session_snapshot,
+    resolve_auto_swap,
     resolve_automatic_top_up,
     resolve_challenge_context,
 )
@@ -53,6 +54,7 @@ from mpp.methods.tempo.session.client._store import (
 
 if TYPE_CHECKING:
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.client import AutoSwap
     from mpp.runtime import AttemptOutcome, ClientMethod, CredentialParams
 
 Send = Callable[[httpx.Request], Awaitable[httpx.Response]]
@@ -179,6 +181,7 @@ class SessionMethod:
         escrow: str | None = None,
         allow_custom_escrow: bool = False,
         allowed_chain_ids: Sequence[int] | None = None,
+        auto_swap: bool | AutoSwap = False,
         channel_store: ChannelStore | None = None,
         on_channel_update: Callable[[ChannelEntry], None] | None = None,
         rpc_url: str | None = None,
@@ -197,6 +200,7 @@ class SessionMethod:
         self.escrow = escrow
         self.allow_custom_escrow = allow_custom_escrow
         self.allowed_chain_ids: tuple[int, ...] | None = allowed_chain_ids
+        self.auto_swap = resolve_auto_swap(auto_swap)
         self.store: ChannelStore = (
             channel_store if channel_store is not None else create_channel_store()
         )
@@ -291,7 +295,16 @@ class SessionMethod:
                 sink = ChannelSink(
                     store=_PendingOpenStore(self.store, pending), notify_update=_ignore
                 )
-            payload = await execute_credential_plan(plan, sink, client=self.http_client)
+            payload = await execute_credential_plan(
+                plan,
+                sink,
+                client=self.http_client,
+                auto_swap=(
+                    resolve_auto_swap(context.auto_swap)
+                    if context is not None and context.auto_swap is not None
+                    else self.auto_swap
+                ),
+            )
             credential = serialize_credential(challenge, payload, resolved.chain_id, plan.account)
             if attempt is not None:
                 if pending:
@@ -589,6 +602,7 @@ def session(
     escrow: str | None = None,
     allow_custom_escrow: bool = False,
     allowed_chain_ids: Sequence[int] | None = None,
+    auto_swap: bool | AutoSwap = False,
     channel_store: ChannelStore | None = None,
     on_channel_update: Callable[[ChannelEntry], None] | None = None,
     rpc_url: str | None = None,
@@ -614,6 +628,12 @@ def session(
             (ignored when ``escrow`` pins one).
         allowed_chain_ids: Chains credentials may be signed for; ``None`` allows
             any and an empty sequence rejects all.
+        auto_swap: When the payer lacks the session currency for an open or
+            top-up, buy it on the stablecoin DEX from a fallback stablecoin in
+            the same transaction. ``True`` uses the defaults; pass an
+            :class:`~mpp.methods.tempo.client.AutoSwap` to prepend currencies or
+            change the slippage. A credential's ``SessionContext.auto_swap``
+            overrides it.
         channel_store: Persistence for reusable channels (in memory by default).
         on_channel_update: Called with the channel entry whenever it changes.
         rpc_url: Tempo RPC for open/top-up transactions; the challenge chain's
@@ -637,6 +657,7 @@ def session(
         escrow=escrow,
         allow_custom_escrow=allow_custom_escrow,
         allowed_chain_ids=allowed_chain_ids,
+        auto_swap=auto_swap,
         channel_store=channel_store,
         on_channel_update=on_channel_update,
         rpc_url=rpc_url,

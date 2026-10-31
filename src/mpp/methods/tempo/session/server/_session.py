@@ -6,9 +6,10 @@ content request pays its route amount from the channel's accepted vouchers, and 
 requests (top-up, close, and open/voucher on non-content requests) get ``204`` with a session
 receipt. Module-level :func:`charge` and :func:`credit` adjust a channel's spend outside a route.
 
-Not ported: SSE/WebSocket metering, bootstrap/snapshot recovery, sponsorship limits,
-``voucherStateMaxAge`` (vouchers are always checked against a fresh chain read) and
-``chargeOnAcceptance``.
+With ``resolve_channel_id``, challenges advertise the caller's reusable channel as a session
+snapshot; with ``bootstrap=True``, a ``HEAD`` request recovers it after a zero-amount proof.
+
+Not ported: SSE/WebSocket metering.
 """
 
 from __future__ import annotations
@@ -28,11 +29,16 @@ from mpp.methods.tempo.session._protocol import (
     definition,
     serialize_session_receipt,
 )
+from mpp.methods.tempo.session.server._bootstrap import handle_bootstrap_preflight
 from mpp.methods.tempo.session.server._request_state import (
     FEE_PAYER_DISABLED,
+    SnapshotPaymentFields,
     capture_request_probe,
+    is_session_content_request,
     resolve_credential_verification_context,
+    resolve_session_channel_id,
     resolve_session_payment_request,
+    resolve_session_snapshot,
     respond_to_session_credential,
 )
 from mpp.methods.tempo.session.server._schedule import (
@@ -48,7 +54,9 @@ from mpp.methods.tempo.session.server._settlement import (
     maybe_settle_scheduled,
     resolve_channel_store,
     should_apply_verified_http_accounting,
+    should_charge_voucher_on_acceptance,
 )
+from mpp.methods.tempo.session.server._sponsorship_limit import SponsorshipLimit, limit_fee_payer
 from mpp.methods.tempo.session.server._store import (
     ChannelState,
     CreditResult,
@@ -64,6 +72,7 @@ from mpp.methods.tempo.session.server._verification import (
     validate_credential_payload,
 )
 from mpp.server.method import (
+    PreflightContext,
     RequestContext,
     RespondContext,
     ServerMethod,
@@ -76,6 +85,7 @@ if TYPE_CHECKING:
 
     from mpp.methods import CanOfferFn, PaymentSuccessHandler
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.session.server._request_state import ResolveSessionChannelId
     from mpp.server.http import Response
     from mpp.store import Store
 
@@ -136,6 +146,23 @@ class SessionPaymentReceipt(Receipt):
         )
 
 
+def _snapshot_free_binding(request: Mapping[str, Any]) -> dict[str, Any]:
+    """Binds a challenge to its whole request except its session snapshot.
+
+    The snapshot is a hint recomputed for every request (its spend moves), so, as mppx's request
+    binding does, a credential's echoed snapshot need not match the route's current one.
+    """
+    details: Any = request.get("methodDetails")
+    if not isinstance(details, Mapping) or "sessionSnapshot" not in details:
+        return dict(request)
+    method_details = {
+        key: value
+        for key, value in cast(Mapping[str, Any], details).items()
+        if key != "sessionSnapshot"
+    }
+    return {**request, "methodDetails": method_details}
+
+
 def _reusable_binding(request: Mapping[str, Any]) -> dict[str, Any]:
     """Binds a reusable challenge to its route and channel terms, not its quoted amount."""
     details: Any = request.get("methodDetails")
@@ -173,12 +200,17 @@ def session(
     on_session_settlement_failure: OnSessionSettlementFailure | None = None,
     channel_state_ttl: int = 5_000,
     reusable_challenges: bool = False,
+    voucher_state_max_age: int = 0,
+    charge_on_acceptance: bool = False,
+    sponsorship_limit: SponsorshipLimit | None = None,
     amount: str | None = None,
     unit_type: str | None = None,
     suggested_deposit: str | None = None,
     operator: str | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
+    resolve_channel_id: ResolveSessionChannelId | None = None,
+    bootstrap: bool = False,
 ) -> ServerMethod:
     """Create the server-side Tempo session method (mppx ``tempo.session``).
 
@@ -212,12 +244,38 @@ def session(
         reusable_challenges: Let a challenge pay later requests to the same route until it
             expires: it is bound to the route and channel terms, not the amount it quoted,
             and each request is charged its own price.
+        voucher_state_max_age: Maximum age (ms) of verified on-chain channel state a voucher may
+            be validated and accepted against without waiting for a fresh read (default 0: read
+            on-chain state before every acceptance). The fresh read then finishes in the
+            background and records a pending close, so later vouchers are rejected. A payer can
+            withdraw only after the escrow's close grace period (900 s on Tempo) following a
+            close request, so vouchers accepted this way stay settleable as long as the payee
+            settles them within the grace period minus this age: keep it well below that bound.
+            ``channel_state_ttl`` bounds how long an accepted voucher skips starting that read.
+        charge_on_acceptance: Charge request-priced content (``unit_type="request"``) in the same
+            store update that accepts its voucher, before the response, instead of in a second
+            update after it. The server must then refund requests it cannot serve (:func:`credit`).
+        sponsorship_limit: Limits fee-payer-sponsored channel opens and top-ups to
+            ``per_day`` of each per payer per UTC day (default 5), counted in its store. The payer
+            is the verified signer of the transaction, never the credential's ``source``. A
+            transaction over the limit, or whose signatures prove no payer, is broadcast
+            unsponsored, so it lands only if the payer pays its own fees.
         amount: Default route amount.
         unit_type: Default unit type (such as ``"request"``).
         suggested_deposit: Default suggested deposit (decimal string).
         operator: Default channel operator clients encode in new channels.
         can_offer: Decides whether to advertise an offer for a wire request.
         on_payment_success: Called with each successful session payment event.
+        resolve_channel_id: Maps authenticated application identity and payment scope to an
+            existing channel ID; called with a
+            :class:`~mpp.methods.tempo.session.server.ResolveSessionChannelIdParameters` when the
+            route doesn't set ``channel_id``. The channel is loaded from ``store`` and validated
+            before its snapshot is included in a challenge or bootstrap response; the store is
+            never searched.
+        bootstrap: Enable same-route ``HEAD`` recovery before a paid request: the server issues a
+            zero-amount identity challenge, verifies the returned proof, passes its ``source``
+            to ``resolve_channel_id``, validates the channel's payment scope and returns its
+            snapshot (with the signed highest voucher) in ``Payment-Session-Snapshot``.
     """
     from mpp.methods.tempo._defaults import (
         CHAIN_ID,
@@ -288,7 +346,57 @@ def session(
             fee_token=fee_token,
         )
         resolved.setdefault("decimals", decimals)
+        snapshot = await resolve_request_snapshot(context, resolved)
+        if snapshot is not None:
+            resolved["session_snapshot"] = snapshot
         return resolved
+
+    async def resolve_request_snapshot(
+        context: RequestContext, resolved: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """The challenge's session snapshot hint (mppx ``resolveSessionPaymentRequest``)."""
+        channel_id = await resolve_session_channel_id(
+            request=context.input,
+            credential=context.credential,
+            payment_request=context.request,
+            resolve_channel_id=resolve_channel_id,
+            store=channel_store(),
+        )
+        if channel_id is None:
+            return None
+        probe = capture_request_probe(context.input) if context.input is not None else None
+        content = probe is not None and is_session_content_request(probe)
+        route_decimals = int(resolved.get("decimals", decimals))
+        amount_value = resolved.get("amount")
+        request_amount = (
+            parse_units(amount_value, route_decimals) if isinstance(amount_value, str) else 0
+        )
+        snapshot = await resolve_session_snapshot(
+            amount=0 if probe is not None and not content else request_amount,
+            channel_id=channel_id,
+            store=channel_store(),
+            expected=SnapshotPaymentFields(
+                chain_id=int(resolved["chain_id"]),
+                currency=str(resolved.get("currency")),
+                escrow_contract=str(resolved["escrow_contract"]),
+                recipient=str(resolved.get("recipient")),
+            ),
+            minimum_voucher_advance=parse_units(min_voucher_delta or "0", decimals),
+            require_voucher_advance=content,
+        )
+        return snapshot.to_wire() if snapshot is not None else None
+
+    async def preflight(context: PreflightContext) -> Response | None:
+        if context.input.method != "HEAD":
+            return None
+        return await handle_bootstrap_preflight(
+            context,
+            chain_id=await resolve_chain_id(),
+            escrow_contract=escrow_contract,
+            resolve_channel_id=resolve_channel_id,
+            store=channel_store(),
+            proof_store=channel_store().store,
+        )
 
     def credential_context(
         context: VerifyContext, payload: Any, **overrides: Any
@@ -323,6 +431,7 @@ def session(
             min_voucher_delta=verification.min_voucher_delta,
             on_session_settlement=on_session_settlement,
             on_session_settlement_failure=on_session_settlement_failure,
+            voucher_state_max_age=voucher_state_max_age,
             **overrides,
         )
 
@@ -390,14 +499,43 @@ def session(
                 request=probe, payload_action=payload.action
             ),
         )
+        unit_type = context.request.get("unit_type", context.challenge.request.get("unitType"))
+        charge_amount = (
+            route_amount(context)
+            if charge_on_acceptance
+            and should_charge_voucher_on_acceptance(
+                request=probe, payload_action=payload.action, unit_type=unit_type
+            )
+            else None
+        )
+        accepted_charges: list[ChannelState] = []
+        # Settlement keeps the fee payer the challenge allowed; only the open or top-up itself
+        # goes unsponsored over the limit.
+        fee_payer = verify_context.fee_payer
+        verify_context = replace(
+            verify_context,
+            charge_amount=charge_amount,
+            on_charged=accepted_charges.append,
+            fee_payer=await limit_fee_payer(
+                chain_id=verify_context.chain_id,
+                fee_payer=fee_payer,
+                limit=sponsorship_limit,
+                payload=payload,
+            ),
+        )
         receipt = await broadcast_credential_payload(verify_context)
+        if accepted_charges:
+            tx_hash = await settle_charged(accepted_charges[-1], fee_payer)
+            return SessionPaymentReceipt.from_session(
+                replace(receipt, tx_hash=tx_hash) if tx_hash else receipt
+            )
 
         async def charge_channel(channel_id: str, request_amount: int) -> ChannelState:
             return await charge_session_channel(channel_store(), channel_id, request_amount)
 
         async def settle_accepted_charge(channel: ChannelState) -> str | None:
             # Like mppx, with the fee payer the credential's challenge allowed.
-            return await settle_charged(channel, verify_context.fee_payer)
+            return await settle_charged(channel, fee_payer)
 
         charged = await apply_verified_http_accounting(
             receipt=receipt,
@@ -423,7 +561,8 @@ def session(
         defaults=defaults,
         respond=respond,
         use_store=use_store,
-        stable_binding=_reusable_binding if reusable_challenges else None,
+        stable_binding=_reusable_binding if reusable_challenges else _snapshot_free_binding,
+        preflight=preflight if bootstrap else None,
         # Accounting and respond classify a POST as content by its body (mppx: request.body
         # !== null), so framework adapters must read it.
         needs_request_body=True,

@@ -15,6 +15,8 @@
 //   MPPX_SECRET_KEY           challenge HMAC secret
 //   MPPX_PORT                 port (default 0: any free port)
 //   MPPX_FUND                 "0" skips funding the payee and fee payer with tempo_fundAddress
+//   MPPX_BOOTSTRAP            "1" enables bootstrap: true with a resolveChannelId that returns the
+//                             channel each payer source last paid on (HEAD recovery)
 //
 // Prints "READY <port>" and a JSON line {"ready":true,...} on stdout once listening, then one
 // JSON line per request on stdout ({"request":...}) and settlement events.
@@ -43,6 +45,9 @@ if (process.env.MPPX_FUND !== '0') {
 
 const client = makeClient(account)
 const store = Store.memory()
+// Bootstrap: the application maps each payer (credential source) to the channel it paid on.
+const bootstrap = process.env.MPPX_BOOTSTRAP === '1'
+const channelsBySource = new Map()
 
 const mppx = Mppx.create({
   secretKey,
@@ -55,6 +60,13 @@ const mppx = Mppx.create({
       getClient: () => client,
       ...(feePayer ? { feePayer } : {}),
       ...(settlementSchedule ? { settlementSchedule } : {}),
+      ...(bootstrap
+        ? {
+            bootstrap,
+            resolveChannelId: ({ source }) =>
+              source ? channelsBySource.get(source.toLowerCase()) : undefined,
+          }
+        : {}),
       onSessionSettlement(event) {
         console.log(json({ settlement: event }))
       },
@@ -78,6 +90,9 @@ async function handle(request) {
     result.status === 402
       ? result.challenge
       : await result.withReceipt(Response.json({ paid: true, path: url.pathname }))
+  const receipt = decodeReceipt(response.headers.get('payment-receipt'))
+  if (bootstrap && credential?.source && receipt?.channelId)
+    channelsBySource.set(credential.source.toLowerCase(), receipt.channelId)
   console.log(
     json({
       request: {
@@ -88,7 +103,7 @@ async function handle(request) {
         credential,
         status: response.status,
         responseHeaders: Object.fromEntries(response.headers.entries()),
-        receipt: decodeReceipt(response.headers.get('payment-receipt')),
+        receipt,
       },
     }),
   )

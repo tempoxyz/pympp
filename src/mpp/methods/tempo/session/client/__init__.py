@@ -4,6 +4,11 @@
 ``session_manager(...)`` drives one channel with fetch, top-up and close.
 """
 
+from mpp.methods.tempo.session._snapshot import (
+    SessionSnapshot,
+    deserialize_snapshot,
+    serialize_snapshot,
+)
 from mpp.methods.tempo.session.client._manager import (
     PaymentResponse,
     SessionManager,
@@ -32,9 +37,12 @@ __all__ = [
     "SessionContext",
     "SessionManager",
     "SessionMethod",
+    "SessionSnapshot",
     "UncertainFundingError",
     "create_channel_store",
     "create_json_channel_store",
+    "deserialize_snapshot",
+    "serialize_snapshot",
     "session",
     "session_manager",
 ]
