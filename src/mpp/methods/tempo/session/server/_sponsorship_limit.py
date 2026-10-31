@@ -192,22 +192,14 @@ def _verified_payer(raw: bytes) -> str | None:
 
     from mpp._typing import is_list
     from mpp.methods.tempo import _rlp as rlp
+    from mpp.methods.tempo.intents import (
+        _decode_signed_transaction,  # pyright: ignore[reportPrivateUsage]
+    )
 
-    fields = rlp.decode(raw[1:])
-    if not is_list(fields) or len(fields) not in (14, 15):
+    decoded = _decode_signed_transaction(raw)
+    if decoded is None:
         return None
-    signature = fields[-1]
-    if not isinstance(signature, bytes) or not signature:
-        return None
-    # The sender signs with an empty fee token and a 0x00 marker when a fee payer co-signs.
-    sponsored = raw[0] == 0x78 or fields[11] != b""
-    preimage = [
-        *fields[:10],
-        b"" if sponsored else fields[10],
-        b"\x00" if sponsored else b"",
-        *fields[12:-1],
-    ]
-    sign_payload = keccak(b"\x76" + rlp.encode(preimage))
+    fields, signature, sign_payload = decoded
     if signature[:1] not in (b"\x03", b"\x04") or len(signature) == 65:
         return _lower(_verified_signer(sign_payload, signature))
     user_address, inner = signature[1:21], signature[21:]

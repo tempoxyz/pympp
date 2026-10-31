@@ -133,11 +133,6 @@ def snapshot(**overrides: Any) -> SessionSnapshot:
     return SessionSnapshot(**fields)
 
 
-# --------------------------------------------------------------------------------------------
-# Proofs
-# --------------------------------------------------------------------------------------------
-
-
 class TestProof:
     def test_digest_and_signature_match_eip712_typed_data(self) -> None:
         account = Account.create()
@@ -181,11 +176,6 @@ class TestProof:
         assert parse_pkh_source(SOURCE) == (PAYER.address, CHAIN_ID)
         for bad in ("did:pkh:eip155:01:" + PAYER.address, "did:pkh:eip155:1:0x12", "x"):
             assert parse_pkh_source(bad) is None
-
-
-# --------------------------------------------------------------------------------------------
-# Snapshot codec
-# --------------------------------------------------------------------------------------------
 
 
 class TestSnapshotCodec:
@@ -246,10 +236,6 @@ class TestSnapshotCodec:
         with pytest.raises(ValueError, match="Invalid base64 JSON header"):
             deserialize_snapshot(base64.b64encode(b"not json").decode())
 
-
-# --------------------------------------------------------------------------------------------
-# Server: channel resolution and snapshot hints
-# --------------------------------------------------------------------------------------------
 
 EXPECTED = SnapshotPaymentFields(
     chain_id=CHAIN_ID, currency=CURRENCY, escrow_contract=ESCROW_ADDRESS, recipient=PAYEE.address
@@ -399,11 +385,6 @@ class TestChallengeSnapshot:
         assert isinstance(result, PaymentRequired)
         issued = Challenge.from_www_authenticate(result.challenge.headers["www-authenticate"])
         assert "sessionSnapshot" not in issued.request["methodDetails"]
-
-
-# --------------------------------------------------------------------------------------------
-# Server: bootstrap preflight
-# --------------------------------------------------------------------------------------------
 
 
 class Bootstrap:
@@ -583,28 +564,27 @@ class TestBootstrapPreflight:
 
 
 class TestBootstrapInternals:
-    def context(self, credential: Credential | None, **request: Any) -> PreflightContext:
-        return PreflightContext(
-            input=Request("HEAD", URL),
+    async def preflight(
+        self, credential: Credential | None = None, method: str = "HEAD", **request: Any
+    ) -> Response | None:
+        context = PreflightContext(
+            input=Request(method, URL),
             request={"currency": CURRENCY, "recipient": PAYEE.address, **request},
             credential=credential,
             realm=REALM,
             secret_key=SECRET,
         )
+        return await bootstrap.handle_bootstrap_preflight(
+            context,
+            chain_id=CHAIN_ID,
+            escrow_contract=None,
+            resolve_channel_id=None,
+            store=None,
+            proof_store=MemoryStore(),
+        )
 
     async def test_non_head_requests_continue(self) -> None:
-        context = replace(self.context(None), input=Request("GET", URL))
-        assert (
-            await bootstrap.handle_bootstrap_preflight(
-                context,
-                chain_id=CHAIN_ID,
-                escrow_contract=None,
-                resolve_channel_id=None,
-                store=None,
-                proof_store=MemoryStore(),
-            )
-            is None
-        )
+        assert await self.preflight(method="GET") is None
 
     @pytest.mark.parametrize(
         ("request_fields", "detail"),
@@ -617,27 +597,11 @@ class TestBootstrapInternals:
         self, request_fields: dict[str, Any], detail: str
     ) -> None:
         echo = ChallengeEcho(id="i", realm=REALM, method="tempo", intent="charge", request="e30")
-        context = self.context(Credential(challenge=echo, payload={}), **request_fields)
-        response = await bootstrap.handle_bootstrap_preflight(
-            context,
-            chain_id=CHAIN_ID,
-            escrow_contract=None,
-            resolve_channel_id=None,
-            store=None,
-            proof_store=MemoryStore(),
-        )
+        response = await self.preflight(Credential(challenge=echo, payload={}), **request_fields)
         assert response is not None and detail in problem(response)["detail"]
 
     async def test_route_chain_and_escrow_override_the_defaults(self) -> None:
-        context = self.context(None, chain_id=7, escrow_contract=OTHER_TOKEN)
-        response = await bootstrap.handle_bootstrap_preflight(
-            context,
-            chain_id=CHAIN_ID,
-            escrow_contract=None,
-            resolve_channel_id=None,
-            store=None,
-            proof_store=MemoryStore(),
-        )
+        response = await self.preflight(chain_id=7, escrow_contract=OTHER_TOKEN)
         assert response is not None
         issued = Challenge.from_www_authenticate(response.headers["www-authenticate"])
         assert issued.request["methodDetails"] == {"chainId": 7}
@@ -673,11 +637,6 @@ class TestBootstrapInternals:
         assert await claim(store, "c", "2030-01-01T00:00:00Z")
         assert not await claim(store, "c", "2030-01-01T00:00:00Z")
         assert store.keys == {"mppx:charge:proof:c"}
-
-
-# --------------------------------------------------------------------------------------------
-# Engine preflight hook
-# --------------------------------------------------------------------------------------------
 
 
 async def _paid(_: Any) -> Receipt:
@@ -753,11 +712,6 @@ class TestPreflightHook:
             server_method(verify=_paid, preflight="x")
 
 
-# --------------------------------------------------------------------------------------------
-# Client: snapshot hydration and manager bootstrap
-# --------------------------------------------------------------------------------------------
-
-
 def on_chain(
     monkeypatch: pytest.MonkeyPatch, *, settled: int = 50, deposit: int = 1_000, closing: int = 0
 ) -> None:
@@ -765,6 +719,20 @@ def on_chain(
         return chain.ChannelState(settled=settled, deposit=deposit, close_requested_at=closing)
 
     monkeypatch.setattr(chain, "get_channel_state", get_channel_state)
+
+
+OTHER_ID = "0x" + "77" * 32
+DELEGATE = TempoAccount.from_key("0x" + "44" * 32)
+DELEGATED = replace(DESCRIPTOR, authorized_signer=DELEGATE.address)
+DELEGATED_ID = compute_channel_id(DELEGATED, chain_id=CHAIN_ID)
+
+
+def voucher(channel_id: str, *, signer: Any = PAYER, signature: str | None = None) -> SignedVoucher:
+    return SignedVoucher(
+        channel_id=channel_id,
+        cumulative_amount=300,
+        signature=signature or sign(channel_id, 300, signer),
+    )
 
 
 class TestHydrate:
@@ -776,80 +744,57 @@ class TestHydrate:
         assert entry.opened and entry.descriptor == DESCRIPTOR and entry.chain_id == CHAIN_ID
 
     @pytest.mark.parametrize(
-        ("change", "message"),
+        ("account", "change", "state", "message"),
         [
-            ({"highest_voucher": None}, "missing its highest signed voucher"),
+            (PAYER, {"highest_voucher": None}, {}, "missing its highest signed voucher"),
             (
-                {
-                    "highest_voucher": SignedVoucher(
-                        channel_id="0x" + "00" * 32, cumulative_amount=300, signature="0x00"
-                    )
-                },
+                PAYER,
+                {"highest_voucher": voucher("0x" + "00" * 32, signature="0x00")},
+                {},
                 "voucher channelId",
             ),
-            ({"accepted_cumulative": 200}, "voucher amount does not match"),
-            ({"spent": 400}, "spent exceeds"),
-            ({"settled": 2000}, "settled amount exceeds"),
+            (PAYER, {"accepted_cumulative": 200}, {}, "voucher amount does not match"),
+            (PAYER, {"spent": 400}, {}, "spent exceeds"),
+            (PAYER, {"settled": 2000}, {}, "settled amount exceeds"),
             (
-                {
-                    "highest_voucher": SignedVoucher(
-                        channel_id=CHANNEL_ID,
-                        cumulative_amount=300,
-                        signature=sign(CHANNEL_ID, 300, PAYEE),
-                    )
-                },
+                PAYER,
+                {"highest_voucher": voucher(CHANNEL_ID, signer=PAYEE)},
+                {},
                 "signature is invalid",
             ),
-            ({"required_cumulative": 2000}, "exceeds on-chain channel deposit"),
+            (PAYER, {"required_cumulative": 2000}, {}, "exceeds on-chain channel deposit"),
+            (PAYEE, {}, {}, "payer does not match"),
+            (
+                PAYER,
+                {"channel_id": OTHER_ID, "highest_voucher": voucher(OTHER_ID)},
+                {},
+                "channelId does not match descriptor",
+            ),
+            (
+                PAYER,
+                {
+                    "descriptor": DELEGATED,
+                    "channel_id": DELEGATED_ID,
+                    "highest_voucher": voucher(DELEGATED_ID, signer=DELEGATE),
+                },
+                {},
+                "authorizedSigner does not match",
+            ),
+            (PAYER, {}, {"deposit": 0}, "closed or not found"),
+            (PAYER, {}, {"closing": 5}, "pending close"),
         ],
     )
-    async def test_rejects_inconsistent_snapshots(
-        self, monkeypatch: pytest.MonkeyPatch, change: dict[str, Any], message: str
-    ) -> None:
-        on_chain(monkeypatch)
-        with pytest.raises(ValueError, match=message):
-            await hydrate_session_snapshot(PAYER, snapshot(**change), rpc_url=RPC)
-
-    async def test_rejects_channels_of_other_accounts_or_ids(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        on_chain(monkeypatch)
-        with pytest.raises(ValueError, match="payer does not match"):
-            await hydrate_session_snapshot(PAYEE, snapshot(), rpc_url=RPC)
-        other = "0x" + "77" * 32
-        mislabeled = snapshot(
-            channel_id=other,
-            highest_voucher=SignedVoucher(
-                channel_id=other, cumulative_amount=300, signature=sign(other, 300)
-            ),
-        )
-        with pytest.raises(ValueError, match="channelId does not match descriptor"):
-            await hydrate_session_snapshot(PAYER, mislabeled, rpc_url=RPC)
-        delegate = TempoAccount.from_key("0x" + "44" * 32)
-        descriptor = replace(DESCRIPTOR, authorized_signer=delegate.address)
-        channel_id = compute_channel_id(descriptor, chain_id=CHAIN_ID)
-        delegated = snapshot(
-            descriptor=descriptor,
-            channel_id=channel_id,
-            highest_voucher=SignedVoucher(
-                channel_id=channel_id,
-                cumulative_amount=300,
-                signature=sign(channel_id, 300, delegate),
-            ),
-        )
-        with pytest.raises(ValueError, match="authorizedSigner does not match"):
-            await hydrate_session_snapshot(PAYER, delegated, rpc_url=RPC)
-
-    @pytest.mark.parametrize(
-        ("state", "message"),
-        [({"deposit": 0}, "closed or not found"), ({"closing": 5}, "pending close")],
-    )
-    async def test_rejects_channels_that_are_not_reusable_on_chain(
-        self, monkeypatch: pytest.MonkeyPatch, state: dict[str, int], message: str
+    async def test_rejects_snapshots_it_cannot_trust(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        account: Any,
+        change: dict[str, Any],
+        state: dict[str, int],
+        message: str,
     ) -> None:
         on_chain(monkeypatch, **state)
         with pytest.raises(ValueError, match=message):
-            await hydrate_session_snapshot(PAYER, snapshot(), rpc_url=RPC)
+            await hydrate_session_snapshot(account, snapshot(**change), rpc_url=RPC)
 
 
 class FakeServer:
@@ -962,53 +907,45 @@ class TestManagerBootstrap:
                 assert probe.url.params["user"] == "7"
                 assert probe.headers["cookie"] == "sid=abc" and probe.content == b""
 
-    async def test_a_snapshot_on_the_first_response_is_used_directly(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        server = FakeServer(first_status=204)
-        async with manager(server, monkeypatch) as client:
-            await client.fetch(URL)
-            assert client.channel_id == CHANNEL_ID and heads(server) == [False]
-
-    async def test_realms_the_origin_does_not_own_get_no_proof(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        server = FakeServer(realm="other.test")
-        async with manager(server, monkeypatch) as client:
-            await client.fetch(URL)
-            assert client.channel_id is None and heads(server) == [False]
-        server = FakeServer(realm="other.test")
-        trusted = {"https://api.test": "other.test"}
-        async with manager(server, monkeypatch, trusted_tempo_realms=trusted) as client:
-            await client.fetch(URL)
-            assert client.channel_id == CHANNEL_ID and heads(server) == [False, True]
-
     @pytest.mark.parametrize(
-        "options",
+        ("server_options", "options", "recovered", "probes"),
         [
-            {"amount": "1"},
-            {"prove_status": 401},
-            {"header": "!!!"},
-            {"details": {"chainId": 99}},
-            {"details": {}, "allowed_chain_ids": [99]},
+            # A snapshot on the first response is used directly.
+            ({"first_status": 204}, {}, True, [False]),
+            # A realm the origin does not own gets no proof, unless it is trusted.
+            ({"realm": "other.test"}, {}, False, [False]),
+            (
+                {"realm": "other.test"},
+                {"trusted_tempo_realms": {"https://api.test": "other.test"}},
+                True,
+                [False, True],
+            ),
+            # A chainless challenge uses the RPC chain.
+            ({"details": {}}, {}, True, [False, True]),
+            # Failures leave the manager to open a channel.
+            ({"amount": "1"}, {}, False, [False]),
+            ({"prove_status": 401}, {}, False, [False, True]),
+            ({"header": "!!!"}, {}, False, [False, True]),
+            ({"details": {"chainId": 99}}, {}, False, [False]),
+            ({"details": {}}, {"allowed_chain_ids": [99]}, False, [False]),
+            # A disabled manager does not probe.
+            ({}, {"bootstrap": False}, False, []),
         ],
     )
-    async def test_failures_leave_the_manager_to_open_a_channel(
-        self, monkeypatch: pytest.MonkeyPatch, options: dict[str, Any]
+    async def test_recovery_outcomes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        server_options: dict[str, Any],
+        options: dict[str, Any],
+        recovered: bool,
+        probes: list[bool],
     ) -> None:
-        allowed = options.pop("allowed_chain_ids", [CHAIN_ID])
-        server = FakeServer(**options)
-        async with manager(server, monkeypatch, allowed_chain_ids=allowed) as client:
-            response = await client.fetch(URL)
-            assert response.status_code == 200 and client.channel_id is None
-
-    async def test_a_chainless_challenge_uses_the_rpc_chain(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        server = FakeServer(details={})
-        async with manager(server, monkeypatch) as client:
-            await client.fetch(URL)
-            assert client.channel_id == CHANNEL_ID
+        server = FakeServer(**server_options)
+        options = {"allowed_chain_ids": [CHAIN_ID], **options}
+        async with manager(server, monkeypatch, **options) as client:
+            assert (await client.fetch(URL)).status_code == 200
+            assert client.channel_id == (CHANNEL_ID if recovered else None)
+            assert heads(server) == probes
 
     async def test_a_snapshot_on_another_rpc_chain_is_rejected(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1023,14 +960,6 @@ class TestManagerBootstrap:
         async with client:
             await client.fetch(URL)
             assert client.channel_id is None
-
-    async def test_disabled_or_opened_managers_do_not_probe(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        server = FakeServer()
-        async with manager(server, monkeypatch, bootstrap=False) as client:
-            await client.fetch(URL)
-            assert heads(server) == []
 
     async def test_responses_without_a_charge_challenge_are_ignored(
         self, monkeypatch: pytest.MonkeyPatch
