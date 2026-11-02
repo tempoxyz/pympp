@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from mpp import Challenge
+from mpp import Challenge, NoMethodFoundError
 from mpp.extensions.mcp import McpClient
 from mpp.extensions.mcp.types import MCPChallenge
 from mpp.methods.tempo import (
@@ -511,9 +511,9 @@ def test_challenge_selection_skips_offers_outside_policy(
     ]
 
     if expected is None:
-        with pytest.raises(ValueError, match="No compatible payment method"):
+        with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
             runtime.match_challenge(challenges)
-        with pytest.raises(ValueError, match="No compatible payment method"):
+        with pytest.raises(NoMethodFoundError, match="No compatible payment method"):
             mcp._match_challenge(mcp_challenges)
         return
     assert runtime.match_challenge(challenges) == (challenges[expected], runtime.methods[0])

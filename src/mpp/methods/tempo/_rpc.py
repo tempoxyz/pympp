@@ -8,6 +8,14 @@ from typing import Any
 from mpp._defaults import DEFAULT_TIMEOUT
 
 
+class RpcError(RuntimeError):
+    """A JSON-RPC error response; ``response`` is the whole response object."""
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        super().__init__(f"RPC error: {response['error']}")
+        self.response = response
+
+
 async def _rpc_call(
     rpc_url: str,
     method: str,
@@ -29,7 +37,7 @@ async def _rpc_call(
     resp.raise_for_status()
     result = resp.json()
     if "error" in result:
-        raise RuntimeError(f"RPC error: {result['error']}")
+        raise RpcError(result)
     return result["result"]
 
 

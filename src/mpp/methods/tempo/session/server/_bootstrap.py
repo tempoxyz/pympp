@@ -24,7 +24,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationFailedError,
 )
-from mpp.methods.tempo import _proof as _charge_proof
+from mpp.methods.tempo._proof import PROOF_CLAIM_PREFIX
 from mpp.methods.tempo.session._proof import parse_pkh_source, verify_proof
 from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS
 from mpp.methods.tempo.session._snapshot import (
@@ -47,9 +47,6 @@ if TYPE_CHECKING:
     from mpp.store import Store
 
 __all__ = ["handle_bootstrap_preflight"]
-
-PROOF_CLAIM_PREFIX = _charge_proof.PROOF_CLAIM_PREFIX
-"""Store key prefix claiming a used proof's challenge ID, shared with mppx and tempo.charge."""
 
 
 def _respond_challenge(challenge: Challenge, error: PaymentError | None = None) -> Response:
@@ -94,8 +91,13 @@ def _assert_not_expired(echo: ChallengeEcho) -> None:
 
 
 async def _claim_proof(store: Store, challenge_id: str, expires: str) -> bool:
-    until = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
-    return await _charge_proof.claim_proof(store, challenge_id, until)
+    from mpp.store import ExpiringStore
+
+    key = PROOF_CLAIM_PREFIX + challenge_id
+    if isinstance(store, ExpiringStore):
+        until = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+        return await store.put_if_absent_until(key, "1", until)
+    return await store.put_if_absent(key, "1")
 
 
 async def _verify_proof_credential(

@@ -30,7 +30,7 @@ Documentation = "https://github.com/tempoxyz/pympp#readme"
 
 [project.optional-dependencies]
 tempo = [
-    "pytempo>=0.2.1",
+    "pytempo>=0.7.0",
     "pydantic>=2.0",
     "eth-account>=0.11",
     "eth-abi>=5.0,<6",
@@ -44,7 +44,7 @@ tempo = [
 ]
 stripe = [
     "pydantic>=2.0",
-    "pytempo>=0.2.1",
+    "pytempo>=0.7.0",
     "eth-account>=0.11",
     "eth-abi>=5.0,<6",
     "eth-hash[pycryptodome]>=0.7",
@@ -261,3 +261,7 @@ pytest_add_cli_args = [
     "not integration and not redis and not x402_localnet",
     "--hypothesis-profile=mutmut",
 ]
+
+[tool.uv]
+# pytempo is our own package; it is exempt from CI's UV_EXCLUDE_NEWER cooldown.
+exclude-newer-package = { pytempo = false }

@@ -1,162 +1,130 @@
-"""Server-side verification of Tempo zero-amount proof credentials.
+"""Tempo zero-amount proof credentials (mppx `tempo/internal/proof.ts`).
 
-Mirrors mppx ``tempo/server/Charge.ts``: a proof is an EIP-712 ``Proof`` signature
-(domain ``MPP`` version 3) binding the source account to the challenge ID and realm.
-It is valid when the source account signed it itself, or when an access key the
-AccountKeychain holds for the source, unrevoked and unexpired, signed it: bare, or
-wrapped in a Keychain V1 (``0x03``) or V2 (``0x04``) envelope naming the source.
-
-Only primitive secp256k1 signatures are recovered (bare or inside a keychain
-envelope); P256, WebAuthn and smart-account (ERC-1271) proofs are not supported yet.
+A zero-amount charge is paid with an EIP-712 ``Proof(address account,string
+challengeId,string realm)`` signature in the ``MPP`` version ``3`` domain instead
+of a transaction. The ``account`` field binds the proof to the payer wallet, so a
+proof signed for one account cannot be replayed against another.
 """
 
 from __future__ import annotations
 
-import json
-import math
-import time
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-from eth_abi.abi import decode, encode
+from eth_abi.abi import encode
 from eth_hash.auto import keccak
 
-from mpp.methods.tempo.session._proof import proof_digest
-from mpp.methods.tempo.session._voucher import (
-    _recover_canonical,  # pyright: ignore[reportPrivateUsage]
-)
-
 if TYPE_CHECKING:
-    from mpp.store import Store
+    from mpp.methods.tempo.account import TempoAccount
 
-ACCOUNT_KEYCHAIN_ADDRESS = "0xaAAAaaAA00000000000000000000000000000000"
-"""The AccountKeychain precompile."""
-
-_GET_KEY_SELECTOR = "bc298553"  # getKey(address,address)
-_KEYCHAIN_V1 = 0x03
-_KEYCHAIN_V2 = 0x04
-_SECP256K1_LENGTH = 65
-_KEYCHAIN_LENGTH = 1 + 20 + _SECP256K1_LENGTH
-
-
-def recover_authorized_proof_signer(
-    signature: str, *, source: str, chain_id: int, challenge_id: str, realm: str
-) -> str | None:
-    """Recover the key that signed a proof for ``source`` (mppx ``recoverAuthorizedProofSigner``).
-
-    Returns the signer of a bare secp256k1 signature over the proof digest, or the
-    inner signer of a keychain envelope naming ``source`` (V1 signs the proof
-    digest, V2 signs ``keccak256(0x04 || digest || source)``). Returns ``None``
-    for anything else. The caller still checks that the signer is ``source`` or
-    one of its active access keys.
-    """
-    try:
-        raw = bytes.fromhex(signature.removeprefix("0x"))
-        digest = proof_digest(
-            account=source, chain_id=chain_id, challenge_id=challenge_id, realm=realm
-        )
-    except Exception:
-        return None
-    if not signature.startswith("0x"):
-        return None
-    if len(raw) == _SECP256K1_LENGTH:
-        return _recover_canonical(signature, digest)
-    if len(raw) != _KEYCHAIN_LENGTH or raw[0] not in (_KEYCHAIN_V1, _KEYCHAIN_V2):
-        return None
-    user_address = raw[1:21]
-    if user_address != bytes.fromhex(source.removeprefix("0x")):
-        return None
-    digest_bytes = bytes.fromhex(digest.removeprefix("0x"))
-    payload = (
-        keccak(bytes([_KEYCHAIN_V2]) + digest_bytes + user_address)
-        if raw[0] == _KEYCHAIN_V2
-        else digest_bytes
-    )
-    return _recover_canonical("0x" + raw[21:].hex(), "0x" + payload.hex())
-
-
-def get_key_call_data(account: str, access_key: str) -> str:
-    """ABI-encoded ``AccountKeychain.getKey(account, accessKey)`` call data."""
-    return "0x" + _GET_KEY_SELECTOR + encode(["address", "address"], [account, access_key]).hex()
-
-
-def is_active_key_info(result: Any, access_key: str, now: int | None = None) -> bool:
-    """Whether a ``getKey`` result describes ``access_key``, unrevoked and unexpired.
-
-    The result is ``(uint8 signatureType, address keyId, uint64 expiry,
-    bool enforceLimits, bool isRevoked)``; an unknown key reads as zeros.
-    """
-    try:
-        _, key_id, expiry, _, revoked = decode(
-            ["uint8", "address", "uint64", "bool", "bool"],
-            bytes.fromhex(str(result).removeprefix("0x")),
-        )
-    except Exception:
-        return False
-    if str(key_id).lower() != access_key.lower():
-        return False
-    current = int(time.time()) if now is None else now
-    return not revoked and int(expiry) > current
-
+DOMAIN_NAME = "MPP"
+DOMAIN_VERSION = "3"
+PRIMARY_TYPE = "Proof"
+# Field order is part of the type hash; it must match mppx's `types`.
+TYPES: dict[str, list[dict[str, str]]] = {
+    "Proof": [
+        {"name": "account", "type": "address"},
+        {"name": "challengeId", "type": "string"},
+        {"name": "realm", "type": "string"},
+    ],
+}
 
 PROOF_CLAIM_PREFIX = "mppx:charge:proof:"
-"""Store key prefix claiming a used proof's challenge ID, shared with mppx and session bootstrap."""
+"""Store key prefix claiming a used proof's challenge ID (mppx ``getProofStoreKey``).
 
-_REPLAY_MARKER_TYPE = "mppx:replay"
+Charges and session bootstrap claim proofs under the same key, so a proof used
+for one cannot be used again for the other.
+"""
 
-
-def proof_claim_key(challenge_id: str) -> str:
-    """The store key claiming a proof's challenge (mppx ``getProofStoreKey``)."""
-    return PROOF_CLAIM_PREFIX + challenge_id
-
-
-def _is_live_claim(value: Any, now: float) -> bool:
-    """Whether a stored claim still holds: anything but an expired replay marker (as mppx)."""
-    if value is None:
-        return False
-    if isinstance(value, bytes | str):
-        # Stores such as Redis keep values as strings: the marker is JSON there.
-        try:
-            value = json.loads(value)
-        except ValueError:
-            return True
-    if not isinstance(value, dict):
-        return True
-    marker = cast("dict[str, Any]", value)
-    if marker.get("type") != _REPLAY_MARKER_TYPE:
-        return True
-    expires = marker.get("expires")
-    return not isinstance(expires, int | float) or expires > now * 1000
+_DOMAIN_TYPEHASH = keccak(b"EIP712Domain(string name,string version,uint256 chainId)")
+_PROOF_TYPEHASH = keccak(b"Proof(address account,string challengeId,string realm)")
 
 
-async def claim_proof(store: Store, challenge_id: str, expires_at: float) -> bool:
-    """Record a proof's first use until ``expires_at`` (mppx ``Store.tryClaim``).
+def typed_data(*, account: str, chain_id: int, challenge_id: str, realm: str) -> dict[str, Any]:
+    """Return the EIP-712 typed data a proof signs, shaped as mppx's ``typedData``."""
+    return {
+        "domain": {"name": DOMAIN_NAME, "version": DOMAIN_VERSION, "chainId": chain_id},
+        "types": TYPES,
+        "primaryType": PRIMARY_TYPE,
+        "message": {"account": account, "challengeId": challenge_id, "realm": realm},
+    }
 
-    Returns ``False`` when the proof was already claimed or its challenge has
-    expired. Stores with ``put_if_absent_until`` claim until the challenge expires;
-    compare-and-set stores write mppx's expiring replay marker, which a later claim
-    may replace once it has expired. Other stores only offer ``put_if_absent``, so
-    their claim (the same marker) is never released: still single-use, but kept.
-    """
-    from mpp.store import CompareAndSetStore, ExpiringStore
 
-    if not math.isfinite(expires_at) or expires_at <= time.time():
-        return False
-    key = proof_claim_key(challenge_id)
-    # JSON, not a dict, so string-valued stores such as Redis can hold it.
-    marker = json.dumps(
-        {"expires": math.floor(expires_at * 1000), "type": _REPLAY_MARKER_TYPE},
-        separators=(",", ":"),
+def proof_hash(*, account: str, chain_id: int, challenge_id: str, realm: str) -> bytes:
+    """Return the 32-byte EIP-712 digest a proof signs."""
+    domain = keccak(
+        encode(
+            ["bytes32", "bytes32", "bytes32", "uint256"],
+            [
+                _DOMAIN_TYPEHASH,
+                keccak(DOMAIN_NAME.encode()),
+                keccak(DOMAIN_VERSION.encode()),
+                chain_id,
+            ],
+        )
     )
-    if isinstance(store, ExpiringStore):
-        return await store.put_if_absent_until(key, marker, expires_at)
-    if isinstance(store, CompareAndSetStore):
-        current = await store.get(key)
-        if _is_live_claim(current, time.time()):
-            return False
-        return await store.compare_and_set(key, current, marker)
-    return await store.put_if_absent(key, marker)
+    struct = keccak(
+        encode(
+            ["bytes32", "address", "bytes32", "bytes32"],
+            [_PROOF_TYPEHASH, account, keccak(challenge_id.encode()), keccak(realm.encode())],
+        )
+    )
+    return keccak(b"\x19\x01" + domain + struct)
 
 
-async def is_proof_claimed(store: Store, challenge_id: str) -> bool:
-    """Whether a proof's challenge is already claimed (see :func:`claim_proof`)."""
-    return _is_live_claim(await store.get(proof_claim_key(challenge_id)), time.time())
+def proof_source(address: str, chain_id: int) -> str:
+    """Return the ``did:pkh`` source a proof credential names its payer with."""
+    return f"did:pkh:eip155:{chain_id}:{address}"
+
+
+def sign_proof(
+    signer: TempoAccount,
+    *,
+    account: str,
+    chain_id: int,
+    challenge_id: str,
+    realm: str,
+) -> str:
+    """Sign a proof bound to ``account``, returning the signature as 0x-hex.
+
+    When ``signer`` is an access key for ``account`` (a different address), the
+    signature is a Keychain V2 envelope (``0x04 || account || inner``), as viem's
+    Tempo access-key accounts sign typed data.
+    """
+    digest = proof_hash(account=account, chain_id=chain_id, challenge_id=challenge_id, realm=realm)
+    if signer.address.lower() == account.lower():
+        return "0x" + signer.sign_hash(digest).hex()
+    # pytempo ships no type information.
+    from pytempo import KeychainSignature  # pyright: ignore[reportMissingTypeStubs]
+
+    envelope: Any = KeychainSignature.sign(digest, signer.private_key, account)
+    return "0x" + bytes(envelope.to_bytes()).hex()
+
+
+class ProofSigner(NamedTuple):
+    """The address that produced a proof signature."""
+
+    address: str
+    keychain: bool
+    """Whether the signature was a Keychain envelope (the signer is an access key)."""
+
+
+def recover_proof_signer(signature: str, *, account: str, digest: bytes) -> ProofSigner | None:
+    """Recover the signer of a secp256k1, P256, WebAuthn or Keychain proof signature.
+
+    Verification is pytempo's ``recover_signer``, which matches tempo-primitives. A
+    Keychain envelope must name ``account`` as its user; its inner signature (any of
+    those primitives) signs the digest (V1) or ``keccak256(0x04 || digest || account)``
+    (V2), as in mppx's ``recoverAuthorizedProofSigner``. Returns ``None`` for an
+    unrecoverable signature.
+    """
+    # pytempo ships no type information.
+    import pytempo.signatures  # pyright: ignore[reportMissingTypeStubs]
+
+    signatures: Any = pytempo.signatures
+    try:
+        recovered: Any = signatures.recover_signer(digest, signature)
+    except ValueError:  # InvalidSignatureError is a ValueError
+        return None
+    if recovered.keychain and recovered.account.lower() != account.lower():
+        return None
+    return ProofSigner(address=recovered.key_id, keychain=bool(recovered.keychain))

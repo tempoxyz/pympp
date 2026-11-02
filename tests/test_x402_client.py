@@ -19,7 +19,7 @@ from eth_account import Account
 
 from mpp import Challenge, Credential
 from mpp.client import Mpp, PaymentTransport
-from mpp.errors import PaymentError, PaymentOutcomeUnknownError
+from mpp.errors import NoMethodFoundError, PaymentError, PaymentOutcomeUnknownError
 from mpp.events import CREDENTIAL_CREATED
 from mpp.methods.evm import BASE_SEPOLIA_USDC, BASE_USDC, EvmAsset
 from mpp.methods.evm import client as evm_client
@@ -476,18 +476,19 @@ class TestTransport:
         failures: list[dict[str, Any]] = []
         async with mpp(server) as client:
             client.on_payment_failed(failures.append)
-            response = await client.fetch(URL)
-        assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError) as raised:
+                await client.fetch(URL)
         assert len(server.requests) == 1
-        assert isinstance(failures[0]["error"], X402FormatError)
+        assert failures[0]["error"] is raised.value
+        assert isinstance(raised.value.__cause__, X402FormatError)
 
     async def test_offers_outside_policy_are_not_paid(self) -> None:
         server = Server(required(header(requirements(amount="1000001"))))
         failures: list[dict[str, Any]] = []
         async with mpp(server, methods=[method(max_amount="1")]) as client:
             client.on_payment_failed(failures.append)
-            response = await client.fetch(URL)
-        assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError, match="for challenges: evm.charge"):
+                await client.fetch(URL)
         assert len(server.requests) == 1
         assert [c.id for c in failures[0]["challenges"]] == ["x402:0"]
 
@@ -523,14 +524,15 @@ class TestTransport:
         await transport.handle_async_request(request)
         assert PAYMENT_RESPONSE_HEADER not in server.requests[1].headers
 
-    async def test_rejected_payments_are_retried_a_bounded_number_of_times(self) -> None:
+    async def test_repeated_offer_does_not_authorize_another_payment(self) -> None:
         server = Server(required())
         async with mpp(server, max_payment_retries=3) as client:
             response = await client.fetch(URL)
         assert response.status_code == 402
         signatures = [r.headers.get(PAYMENT_SIGNATURE_HEADER) for r in server.requests]
         assert signatures[0] is None
-        assert len(set(signatures[1:])) == 3
+        assert len(signatures) == 2
+        assert signatures[1] is not None
 
     async def test_server_error_after_paying_is_an_unknown_outcome(self) -> None:
         server = Server(required(), httpx.Response(500, text="boom"))

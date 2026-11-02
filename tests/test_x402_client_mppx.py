@@ -40,6 +40,7 @@ from x402.mechanisms.evm import FacilitatorWeb3Signer
 from x402.mechanisms.evm.exact import register_exact_evm_facilitator
 from x402.schemas import PaymentPayload, PaymentRequirements
 
+from mpp import NoMethodFoundError
 from mpp.client import PaymentTransport
 from mpp.methods.evm import EvmAsset
 from mpp.methods.evm import client as evm
@@ -328,14 +329,14 @@ async def test_amount_above_max_amount_sends_no_payment(
         tap = Tap(x402_only=x402_only)
         async with pympp_client(tap, max_amount="0.005") as (client, transport):
             transport.on_payment_failed(failures.append)
-            response = await client.get(f"{base}/paid")
+            with pytest.raises(NoMethodFoundError):
+                await client.get(f"{base}/paid")
 
-    assert response.status_code == 402
     assert len(tap.requests) == 1
     assert tap.signatures() == []
     [failure] = failures
     assert failure["credential"] is None
-    assert "No compatible payment method" in str(failure["error"])
+    assert "No method found for challenges" in str(failure["error"])
     assert stub.verify_requests == []
     assert stub.settle_requests == []
 
