@@ -1006,6 +1006,28 @@ class TestOpaqueEcho:
         challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
         assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
 
+    def test_unchanged_large_integer_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = (
+            base64.urlsafe_b64encode(b'{"value":1267650600228229401496703205376}')
+            .rstrip(b"=")
+            .decode()
+        )
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    @pytest.mark.parametrize("pair", [([1], [True]), ({"a": [0]}, {"a": [False]})])
+    def test_nested_bool_int_change_is_detected(self, pair: tuple[object, object]) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal(*pair)
+
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
 

@@ -11,7 +11,7 @@ import hmac
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mpp._canonical import canonical_b64url
 from mpp._parsing import (
@@ -189,6 +189,28 @@ def _challenge_id(
     return _b64url_encode_bytes(mac)
 
 
+def _json_equal(a: object, b: object) -> bool:
+    """Compare decoded JSON values, telling booleans apart from numbers.
+
+    Python treats True == 1 and False == 0, which JSON does not.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        left = cast("dict[str, object]", a)
+        right = cast("dict[str, object]", b)
+        return left.keys() == right.keys() and all(
+            _json_equal(v, right[k]) for k, v in left.items()
+        )
+    if isinstance(a, list) and isinstance(b, list):
+        left_list = cast("list[object]", a)
+        right_list = cast("list[object]", b)
+        return len(left_list) == len(right_list) and all(
+            _json_equal(x, y) for x, y in zip(left_list, right_list, strict=True)
+        )
+    return a == b
+
+
 def _constant_time_equal(a: str, b: str) -> bool:
     """Constant-time string comparison to prevent timing attacks."""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
@@ -352,16 +374,13 @@ class Challenge:
         """
         if self.opaque is None:
             return None
-        canonical = canonical_b64url(self.opaque)
         if self._opaque_b64:
-            # Compare canonical encodings, not decoded values: Python treats
-            # True == 1 and False == 0, which JSON does not.
             try:
-                if canonical_b64url(_b64_decode(self._opaque_b64)) == canonical:
+                if _json_equal(_b64_decode(self._opaque_b64), self.opaque):
                     return self._opaque_b64
             except ParseError:
                 pass
-        return canonical
+        return canonical_b64url(self.opaque)
 
     def to_echo(self) -> ChallengeEcho:
         """Create a ChallengeEcho for use in credentials.
