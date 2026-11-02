@@ -1023,3 +1023,23 @@ async def test_sqlite_state_survives_restart(tmp_path: Any) -> None:
         assert (await store.deduct_from_channel(cs, CHANNEL_ID, 5)).channel.spent == 7
     finally:
         await reopened.close()
+
+
+def test_reconcile_keeps_marker_while_a_server_close_may_land() -> None:
+    # A payer cancelling its request must not reopen spending while the server's close is valid.
+    current = make_channel(close_requested_at=1_000, pending_close_valid_before=1_100)
+    cancelled = OnChain(100, 10, 0)
+    kept = store.reconcile_expired_pending_close(current=current, now=1_130, state=cancelled)
+    assert kept is current
+    cleared = store.reconcile_expired_pending_close(current=current, now=1_131, state=cancelled)
+    assert cleared is not None
+    assert cleared.close_requested_at == 0
+    assert cleared.pending_close_valid_before is None
+
+
+def test_pending_close_valid_before_round_trips_through_json() -> None:
+    state = make_channel(close_requested_at=1_000, pending_close_valid_before=1_100)
+    encoded = store.channel_state_to_json(state)
+    assert encoded["pendingCloseValidBefore"] == "1100"
+    assert store.channel_state_from_json(encoded) == state
+    assert "pendingCloseValidBefore" not in store.channel_state_to_json(make_channel())
