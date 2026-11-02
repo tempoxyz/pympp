@@ -280,8 +280,10 @@ async def test_replayed_payment_is_rejected() -> None:
 
 
 async def test_expired_payment_is_rejected_then_paid_afresh() -> None:
-    async with coinbase(accepts(timeout=1)) as (url, facilitator, app):
-        async with paying_client(Recorder(delay_paid=2.2)) as (client, recorder):
+    # validBefore is whole seconds from signing, so the retry needs a window wide
+    # enough that a slow runner does not see it expire too; the delay outlasts it.
+    async with coinbase(accepts(timeout=3)) as (url, facilitator, app):
+        async with paying_client(Recorder(delay_paid=3.2)) as (client, recorder):
             response = await client.fetch(url)
     assert response.status_code == 200
     first, second = recorder.signatures()
