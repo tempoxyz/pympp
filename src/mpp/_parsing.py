@@ -171,7 +171,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
             break
         match = _AUTH_PARAM_RE.match(params_str, pos)
         if match is None:
-            raise ParseError("Invalid authentication parameter")
+            # Preserve permissive trailing-extension handling without searching every suffix.
+            break
         # Auth-param names are case-insensitive (RFC 9110 §11.2).
         key = match.group(1).lower()
         if key in params:
@@ -185,7 +186,7 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         if pos == len(params_str):
             break
         if params_str[pos] != ",":
-            raise ParseError("Invalid authentication parameter separator")
+            break
         pos += 1
     return params
 

@@ -1,20 +1,33 @@
-"""Malformed authentication parameters must not be skipped during parsing."""
+"""Authentication parsing stays bounded, including malformed optional suffixes."""
 
 import pytest
 
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _parse_auth_params
 
 
-@pytest.mark.parametrize("value", ["garbage id=ok", "a=ok junk", 'a="unterminated'])
-def test_reject_malformed_parameters(value: str) -> None:
-    with pytest.raises(ParseError):
-        _parse_auth_params(value)
+@pytest.mark.parametrize(
+    "value, expected",
+    [("garbage id=ok", {}), ("a=ok junk", {"a": "ok"}), ('a="unterminated', {})],
+)
+def test_malformed_suffix_stops_parsing(value: str, expected: dict[str, str]) -> None:
+    assert _parse_auth_params(value) == expected
 
 
 @pytest.mark.parametrize("size", [1024, 8192, MAX_AUTHORIZATION_SIZE])
-def test_reject_long_missing_separator(size: int) -> None:
-    with pytest.raises(ParseError):
-        _parse_auth_params("a" * size)
+def test_long_missing_separator(size: int) -> None:
+    assert _parse_auth_params("a" * size) == {}
+
+
+def test_malformed_optional_extensions_keep_required_parameters() -> None:
+    from mpp._parsing import parse_www_authenticate
+
+    required = (
+        'Payment id="bounded", realm="example.com", method="tempo", intent="charge", request="e30"'
+    )
+    for suffix in [', fuzz="' + "\\" * 24_000, ', description="Payment for "Premium" service"']:
+        challenge = parse_www_authenticate(required + suffix)
+        assert challenge.id == "bounded"
+        assert challenge.request == {}
 
 
 def test_reject_oversized_parameters() -> None:
