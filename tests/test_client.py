@@ -12,7 +12,14 @@ import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
-from mpp import Challenge, Credential, PaymentError, PaymentOutcomeUnknownError
+from mpp import (
+    Challenge,
+    Credential,
+    NoMethodFoundError,
+    ParseError,
+    PaymentError,
+    PaymentOutcomeUnknownError,
+)
 from mpp.client import Mpp, PaymentTransport
 from mpp.events import (
     CHALLENGE_RECEIVED,
@@ -25,7 +32,7 @@ from mpp.events import (
     PaymentEventName,
 )
 from mpp.methods import Method
-from mpp.runtime import ClientMethod, CredentialParams, PaymentRuntime
+from mpp.runtime import ChallengeCandidate, ClientMethod, CredentialParams, PaymentRuntime
 from tests import make_credential
 
 _NOISE_GZIP = gzip.compress(random.Random(0).randbytes(100_000))
@@ -599,7 +606,9 @@ class TestPaymentTransport:
             ).to_www_authenticate("example.com"),
         ],
     )
-    async def test_streaming_body_returns_unmatched_402(self, www_authenticate: str | None) -> None:
+    async def test_streaming_body_raises_for_unmatched_402(
+        self, www_authenticate: str | None
+    ) -> None:
         headers = {"www-authenticate": www_authenticate} if www_authenticate else {}
         inner = MockTransport([httpx.Response(402, headers=headers, content=b"unmatched")])
         transport = PaymentTransport(methods=[MockMethod().client], inner=inner)
@@ -607,12 +616,11 @@ class TestPaymentTransport:
         async def body():
             yield b"one-shot"
 
-        response = await transport.handle_async_request(
-            httpx.Request("POST", "https://example.com", content=body())
-        )
+        with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
+            await transport.handle_async_request(
+                httpx.Request("POST", "https://example.com", content=body())
+            )
 
-        assert response.status_code == 402
-        assert response.content == b"unmatched"
         assert len(inner.requests) == 1
 
     @pytest.mark.asyncio
@@ -656,19 +664,17 @@ class TestPaymentTransport:
             with pytest.raises(asyncio.CancelledError if mode == "cancel" else RuntimeError):
                 await transport.handle_async_request(request)
             assert stream.closed
+        elif mode in ("missing", "malformed", "unmatched"):
+            with pytest.raises(NoMethodFoundError):
+                await transport.handle_async_request(request)
+            assert stream.reads == 0
+            assert stream.closed
         else:
             response = await transport.handle_async_request(request)
             assert stream.reads == 0
-            if mode == "retry":
-                assert response.status_code == 200
-                assert stream.closed
-                assert len(inner.requests) == 2
-            else:
-                assert response is original
-                assert not stream.closed
-                assert await response.aread() == b"body remains available to the caller"
-                await response.aclose()
-        assert stream.reads == (1 if mode in ("missing", "malformed", "unmatched") else 0)
+            assert response.status_code == 200
+            assert stream.closed
+            assert len(inner.requests) == 2
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -911,8 +917,8 @@ class TestPaymentTransport:
         assert inner.requests[1].headers["Authorization"] == first_credential.to_authorization()
 
     @pytest.mark.asyncio
-    async def test_returns_402_when_no_matching_method(self) -> None:
-        """Should return 402 when no matching method found."""
+    async def test_raises_when_no_matching_method(self) -> None:
+        """Should raise, as mppx does, when no configured method pays a challenge."""
         failed_payloads: list[dict] = []
         challenge = Challenge(
             id="test-id",
@@ -933,9 +939,13 @@ class TestPaymentTransport:
         transport.on_payment_failed(lambda payload: failed_payloads.append(payload))
 
         request = httpx.Request("GET", "https://example.com")
-        response = await transport.handle_async_request(request)
+        with pytest.raises(NoMethodFoundError) as raised:
+            await transport.handle_async_request(request)
 
-        assert response.status_code == 402
+        assert str(raised.value) == (
+            "No method found for challenges: stripe.charge. Available: tempo.charge"
+        )
+        assert isinstance(raised.value, PaymentError)
         assert len(inner.requests) == 1
         assert len(failed_payloads) == 1
         payload = failed_payloads[0]
@@ -944,14 +954,14 @@ class TestPaymentTransport:
         assert payload["challenges"][0].id == challenge.id
         assert payload["challenges"][0].method == challenge.method
         assert payload["credential"] is None
-        assert isinstance(payload["error"], ValueError)
+        assert payload["error"] is raised.value
         assert payload["method"] is None
         assert payload["request"] is request
-        assert payload["response"] is response
+        assert payload["response"] is inner.responses[0]
 
     @pytest.mark.asyncio
-    async def test_returns_402_without_payment_header(self) -> None:
-        """Should return 402 if no Payment WWW-Authenticate header."""
+    async def test_raises_without_payment_header(self) -> None:
+        """A 402 without a Payment challenge offers nothing to pay (mppx Fetch)."""
         inner = MockTransport(
             [
                 httpx.Response(402, headers={"www-authenticate": "Bearer realm=test"}),
@@ -961,13 +971,14 @@ class TestPaymentTransport:
         transport = PaymentTransport(methods=[MockMethod().client], inner=inner)
 
         request = httpx.Request("GET", "https://example.com")
-        response = await transport.handle_async_request(request)
+        with pytest.raises(NoMethodFoundError) as raised:
+            await transport.handle_async_request(request)
 
-        assert response.status_code == 402
+        assert str(raised.value) == "No method found for challenges: . Available: tempo.charge"
 
     @pytest.mark.asyncio
-    async def test_returns_402_on_parse_error(self) -> None:
-        """Should return 402 if challenge cannot be parsed."""
+    async def test_raises_on_parse_error(self) -> None:
+        """An unparseable challenge leaves nothing to pay; the parse error is the cause."""
         inner = MockTransport(
             [
                 httpx.Response(402, headers={"www-authenticate": "Payment invalid-base64!!"}),
@@ -977,9 +988,108 @@ class TestPaymentTransport:
         transport = PaymentTransport(methods=[MockMethod().client], inner=inner)
 
         request = httpx.Request("GET", "https://example.com")
-        response = await transport.handle_async_request(request)
+        with pytest.raises(NoMethodFoundError) as raised:
+            await transport.handle_async_request(request)
+
+        assert isinstance(raised.value.__cause__, ParseError)
+
+    @pytest.mark.asyncio
+    async def test_returns_unpayable_402_after_paid_retry(self) -> None:
+        """A 402 answering a paid retry is the server's final answer (mppx Fetch)."""
+        challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
+        rejected = httpx.Response(402, headers={"www-authenticate": "Bearer realm=test"})
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+                ),
+                rejected,
+            ]
+        )
+        failed: list[object] = []
+        transport = PaymentTransport(methods=[MockMethod().client], inner=inner)
+        transport.on_payment_failed(failed.append)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response is rejected
+        assert len(inner.requests) == 2
+        assert failed == []
+
+    @pytest.mark.asyncio
+    async def test_never_pays_again_after_a_pushed_payment_is_refused(self) -> None:
+        """A hash credential reports a payment already on chain: a 402 answering it is
+        final, so the client must not sign and broadcast a second payment."""
+        challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
+        offer = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers=offer),
+                httpx.Response(402, headers=offer, content=b"payment refused"),
+            ]
+        )
+        method = MockMethod()
+        method.create_credential.return_value = make_credential(
+            payload={"type": "hash", "hash": "0x" + "ab" * 32}, challenge_id="test-id"
+        )
+        transport = PaymentTransport(methods=[method.client], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
 
         assert response.status_code == 402
+        assert await response.aread() == b"payment refused"
+        assert method.create_credential.await_count == 1
+        assert len(inner.requests) == 2
+
+    @pytest.mark.asyncio
+    async def test_order_challenges_selects_the_paid_challenge(self) -> None:
+        """order_challenges filters and sorts candidates before signing (mppx)."""
+        first = Challenge(id="first", method="tempo", intent="charge", request={"n": 1})
+        second = Challenge(id="second", method="tempo", intent="charge", request={"n": 2})
+        header = ", ".join(c.to_www_authenticate("example.com") for c in (first, second))
+        inner = MockTransport(
+            [httpx.Response(402, headers={"www-authenticate": header}), httpx.Response(200)]
+        )
+        method = MockMethod()
+        seen: list[list[str]] = []
+
+        async def prefer_second(
+            candidates: Sequence[ChallengeCandidate],
+        ) -> list[ChallengeCandidate]:
+            seen.append([candidate.challenge.id for candidate in candidates])
+            assert [candidate.index for candidate in candidates] == [0, 1]
+            assert all(candidate.method is method.client for candidate in candidates)
+            return [c for c in candidates if c.challenge.id == "second"]
+
+        transport = PaymentTransport(
+            methods=[method.client], inner=inner, order_challenges=prefer_second
+        )
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        assert seen == [["first", "second"]]
+        assert method.create_credential.await_args is not None
+        assert method.create_credential.await_args.args[0].id == "second"
+
+    @pytest.mark.asyncio
+    async def test_order_challenges_rejecting_all_raises(self) -> None:
+        challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+                )
+            ]
+        )
+        method = MockMethod()
+        async with Mpp(methods=[method.client], order_challenges=lambda candidates: []) as mpp:
+            mpp.payment_transport._inner = inner
+            with pytest.raises(
+                NoMethodFoundError, match="No method found for challenges: tempo.charge"
+            ):
+                await mpp.fetch("https://example.com")
+        method.create_credential.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_aclose(self) -> None:
@@ -2026,13 +2136,15 @@ def test_invalid_payment_origin(origin):
         'Payment id="x", realm="test", method="unknown", intent="charge", request="e30"',
     ],
 )
-async def test_origin_policy_preserves_unmatched_402(header):
+async def test_origin_policy_raises_for_unmatched_402(header):
+    """The origin policy only restricts payments: an unpayable 402 raises as anywhere."""
     method = MockMethod()
     response = httpx.Response(402, headers={} if header is None else {"WWW-Authenticate": header})
     inner = MockTransport([response])
     transport = PaymentTransport(methods=[method.client], inner=inner, allowed_origins=[])
     async with httpx.AsyncClient(transport=transport) as client:
-        assert await client.get("https://unapproved.test/") is response
+        with pytest.raises(NoMethodFoundError):
+            await client.get("https://unapproved.test/")
     method.create_credential.assert_not_awaited()
 
 

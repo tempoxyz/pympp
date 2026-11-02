@@ -7,6 +7,7 @@ for structured error responses.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
 _BASE_URI = "https://paymentauth.org/problems"
@@ -104,6 +105,29 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         super().__init__(
             "Payment outcome is unknown after sending a credential "
             f"for challenge {challenge.id}. Do not blindly retry."
+        )
+
+
+class NoMethodFoundError(PaymentError, ValueError):
+    """No configured client method can pay any offered challenge.
+
+    Raised by clients for a ``402`` they cannot pay. ``challenges`` are the
+    offered challenges and ``methods`` the configured client methods.
+    """
+
+    def __init__(
+        self,
+        challenges: Sequence[Any] = (),
+        methods: Sequence[Any] = (),
+        *,
+        message: str | None = None,
+    ) -> None:
+        self.challenges = tuple(challenges)
+        self.methods = tuple(methods)
+        offered = ", ".join(f"{c.method}.{c.intent}" for c in self.challenges)
+        available = ", ".join(f"{m.name}.{m.intent}" for m in self.methods)
+        super().__init__(
+            message or f"No method found for challenges: {offered}. Available: {available}"
         )
 
 

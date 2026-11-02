@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
 
-from mpp import Challenge, Credential, InvalidChallengeError, PaymentExpiredError
+from mpp import (
+    Challenge,
+    Credential,
+    InvalidChallengeError,
+    NoMethodFoundError,
+    PaymentExpiredError,
+)
 from mpp.events import EventDispatcher
 from mpp.methods import Method
-from mpp.runtime import ClientMethod, CredentialParams, PaymentRuntime
+from mpp.runtime import ChallengeCandidate, ClientMethod, CredentialParams, PaymentRuntime
 
 
 def challenge(
@@ -66,10 +73,48 @@ def test_matching_preserves_transport_selection() -> None:
     ]
 
     assert runtime.match_challenge(offered) == (offered[0], runtime.methods[1])
-    with pytest.raises(ValueError, match="No compatible payment method"):
+    with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
         runtime.match_challenge([offered[1]])
-    with pytest.raises(ValueError, match="No compatible payment method"):
+    with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
         runtime.match_challenge([challenge(method="other")])
+
+
+def test_no_method_found_mirrors_mppx_message() -> None:
+    runtime = PaymentRuntime([MockMethod().client])
+    offered = [challenge(method="stripe"), challenge(intent="session")]
+
+    with pytest.raises(NoMethodFoundError) as raised:
+        runtime.match_challenge(offered)
+
+    assert str(raised.value) == (
+        "No method found for challenges: stripe.charge, tempo.session. Available: tempo.charge"
+    )
+    assert raised.value.challenges == tuple(offered)
+    assert isinstance(raised.value, ValueError)
+
+
+async def test_order_challenges_hook_reorders_and_filters_candidates() -> None:
+    first, second = MockMethod(), MockMethod()
+    runtime = PaymentRuntime([first.client, second.client])
+    offered = [challenge("a"), challenge("b", method="other"), challenge("c")]
+
+    candidates = runtime.challenge_candidates(offered)
+    assert [(c.challenge.id, c.method, c.index) for c in candidates] == [
+        ("a", first.client, 0),
+        ("a", second.client, 0),
+        ("c", first.client, 2),
+        ("c", second.client, 2),
+    ]
+
+    def last_first(found: Sequence[ChallengeCandidate]) -> list[ChallengeCandidate]:
+        return list(reversed(found))
+
+    async def none(found: Sequence[ChallengeCandidate]) -> list[ChallengeCandidate]:
+        return []
+
+    assert await runtime.order_challenges(offered) == candidates
+    assert await runtime.order_challenges(offered, last_first) == candidates[::-1]
+    assert await runtime.order_challenges(offered, none) == []
 
 
 def test_matching_skips_unsupported_intent_before_supported_challenge() -> None:
@@ -93,7 +138,7 @@ def test_matching_skips_currency_rejected_by_configured_method() -> None:
     ]
 
     assert runtime.match_challenge(offered) == (offered[1], runtime.methods[0])
-    with pytest.raises(ValueError, match="No compatible payment method"):
+    with pytest.raises(NoMethodFoundError, match="No method found for challenges"):
         runtime.match_challenge(offered[:1])
 
 

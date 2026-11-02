@@ -12,14 +12,15 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
-from mpp import Challenge, Receipt
+from mpp import Challenge, NoMethodFoundError, Receipt
 from mpp.client import PaymentTransport
+from mpp.errors import InternalPaymentError
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo.client import _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent
 from mpp.server.verify import verify_or_challenge
-from tests import INTEGRATION, TEST_SECRET
+from tests import INTEGRATION, TEST_SECRET, internal_cause
 from tests.conftest import _fund_account, _tip20_balance
 
 pytestmark = [pytest.mark.integration, INTEGRATION]
@@ -134,8 +135,8 @@ class TestClientServerIntegration:
         payment_transport = PaymentTransport(methods=[], inner=server_transport)
 
         async with httpx.AsyncClient(transport=payment_transport, base_url="http://test") as client:
-            response = await client.get("/paid")
-            assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError, match="for challenges: tempo.charge"):
+                await client.get("/paid")
 
     async def test_wrong_auth_scheme_returns_402(self, server_transport):
         async with httpx.AsyncClient(transport=server_transport, base_url="http://test") as client:
@@ -231,17 +232,13 @@ class TestClientServerIntegration:
     async def test_fee_payer_no_signer_fails_verification(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id
     ):
-        intent = ChargeIntent(rpc_url=rpc_url)
+        intent = ChargeIntent(rpc_url=rpc_url, fee_payer="http://127.0.0.1:1/nonexistent")
         request_params = {
             "amount": "1000000",
             "currency": currency,
             "recipient": funded_recipient.address,
             "expires": (datetime.now(UTC) + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
-            "methodDetails": {
-                "feePayer": True,
-                "chainId": chain_id,
-                "feePayerUrl": "http://127.0.0.1:1/nonexistent",
-            },
+            "methodDetails": {"feePayer": True, "chainId": chain_id},
         }
 
         client_method = _tempo_method(
@@ -257,8 +254,9 @@ class TestClientServerIntegration:
         )
         credential = await client_method.create_credential(challenge)
 
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(credential, request_params)
+        assert isinstance(internal_cause(raised.value), httpx.ConnectError)
 
     async def test_e2e_charge_with_memo(
         self, rpc_url, funded_payer, funded_recipient, currency, chain_id

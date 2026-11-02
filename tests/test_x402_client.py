@@ -19,7 +19,7 @@ from eth_account import Account
 
 from mpp import Challenge, Credential
 from mpp.client import Mpp, PaymentTransport
-from mpp.errors import PaymentError, PaymentOutcomeUnknownError
+from mpp.errors import NoMethodFoundError, PaymentError, PaymentOutcomeUnknownError
 from mpp.events import CREDENTIAL_CREATED
 from mpp.methods.evm import BASE_SEPOLIA_USDC, BASE_USDC, EvmAsset
 from mpp.methods.evm import client as evm_client
@@ -476,18 +476,19 @@ class TestTransport:
         failures: list[dict[str, Any]] = []
         async with mpp(server) as client:
             client.on_payment_failed(failures.append)
-            response = await client.fetch(URL)
-        assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError) as raised:
+                await client.fetch(URL)
         assert len(server.requests) == 1
-        assert isinstance(failures[0]["error"], X402FormatError)
+        assert failures[0]["error"] is raised.value
+        assert isinstance(raised.value.__cause__, X402FormatError)
 
     async def test_offers_outside_policy_are_not_paid(self) -> None:
         server = Server(required(header(requirements(amount="1000001"))))
         failures: list[dict[str, Any]] = []
         async with mpp(server, methods=[method(max_amount="1")]) as client:
             client.on_payment_failed(failures.append)
-            response = await client.fetch(URL)
-        assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError, match="for challenges: evm.charge"):
+                await client.fetch(URL)
         assert len(server.requests) == 1
         assert [c.id for c in failures[0]["challenges"]] == ["x402:0"]
 

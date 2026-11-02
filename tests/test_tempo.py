@@ -240,10 +240,15 @@ class TestTempoMethod:
         assert TempoMethod().transaction_hash(credential) == expected
         assert TempoMethod().transaction_hash(trailing) is None
 
+    def test_transaction_hash_reads_a_pushed_hash(self) -> None:
+        credential = make_credential(payload={"type": "hash", "hash": "0xabc"})
+
+        assert TempoMethod().transaction_hash(credential) == "0xabc"
+
     @pytest.mark.parametrize(
         "payload",
         [
-            {"type": "hash", "hash": "0xabc"},
+            {"type": "hash"},
             {"type": "transaction"},
             {"type": "transaction", "signature": ""},
             {"type": "transaction", "signature": "0xnothex"},
@@ -264,7 +269,7 @@ class TestTempoMethod:
             },
         ],
         ids=[
-            "hash-payload",
+            "hash-without-hash",
             "missing",
             "empty",
             "not-hex",
@@ -3260,10 +3265,7 @@ class TestSponsoredTransfer:
                 "amount": "1000000",
                 "currency": "0x20c0000000000000000000000000000000000000",
                 "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {
-                    "feePayer": True,
-                    "feePayerUrl": "https://sponsor.test",
-                },
+                "methodDetails": {"feePayer": True},
             },
             realm="test.example.com",
             request_b64="e30",
@@ -3274,109 +3276,6 @@ class TestSponsoredTransfer:
         assert credential.challenge.id == "test-sponsored"
         assert credential.payload["type"] == "transaction"
         assert credential.payload["signature"].startswith("0x78")
-
-    @pytest.mark.asyncio
-    async def test_server_submits_sponsored_transaction(self, httpx_mock: HTTPXMock) -> None:
-        """Server should submit sponsored tx via external fee payer service."""
-        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-        challenge_id = "test-sponsored"
-        realm = "test.example.com"
-        memo = encode_attribution(challenge_id=challenge_id, server_id=realm)
-
-        # External fee payer signs and returns co-signed tx
-        httpx_mock.add_response(
-            url="https://sponsor.test",
-            json={"jsonrpc": "2.0", "result": "0x76abcdef01", "id": 1},
-        )
-
-        # eth_sendRawTransactionSync to RPC
-        httpx_mock.add_response(
-            url="https://rpc.test",
-            json={
-                "jsonrpc": "2.0",
-                "result": {
-                    "transactionHash": _raw_transaction_hash("0x76abcdef01"),
-                    "status": "0x1",
-                    "logs": [
-                        {
-                            "address": "0x20c0000000000000000000000000000000000000",
-                            "topics": [
-                                TRANSFER_WITH_MEMO_TOPIC,
-                                "0x000000000000000000000000sender00000000000000000000000000000000",
-                                "0x000000000000000000000000742d35cc6634c0532925a3b844bc9e7595f8fe00",
-                                memo,
-                            ],
-                            "data": amount_data(1000000),
-                        }
-                    ],
-                },
-                "id": 1,
-            },
-        )
-
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(
-            payload={"type": "transaction", "signature": "0x76abcdef"},
-            challenge_id=challenge_id,
-            expires=future,
-            realm=realm,
-        )
-
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000000",
-                "currency": "0x20c0000000000000000000000000000000000000",
-                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                "methodDetails": {
-                    "feePayer": True,
-                    "feePayerUrl": "https://sponsor.test",
-                },
-            },
-        )
-
-        assert receipt.status == "success"
-        assert receipt.reference == _raw_transaction_hash("0x76abcdef01")
-
-        requests = httpx_mock.get_requests()
-        assert len(requests) == 2
-        body = requests[1].read().decode()
-        assert '"method":"eth_sendRawTransactionSync"' in body
-
-    @pytest.mark.asyncio
-    async def test_server_fee_payer_error(self, httpx_mock: HTTPXMock) -> None:
-        """External fee payer failures are internal errors, not verification failures."""
-        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
-
-        httpx_mock.add_response(
-            url="https://sponsor.test",
-            json={
-                "jsonrpc": "2.0",
-                "error": {"code": -32000, "message": "insufficient funds"},
-                "id": 1,
-            },
-        )
-
-        intent = ChargeIntent(rpc_url="https://rpc.test")
-        credential = make_credential(
-            payload={"type": "transaction", "signature": "0x76abcdef"},
-            expires=future,
-        )
-
-        with pytest.raises(InternalPaymentError) as raised:
-            await intent.verify(
-                credential,
-                {
-                    "amount": "1000000",
-                    "currency": "0x20c0000000000000000000000000000000000000",
-                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                    "methodDetails": {
-                        "feePayer": True,
-                        "feePayerUrl": "https://sponsor.test",
-                    },
-                },
-            )
-        assert "Fee payer signing failed" in str(internal_cause(raised.value))
 
 
 class TestCosignAsFeePayer:
@@ -4087,6 +3986,44 @@ class TestCosignAsFeePayer:
             assert call["to"].lower() == currency.lower()
             assert call["data"].startswith("0x")
             assert "to" not in request and "data" not in request
+
+    def test_cosigns_split_transfers_with_memos(self) -> None:
+        """Like mppx, a sponsored charge may carry splits: one transferWithMemo per leg."""
+        from pytempo import Call
+
+        intent = self._make_intent()
+        currency = PATH_USD
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        partner = "0x1111111111111111111111111111111111111111"
+        memo = encode_attribution(challenge_id="split", server_id=TEST_REALM)
+        split_memo = "0x" + "ee" * 32
+        raw = self._build_client_tx(
+            calls=(
+                Call.create(
+                    to=currency, value=0, data=self._encode_transfer_data(recipient, 700000, memo)
+                ),
+                Call.create(
+                    to=currency,
+                    value=0,
+                    data=self._encode_transfer_data(partner, 300000, split_memo),
+                ),
+            )
+        )
+        request = ChargeRequest(
+            amount="1000000",
+            currency=currency,
+            recipient=recipient,
+            methodDetails=MethodDetails(
+                feePayer=True,
+                splits=[Split(amount="300000", recipient=partner, memo=split_memo)],
+            ),
+        )
+
+        cosigned, simulate_payload = intent._cosign_as_fee_payer(raw, PATH_USD, request=request)
+
+        assert cosigned.startswith("0x76")
+        for call_request in simulate_payload:
+            assert [c["to"] for c in call_request["calls"]] == [currency, currency]
 
     def test_build_simulate_payload_multi_call_preserves_order(self) -> None:
         from types import SimpleNamespace
@@ -4896,7 +4833,7 @@ class TestCosignAsFeePayer:
         assert httpx_mock.get_requests() == []
 
     @pytest.mark.asyncio
-    async def test_verify_local_fee_payer_rejects_unsimulatable_authorization(
+    async def test_verify_local_fee_payer_rejects_authorization_list(
         self, httpx_mock: HTTPXMock
     ) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -4922,7 +4859,7 @@ class TestCosignAsFeePayer:
             realm=realm,
         )
 
-        with pytest.raises(VerificationError, match="Authorization-bearing transactions"):
+        with pytest.raises(VerificationError, match="unsupported fields: authorizationList"):
             await intent.verify(
                 credential,
                 {
@@ -5806,18 +5743,17 @@ class TestSchemas:
         assert req.methodDetails.chainId == 4217
 
     def test_charge_request_with_fee_payer(self) -> None:
-        """Should accept methodDetails with feePayer and feePayerUrl."""
-        req = ChargeRequest(
-            amount="1000",
-            currency="0x20c0000000000000000000000000000000000000",
-            recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            methodDetails=MethodDetails(
-                feePayer=True,
-                feePayerUrl="https://sponsor.test",
-            ),
+        """Should accept methodDetails with feePayer, ignoring a legacy feePayerUrl."""
+        req = ChargeRequest.model_validate(
+            {
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": True, "feePayerUrl": "https://sponsor.test"},
+            }
         )
         assert req.methodDetails.feePayer is True
-        assert req.methodDetails.feePayerUrl == "https://sponsor.test"
+        assert "feePayerUrl" not in req.methodDetails.model_dump()
 
     def test_hash_credential_payload(self) -> None:
         """Should validate hash credential payload."""
@@ -7463,11 +7399,13 @@ class TestSplitLogMemoStrictness:
         assert [matched_log.kind for matched_log in matched_logs] == ["transfer", "memo"]
 
 
-class TestSplitsFeePayerRejection:
-    """Test that splits + fee_payer raises."""
+class TestSplitsWithFeePayer:
+    """Splits and fee sponsorship bind independently, as in mppx."""
 
     @pytest.mark.anyio
-    async def test_splits_with_fee_payer_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_splits_with_fee_payer_issue_one_challenge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from mpp.server import Mpp
 
         monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
@@ -7478,17 +7416,15 @@ class TestSplitsFeePayerRejection:
                 fee_payer=TempoAccount.from_key(TEST_PRIVATE_KEY),
             ),
         )
-        with pytest.raises(ValueError, match="splits and fee_payer cannot be used together"):
-            await server.charge(
-                amount="1.00",
-                splits=[
-                    {
-                        "amount": "300000",
-                        "recipient": "0x1111111111111111111111111111111111111111",
-                    }
-                ],
-                fee_payer=True,
-            )(http_request())
+        splits = [{"amount": "300000", "recipient": "0x1111111111111111111111111111111111111111"}]
+        result = await server.charge(amount="1.00", splits=splits, fee_payer=True)(http_request())
+
+        issued = challenges(result)
+        assert issued
+        for challenge in issued:
+            details = challenge.request["methodDetails"]
+            assert details["feePayer"] is True
+            assert details["splits"] == splits
 
 
 class TestSponsoredChallengeLifetime:
@@ -7518,6 +7454,16 @@ class TestSponsoredChallengeLifetime:
             await server.charge(amount="1.00", fee_payer=True, expires=expires)(http_request())
 
     @pytest.mark.anyio
+    async def test_routes_sponsored_by_default_keep_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured fee payer sponsors routes by default, so mppx's floor applies to them."""
+        server = self._server(monkeypatch)
+        expires = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
+        with pytest.raises(ValueError, match="at least 15 seconds after issuance"):
+            await server.charge(amount="1.00", expires=expires)(http_request())
+
+    @pytest.mark.anyio
     @pytest.mark.parametrize(
         ("fee_payer", "seconds"),
         [(True, 20), (True, None), (False, 10)],
@@ -7543,7 +7489,8 @@ class TestSponsoredChallengeLifetime:
 
 
 class TestSponsorshipDefault:
-    """Routes opt in to sponsorship; a route never promises a sponsor nobody configured."""
+    """A configured fee payer sponsors routes unless they opt out (mppx resolvedFeePayer);
+    a route never promises a sponsor nobody configured."""
 
     @staticmethod
     def _issued(server_methods, **options):
@@ -7559,13 +7506,13 @@ class TestSponsorshipDefault:
     @pytest.mark.parametrize(
         ("sponsor", "options", "sponsored"),
         [
-            (True, {}, False),
+            (True, {}, True),
             (True, {"fee_payer": True}, True),
             (True, {"fee_payer": False}, False),
             (False, {}, False),
             (False, {"fee_payer": True}, False),
         ],
-        ids=["opt-in-default", "opted-in", "opt-out", "no-sponsor", "no-sponsor-asked"],
+        ids=["sponsored-by-default", "opted-in", "opt-out", "no-sponsor", "no-sponsor-asked"],
     )
     async def test_fee_payer_follows_the_configured_sponsor(
         self, sponsor: bool, options: dict, sponsored: bool
@@ -8166,73 +8113,6 @@ class TestTransactionCredentialPayer:
         validation = await intent.validate(self._credential(forged, None), self._request())
         assert validation.payer is None
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("allowed", "sponsor_token", "accepted"),
-        [
-            (None, USDC, True),
-            ((PATH_USD,), PATH_USD, True),
-            ((PATH_USD,), USDC, False),
-            ((PATH_USD,), None, False),
-            (None, None, True),
-            ((PATH_USD,), "invalid", False),
-        ],
-    )
-    async def test_external_fee_payer_token_respects_configured_allowlist(
-        self, allowed: tuple[str, ...] | None, sponsor_token: str | None, accepted: bool
-    ) -> None:
-        from eth_account import Account
-
-        sender = Account.from_key(TEST_PRIVATE_KEY).address
-        signed = self._tx(
-            awaiting_fee_payer=True, fee_token=None if sponsor_token == "invalid" else sponsor_token
-        ).sign(TEST_PRIVATE_KEY)
-        cosigned = "0x" + signed.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex()
-        if sponsor_token == "invalid":
-            fields = rlp.decode(bytes.fromhex(cosigned[4:]))
-            fields[10] = b"invalid"
-            cosigned = "0x76" + bytes(rlp.encode(fields)).hex()
-        log = {
-            "address": self.CURRENCY,
-            "topics": [
-                TRANSFER_WITH_MEMO_TOPIC,
-                "0x" + sender[2:].lower().zfill(64),
-                "0x" + self.RECIPIENT[2:].lower().zfill(64),
-                self._memo,
-            ],
-            "data": amount_data(1000),
-        }
-        methods: list[str] = []
-
-        def rpc(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            methods.append(body["method"])
-            if body["method"] == "eth_signRawTransaction":
-                result: object = cosigned
-            else:
-                tx_hash = _raw_transaction_hash(body["params"][0])
-                result = {"status": "0x1", "transactionHash": tx_hash, "logs": [log]}
-            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
-            intent = ChargeIntent(
-                rpc_url="https://rpc.test", http_client=client, allowed_fee_tokens=allowed
-            )
-            credential = self._credential(self._envelope(), None)
-            request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
-
-            if not accepted:
-                with pytest.raises(InternalPaymentError) as raised:
-                    await _broadcast(intent=intent, credential=credential, request=request)
-                assert "feeToken is" in str(internal_cause(raised.value))
-                assert raised.value.retry_challenge is None
-                assert methods == ["eth_signRawTransaction"]
-                return
-
-            await _broadcast(intent=intent, credential=credential, request=request)
-
-        assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
-
     @pytest.mark.parametrize(
         "raw_tx",
         [
@@ -8247,59 +8127,6 @@ class TestTransactionCredentialPayer:
         assert ChargeIntent._transaction_payer(raw_tx, None, self.CHAIN_ID) is None
         with pytest.raises(VerificationError, match="does not match the sender"):
             ChargeIntent._transaction_payer(raw_tx, self._did(self.ROOT), self.CHAIN_ID)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("source", ["match", None])
-    @pytest.mark.parametrize("cosigner", ["sender", "other"])
-    async def test_external_fee_payer_cannot_change_sender(
-        self, source: str | None, cosigner: str
-    ) -> None:
-        from eth_account import Account
-
-        sender = Account.from_key(TEST_PRIVATE_KEY).address
-        signer_key = TEST_PRIVATE_KEY if cosigner == "sender" else self.OTHER_KEY
-        signed = self._tx(awaiting_fee_payer=True).sign(signer_key)
-        cosigned = "0x" + signed.sign(self.FEE_PAYER_KEY, for_fee_payer=True).encode().hex()
-        log = {
-            "address": self.CURRENCY,
-            "topics": [
-                TRANSFER_WITH_MEMO_TOPIC,
-                "0x" + sender[2:].lower().zfill(64),
-                "0x" + self.RECIPIENT[2:].lower().zfill(64),
-                self._memo,
-            ],
-            "data": amount_data(1000),
-        }
-        methods: list[str] = []
-
-        def rpc(request: httpx.Request) -> httpx.Response:
-            body = json.loads(request.content)
-            methods.append(body["method"])
-            if body["method"] == "eth_signRawTransaction":
-                result: object = cosigned
-            else:
-                tx_hash = _raw_transaction_hash(body["params"][0])
-                result = {"status": "0x1", "transactionHash": tx_hash, "logs": [log]}
-            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
-
-        async with httpx.AsyncClient(transport=httpx.MockTransport(rpc)) as client:
-            intent = ChargeIntent(rpc_url="https://rpc.test", http_client=client)
-            credential = self._credential(
-                self._envelope(), None if source is None else self._did(sender)
-            )
-            request = self._request(feePayer=True, feePayerUrl="https://fee-payer.test")
-
-            if cosigner == "other":
-                with pytest.raises(VerificationError, match="Fee payer transaction sender"):
-                    await _broadcast(intent=intent, credential=credential, request=request)
-                assert methods == ["eth_signRawTransaction"]
-                return
-
-            receipt = await _broadcast(intent=intent, credential=credential, request=request)
-
-        assert receipt.payer == sender.lower()
-        assert receipt.funding_currency == self.CURRENCY
-        assert methods == ["eth_signRawTransaction", "eth_sendRawTransactionSync"]
 
 
 @pytest.mark.parametrize("encoding", ["prefixed", "bare", "uppercase", "spaced"])
