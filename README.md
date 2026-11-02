@@ -369,11 +369,11 @@ challenge, and clients reject it before signing or broadcasting. Drain or
 replace outstanding challenges with fixed MPP memos before upgrading; their
 transfers cannot safely authorize the enclosing split charge.
 
-Local fee sponsorship accepts only secp256k1 sender signatures. Keychain, P256,
-WebAuthn and multisig envelopes remain usable without local sponsorship, or
-through a hosted sponsor that independently authenticates the signature and
-checks the key's current authorization and spending limits. Root-account
-`eth_call` simulation alone cannot establish those permissions.
+Local fee sponsorship verifies secp256k1, P256, WebAuthn and keychain sender
+signatures before co-signing. Unsupported signature formats require an
+independently authorizing hosted sponsor. Keychain authorization is checked by
+the node; root-account `eth_call` simulation does not itself establish per-key
+spending limits.
 
 Push payments require more than 15 seconds of challenge lifetime before signing
 and again immediately before submission. Their signed inclusion deadline leaves
