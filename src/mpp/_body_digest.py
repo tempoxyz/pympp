@@ -142,9 +142,11 @@ def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
         return False
     # Accept the RFC 9530 byte-sequence form (sha-256=:<base64>:), which the
     # Payment spec shows, by stripping its colons.
+    # A byte sequence may also omit its padding (RFC 8941 section 4.2.7).
     match = _BYTE_SEQUENCE.fullmatch(digest)
     if match is not None:
-        digest = f"sha-256={match.group(1)}"
+        unpadded = match.group(1).rstrip("=")
+        digest = f"sha-256={unpadded}{'=' * (-len(unpadded) % 4)}"
     if hmac.compare_digest(compute(body), digest):
         return True
     if isinstance(body, dict):

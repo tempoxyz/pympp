@@ -197,6 +197,11 @@ class TestRfc9530ByteSequence:
         assert verify("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:", b"")
         assert not verify(f"sha-256=:{self.HELLO}:", "changed body")
 
+    def test_accepts_unpadded_byte_sequence(self) -> None:
+        unpadded = self.HELLO.rstrip("=")
+        assert verify(f"sha-256=:{unpadded}:", "hello")
+        assert not verify(f"sha-256=:{unpadded}:", "changed body")
+
     @pytest.mark.parametrize(
         "template",
         [
