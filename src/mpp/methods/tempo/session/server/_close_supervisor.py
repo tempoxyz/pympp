@@ -7,9 +7,10 @@ scheduled job well within that period, for example every minute.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mpp._typing import is_dict, is_list
 from mpp.errors import VerificationFailedError
@@ -29,6 +30,8 @@ from mpp.methods.tempo.session.server._settlement import (
     resolve_channel_store,
 )
 from mpp.methods.tempo.session.server._store import (
+    PENDING_CLOSE_CLOCK_SKEW_SECONDS,
+    PENDING_CLOSE_VALIDITY_SECONDS,
     ChannelState,
     ChannelStore,
     finalize_closed_channel_state,
@@ -38,6 +41,7 @@ from mpp.methods.tempo.session.server._store import (
     reconcile_expired_pending_close,
     resolve_close_capture_amount,
 )
+from mpp.methods.tempo.session.server._verification import _SendTracker
 
 if TYPE_CHECKING:
     import httpx
@@ -321,6 +325,7 @@ async def _supervise_channel(
             return replace(
                 current,
                 close_requested_at=0,
+                pending_close_valid_before=None,
                 deposit=0,
                 finalized=True,
                 settled_on_chain=keep_greater(current.settled_on_chain, paid),
@@ -401,6 +406,10 @@ async def _close_at_spend(
     options: _Options, channel: ChannelState, state: chain.ChannelState
 ) -> tuple[CloseSupervisionOutcome, str | None]:
     channel_id = channel.channel_id
+    tracker = _SendTracker(options.http_client)
+    valid_before: int | None = None
+    reserved = False
+    acquired = False
     try:
         voucher = channel.highest_voucher
         if voucher is None or channel.descriptor is None:
@@ -422,6 +431,31 @@ async def _close_at_spend(
             sender=account.address if account is not None else None,
         )
         assert account is not None
+        now = int(time.time())
+        valid_before = now + PENDING_CLOSE_VALIDITY_SECONDS
+
+        def reserve(current: ChannelState | None) -> ChannelState | None:
+            nonlocal reserved
+            reserved = False
+            if (
+                current is None
+                or current.finalized
+                or current.close_requested_at == 0
+                or current.spent != channel.spent
+            ):
+                return current
+            if (
+                current.pending_close_valid_before is not None
+                and now <= current.pending_close_valid_before + PENDING_CLOSE_CLOCK_SKEW_SECONDS
+            ):
+                return current
+            reserved = True
+            return replace(current, pending_close_valid_before=valid_before)
+
+        await options.store.update_channel(channel_id, reserve)
+        if not reserved:
+            return "closing", None
+        acquired = True
         tx_hash = await chain.close_on_chain(
             options.rpc_url,
             account,
@@ -434,7 +468,8 @@ async def _close_at_spend(
             fee_payer_policy=options.fee_payer_policy,
             fee_token=options.fee_token,
             candidate_fee_tokens=options.candidate_fee_tokens or [channel.token],
-            client=options.http_client,
+            valid_before=valid_before,
+            client=cast("httpx.AsyncClient", tracker),
         )
         receipt = await chain.wait_for_successful_receipt(
             options.rpc_url, tx_hash, client=options.http_client
@@ -466,6 +501,15 @@ async def _close_at_spend(
         )
         return "closed", tx_hash
     except Exception as error:
+        if acquired and not tracker.attempted:
+            await options.store.update_channel(
+                channel_id,
+                lambda current: (
+                    replace(current, pending_close_valid_before=None)
+                    if current is not None and current.pending_close_valid_before == valid_before
+                    else current
+                ),
+            )
         await report_session_settlement_failure(
             options.on_session_settlement_failure,
             SessionSettlementFailureContext(

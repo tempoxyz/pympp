@@ -1035,6 +1035,7 @@ module mpp.methods.tempo.session.server
         field kw_only close_requested_at: int
         field kw_only finalized: bool
         field kw_only created_at: str
+        field kw_only pending_close_valid_before: int | None = None
         field kw_only backend: Backend | None = None
         field kw_only descriptor: ChannelDescriptor | None = None
         field kw_only expiring_nonce_hash: str | None = None
