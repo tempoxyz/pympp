@@ -4637,6 +4637,24 @@ class TestCosignAsFeePayer:
         assert len(claims) == 1
         assert claims[0] in store._expiry_deadlines
 
+    @pytest.mark.asyncio
+    async def test_admission_uses_explicit_sponsor_store_and_maps_backend_failure(self):
+        from mpp.methods.tempo import SponsorBudget
+        from mpp.store import MemoryStore
+
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        admission_store = MemoryStore()
+        intent._sponsor_budget = SponsorBudget(store=admission_store)
+        failure = RuntimeError("admission storage unavailable")
+        admission_store.put_if_absent_until = AsyncMock(side_effect=failure)
+        intent._http_client = AsyncMock()
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent.verify(credential, request)
+        assert raised.value.__cause__ is failure
+        admission_store.put_if_absent_until.assert_awaited()
+        intent._http_client.post.assert_not_awaited()
+        assert not any(key.startswith("mpp:charge-admission:") for key in store._data)
+
     def _cosign_payload(self, intent: ChargeIntent) -> list[dict[str, Any]]:
         currency = "0x20c0000000000000000000000000000000000000"
         raw_tx = self._build_client_tx(currency=currency)
@@ -5264,6 +5282,7 @@ class TestCosignAsFeePayer:
                 "eth_getTransactionReceipt",
             ]
             assert await store.get(broadcast_key) is None
+            assert not any(key.startswith("mpp:charge-admission:") for key in store._data)
 
     @pytest.mark.asyncio
     async def test_verify_local_fee_payer_does_not_broadcast_without_marker(self) -> None:

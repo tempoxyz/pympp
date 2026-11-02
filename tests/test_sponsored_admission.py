@@ -164,3 +164,18 @@ async def test_busy_payer_waits_for_release():
     )
     await waiter
     assert second.created
+
+
+@pytest.mark.asyncio
+async def test_payer_lock_covers_swap_source_tokens():
+    store = MemoryStore()
+    await payer(store)
+    with pytest.raises(InternalPaymentError):
+        await admission.claim_payer(
+            store,
+            chain_id=1,
+            payer="0xAA",
+            currency="0xCC",
+            transaction_hash="0x02",
+            expires_at=time.time() + 60,
+        )

@@ -97,6 +97,22 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+class _TransactionReverted(VerificationError):
+    """A receipt establishes that the submitted transaction reverted."""
+
+    type = VerificationError.type
+    title = VerificationError.title
+
+
+class _TransactionNotIncluded(VerificationError):
+    """Chain time and receipt lookup establish that an expired transaction cannot land."""
+
+    type = VerificationError.type
+    title = VerificationError.title
+
+
 ACCOUNT_KEYCHAIN = "0xaAAAaaAA00000000000000000000000000000000"
 # getKey(address account,address keyId) -> (uint8,address,uint64,bool,bool)
 GET_KEY_SELECTOR = "bc298553"
@@ -1563,8 +1579,10 @@ class ChargeIntent:
         source_address: str | None = None,
         validate_sender: ValidateSender | None = None,
     ) -> list[MatchedTransferLog]:
+        if receipt_data.get("status") == "0x0":
+            raise _TransactionReverted("Transaction reverted")
         if receipt_data.get("status") != "0x1":
-            raise VerificationError("Transaction reverted")
+            raise VerificationError("Invalid transaction receipt status")
 
         # Bind the transfer sender only when a credential source is present;
         # no source means no sender filtering.
@@ -2098,6 +2116,30 @@ class ChargeIntent:
         admission_store: CompareAndSetStore | None = None
         challenge_claim: _sponsored_admission.Claim | None = None
         payer_claim: _sponsored_admission.Claim | None = None
+        admitting = False
+
+        async def cleanup_admission() -> None:
+            nonlocal challenge_claim, payer_claim
+            if admission_store is None:
+                return
+            try:
+                if payer_claim is not None and (
+                    verified or (not outcome_unknown and not reconciling)
+                ):
+                    await _sponsored_admission.release(admission_store, payer_claim)
+                if (
+                    challenge_claim is not None
+                    and challenge_claim.created
+                    and not broadcast_attempted
+                    and not reconciling
+                    and not verified
+                ):
+                    await _sponsored_admission.release(admission_store, challenge_claim)
+            except Exception:
+                logger.exception("Sponsored admission cleanup failed")
+            finally:
+                challenge_claim = payer_claim = None
+
         try:
             if request.methodDetails.feePayer and self.fee_payer is not None:
                 configured_admission_store = (
@@ -2119,6 +2161,7 @@ class ChargeIntent:
                     if recovery_expires_at is not None
                     else None
                 )
+                admitting = True
                 challenge_claim = await _sponsored_admission.claim_challenge(
                     admission_store,
                     realm=realm,
@@ -2140,6 +2183,7 @@ class ChargeIntent:
                     reconciling=reconciling,
                     wait_until=min(time.time() + 5, valid_before),
                 )
+            admitting = False
             if reconciling:
                 prior = await self._check_sponsored_validity(
                     client,
@@ -2339,6 +2383,13 @@ class ChargeIntent:
             await self._clear_broadcast_marker(broadcast_key)
             return Receipt.success(receipt_tx_hash)
         except (Exception, asyncio.CancelledError) as err:
+            if isinstance(err, (_TransactionReverted, _TransactionNotIncluded)):
+                outcome_unknown = reconciling = False
+                if isinstance(err, _TransactionNotIncluded) and challenge_claim is not None:
+                    challenge_claim = replace(challenge_claim, created=True)
+            # Remove admission ownership before reopening transaction replay claims.
+            # A same-envelope retry must not adopt a binding we later delete.
+            await cleanup_admission()
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if not verified and self._store is not None:
@@ -2364,26 +2415,15 @@ class ChargeIntent:
                 and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
             ):
                 raise InternalPaymentError() from err
-            if isinstance(err, NotImplementedError) and admission_store is not None:
+            if (
+                admitting
+                and isinstance(err, Exception)
+                and not isinstance(err, (VerificationError, InternalPaymentError))
+            ):
                 raise InternalPaymentError() from err
             raise
         finally:
-            if admission_store is not None:
-                try:
-                    if payer_claim is not None and (
-                        verified or (not outcome_unknown and not reconciling)
-                    ):
-                        await _sponsored_admission.release(admission_store, payer_claim)
-                    if (
-                        challenge_claim is not None
-                        and challenge_claim.created
-                        and not broadcast_attempted
-                        and not reconciling
-                        and not verified
-                    ):
-                        await _sponsored_admission.release(admission_store, challenge_claim)
-                except Exception:
-                    logger.exception("Sponsored admission cleanup failed")
+            await cleanup_admission()
             if reservation is not None and budget_store is not None:
                 try:
                     # A transaction that may still land keeps its fee reserved
@@ -2538,7 +2578,7 @@ class ChargeIntent:
                 # Chain time is past its inclusion window with no receipt: it
                 # never landed.
                 await self._clear_broadcast_marker(broadcast_key)
-                raise VerificationError(
+                raise _TransactionNotIncluded(
                     "Fee payer envelope expired: valid_before "
                     f"({valid_before}) is not in the future"
                 )

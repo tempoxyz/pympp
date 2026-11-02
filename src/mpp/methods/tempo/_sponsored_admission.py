@@ -80,8 +80,8 @@ async def claim_payer(
     reconciling: bool = False,
     wait_until: float = 0,
 ) -> Claim:
-    """Permit one pending transaction per chain, payer, and charge token before simulation."""
-    key = _key("payer", chain_id, payer.lower(), currency.lower())
+    """Permit one pending transaction per chain and payer before simulation."""
+    key = _key("payer", chain_id, payer.lower())
     value = json.dumps({"hash": transaction_hash.lower(), "expiresAt": expires_at}, sort_keys=True)
     if reconciling and expires_at <= time.time():
         # An expired envelope can only be reconciled, not newly included.

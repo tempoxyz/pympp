@@ -767,3 +767,56 @@ async def test_sponsored_broadcast_requires_its_own_marker(outcome: str, cause: 
     assert cause in str(internal_cause(raised.value))
     assert rpc.sent == []
     assert stored_keys(intent) == []
+
+
+async def test_reconciled_revert_releases_payer_admission() -> None:
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    cosigned = await _seed_unknown_submission(intent, envelope)
+    tx_hash = _raw_transaction_hash(cosigned)
+    rpc.receipts[tx_hash] = receipt(tx_hash, status="0x0")
+    with pytest.raises(VerificationError, match="reverted"):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert not any(key.startswith("mpp:charge-admission:payer:") for key in stored_keys(intent))
+
+
+async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims() -> None:
+    from unittest.mock import AsyncMock
+
+    from mpp.methods.tempo import _sponsored_admission as admission
+
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    credential, request = _tx_credential(envelope), _request(fee_payer=True)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    release = admission.release
+
+    async def delayed_release(store, claim):
+        entered.set()
+        await resume.wait()
+        await release(store, claim)
+
+    with (
+        patch.object(
+            intent,
+            "_simulate_before_broadcast",
+            AsyncMock(side_effect=VerificationError("simulation failed")),
+        ),
+        patch.object(admission, "release", delayed_release),
+    ):
+        first = asyncio.create_task(intent.verify(credential, request))
+        await asyncio.wait_for(entered.wait(), 2)
+        try:
+            with pytest.raises(CredentialReplayedError):
+                await intent.verify(credential, request)
+        finally:
+            resume.set()
+        with pytest.raises(VerificationError, match="simulation failed"):
+            await first
+    await intent.verify(credential, request)
+    replacement = signed_tx((pay_call(),), fee_payer=True, nonce=1)
+    with pytest.raises(CredentialReplayedError):
+        await intent.verify(_tx_credential(replacement), request)
+    assert len(rpc.sent) == 1
