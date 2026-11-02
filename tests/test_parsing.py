@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -571,6 +571,20 @@ class TestReceipt:
         parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
 
         assert parsed.timestamp == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "offset",
+        [timedelta(hours=5, minutes=30), timedelta(hours=-3), timedelta(hours=1, seconds=30)],
+    )
+    def test_format_converts_offsets_to_utc(self, offset: timedelta) -> None:
+        timestamp = datetime(2026, 1, 1, 12, 30, tzinfo=timezone(offset))
+        receipt = Receipt(status="success", timestamp=timestamp, reference="0xabc", method="tempo")
+
+        header = receipt.to_payment_receipt()
+        raw = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+
+        assert raw["timestamp"].endswith("Z")
+        assert Receipt.from_payment_receipt(header).timestamp == timestamp
 
     def test_roundtrip(self) -> None:
         """Receipt should survive roundtrip through header format."""

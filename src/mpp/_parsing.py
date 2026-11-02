@@ -476,10 +476,11 @@ def format_payment_receipt(receipt: Receipt) -> str:
         <base64-receipt>
     """
     timestamp = receipt.timestamp
-    # A naive datetime has no offset, which the receipt schema requires: treat it as UTC.
+    # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets
+    # (such as ones with seconds) don't fit the receipt schema. A naive datetime is UTC.
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=UTC)
-    timestamp_str = timestamp.isoformat().replace("+00:00", "Z")
+    timestamp_str = timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     payload: dict[str, Any] = {
         "status": receipt.status,
