@@ -13,6 +13,9 @@ from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
 from mpp.store import CompareAndSetStore
 
 
+__all__ = ["SessionSponsorshipLimit"]
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionSponsorshipLimit:
     """Bound top-up sponsorship over a rolling window.
