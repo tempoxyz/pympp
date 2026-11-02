@@ -365,6 +365,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             for retry in range(self._max_payment_retries):
                 if response.status_code != 402:
                     return response
+                # An x402 authorization remains spendable even after a 402 response.
+                if sent is not None and is_x402_challenge(sent.challenge):
+                    return response
 
                 if original_origin != current_origin:
                     error = PaymentError("Refusing to send payment credential across redirect")
