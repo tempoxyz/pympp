@@ -285,10 +285,12 @@ async def test_cancelled_payer_close_does_not_clear_live_server_close(
         PENDING_CLOSE_VALIDITY_SECONDS,
     )
 
+    monkeypatch.setattr("mpp.methods.tempo.session.server._close_supervisor.time.time", lambda: NOW)
     captured = []
 
     async def uncertain_close(*args, **kwargs):
         captured.append(kwargs["valid_before"])
+        kwargs["client"].attempted = True
         raise TimeoutError("reply lost")
 
     monkeypatch.setattr(chain, "close_on_chain", uncertain_close)
@@ -304,3 +306,54 @@ async def test_cancelled_payer_close_does_not_clear_live_server_close(
     life.block["timestamp"] = hex(captured[0] + PENDING_CLOSE_CLOCK_SKEW_SECONDS + 1)
     assert outcomes(await life.supervise()) == ["cancelled"]
     assert (await life.channel()).pending_close_valid_before is None
+
+
+async def test_unsent_close_releases_reservation_and_uses_fresh_deadline(life, monkeypatch):
+    from mpp.methods.tempo.session import _chain as chain
+    from mpp.methods.tempo.session.server._store import PENDING_CLOSE_VALIDITY_SECONDS
+
+    now = NOW + 100
+    monkeypatch.setattr("mpp.methods.tempo.session.server._close_supervisor.time.time", lambda: now)
+    deadlines = []
+
+    async def preflight_failure(*args, **kwargs):
+        deadlines.append(kwargs["valid_before"])
+        raise ValueError("gas estimation failed before submission")
+
+    monkeypatch.setattr(chain, "close_on_chain", preflight_failure)
+    life.rpc.states[life.channel_id] = (0, DEPOSIT, CLOSE_REQUESTED)
+    for _ in range(2):
+        assert outcomes(await life.supervise()) == ["failed"]
+        assert (await life.channel()).pending_close_valid_before is None
+        now += 60
+    assert deadlines == [
+        NOW + 100 + PENDING_CLOSE_VALIDITY_SECONDS,
+        NOW + 160 + PENDING_CLOSE_VALIDITY_SECONDS,
+    ]
+
+
+async def test_lost_cas_does_not_authorize_a_second_close(life, monkeypatch):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from mpp.methods.tempo.session import _chain as chain
+
+    monkeypatch.setattr("mpp.methods.tempo.session.server._close_supervisor.time.time", lambda: NOW)
+    original_update = life.store.update_channel
+
+    async def contended_update(channel_id, fn):
+        if fn.__name__ == "reserve":
+            current = await life.store.get_channel(channel_id)
+            proposal = fn(current)
+            assert proposal.pending_close_valid_before == NOW + 25
+            await original_update(
+                channel_id, lambda current: replace(current, pending_close_valid_before=NOW + 25)
+            )
+        return await original_update(channel_id, fn)
+
+    monkeypatch.setattr(life.store, "update_channel", contended_update)
+    close = AsyncMock()
+    monkeypatch.setattr(chain, "close_on_chain", close)
+    life.rpc.states[life.channel_id] = (0, DEPOSIT, CLOSE_REQUESTED)
+    assert outcomes(await life.supervise()) == ["closing"]
+    close.assert_not_called()
