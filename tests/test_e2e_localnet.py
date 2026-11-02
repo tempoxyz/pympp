@@ -263,19 +263,21 @@ class TestE2ECharge:
         assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 500_000
         assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
 
-    async def test_fee_payer_sponsors_split_routes_by_default(
-        self, rpc_url, chain_id, currency, funded_payer, funded_recipient
+    @pytest.mark.parametrize("sponsored", [False, True])
+    async def test_local_split_sponsorship_is_opt_in(
+        self, rpc_url, chain_id, currency, funded_payer, funded_recipient, sponsored
     ):
-        # As mppx: a configured fee payer sponsors routes that don't opt out, splits included.
+        # A local sponsor leaves routes unsponsored until they explicitly opt in.
         sponsor = _new_account(rpc_url, currency)
         partner = TempoAccount.from_key("0x" + os.urandom(32).hex())
         server = _server(rpc_url, chain_id, funded_recipient.address, [currency], fee_payer=sponsor)
         splits = [{"amount": "150000", "recipient": partner.address}]
-        async with _serve({"/paid": server.charge(amount="1", splits=splits)}) as url:
+        route = {"fee_payer": True} if sponsored else {}
+        async with _serve({"/paid": server.charge(amount="1", splits=splits, **route)}) as url:
             async with httpx.AsyncClient(timeout=30) as http:
                 unpaid = await http.get(f"{url}/paid")
             challenge = Challenge.from_www_authenticate(unpaid.headers["WWW-Authenticate"])
-            assert challenge.request["methodDetails"]["feePayer"] is True
+            assert bool(challenge.request["methodDetails"].get("feePayer")) is sponsored
             assert challenge.request["methodDetails"]["splits"] == splits
 
             payer_before = _balance(rpc_url, currency, funded_payer.address)
@@ -284,10 +286,15 @@ class TestE2ECharge:
             async with _client(funded_payer, rpc_url) as client:
                 _receipt(await client.fetch(f"{url}/paid"))
 
-        assert _balance(rpc_url, currency, funded_payer.address) == payer_before - 1_000_000
+        payer_after = _balance(rpc_url, currency, funded_payer.address)
+        if sponsored:
+            assert payer_after == payer_before - 1_000_000
+            assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
+        else:
+            assert payer_after < payer_before - 1_000_000
+            assert _balance(rpc_url, currency, sponsor.address) == sponsor_before
         assert _balance(rpc_url, currency, partner.address) == 150_000
         assert _balance(rpc_url, currency, funded_recipient.address) == recipient_before + 850_000
-        assert _balance(rpc_url, currency, sponsor.address) < sponsor_before
 
     async def test_split_charge_pays_every_recipient(
         self, rpc_url, chain_id, currency, funded_payer, funded_recipient
