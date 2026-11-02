@@ -1853,6 +1853,8 @@ async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lif
             life.rpc.states[life.channel_id] = (0, DEPOSIT + additional, 0)
             await verification.broadcast_credential_payload(context)
             assert (await life.channel()).spent == 0
+            # A retry of this exact signed transaction retains its original budget slot.
+            await verification.broadcast_credential_payload(context)
         else:
             sent = list(life.rpc.sent)
             before = await life.channel()

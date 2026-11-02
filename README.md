@@ -386,7 +386,9 @@ Sponsored session top-ups use a rolling 24-hour allowance: five attempts per pay
 across its channels, 100 attempts across all payers, and an aggregate fee allowance
 of 100 default maximum envelope fees. After successful simulation, each submission reserves its full configured
 maximum fee for the window, even after success, a mined revert, or an uncertain result.
-Invalid signatures and failed simulations consume no allowance. Sponsored top-ups
+Retries of the same sender-signed transaction reuse the reservation, including
+concurrent retries on different instances. Invalid signatures and failed simulations
+consume no allowance. Sponsored top-ups
 must be signed by the channel payer.
 This is conservative: unused fee allowance is not refunded. Unsponsored top-ups
 and server settlement/close transactions are unaffected.
@@ -406,4 +408,9 @@ Use the same shared compare-and-set store and policy on every instance using a
 sponsor; the default in-memory store protects only one process. The policy is
 operator-owned: route inputs cannot increase its limits. Reaching a limit rejects
 the top-up before broadcast. Raising the count does not raise the separate fee
-allowance; configure `max_total_fee` explicitly when needed.
+allowance; configure `max_total_fee` explicitly when needed. The aggregate cap is a
+sponsor-wide availability limit: once exhausted, new sponsored top-ups are rejected
+for every payer until capacity returns. Payers can submit their own fee-paying
+transactions through an unsponsored route. A signed `0x78` sponsorship envelope
+cannot be automatically converted to a payer-funded transaction without a new
+payer signature.

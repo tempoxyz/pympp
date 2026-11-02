@@ -50,6 +50,7 @@ class _Entry(BaseModel):
     at: float = Field(ge=0, allow_inf_nan=False)
     payer: str
     fee: int = Field(ge=0)
+    transaction_id: str | None = None
 
 
 class _Usage(BaseModel):
@@ -65,10 +66,12 @@ async def reserve_top_up(
     sponsor: str,
     payer: str,
     maximum_fee: int,
+    transaction_id: str,
 ) -> None:
     """Atomically consume a payer allowance and aggregate fee allowance before broadcast."""
     key = f"mpp:session:sponsorship:{chain_id}:{sponsor.lower()}"
     payer = payer.lower()
+    transaction_id = transaction_id.lower()
     if maximum_fee < 0:
         raise VerificationFailedError("Invalid sponsorship fee limit")
     for _ in range(100):
@@ -79,13 +82,17 @@ async def reserve_top_up(
         except (ValidationError, TypeError, ValueError) as error:
             raise VerificationFailedError("Invalid stored sponsorship usage") from error
         entries = [entry for entry in usage.entries if entry.at > now - limit.window_seconds]
+        if any(
+            entry.transaction_id == transaction_id and entry.payer == payer for entry in entries
+        ):
+            return
         if (
             sum(entry.payer == payer for entry in entries) >= limit.per_payer
             or len(entries) >= limit.max_transactions
             or sum(entry.fee for entry in entries) + maximum_fee > limit.max_total_fee
         ):
             raise VerificationFailedError("Session top-up sponsorship allowance exhausted")
-        entries.append(_Entry(at=now, payer=payer, fee=maximum_fee))
+        entries.append(_Entry(at=now, payer=payer, fee=maximum_fee, transaction_id=transaction_id))
         value = json.dumps(_Usage(entries=entries).model_dump(), separators=(",", ":"))
         if await store.compare_and_set(key, raw, value):
             return

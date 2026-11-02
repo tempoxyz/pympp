@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 
@@ -13,9 +14,15 @@ from mpp.methods.tempo.session.server.sponsorship_limit import (
 from mpp.store import MemoryStore
 
 
-async def reserve(store, limit, payer="payer", fee=10):
+async def reserve(store, limit, payer="payer", fee=10, transaction_id=None):
     await reserve_top_up(
-        limit=limit, store=store, chain_id=4217, sponsor="SPONSOR", payer=payer, maximum_fee=fee
+        limit=limit,
+        store=store,
+        chain_id=4217,
+        sponsor="SPONSOR",
+        payer=payer,
+        maximum_fee=fee,
+        transaction_id=transaction_id or uuid4().hex,
     )
 
 
@@ -116,3 +123,36 @@ async def test_negative_fee_cannot_credit_the_sponsorship_budget():
     with pytest.raises(VerificationFailedError, match="Invalid sponsorship fee"):
         await reserve(store, SessionSponsorshipLimit(), fee=-1)
     assert not store._data
+
+
+async def test_replayed_transaction_consumes_one_reservation_across_instances():
+    import json
+
+    class ContendedStore(MemoryStore):
+        async def get(self, key):
+            value = await super().get(key)
+            await asyncio.sleep(0)
+            return value
+
+    store = ContendedStore()
+    limit = SessionSponsorshipLimit(per_payer=1, max_transactions=1)
+    await asyncio.gather(*(reserve(store, limit, transaction_id="0xABC") for _ in range(20)))
+    await reserve(store, limit, payer="PAYER", transaction_id="0xabc")
+    raw = await store.get("mpp:session:sponsorship:4217:sponsor")
+    assert raw is not None
+    assert len(json.loads(raw)["entries"]) == 1
+    with pytest.raises(VerificationFailedError, match="allowance"):
+        await reserve(store, limit, transaction_id="0xdef")
+
+
+async def test_legacy_reservations_still_count_without_transaction_id():
+    import json
+    import time
+
+    store = MemoryStore()
+    await store.put(
+        "mpp:session:sponsorship:4217:sponsor",
+        json.dumps({"entries": [{"at": time.time(), "payer": "payer", "fee": 10}]}),
+    )
+    with pytest.raises(VerificationFailedError, match="allowance"):
+        await reserve(store, SessionSponsorshipLimit(per_payer=1))

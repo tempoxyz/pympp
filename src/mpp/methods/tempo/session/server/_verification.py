@@ -1073,6 +1073,9 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
                 sponsor=sponsor,
                 payer=payer,
                 maximum_fee=get_policy(context.chain_id, context.fee_payer_policy).max_total_fee,
+                transaction_id=chain.expiring_nonce_hash(
+                    payload.transaction, payer, fee_payer=True
+                ),
             )
 
         before_send = reserve
