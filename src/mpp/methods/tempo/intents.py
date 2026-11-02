@@ -202,6 +202,37 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
 
 
+def _decode_signed_transaction(raw: bytes) -> tuple[list[Any], bytes, bytes] | None:
+    """Decode a 0x76 or 0x78 Tempo transaction into its fields, sender signature and the hash
+    the sender signed, or None when it is malformed.
+
+    The sender signs with an empty fee token and a 0x00 marker when a fee payer co-signs.
+    """
+    from eth_hash.auto import keccak
+
+    from mpp.methods.tempo import _rlp as rlp
+
+    if raw[:1] not in (b"\x76", b"\x78"):
+        return None
+    try:
+        fields = rlp.decode(raw[1:])
+    except Exception:
+        return None
+    if not is_list(fields) or len(fields) not in (14, 15):
+        return None
+    signature = fields[-1]
+    if not isinstance(signature, bytes) or not signature:
+        return None
+    sponsored = raw[0] == 0x78 or fields[11] != b""
+    preimage = [
+        *fields[:10],
+        b"" if sponsored else fields[10],
+        b"\x00" if sponsored else b"",
+        *fields[12:-1],
+    ]
+    return list(fields), signature, keccak(b"\x76" + rlp.encode(preimage))
+
+
 def _transaction_sender(raw_tx: str) -> str | None:
     """Return the lowercase address of the account a Tempo transaction debits.
 
@@ -215,37 +246,22 @@ def _transaction_sender(raw_tx: str) -> str | None:
     derived.
     """
     from eth_account import Account
-    from eth_hash.auto import keccak
-
-    from mpp.methods.tempo import _rlp as rlp
 
     try:
         tx_bytes = bytes.fromhex(raw_tx.removeprefix("0x"))
-        fields = rlp.decode(tx_bytes[1:])
-    except Exception:
+    except ValueError:
         return None
-    if tx_bytes[0] not in (0x76, 0x78) or not is_list(fields):
+    decoded = _decode_signed_transaction(tx_bytes)
+    if decoded is None:
         return None
-    if len(fields) not in (14, 15):
-        return None
+    fields, signature, sign_hash = decoded
     is_envelope = tx_bytes[0] == 0x78
-    sender_slot, signature = fields[11], fields[-1]
-    if not isinstance(signature, bytes) or not signature:
-        return None
+    sender_slot = fields[11]
 
     sender: str | None = None
     if len(signature) == 65:
-        has_fee_payer = is_envelope or sender_slot != b""
-        preimage = [
-            *fields[:10],
-            b"" if has_fee_payer else fields[10],
-            b"\x00" if has_fee_payer else b"",
-            *fields[12:-1],
-        ]
         try:
-            sender = Account._recover_hash(
-                keccak(b"\x76" + rlp.encode(preimage)), signature=signature
-            )
+            sender = Account._recover_hash(sign_hash, signature=signature)
         except Exception:
             return None
     else:

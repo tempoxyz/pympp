@@ -1466,7 +1466,11 @@ class TestSessionMethod:
         # A POST is content only when it has a body, so adapters must pass the body through.
         method = tempo_server.session(account=PAYEE, rpc_url=RPC, store=MemoryStore())
         assert method.key == "tempo/session" and method.respond is not None
-        assert method.stable_binding is None and method.needs_request_body
+        assert method.stable_binding is not None and method.needs_request_body
+        # Only the session snapshot hint is unbound: it moves with every request's spend.
+        request = {"amount": "1", "methodDetails": {"chainId": 1, "sessionSnapshot": {"a": 1}}}
+        assert method.stable_binding(request) == {"amount": "1", "methodDetails": {"chainId": 1}}
+        assert method.stable_binding({"amount": "1"}) == {"amount": "1"}
         handler = Mpp(methods=[method], realm="api.test", secret_key="s").session(
             amount="1", unit_type="request"
         )

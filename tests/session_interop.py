@@ -103,9 +103,13 @@ async def mppx_session_server(
     secret_key: str | None = None,
     fund: bool = True,
     port: int = 0,
+    bootstrap: bool = False,
     timeout: float = 90.0,
 ) -> AsyncIterator[MppxServer]:
-    """Start server.mjs and yield it once it prints ``READY``; stop it on exit."""
+    """Start server.mjs and yield it once it prints ``READY``; stop it on exit.
+
+    ``bootstrap`` enables HEAD recovery, resolving each payer source to the channel it last paid on.
+    """
     node = require_mppx()
     env = _env(
         {
@@ -121,6 +125,7 @@ async def mppx_session_server(
             "MPPX_SECRET_KEY": secret_key,
             "MPPX_FUND": fund,
             "MPPX_PORT": port,
+            "MPPX_BOOTSTRAP": bootstrap,
         }
     )
     process = await asyncio.create_subprocess_exec(
@@ -229,12 +234,16 @@ async def run_mppx_session_client(
     method: str = "GET",
     trace: bool = False,
     fund: bool = True,
+    bootstrap: bool = False,
+    trusted_realms: Mapping[str, str] | None = None,
     timeout: float = 180.0,
 ) -> MppxClientResult:
     """Run client.mjs against ``url`` and return its parsed output.
 
     ``mode`` is ``"fetch"`` (mppx client fetch with ``tempo.session``) or ``"manager"``
     (``tempo.session.manager``); it defaults to the manager when ``top_up`` or ``close`` is set.
+    ``bootstrap`` runs the manager with HEAD recovery (``trusted_realms`` is its
+    ``trustedTempoProofRealms``).
     """
     node = require_mppx()
     env = _env(
@@ -251,6 +260,8 @@ async def run_mppx_session_client(
             "MPPX_METHOD": method,
             "MPPX_TRACE": trace,
             "MPPX_FUND": fund,
+            "MPPX_BOOTSTRAP": bootstrap,
+            "MPPX_TRUSTED_REALMS": dict(trusted_realms) if trusted_realms else None,
         }
     )
     process = await asyncio.create_subprocess_exec(

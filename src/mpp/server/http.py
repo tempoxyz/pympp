@@ -121,7 +121,9 @@ class PaymentRequired:
     """Payment is required, or the credential was rejected: return ``challenge`` as-is.
 
     ``challenge`` is a ``402`` response carrying ``WWW-Authenticate: Payment`` challenges,
-    or a final ``403`` problem response when paying again cannot help.
+    or a final ``403`` problem response when paying again cannot help. It is also the
+    response a method's preflight hook handled the request with (such as a session
+    bootstrap's ``204``), which the route returns as-is without running.
     """
 
     challenge: Response
