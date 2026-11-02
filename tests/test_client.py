@@ -1099,10 +1099,7 @@ class TestPaymentTransport:
         await transport.aclose()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "expires",
-        ["2020-01-01T00:00:00Z", "2020-01-01T00:00:00", "not-a-date"],
-    )
+    @pytest.mark.parametrize("expires", ["2020-01-01T00:00:00Z"])
     async def test_skips_invalid_or_expired_challenge(self, expires: str) -> None:
         """Should return 402 without paying if challenge expiry is unsafe."""
         challenge = Challenge(
@@ -1127,6 +1124,29 @@ class TestPaymentTransport:
         response = await transport.handle_async_request(request)
 
         assert response.status_code == 402
+        assert len(inner.requests) == 1
+        method.create_credential.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("expires", ["2020-01-01T00:00:00", "not-a-date"])
+    async def test_malformed_expires_is_an_unparseable_challenge(self, expires: str) -> None:
+        """A non-RFC 3339 expires fails parsing, as in mppx, so nothing is paid."""
+        challenge = Challenge(
+            id="test-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires=expires,
+        )
+        www_auth = challenge.to_www_authenticate("example.com")
+        inner = MockTransport([httpx.Response(402, headers={"www-authenticate": www_auth})])
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method.client], inner=inner)
+
+        with pytest.raises(NoMethodFoundError) as info:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert isinstance(info.value.__cause__, ParseError)
         assert len(inner.requests) == 1
         method.create_credential.assert_not_called()
 

@@ -310,11 +310,25 @@ class TestProofVerification:
 
         await intent.broadcast(credential, _request())
 
-        assert await store.get(f"mpp:charge:proof:{CHALLENGE_ID}") is not None
+        assert await store.get(f"mppx:charge:proof:{CHALLENGE_ID}") is not None
         with pytest.raises(CredentialReplayedError, match="already been used"):
             await intent.validate(credential, _request())
         with pytest.raises(CredentialReplayedError, match="already been used"):
             await intent.broadcast(credential, _request())
+
+    async def test_proof_claimed_by_session_bootstrap_is_not_reused(self) -> None:
+        from mpp.methods.tempo.session.server._bootstrap import (
+            _claim_proof,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        store = MemoryStore()
+        intent = _intent(store=store)
+        credential = _proof_credential(VIEM_SIGNATURE)
+        assert credential.challenge.expires is not None
+
+        assert await _claim_proof(store, CHALLENGE_ID, credential.challenge.expires)
+        with pytest.raises(CredentialReplayedError, match="already been used"):
+            await intent.validate(credential, _request())
 
     async def test_proof_claim_outlives_challenge_expiry(self) -> None:
         from mpp.methods.tempo.intents import _PROOF_CLAIM_GRACE
@@ -325,7 +339,7 @@ class TestProofVerification:
 
         await intent.broadcast(credential, _request())
 
-        deadline = store._expiry_deadlines[f"mpp:charge:proof:{CHALLENGE_ID}"]
+        deadline = store._expiry_deadlines[f"mppx:charge:proof:{CHALLENGE_ID}"]
         expires = datetime.fromisoformat(credential.challenge.expires.replace("Z", "+00:00"))
         assert deadline == expires.timestamp() + _PROOF_CLAIM_GRACE
 
