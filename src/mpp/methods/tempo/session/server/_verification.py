@@ -66,6 +66,7 @@ from mpp.methods.tempo.session.server._store import (
     InsufficientBalanceError,
     InvalidSignatureError,
     OnChainChannelState,
+    StoreChannelStore,
     VoucherValidation,
     accept_voucher_state_update,
     check_atomic_update,
@@ -101,6 +102,14 @@ __all__ = [
     "validate_voucher",
     "verify_and_accept_voucher",
 ]
+
+
+from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.session.server.sponsorship_limit import (
+    SessionSponsorshipLimit,
+    reserve_top_up,
+)
+from mpp.store import CompareAndSetStore
 
 
 def _now_ms() -> int:
@@ -489,6 +498,7 @@ class CredentialContext:
     fee_payer: TempoAccount | None = None
     fee_payer_policy: Mapping[str, int] | None = None
     fee_token: str | None = None
+    sponsorship_limit: SessionSponsorshipLimit = field(default_factory=SessionSponsorshipLimit)
     last_on_chain_verified: dict[str, int] = field(default_factory=dict[str, int])
     min_voucher_delta: int = 0
     on_session_settlement: OnSessionSettlement | None = None
@@ -935,6 +945,38 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
     )
     assert channel.descriptor is not None
     await check_atomic_update(context.store, channel_id)
+    if context.fee_payer is not None:
+        validated = chain.validate_top_up_credential_transaction(
+            serialized_transaction=payload.transaction,
+            additional_deposit=additional,
+            chain_id=context.chain_id,
+            descriptor=channel.descriptor,
+            escrow_contract=context.escrow,
+            expected_channel_id=channel_id,
+            expected_currency=request.currency,
+            fee_payer=context.fee_payer,
+            fee_payer_policy=context.fee_payer_policy,
+            allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
+            challenge_expires=context.challenge.expires,
+        )
+        limit = context.sponsorship_limit
+        budget_store = limit.store
+        if budget_store is None and isinstance(context.store, StoreChannelStore):
+            candidate = context.store.store
+            if isinstance(candidate, CompareAndSetStore):
+                budget_store = candidate
+        if budget_store is None:
+            raise VerificationFailedError(
+                "Sponsored top-ups require a shared compare-and-set store"
+            )
+        await reserve_top_up(
+            limit=limit,
+            store=budget_store,
+            chain_id=context.chain_id,
+            sponsor=context.fee_payer.address,
+            payer=validated.transaction.sender,
+            maximum_fee=get_policy(context.chain_id, context.fee_payer_policy).max_total_fee,
+        )
     result = await chain.broadcast_top_up_transaction(
         context.rpc_url,
         serialized_transaction=payload.transaction,

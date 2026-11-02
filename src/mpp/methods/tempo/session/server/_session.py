@@ -6,7 +6,7 @@ content request pays its route amount from the channel's accepted vouchers, and 
 requests (top-up, close, and open/voucher on non-content requests) get ``204`` with a session
 receipt. Module-level :func:`charge` and :func:`credit` adjust a channel's spend outside a route.
 
-Not ported: SSE/WebSocket metering, bootstrap/snapshot recovery, sponsorship limits,
+Not ported: SSE/WebSocket metering, bootstrap/snapshot recovery,
 ``voucherStateMaxAge`` (vouchers are always checked against a fresh chain read) and
 ``chargeOnAcceptance``.
 """
@@ -80,6 +80,8 @@ if TYPE_CHECKING:
     from mpp.store import Store
 
 __all__ = ["SessionPaymentReceipt", "charge", "credit", "session"]
+
+from mpp.methods.tempo.session.server.sponsorship_limit import SessionSponsorshipLimit
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,7 @@ def session(
     store: Store | None = None,
     fee_payer: TempoAccount | Literal[True] | None = None,
     fee_payer_policy: Mapping[str, int] | None = None,
+    sponsorship_limit: SessionSponsorshipLimit | None = None,
     fee_token: str | None = None,
     min_voucher_delta: str | None = None,
     settlement_schedule: SettlementSchedule | None = None,
@@ -203,6 +206,9 @@ def session(
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
+        sponsorship_limit: Rolling sponsored top-up limits; default five per payer and 100
+            aggregate attempts per 24 hours, subject to the aggregate maximum-fee budget.
+            The limit is operator-owned and cannot be overridden by a route request.
         fee_token: Fee token clients use for open/top-up and the server for settle/close.
         min_voucher_delta: Minimum voucher increase (decimal string, default "0").
         settlement_schedule: Server-owned automatic settlement cadence.
@@ -311,6 +317,7 @@ def session(
             escrow=verification.escrow,
             rpc_url=resolved_rpc_url,
             store=channel_store(),
+            sponsorship_limit=sponsorship_limit or SessionSponsorshipLimit(),
             account=account,
             http_client=http_client,
             channel_state_ttl=channel_state_ttl,

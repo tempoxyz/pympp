@@ -335,3 +335,29 @@ outside the MPP format. Servers reject this configuration before issuing a
 challenge, and clients reject it before signing or broadcasting. Drain or
 replace outstanding challenges with fixed MPP memos before upgrading; their
 transfers cannot safely authorize the enclosing split charge.
+
+### Session top-up sponsorship limits
+
+Sponsored session top-ups use a rolling 24-hour allowance: five attempts per payer
+across its channels, 100 attempts across all payers, and an aggregate fee allowance
+of 100 default maximum envelope fees. Each attempt reserves its full configured
+maximum fee for the window, even after success, failure, or an uncertain result.
+This is conservative: unused fee allowance is not refunded. Unsponsored top-ups
+and server settlement/close transactions are unaffected.
+
+```python
+from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+
+method = tempo.session(
+    account=operator,
+    fee_payer=sponsor,
+    store=shared_store,
+    sponsorship_limit=SessionSponsorshipLimit(per_payer=10, max_transactions=200),
+)
+```
+
+Use the same shared compare-and-set store and policy on every instance using a
+sponsor; the default in-memory store protects only one process. The policy is
+operator-owned: route inputs cannot increase its limits. Reaching a limit rejects
+the top-up before broadcast. Raising the count does not raise the separate fee
+allowance; configure `max_total_fee` explicitly when needed.

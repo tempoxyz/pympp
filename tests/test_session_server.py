@@ -1823,3 +1823,36 @@ class TestCompareAndSetRefused:
             await StoreChannelStore(raw).check_atomic_update("0x" + "ab" * 32)
         assert len(raw.data) == 3
         assert all(key.startswith("mpp:session:cas-probe:") for key in raw.data)
+
+
+async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lifecycle):
+    from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+
+    await life.open(100)
+    limit = SessionSponsorshipLimit(per_payer=1)
+    for index, additional in enumerate([500, 501]):
+        payload = await life.top_up_payload(additional)
+        transaction = await chain.build_top_up_transaction(
+            PAYER,
+            life.descriptor,
+            additional,
+            rpc_url=RPC,
+            fee_payer=True,
+            client=life.rpc.client,
+        )
+        payload = payload.model_copy(update={"transaction": transaction})
+        context = life.context(payload, fee_payer=SPONSOR, sponsorship_limit=limit)
+        if index == 0:
+            life.rpc.logs = [
+                top_up_log(life.descriptor, life.channel_id, additional, DEPOSIT + additional)
+            ]
+            life.rpc.states[life.channel_id] = (0, DEPOSIT + additional, 0)
+            await verification.broadcast_credential_payload(context)
+            assert (await life.channel()).spent == 0
+        else:
+            sent = list(life.rpc.sent)
+            before = await life.channel()
+            with pytest.raises(VerificationFailedError, match="allowance"):
+                await verification.broadcast_credential_payload(context)
+            assert life.rpc.sent == sent
+            assert await life.channel() == before
