@@ -578,6 +578,38 @@ class TestPushSafety:
             await method.create_credential(_challenge("1000", supportedModes=["push"]))
         assert raised.value.transaction_hash == "0x" + keccak(bytes.fromhex(raw[2:])).hex()
 
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            None,
+            {},
+            {"status": "0x1"},
+            {"transactionHash": "0x" + "cd" * 32},
+            {"transactionHash": "0x" + "cd" * 32, "status": "unknown"},
+            {"transactionHash": "invalid", "status": "0x1"},
+            KeyError("result"),
+        ],
+    )
+    async def test_incomplete_push_response_preserves_unknown_hash(self, reply: Any) -> None:
+        from eth_hash.auto import keccak
+
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        raw = "0x76" + "ab" * 40
+        rpc = (
+            AsyncMock(side_effect=reply)
+            if isinstance(reply, Exception)
+            else AsyncMock(return_value=reply)
+        )
+        with (
+            patch.object(method, "_build_tempo_transfer", AsyncMock(return_value=(raw, CHAIN))),
+            patch("mpp.methods.tempo.client._rpc_call", rpc),
+            pytest.raises(PaymentOutcomeUnknownError) as raised,
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+        assert raised.value.transaction_hash == "0x" + keccak(bytes.fromhex(raw[2:])).hex()
+
     async def test_node_rejection_is_a_plain_transaction_error(self) -> None:
         method = _tempo_method(account=ROOT, chain_id=CHAIN)
         with (
