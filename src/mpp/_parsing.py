@@ -285,8 +285,11 @@ def parse_www_authenticate(header: str) -> Challenge:
     if digest and not digest.startswith("sha-256="):
         raise ParseError("Invalid digest format")
     expires = params.get("expires")
-    if expires and not _DATETIME_RE.fullmatch(expires):
-        raise ParseError("Invalid expires format")
+    if expires:
+        try:
+            _validate_expires(expires)
+        except ValueError:
+            raise ParseError("Invalid expires format") from None
 
     return Challenge(
         id=id_,
