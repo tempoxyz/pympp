@@ -695,7 +695,7 @@ async def test_push_reserves_time_to_deliver_hash_credential(monkeypatch, during
     from mpp.errors import PaymentExpiredError
     from mpp.methods.tempo.client import _expiring_valid_before
 
-    now = [time.time()]
+    now = [float(int(time.time()))]
     expiry = now[0] + (60 if during_build else 15)
     offered = replace(
         _challenge("1000", supportedModes=["push"]),
