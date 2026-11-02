@@ -989,6 +989,79 @@ class TestOpaqueEcho:
         )
         assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
 
+    @pytest.mark.parametrize(("sent", "changed"), [(1, True), (0, False), (True, 1)])
+    def test_bool_int_change_falls_back_to_canonical(self, sent: object, changed: object) -> None:
+        import base64
+        import json
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = base64.urlsafe_b64encode(json.dumps({"x": sent}).encode()).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
+        assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
+
+    def test_unchanged_large_integer_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = (
+            base64.urlsafe_b64encode(b'{"value":1267650600228229401496703205376}')
+            .rstrip(b"=")
+            .decode()
+        )
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    @pytest.mark.parametrize("pair", [([1], [True]), ({"a": [0]}, {"a": [False]})])
+    def test_nested_bool_int_change_is_detected(self, pair: tuple[object, object]) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal(*pair)
+
+    def test_deeply_nested_opaque_does_not_exhaust_the_stack(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        nested = b'{"x":' + b"[" * 900 + b"]" * 900 + b"}"
+        raw = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_unchanged_nan_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"x":NaN}').rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_json_equal_mismatched_shapes(self) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal({"a": 1}, {"b": 1})
+        assert not _json_equal([1, 2], [1])
+        assert not _json_equal({"a": [1]}, {"a": 1})
+        assert not _json_equal({"a": 1}, {"a": 2})
+        assert _json_equal({"a": [1, {"b": True}]}, {"a": [1, {"b": True}]})
+
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
 
