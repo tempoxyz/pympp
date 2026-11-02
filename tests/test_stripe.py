@@ -1018,7 +1018,19 @@ async def test_cached_stripe_success_never_issues_replacement_challenge(backend,
 @pytest.mark.parametrize("backend", ["sdk", "http"])
 @pytest.mark.parametrize(
     "outcome",
-    ["timeout", "cancelled", "500", "idempotency", "processing", "requires_capture", "malformed"],
+    [
+        "timeout",
+        "cancelled",
+        "500",
+        "302",
+        "405",
+        "408",
+        "425",
+        "idempotency",
+        "processing",
+        "requires_capture",
+        "malformed",
+    ],
 )
 async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
     from mpp.server.verify import verify_or_challenge
@@ -1038,10 +1050,10 @@ async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
                 http_status = 400
 
             client.payment_intents.create_async.side_effect = IdempotencyError()
-        elif outcome == "500":
+        elif outcome in {"500", "302", "405", "408", "425"}:
 
             class ServerError(RuntimeError):
-                http_status = 500
+                http_status = int(outcome)
 
             client.payment_intents.create_async.side_effect = ServerError("internal error")
         intent = ChargeIntent(client=client)
@@ -1059,7 +1071,7 @@ async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
             )
         else:
             client.post.return_value = httpx.Response(
-                500 if outcome == "500" else 200,
+                int(outcome) if outcome.isdigit() else 200,
                 json={} if outcome == "malformed" else {"id": "pi_pending", "status": outcome},
             )
         intent = ChargeIntent(secret_key="sk_test", http_client=client)

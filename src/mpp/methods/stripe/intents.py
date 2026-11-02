@@ -371,7 +371,15 @@ class ChargeIntent:
         except (Exception, asyncio.CancelledError) as err:
             raise _StripeOutcomeUnknown() from err
 
-        if response.status_code >= 500 or response.status_code in {408, 409}:
+        if not response.is_success and response.status_code not in {
+            400,
+            401,
+            402,
+            403,
+            404,
+            422,
+            429,
+        }:
             raise _StripeOutcomeUnknown("Stripe settlement requires reconciliation")
         if response.status_code == 400:
             try:
