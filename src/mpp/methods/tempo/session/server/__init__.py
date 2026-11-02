@@ -50,10 +50,12 @@ if TYPE_CHECKING:
         IdempotencyKeyConflictError,
         resolve_settleable_voucher,
     )
+    from mpp.methods.tempo.session.server.sponsorship_limit import SessionSponsorshipLimit
 
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
 
 _LAZY_EXPORTS = {
+    "mpp.methods.tempo.session.server.sponsorship_limit": ("SessionSponsorshipLimit",),
     "mpp.methods.tempo.session._snapshot": (
         "SessionSnapshot",
         "deserialize_snapshot",
@@ -113,6 +115,7 @@ __all__ = [
     "ResolveSessionChannelIdParameters",
     "ResolvedSettlementSchedule",
     "SessionPaymentReceipt",
+    "SessionSponsorshipLimit",
     "SessionSettlementContext",
     "SessionSettlementFailureContext",
     "SessionSnapshot",

@@ -80,6 +80,7 @@ from mpp.server.method import (
     ValidateContext,
     VerifyContext,
 )
+from mpp.store import CompareAndSetStore
 
 if TYPE_CHECKING:
     import httpx
@@ -91,6 +92,8 @@ if TYPE_CHECKING:
     from mpp.store import Store
 
 __all__ = ["SessionPaymentReceipt", "charge", "credit", "session"]
+
+from mpp.methods.tempo.session.server.sponsorship_limit import SessionSponsorshipLimit
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +197,7 @@ def session(
     store: Store | None = None,
     fee_payer: TempoAccount | Literal[True] | None = None,
     fee_payer_policy: Mapping[str, int] | None = None,
+    top_up_sponsorship_limit: SessionSponsorshipLimit | None = None,
     fee_token: str | None = None,
     min_voucher_delta: str | None = None,
     settlement_schedule: SettlementSchedule | None = None,
@@ -236,6 +240,9 @@ def session(
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
+        top_up_sponsorship_limit: Rolling sponsored top-up limits; default five per payer and 100
+            aggregate attempts per 24 hours, subject to the aggregate maximum-fee budget.
+            The limit is operator-owned and cannot be overridden by a route request.
         fee_token: Fee token clients use for open/top-up and the server for settle/close.
         min_voucher_delta: Minimum voucher increase (decimal string, default "0").
         settlement_schedule: Server-owned automatic settlement cadence.
@@ -295,18 +302,28 @@ def session(
     if fee_payer is True and account is None:
         raise ValueError("fee_payer=True requires an account")
     schedule = resolve_settlement_schedule(settlement_schedule, decimals)
-    channel_stores: list[StoreChannelStore] = [from_store(store)] if store is not None else []
+
+    def checked_store(value: Store) -> StoreChannelStore:
+        if (
+            resolved_fee_payer is not None
+            and (top_up_sponsorship_limit is None or top_up_sponsorship_limit.store is None)
+            and not isinstance(value, CompareAndSetStore)
+        ):
+            raise TypeError("Sponsored sessions require a compare-and-set sponsorship store")
+        return from_store(value)
+
+    channel_stores: list[StoreChannelStore] = [checked_store(store)] if store is not None else []
 
     def channel_store() -> StoreChannelStore:
         # Without its own store, the method adopts `Mpp(store=...)` (`use_store`) or, failing
         # that, the per-process fallback on first use.
         if not channel_stores:
-            channel_stores.append(from_store(_fallback_store()))
+            channel_stores.append(checked_store(_fallback_store()))
         return channel_stores[0]
 
     def use_store(engine_store: Store) -> None:
         if not channel_stores:
-            channel_stores.append(from_store(engine_store))
+            channel_stores.append(checked_store(engine_store))
 
     last_on_chain_verified: dict[str, int] = {}
     chain_ids: list[int] = [chain_id] if chain_id is not None else []
@@ -430,6 +447,7 @@ def session(
             escrow=verification.escrow,
             rpc_url=resolved_rpc_url,
             store=channel_store(),
+            top_up_sponsorship_limit=top_up_sponsorship_limit or SessionSponsorshipLimit(),
             account=account,
             http_client=http_client,
             channel_state_ttl=channel_state_ttl,

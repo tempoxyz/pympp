@@ -1827,3 +1827,95 @@ class TestCompareAndSetRefused:
             await StoreChannelStore(raw).check_atomic_update("0x" + "ab" * 32)
         assert len(raw.data) == 3
         assert all(key.startswith("mpp:session:cas-probe:") for key in raw.data)
+
+
+async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lifecycle):
+    from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+
+    await life.open(100)
+    limit = SessionSponsorshipLimit(per_payer=1)
+    for index, additional in enumerate([500, 501]):
+        payload = await life.top_up_payload(additional)
+        transaction = await chain.build_top_up_transaction(
+            PAYER,
+            life.descriptor,
+            additional,
+            rpc_url=RPC,
+            fee_payer=True,
+            client=life.rpc.client,
+        )
+        payload = payload.model_copy(update={"transaction": transaction})
+        context = life.context(payload, fee_payer=SPONSOR, top_up_sponsorship_limit=limit)
+        if index == 0:
+            life.rpc.logs = [
+                top_up_log(life.descriptor, life.channel_id, additional, DEPOSIT + additional)
+            ]
+            life.rpc.states[life.channel_id] = (0, DEPOSIT + additional, 0)
+            await verification.broadcast_credential_payload(context)
+            assert (await life.channel()).spent == 0
+            # A retry of this exact signed transaction retains its original budget slot.
+            await verification.broadcast_credential_payload(context)
+        else:
+            sent = list(life.rpc.sent)
+            before = await life.channel()
+            daily_sends: list[str] = []
+            token = chain.sponsored_sends.set(daily_sends)
+            try:
+                with pytest.raises(VerificationFailedError, match="allowance"):
+                    await verification.broadcast_credential_payload(context)
+            finally:
+                chain.sponsored_sends.reset(token)
+            assert daily_sends == []
+            assert life.rpc.sent == sent
+            assert await life.channel() == before
+
+
+@pytest.mark.parametrize("failure", ["wrong_sender", "simulation"])
+async def test_invalid_top_up_does_not_consume_sponsorship(life: Lifecycle, monkeypatch, failure):
+    from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+
+    await life.open(100)
+    budget_store = MemoryStore()
+    limit = SessionSponsorshipLimit(per_payer=1, store=budget_store)
+    payload = await life.top_up_payload(500)
+    transaction = await chain.build_top_up_transaction(
+        PAYEE if failure == "wrong_sender" else PAYER,
+        life.descriptor,
+        500,
+        rpc_url=RPC,
+        fee_payer=True,
+        client=life.rpc.client,
+    )
+    payload = payload.model_copy(update={"transaction": transaction})
+    context = life.context(payload, fee_payer=SPONSOR, top_up_sponsorship_limit=limit)
+    if failure == "simulation":
+
+        async def fail_simulation(*args, **kwargs):
+            raise VerificationFailedError("preflight simulation reverted")
+
+        monkeypatch.setattr(chain, "_simulate_call", fail_simulation)
+    sent = list(life.rpc.sent)
+    with pytest.raises(VerificationFailedError, match="channel payer|simulation reverted"):
+        await verification.broadcast_credential_payload(context)
+    assert life.rpc.sent == sent
+    assert not budget_store._data
+
+
+@pytest.mark.parametrize("params", [None, [], [None], ["other"], ["raw"]])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_rejected_send_reservation_preserves_unrelated_daily_attempts(params, cancelled):
+    async def reject():
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise VerificationFailedError("allowance exhausted")
+
+    tracker = verification._SendTracker(None, before_send=reject)
+    sends = ["prior", "raw"]
+    token = chain.sponsored_sends.set(sends)
+    try:
+        with pytest.raises(asyncio.CancelledError if cancelled else VerificationFailedError):
+            await tracker.post(RPC, json={"method": "eth_sendRawTransaction", "params": params})
+    finally:
+        chain.sponsored_sends.reset(token)
+    assert not tracker.attempted
+    assert sends == (["prior"] if params == ["raw"] else ["prior", "raw"])
