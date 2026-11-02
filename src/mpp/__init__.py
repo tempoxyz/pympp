@@ -192,23 +192,32 @@ def _challenge_id(
 def _json_equal(a: object, b: object) -> bool:
     """Compare decoded JSON values, telling booleans apart from numbers.
 
-    Python treats True == 1 and False == 0, which JSON does not.
+    Python treats True == 1 and False == 0, which JSON does not. Iterative, so
+    deeply nested values the JSON decoder accepted cannot exhaust the stack.
     """
-    if isinstance(a, bool) or isinstance(b, bool):
-        return type(a) is type(b) and a == b
-    if isinstance(a, dict) and isinstance(b, dict):
-        left = cast("dict[str, object]", a)
-        right = cast("dict[str, object]", b)
-        return left.keys() == right.keys() and all(
-            _json_equal(v, right[k]) for k, v in left.items()
-        )
-    if isinstance(a, list) and isinstance(b, list):
-        left_list = cast("list[object]", a)
-        right_list = cast("list[object]", b)
-        return len(left_list) == len(right_list) and all(
-            _json_equal(x, y) for x, y in zip(left_list, right_list, strict=True)
-        )
-    return a == b
+    stack: list[tuple[object, object]] = [(a, b)]
+    while stack:
+        left, right = stack.pop()
+        if isinstance(left, bool) or isinstance(right, bool):
+            if type(left) is not type(right) or left != right:
+                return False
+        elif isinstance(left, dict) and isinstance(right, dict):
+            left_dict = cast("dict[str, object]", left)
+            right_dict = cast("dict[str, object]", right)
+            if left_dict.keys() != right_dict.keys():
+                return False
+            stack.extend((v, right_dict[k]) for k, v in left_dict.items())
+        elif isinstance(left, list) and isinstance(right, list):
+            left_list = cast("list[object]", left)
+            right_list = cast("list[object]", right)
+            if len(left_list) != len(right_list):
+                return False
+            stack.extend(zip(left_list, right_list, strict=True))
+        elif isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
+            return False
+        elif left != right:
+            return False
+    return True
 
 
 def _constant_time_equal(a: str, b: str) -> bool:
