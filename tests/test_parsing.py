@@ -115,6 +115,80 @@ class TestChallenge:
         challenge = Challenge.from_www_authenticate(header)
         assert challenge.method == method
 
+    @pytest.mark.parametrize(
+        "header",
+        [
+            'Payment id="test", @@@, realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", ="x", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30", description="unterminated',
+        ],
+        ids=["junk", "missing-name", "unterminated"],
+    )
+    def test_parse_rejects_malformed_auth_params(self, header: str) -> None:
+        """Like mppx, a position that cannot begin an auth-param fails parsing."""
+        with pytest.raises(ParseError):
+            Challenge.from_www_authenticate(header)
+
+    def test_parse_stops_at_next_auth_scheme(self) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30", Bearer realm="other"'
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.realm == "api.example.com"
+
+    @pytest.mark.parametrize("digest", ["md5=abc", "SHA-256=abc", "abc"])
+    def test_parse_rejects_invalid_digest(self, digest: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", digest="{digest}"'
+        )
+
+        with pytest.raises(ParseError, match="Invalid digest format"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize(
+        "expires",
+        ["not-a-date", "2026-01-01", "2026-01-01T00:00:00", "2026-01-01 00:00:00Z", "1767225600"],
+    )
+    def test_parse_rejects_invalid_expires(self, expires: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", expires="{expires}"'
+        )
+
+        with pytest.raises(ParseError, match="Invalid expires format"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize("expires", ["not-a-date", "2026-01-01T00:00:00", "1767225600"])
+    def test_create_rejects_expires_the_parser_refuses(self, expires: str) -> None:
+        with pytest.raises(ValueError, match="Invalid expires format"):
+            Challenge.create(
+                secret_key="secret",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={},
+                expires=expires,
+            )
+
+    @pytest.mark.parametrize(
+        "expires", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00+02:00"]
+    )
+    def test_parse_accepts_rfc3339_expires(self, expires: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", expires="{expires}", digest="sha-256=abc"'
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.expires == expires
+        assert challenge.digest == "sha-256=abc"
+
     def test_roundtrip_with_optional_fields(self) -> None:
         """Challenge with optional fields should survive roundtrip."""
         challenge = Challenge(

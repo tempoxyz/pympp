@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias, cast
 from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
-from mpp._parsing import ParseError, _b64_decode
+from mpp._parsing import ParseError, _b64_decode, _validate_expires
 from mpp._typing import is_dict, is_mapping
 from mpp.errors import (
     InvalidChallengeError,
@@ -354,6 +354,10 @@ def _validate_options(  # pyright: ignore[reportUnusedFunction]  # used by mpp.s
     """Check route options shared by every method."""
     if options.get("expires") is not None and options.get("expires_in") is not None:
         raise ValueError("expires and expires_in cannot both be set")
+    expires = options.get("expires")
+    # Non-string values fall back to the default expiry in create_challenge.
+    if isinstance(expires, str) and expires:
+        _validate_expires(expires)
     expires_in = options.get("expires_in")
     if expires_in is not None and not isinstance(expires_in, timedelta):
         raise ValueError("expires_in must be a timedelta")
