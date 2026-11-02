@@ -606,10 +606,13 @@ def cosign_fee_payer_envelope(
     clients name the channel token, as mppx does). The co-signed transaction
     pays fees in the envelope's fee token, else `fee_token`, else pathUSD.
 
-    Local sponsorship requires a recovered secp256k1 sender signature. The
-    current simulation does not authenticate other envelope types or enforce
-    access-key spending limits. A key authorization is carried through;
-    an authorization list is refused, as
+    Local sponsorship requires a secp256k1, P256, WebAuthn or keychain sender
+    signature that verifies (pytempo's ``recover_signer``). As in mppx, an access
+    key's expiry, revocation and spending limits are left to the chain: the
+    pre-broadcast simulation runs from the root account without a signature, so
+    a keychain transfer over its key's limit reverts on chain at the sponsor's
+    expense. Use a hosted sponsor that enforces access-key limits to avoid that.
+    A key authorization is carried through; an authorization list is refused, as
     mppx does. With `require_remaining_validity=False` only an already expired `valid_before` is
     rejected; with `allow_expired=True` as well, an expired one is not either.
     `max_valid_before` further caps `valid_before` (such as the challenge expiry).
@@ -663,9 +666,9 @@ def _verified_sender_signature(tx: Any, sender: str, sender_sig: bytes) -> Any:
 
     pytempo's ``recover_signer`` checks it as tempo-primitives does, so a local
     sponsor never pays for an envelope whose signature does not authorize
-    ``sender``. Whether a keychain access key is authorized is on-chain state the
-    node checks before inclusion. Multisig and other envelopes pytempo cannot
-    verify are refused.
+    ``sender``. As in mppx, whether a keychain access key is authorized, unexpired
+    and within its limits is left to the chain. Multisig and other envelopes
+    pytempo cannot verify are refused.
     """
     import pytempo.signatures  # pyright: ignore[reportMissingTypeStubs]
 
