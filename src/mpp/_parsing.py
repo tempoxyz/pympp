@@ -174,6 +174,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     cannot begin an auth-param is rejected rather than skipped, and parsing stops
     at a token without `=`, which begins another auth scheme.
     """
+    if len(params_str) > MAX_AUTHORIZATION_SIZE:
+        raise ParseError("Authentication parameters exceed maximum size")
     params: dict[str, str] = {}
     length = len(params_str)
     index = 0
@@ -239,6 +241,8 @@ def parse_www_authenticate(header: str) -> Challenge:
     """
     from mpp import Challenge, advertised_credential_header
 
+    if len(header) > MAX_AUTHORIZATION_SIZE:
+        raise ParseError("WWW-Authenticate header exceeds maximum size")
     header = header.strip()
 
     # Case-insensitive scheme matching
