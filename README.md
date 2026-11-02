@@ -381,18 +381,20 @@ and again immediately before submission. Their signed inclusion deadline leaves
 applications must still allow enough time for network delays and recovery.
 
 Local sponsored charges atomically bind each payer and challenge to its first
-submitted transaction and allow only one pending sponsored charge per payer and
-currency. Busy payers wait up to five seconds (bounded by transaction expiry).
-Unknown outcomes retain the payer claim until reconciliation or signed transaction
-expiry. Submitted transactions keep their challenge binding for its acceptance
-window; a preflight rejection releases claims without consuming sponsorship.
-Use an atomic `SponsorBudget(store=...)` backend or a replay store supporting
-`compare_and_set`. Expiring backends remove payer claims at the signed deadline;
-failed conditional cleanup retains the claim until expiry rather than deleting
-another request's reservation. Without a configured store these
-claims are process-local, so use a shared atomic store across server instances.
+submitted transaction and allow only one pending sponsored charge per payer on
+a chain, across currencies. Busy payers wait up to five seconds (bounded by the
+new transaction's expiry). A preflight rejection releases its claims without
+consuming sponsorship. Submitted transactions keep their challenge binding for
+its acceptance window.
 
-Payer admission for an unknown sponsored charge is retained until a receipt or chain-time
-non-inclusion check resolves it. Wall-clock expiry alone does not release the claim; a
-later request for that payer performs reconciliation. Backends should provision for
-these retained records and apply capacity limits rather than evicting pending payments.
+Unknown payer claims remain until a receipt or chain-time non-inclusion check
+resolves them. Wall-clock expiry alone does not release a claim; a later request
+for that payer performs reconciliation. Provision storage for retained records
+and apply capacity limits rather than evicting pending payments.
+
+Use an atomic `SponsorBudget(store=...)` backend or a replay store supporting
+`compare_and_set`. The Redis adapter requires permission to execute its CAS Lua
+script (`EVAL`); an adapter whose CAS operation is disabled is unsupported.
+Failed conditional cleanup retains the claim rather than deleting another
+request's reservation. Without a configured store these claims are process-local,
+so use a shared atomic store across server instances.
