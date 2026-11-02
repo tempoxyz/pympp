@@ -22,7 +22,7 @@ import httpx
 
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
-from mpp._parsing import ParseError
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError
 from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
@@ -883,6 +883,8 @@ class Mpp:
 
 def _payment_challenges(value: str) -> list[str]:
     """Return Payment challenges, preserving quoted commas and escapes."""
+    if len(value) > MAX_AUTHORIZATION_SIZE:
+        return []
     fields: list[str] = []
     start = 0
     quoted = escaped = False

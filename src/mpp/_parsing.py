@@ -34,7 +34,9 @@ MAX_AUTHORIZATION_SIZE = 64 * 1024
 
 # RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
-_AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
+_AUTH_PARAM_RE = re.compile(
+    r"""([!#$%&'*+.^_`|~0-9A-Za-z-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))"""
+)
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
 # Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
 # colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
@@ -163,11 +165,9 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         raise ParseError("Authentication parameters exceed maximum size")
     pos = 0
     while pos < len(params_str):
-        while pos < len(params_str) and params_str[pos] in " \t":
+        while pos < len(params_str) and params_str[pos] in " \t,":
             pos += 1
         if pos == len(params_str):
-            if params:
-                raise ParseError("Invalid trailing separator")
             break
         match = _AUTH_PARAM_RE.match(params_str, pos)
         if match is None:
@@ -187,8 +187,6 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         if params_str[pos] != ",":
             raise ParseError("Invalid authentication parameter separator")
         pos += 1
-        if pos == len(params_str):
-            raise ParseError("Invalid trailing separator")
     return params
 
 
@@ -202,6 +200,8 @@ def parse_www_authenticate(header: str) -> Challenge:
     """
     from mpp import Challenge, advertised_credential_header
 
+    if len(header) > MAX_AUTHORIZATION_SIZE:
+        raise ParseError("WWW-Authenticate header exceeds maximum size")
     header = header.strip()
 
     # Case-insensitive scheme matching

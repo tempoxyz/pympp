@@ -5,9 +5,7 @@ import pytest
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _parse_auth_params
 
 
-@pytest.mark.parametrize(
-    "value", ["garbage id=ok", "a=ok junk", "a=ok,", 'a="unterminated', "a=ok,,b=yes"]
-)
+@pytest.mark.parametrize("value", ["garbage id=ok", "a=ok junk", 'a="unterminated'])
 def test_reject_malformed_parameters(value: str) -> None:
     with pytest.raises(ParseError):
         _parse_auth_params(value)
@@ -30,7 +28,22 @@ def test_reject_oversized_parameters() -> None:
         ('a="comma, quote\\"", b=token', {"a": 'comma, quote"', "b": "token"}),
         (" a = token \t, B=other \t", {"a": "token", "b": "other"}),
         ("", {}),
+        ("a=ok,,b=yes, ", {"a": "ok", "b": "yes"}),
+        (
+            "foo.bar=one, 1x=two, !#$%&'*+.^_`|~-=three",
+            {"foo.bar": "one", "1x": "two", "!#$%&'*+.^_`|~-": "three"},
+        ),
     ],
 )
 def test_valid_parameters(value: str, expected: dict[str, str]) -> None:
     assert _parse_auth_params(value) == expected
+
+
+def test_raw_challenge_is_bounded_before_normalization() -> None:
+    from mpp._parsing import parse_www_authenticate
+    from mpp.client.transport import _payment_challenges
+
+    header = " " * MAX_AUTHORIZATION_SIZE + 'Payment id="x"'
+    with pytest.raises(ParseError, match="maximum size"):
+        parse_www_authenticate(header)
+    assert _payment_challenges(header) == []
