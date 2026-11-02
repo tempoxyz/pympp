@@ -29,6 +29,8 @@ from mpp.methods.tempo.session.server._settlement import (
     resolve_channel_store,
 )
 from mpp.methods.tempo.session.server._store import (
+    PENDING_CLOSE_CLOCK_SKEW_SECONDS,
+    PENDING_CLOSE_VALIDITY_SECONDS,
     ChannelState,
     ChannelStore,
     finalize_closed_channel_state,
@@ -321,6 +323,7 @@ async def _supervise_channel(
             return replace(
                 current,
                 close_requested_at=0,
+                pending_close_valid_before=None,
                 deposit=0,
                 finalized=True,
                 settled_on_chain=keep_greater(current.settled_on_chain, paid),
@@ -422,6 +425,30 @@ async def _close_at_spend(
             sender=account.address if account is not None else None,
         )
         assert account is not None
+        valid_before = options.pinned_timestamp + PENDING_CLOSE_VALIDITY_SECONDS
+        reserved = False
+
+        def reserve(current: ChannelState | None) -> ChannelState | None:
+            nonlocal reserved
+            if (
+                current is None
+                or current.finalized
+                or current.close_requested_at == 0
+                or current.spent != channel.spent
+            ):
+                return current
+            if (
+                current.pending_close_valid_before is not None
+                and options.pinned_timestamp
+                <= current.pending_close_valid_before + PENDING_CLOSE_CLOCK_SKEW_SECONDS
+            ):
+                return current
+            reserved = True
+            return replace(current, pending_close_valid_before=valid_before)
+
+        await options.store.update_channel(channel_id, reserve)
+        if not reserved:
+            return "closing", None
         tx_hash = await chain.close_on_chain(
             options.rpc_url,
             account,
@@ -434,6 +461,7 @@ async def _close_at_spend(
             fee_payer_policy=options.fee_payer_policy,
             fee_token=options.fee_token,
             candidate_fee_tokens=options.candidate_fee_tokens or [channel.token],
+            valid_before=valid_before,
             client=options.http_client,
         )
         receipt = await chain.wait_for_successful_receipt(

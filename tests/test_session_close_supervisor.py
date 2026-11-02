@@ -274,3 +274,33 @@ class TestBatches:
         life.block = {"number": BLOCK, "timestamp": None}
         with pytest.raises(ValueError, match="hex quantity"):
             await life.supervise()
+
+
+async def test_cancelled_payer_close_does_not_clear_live_server_close(
+    life: Supervised, monkeypatch
+) -> None:
+    from mpp.methods.tempo.session import _chain as chain
+    from mpp.methods.tempo.session.server._store import (
+        PENDING_CLOSE_CLOCK_SKEW_SECONDS,
+        PENDING_CLOSE_VALIDITY_SECONDS,
+    )
+
+    captured = []
+
+    async def uncertain_close(*args, **kwargs):
+        captured.append(kwargs["valid_before"])
+        raise TimeoutError("reply lost")
+
+    monkeypatch.setattr(chain, "close_on_chain", uncertain_close)
+    life.rpc.states[life.channel_id] = (0, DEPOSIT, CLOSE_REQUESTED)
+    assert outcomes(await life.supervise()) == ["failed"]
+    assert captured == [NOW + PENDING_CLOSE_VALIDITY_SECONDS]
+    assert (await life.channel()).pending_close_valid_before == captured[0]
+    assert outcomes(await life.supervise()) == ["closing"]
+    assert len(captured) == 1
+    life.rpc.states[life.channel_id] = (0, DEPOSIT, 0)
+    assert outcomes(await life.supervise()) == ["open"]
+    assert (await life.channel()).close_requested_at != 0
+    life.block["timestamp"] = hex(captured[0] + PENDING_CLOSE_CLOCK_SKEW_SECONDS + 1)
+    assert outcomes(await life.supervise()) == ["cancelled"]
+    assert (await life.channel()).pending_close_valid_before is None
