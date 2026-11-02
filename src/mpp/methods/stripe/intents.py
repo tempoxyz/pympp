@@ -19,6 +19,7 @@ from mpp.errors import (
     InvalidChallengeError,
     PaymentActionRequiredError,
     PaymentExpiredError,
+    PaymentOutcomeUnknownError,
     VerificationFailedError,
 )
 from mpp.methods.stripe.analytics import merge_metadata
@@ -201,31 +202,48 @@ class ChargeIntent:
         payment_options = await resolve_options(payment_intent_options, credential, request)
         resolved_metadata = merge_metadata(credential, user_metadata, payment_options)
 
-        if self._client is not None:
-            pi = await self._create_with_client(
-                client=self._client,
-                challenge_id=challenge.id,
-                request=parsed_request,
-                spt=spt,
-                metadata=resolved_metadata,
-                payment_options=payment_options,
-                settlement=settlement,
-            )
-        else:
-            pi = await self._create_with_secret_key(
-                secret_key=self._secret_key,  # type: ignore[arg-type]
-                challenge_id=challenge.id,
-                request=parsed_request,
-                spt=spt,
-                metadata=resolved_metadata,
-                payment_options=payment_options,
-                settlement=settlement,
-            )
+        try:
+            if self._client is not None:
+                pi = await self._create_with_client(
+                    client=self._client,
+                    challenge_id=challenge.id,
+                    request=parsed_request,
+                    spt=spt,
+                    metadata=resolved_metadata,
+                    payment_options=payment_options,
+                    settlement=settlement,
+                )
+            else:
+                pi = await self._create_with_secret_key(
+                    secret_key=self._secret_key,  # type: ignore[arg-type]
+                    challenge_id=challenge.id,
+                    request=parsed_request,
+                    spt=spt,
+                    metadata=resolved_metadata,
+                    payment_options=payment_options,
+                    settlement=settlement,
+                )
+        except (VerificationFailedError, TypeError):
+            raise
+        except Exception as err:
+            raise PaymentOutcomeUnknownError(
+                challenge, err, credential=credential, request=request
+            ) from err
 
         if pi["replayed"] and pi["status"] == "succeeded":
             raise CredentialReplayedError("Payment has already been processed")
-        if pi["replayed"]:
-            raise VerificationFailedError("Payment has already been processed")
+        if pi["replayed"] or pi["status"] not in {
+            "succeeded",
+            "requires_action",
+            "requires_payment_method",
+            "canceled",
+        }:
+            raise PaymentOutcomeUnknownError(
+                challenge,
+                RuntimeError("Stripe settlement requires reconciliation"),
+                credential=credential,
+                request=request,
+            )
         if pi["status"] == "requires_action":
             raise PaymentActionRequiredError("Stripe PaymentIntent requires action")
         if pi["status"] != "succeeded":
@@ -276,7 +294,9 @@ class ChargeIntent:
         except (VerificationFailedError, TypeError):
             raise
         except Exception as err:
-            raise VerificationFailedError("Stripe PaymentIntent failed") from err
+            if getattr(err, "http_status", None) in {400, 401, 402, 403, 404, 422}:
+                raise VerificationFailedError("Stripe PaymentIntent failed") from err
+            raise
 
     async def _create_with_secret_key(
         self,
@@ -331,6 +351,8 @@ class ChargeIntent:
             f"{stripe_defaults.STRIPE_API_BASE}/payment_intents", headers=headers, data=body
         )
 
+        if response.status_code >= 500 or response.status_code in {408, 409, 429}:
+            raise RuntimeError("Stripe settlement requires reconciliation")
         if not response.is_success:
             # Stripe's text can echo server-only options and Connect accounts.
             if not payment_options and settlement is None:

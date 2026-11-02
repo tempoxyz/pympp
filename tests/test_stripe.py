@@ -21,6 +21,7 @@ from mpp.errors import (
     InvalidChallengeError,
     PaymentActionRequiredError,
     PaymentExpiredError,
+    PaymentOutcomeUnknownError,
     VerificationFailedError,
 )
 from mpp.methods.stripe import ChargeIntent, StripeMethod
@@ -652,7 +653,7 @@ class TestChargeIntent:
         intent = ChargeIntent(client=FailingClient())
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="PaymentIntent failed"):
+        with pytest.raises(PaymentOutcomeUnknownError):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     def test_no_client_or_secret_key_raises(self):
@@ -858,7 +859,7 @@ class TestChargeIntentRawHttp:
         intent = ChargeIntent(secret_key="sk_test_raw", http_client=mock_client)
         credential = _make_credential()
 
-        with pytest.raises(VerificationFailedError, match="Internal Server Error"):
+        with pytest.raises(PaymentOutcomeUnknownError):
             await intent.verify(credential, SAMPLE_REQUEST)
 
     @pytest.mark.asyncio
@@ -1011,4 +1012,49 @@ async def test_cached_stripe_success_never_issues_replacement_challenge(backend,
     with pytest.raises(PaymentError) as caught:
         await verify_or_challenge(authorization=credential.to_authorization(), **options)
     assert caught.value.status == (403 if status == "succeeded" else 402)
-    assert (caught.value.retry_challenge is None) == (status == "succeeded")
+    assert caught.value.retry_challenge is None
+
+
+@pytest.mark.parametrize("backend", ["sdk", "http"])
+@pytest.mark.parametrize(
+    "outcome", ["timeout", "500", "processing", "requires_capture", "malformed"]
+)
+async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
+    from mpp.server.verify import verify_or_challenge
+    from tests import TEST_SECRET
+
+    if backend == "sdk":
+        client = FakeAsyncStripeClient(FakePaymentIntent(status=outcome))
+        if outcome == "timeout":
+            client.payment_intents.create_async.side_effect = TimeoutError("lost reply")
+        elif outcome == "500":
+
+            class ServerError(RuntimeError):
+                http_status = 500
+
+            client.payment_intents.create_async.side_effect = ServerError("internal error")
+        intent = ChargeIntent(client=client)
+    else:
+        client = AsyncMock(spec=httpx.AsyncClient)
+        if outcome == "timeout":
+            client.post.side_effect = httpx.ReadTimeout("lost reply")
+        else:
+            client.post.return_value = httpx.Response(
+                500 if outcome == "500" else 200,
+                json={} if outcome == "malformed" else {"id": "pi_pending", "status": outcome},
+            )
+        intent = ChargeIntent(secret_key="sk_test", http_client=client)
+    options: dict[str, Any] = {
+        "intent": intent,
+        "request": SAMPLE_REQUEST,
+        "realm": "test",
+        "secret_key": TEST_SECRET,
+        "method": "stripe",
+    }
+    challenge = await verify_or_challenge(authorization=None, **options)
+    assert isinstance(challenge, Challenge)
+    credential = Credential(challenge=challenge.to_echo(), payload={"spt": "spt_test"})
+    with pytest.raises(PaymentOutcomeUnknownError) as caught:
+        await verify_or_challenge(authorization=credential.to_authorization(), **options)
+    assert caught.value.retry_challenge is None
+    assert caught.value.credential.payload == credential.payload
