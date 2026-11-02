@@ -1082,13 +1082,18 @@ async def _send_raw_transaction_sync(
         raise TransactionError(f"Transaction submission failed: {error}") from error
     except RuntimeError as error:
         raise TransactionError(f"Transaction submission failed: {error}") from error
-    except (httpx.HTTPError, ValueError) as error:
+    except (httpx.HTTPError, ValueError, KeyError) as error:
         raise unknown(error) from error
+    # The node may have accepted the transaction, so an incomplete receipt is
+    # not evidence that nothing was paid.
     tx_hash = receipt.get("transactionHash") if is_dict(receipt) else None
     if not isinstance(tx_hash, str):
-        raise TransactionError("No transaction receipt returned.")
-    if receipt.get("status") != "0x1":
+        raise unknown(RuntimeError("No transaction receipt returned."))
+    status = receipt.get("status")
+    if status == "0x0":
         raise TransactionError(f"Transaction {tx_hash} reverted")
+    if status != "0x1":
+        raise unknown(RuntimeError(f"Transaction {tx_hash} has no recognized status"))
     return tx_hash
 
 

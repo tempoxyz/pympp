@@ -471,6 +471,35 @@ class TestSupportedModes:
             await method.create_credential(_challenge("1000", supportedModes=["push"]))
 
     @pytest.mark.parametrize(
+        "reply",
+        [
+            pytest.param(None, id="null-result"),
+            pytest.param({"status": "0x1"}, id="no-hash"),
+            pytest.param({"transactionHash": "0x" + "cd" * 32}, id="no-status"),
+            pytest.param({"transactionHash": "0x" + "cd" * 32, "status": "0x2"}, id="bad-status"),
+            pytest.param(KeyError("result"), id="no-result-member"),
+        ],
+    )
+    async def test_client_reports_incomplete_push_reply_as_unknown(self, reply: Any) -> None:
+        from mpp.errors import PaymentOutcomeUnknownError
+
+        method = _tempo_method(account=ROOT, chain_id=CHAIN)
+        rpc = (
+            AsyncMock(side_effect=reply)
+            if isinstance(reply, Exception)
+            else AsyncMock(return_value=reply)
+        )
+        with (
+            patch.object(
+                method, "_build_tempo_transfer", AsyncMock(return_value=("0x76ab", CHAIN))
+            ),
+            patch("mpp.methods.tempo.client._rpc_call", rpc),
+            pytest.raises(PaymentOutcomeUnknownError) as raised,
+        ):
+            await method.create_credential(_challenge("1000", supportedModes=["push"]))
+        assert raised.value.transaction_hash is not None
+
+    @pytest.mark.parametrize(
         "rpc_error",
         [
             {"code": 4, "message": "transaction pooled but not yet confirmed"},
