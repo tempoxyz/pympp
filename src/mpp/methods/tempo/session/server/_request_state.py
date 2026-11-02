@@ -3,13 +3,14 @@
 Resolves the TIP-1034 method details a ``tempo/session`` challenge advertises, reads the
 payment fields and verification context back from an authenticated challenge, and decides
 whether a verified credential serves content or gets a management response.
-
-Bootstrap (HEAD recovery) and session snapshots are not ported.
+Also resolves the reusable channel a challenge or bootstrap response advertises as a
+session snapshot.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import inspect
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -25,15 +26,19 @@ from mpp.methods.tempo.session._protocol import (
 )
 
 if TYPE_CHECKING:
-    from mpp import Challenge
+    from mpp import Challenge, Credential
     from mpp.methods.tempo.account import TempoAccount
+    from mpp.methods.tempo.session._snapshot import SessionSnapshot
     from mpp.server.http import Request, Response
 
 __all__ = [
     "ChallengePaymentFields",
     "CredentialVerificationContext",
     "RequestProbe",
+    "ResolveSessionChannelId",
+    "ResolveSessionChannelIdParameters",
     "SessionMethodDetails",
+    "SnapshotPaymentFields",
     "capture_request_probe",
     "get_challenge_payment_fields",
     "has_captured_request_body",
@@ -42,7 +47,9 @@ __all__ = [
     "resolve_credential_fee_payer",
     "resolve_credential_verification_context",
     "resolve_request_fee_payer",
+    "resolve_session_channel_id",
     "resolve_session_payment_request",
+    "resolve_session_snapshot",
     "respond_to_session_credential",
 ]
 
@@ -390,3 +397,140 @@ def resolve_session_payment_request(
         resolved["fee_token"] = fee_token
     resolved["session_protocol"] = SESSION_PROTOCOL_V2
     return resolved
+
+
+# --------------------------------------------------------------------------------------------
+# Channel ID resolution and session snapshots (mppx RequestState.ts)
+# --------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ResolveSessionChannelIdParameters:
+    """Arguments for ``resolve_channel_id`` (mppx ``ResolveSessionChannelIdParameters``).
+
+    Attributes:
+        request: The HTTP request being challenged or bootstrapped, when known; read its
+            headers (cookies, application auth) to identify the caller.
+        credential: The submitted credential, set only for a verified bootstrap proof.
+        source: The payer's ``did:pkh`` identity from a verified zero-amount bootstrap proof.
+        payment_request: The session route input being challenged.
+        store: The method's channel store.
+    """
+
+    request: Request | None
+    credential: Credential | None
+    source: str | None
+    payment_request: Mapping[str, Any]
+    store: Any
+
+
+ResolveSessionChannelId = Callable[
+    [ResolveSessionChannelIdParameters], "str | None | Awaitable[str | None]"
+]
+"""Application-owned lookup from authenticated identity and payment scope to a channel ID.
+
+pympp does not derive a storage key or scan the store: the returned channel is loaded and
+validated against the challenge's payment scope before its snapshot is advertised.
+"""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SnapshotPaymentFields:
+    """The payment fields a reusable channel must match before it is advertised."""
+
+    chain_id: int
+    currency: str
+    escrow_contract: str
+    recipient: str
+
+
+async def resolve_session_channel_id(
+    *,
+    request: Request | None,
+    credential: Credential | None,
+    payment_request: Mapping[str, Any],
+    resolve_channel_id: ResolveSessionChannelId | None,
+    store: Any,
+    source: str | None = None,
+) -> str | None:
+    """The channel to snapshot: the route's ``channel_id``, else ``resolve_channel_id``'s."""
+    from mpp.methods.tempo.session.server._store import normalize_channel_id
+
+    explicit = normalize_session_channel_id(
+        payment_request.get("channel_id", payment_request.get("channelId"))
+    )
+    if explicit is not None:
+        return explicit
+    if resolve_channel_id is None:
+        return None
+    resolved = resolve_channel_id(
+        ResolveSessionChannelIdParameters(
+            request=request,
+            credential=credential if source else None,
+            source=source,
+            payment_request=payment_request,
+            store=store,
+        )
+    )
+    if inspect.isawaitable(resolved):
+        resolved = await resolved
+    if resolved is None:
+        return None
+    return normalize_channel_id(resolved)
+
+
+async def resolve_session_snapshot(
+    *,
+    amount: int,
+    channel_id: str | None,
+    store: Any,
+    expected: SnapshotPaymentFields | None = None,
+    minimum_voucher_advance: int = 0,
+    require_voucher_advance: bool = False,
+) -> SessionSnapshot | None:
+    """The snapshot of a reusable channel, or None when it can't be advertised.
+
+    A channel is advertised only when it is a stored, open precompile channel with a signed
+    highest voucher matching its accepted amount, in the challenge's payment scope.
+    ``required_cumulative`` covers the spend plus ``amount`` and, when the next voucher
+    must advance, the accepted amount plus ``minimum_voucher_advance`` (at least 1).
+    """
+    from mpp.methods.tempo.session._snapshot import SessionSnapshot
+    from mpp.methods.tempo.session.server._store import is_precompile_state, normalize_channel_id
+
+    if channel_id is None:
+        return None
+    channel = await store.get_channel(normalize_channel_id(channel_id))
+    if channel is None or not is_precompile_state(channel) or channel.descriptor is None:
+        return None
+    if channel.finalized or channel.close_requested_at != 0:
+        return None
+    voucher = channel.highest_voucher
+    if voucher is None or voucher.cumulative_amount != channel.highest_voucher_amount:
+        return None
+    if expected is not None and not (
+        channel.chain_id == expected.chain_id
+        and channel.escrow_contract.lower() == expected.escrow_contract.lower()
+        and channel.payee.lower() == expected.recipient.lower()
+        and channel.token.lower() == expected.currency.lower()
+    ):
+        return None
+    spend_boundary = channel.spent + amount
+    advance_boundary = (
+        channel.highest_voucher_amount + (minimum_voucher_advance or 1)
+        if require_voucher_advance
+        else 0
+    )
+    return SessionSnapshot(
+        accepted_cumulative=channel.highest_voucher_amount,
+        chain_id=channel.chain_id,
+        channel_id=channel.channel_id,
+        deposit=channel.deposit,
+        descriptor=channel.descriptor,
+        escrow=channel.escrow_contract,
+        highest_voucher=voucher,
+        required_cumulative=max(spend_boundary, advance_boundary),
+        settled=channel.settled_on_chain,
+        spent=channel.spent,
+        units=channel.units,
+    )

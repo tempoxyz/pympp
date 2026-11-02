@@ -990,3 +990,188 @@ class TestEncodingBoundaries:
         assert Receipt.from_payment_receipt(_b64_json(receipt)).extra is None
         receipt["extra"] = {"k": "v"}
         assert Receipt.from_payment_receipt(_b64_json(receipt)).extra == {"k": "v"}
+
+
+class TestOpaqueEcho:
+    """The credential echoes the issuer's opaque string unchanged (pympp#370)."""
+
+    @staticmethod
+    def _header(opaque_json: bytes) -> tuple[str, str]:
+        import base64
+
+        raw = base64.urlsafe_b64encode(opaque_json).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        return header, raw
+
+    @pytest.mark.parametrize(
+        "opaque_json",
+        [
+            b'{"route":"/v1/search","plan":"pro"}',
+            b'{"plan": "pro", "route": "/v1/search"}',
+            b'{"plan":"pro","route":"/v1/search"}',
+        ],
+    )
+    def test_to_echo_and_format_keep_issuer_string(self, opaque_json: bytes) -> None:
+        from mpp import Challenge
+
+        header, raw = self._header(opaque_json)
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.opaque == {"plan": "pro", "route": "/v1/search"}
+        assert challenge.to_echo().opaque == raw
+        assert f'opaque="{raw}"' in challenge.to_www_authenticate("api.example.com")
+
+    def test_non_canonical_opaque_verifies_against_issuer_encoding(self) -> None:
+        import base64
+        import hashlib
+        import hmac
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"route":"/v1/search","plan":"pro"}').rstrip(b"=")
+        hmac_input = f"api.example.com|tempo|charge|e30|||{raw.decode()}"
+        mac = hmac.new(b"secret", hmac_input.encode(), hashlib.sha256).digest()
+        challenge_id = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+        header = (
+            f'Payment id="{challenge_id}", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", opaque="{raw.decode()}"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.verify("secret", "api.example.com")
+
+    @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
+    def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = "eyJyb3V0ZSI6Ii92MS9zZWFyY2giLCJwbGFuIjoicHJvIn0"
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}{suffix}"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        canonical = canonical_b64url({"plan": "pro", "route": "/v1/search"})
+        assert challenge.to_echo().opaque == canonical
+        assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
+
+    def test_undecodable_stored_opaque_falls_back_to_canonical(self) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        challenge = Challenge(
+            id="abc",
+            method="tempo",
+            intent="charge",
+            request={},
+            opaque={"plan": "pro"},
+            _opaque_b64="not-json",
+        )
+        assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
+
+    @pytest.mark.parametrize(("sent", "changed"), [(1, True), (0, False), (True, 1)])
+    def test_bool_int_change_falls_back_to_canonical(self, sent: object, changed: object) -> None:
+        import base64
+        import json
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = base64.urlsafe_b64encode(json.dumps({"x": sent}).encode()).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
+        assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
+
+    def test_unchanged_large_integer_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = (
+            base64.urlsafe_b64encode(b'{"value":1267650600228229401496703205376}')
+            .rstrip(b"=")
+            .decode()
+        )
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    @pytest.mark.parametrize("pair", [([1], [True]), ({"a": [0]}, {"a": [False]})])
+    def test_nested_bool_int_change_is_detected(self, pair: tuple[object, object]) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal(*pair)
+
+    def test_deeply_nested_opaque_does_not_exhaust_the_stack(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        nested = b'{"x":' + b"[" * 900 + b"]" * 900 + b"}"
+        raw = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_unchanged_nan_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"x":NaN}').rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_json_equal_mismatched_shapes(self) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal({"a": 1}, {"b": 1})
+        assert not _json_equal([1, 2], [1])
+        assert not _json_equal({"a": [1]}, {"a": 1})
+        assert not _json_equal({"a": 1}, {"a": 2})
+        assert _json_equal({"a": [1, {"b": True}]}, {"a": [1, {"b": True}]})
+
+    def test_changed_opaque_falls_back_to_canonical(self) -> None:
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        header, raw = self._header(b'{"route":"/v1/search","plan":"pro"}')
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"plan": "free"})
+        assert challenge.to_echo().opaque == canonical_b64url({"plan": "free"})
+
+    def test_created_challenge_ids_are_unchanged(self) -> None:
+        from mpp import Challenge, generate_challenge_id
+
+        challenge = Challenge.create(
+            secret_key="secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            meta={"route": "/v1/search", "plan": "pro"},
+        )
+        assert challenge.id == generate_challenge_id(
+            secret_key="secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            opaque={"plan": "pro", "route": "/v1/search"},
+        )
+        parsed = Challenge.from_www_authenticate(challenge.to_www_authenticate("api.example.com"))
+        assert parsed.verify("secret", "api.example.com")
+        assert parsed.to_echo().opaque == challenge.to_echo().opaque

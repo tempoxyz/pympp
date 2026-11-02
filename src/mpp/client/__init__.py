@@ -25,11 +25,12 @@ from mpp.events import (
     PaymentEventName,
 )
 from mpp.methods import Method
-from mpp.runtime import ClientMethod, CredentialParams, PaymentRuntime
+from mpp.runtime import ChallengeCandidate, ClientMethod, CredentialParams, PaymentRuntime
 
 __all__ = [
     "CHALLENGE_RECEIVED",
     "CREDENTIAL_CREATED",
+    "ChallengeCandidate",
     "ClientMethod",
     "CredentialParams",
     "EventDispatcher",

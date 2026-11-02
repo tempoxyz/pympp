@@ -61,6 +61,9 @@ def _b64_encode(data: dict[str, Any]) -> str:
     return encoded.rstrip("=")
 
 
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
+
+
 def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
     """Decode URL-safe base64 JSON to dict.
 
@@ -239,6 +242,9 @@ def parse_www_authenticate(header: str) -> Challenge:
         description=params.get("description"),
         opaque=opaque,
         header=credential_header,
+        # Keep the issuer's string only when it is strict base64url, so that
+        # echoing or re-formatting it cannot inject header parameters.
+        _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
     )
 
 
@@ -269,8 +275,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
     if challenge.header:
         parts.append(f'header="{_escape_quoted(challenge.header)}"')
-    if challenge.opaque is not None:
-        opaque_b64 = canonical_b64url(challenge.opaque)
+    opaque_b64 = challenge._encoded_opaque()
+    if opaque_b64 is not None:
         parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
