@@ -100,10 +100,22 @@ async def test_redis_bytes_preserve_challenge_retry():
     store = BytesStore()
     first = await challenge(store)
     retry = await challenge(store)
-    assert retry.value == first.value
     assert not retry.created
+    assert (await challenge(store)).value == retry.value
     await admission.release(store, retry)
     assert await store.get(first.key) is None
+
+
+@pytest.mark.asyncio
+async def test_adopted_challenge_survives_its_creators_cleanup():
+    store = MemoryStore()
+    creator = await challenge(store)
+    adopter = await challenge(store)
+    assert creator.created and not adopter.created
+    await admission.release(store, creator)
+    assert await store.get(creator.key) == adopter.value
+    with pytest.raises(CredentialReplayedError):
+        await challenge(store, "0x02")
 
 
 @pytest.mark.asyncio

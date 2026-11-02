@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import uuid4
 
+from mpp._typing import is_dict
 from mpp.errors import CredentialReplayedError, InternalPaymentError, VerificationError
 from mpp.store import CompareAndSetStore, ExpiringStore
 
@@ -75,12 +76,28 @@ async def claim_challenge(
             inserted = await store.put_if_absent(key, value)
         if inserted:
             return Claim(key, value, True)
-        current = _text(await store.get(key))
+        raw = await store.get(key)
+        current = _text(raw)
         if current is None:
             continue
-        if current != value:
+        try:
+            parsed: object = json.loads(current)
+        except ValueError as error:
+            raise InternalPaymentError() from error
+        if not is_dict(parsed):
+            raise InternalPaymentError() from ValueError("Malformed challenge binding")
+        bound = dict(parsed)
+        if {k: v for k, v in bound.items() if k != "adopted"} != json.loads(value):
             raise CredentialReplayedError("Challenge is already bound to another transaction")
-        return Claim(key, value, False)
+        if bound.get("adopted") is True:
+            return Claim(key, current, False)
+        # Mark the binding adopted so its creator's pre-broadcast cleanup, which
+        # releases only the exact value it wrote, cannot delete it under this attempt.
+        adopted = json.dumps({**bound, "adopted": True}, sort_keys=True)
+        if await store.compare_and_set(key, raw, adopted) or (
+            isinstance(raw, bytes) and await store.compare_and_set(key, current, adopted)
+        ):
+            return Claim(key, adopted, False)
     raise InternalPaymentError() from RuntimeError("Challenge admission contention")
 
 
