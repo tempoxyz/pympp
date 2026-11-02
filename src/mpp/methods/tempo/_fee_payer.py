@@ -667,14 +667,12 @@ def _verified_sender_signature(tx: Any, sender: str, sender_sig: bytes) -> Any:
     node checks before inclusion. Multisig and other envelopes pytempo cannot
     verify are refused.
     """
-    from pytempo.signatures import (  # pyright: ignore[reportMissingTypeStubs]
-        parse_signature,
-        recover_signer,
-    )
+    import pytempo.signatures  # pyright: ignore[reportMissingTypeStubs]
 
+    signatures: Any = pytempo.signatures
     try:
-        parsed: Any = parse_signature(sender_sig)
-        recovered: Any = recover_signer(tx.get_signing_hash(for_fee_payer=False), parsed)
+        parsed: Any = signatures.parse_signature(sender_sig)
+        recovered: Any = signatures.recover_signer(tx.get_signing_hash(for_fee_payer=False), parsed)
     except ValueError as err:
         raise VerificationError(
             "Local sponsorship requires a secp256k1, P256, WebAuthn or keychain "
