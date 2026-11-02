@@ -34,7 +34,7 @@ MAX_AUTHORIZATION_SIZE = 64 * 1024
 
 # RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
 # Matches: key="value" or key=token, handles escaped quotes in quoted strings
-_AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
+_AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
 # Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
 # colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
@@ -159,7 +159,19 @@ def _validate_payment_method_id(method: str) -> None:
 def _parse_auth_params(params_str: str) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
     params: dict[str, str] = {}
-    for match in _AUTH_PARAM_RE.finditer(params_str):
+    if len(params_str) > MAX_AUTHORIZATION_SIZE:
+        raise ParseError("Authentication parameters exceed maximum size")
+    pos = 0
+    while pos < len(params_str):
+        while pos < len(params_str) and params_str[pos] in " \t":
+            pos += 1
+        if pos == len(params_str):
+            if params:
+                raise ParseError("Invalid trailing separator")
+            break
+        match = _AUTH_PARAM_RE.match(params_str, pos)
+        if match is None:
+            raise ParseError("Invalid authentication parameter")
         # Auth-param names are case-insensitive (RFC 9110 §11.2).
         key = match.group(1).lower()
         if key in params:
@@ -167,6 +179,16 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         # Group 2 is quoted value, group 3 is unquoted token
         value = match.group(2) if match.group(2) is not None else match.group(3)
         params[key] = _unescape_quoted(value) if match.group(2) is not None else value
+        pos = match.end()
+        while pos < len(params_str) and params_str[pos] in " \t":
+            pos += 1
+        if pos == len(params_str):
+            break
+        if params_str[pos] != ",":
+            raise ParseError("Invalid authentication parameter separator")
+        pos += 1
+        if pos == len(params_str):
+            raise ParseError("Invalid trailing separator")
     return params
 
 
