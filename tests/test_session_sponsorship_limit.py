@@ -84,3 +84,23 @@ async def test_malformed_usage_fails_closed():
     await store.put("mpp:session:sponsorship:4217:sponsor", '{"entries": [{"payer": "payer"}]}')
     with pytest.raises(VerificationFailedError, match="stored sponsorship"):
         await reserve(store, SessionSponsorshipLimit())
+
+
+async def test_bytes_backend_reservations_complete():
+    class BytesStore(MemoryStore):
+        async def get(self, key):
+            value = await super().get(key)
+            return value.encode() if isinstance(value, str) else value
+
+    store = BytesStore()
+    await reserve(store, SessionSponsorshipLimit())
+    await reserve(store, SessionSponsorshipLimit())
+
+
+async def test_permanent_contention_is_bounded():
+    class BusyStore(MemoryStore):
+        async def compare_and_set(self, key, expected, value):
+            return False
+
+    with pytest.raises(VerificationFailedError, match="contention"):
+        await reserve(BusyStore(), SessionSponsorshipLimit())

@@ -12,7 +12,6 @@ from mpp.errors import VerificationFailedError
 from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
 from mpp.store import CompareAndSetStore
 
-
 __all__ = ["SessionSponsorshipLimit"]
 
 
@@ -72,7 +71,7 @@ async def reserve_top_up(
     payer = payer.lower()
     if maximum_fee < 0:
         raise VerificationFailedError("Invalid sponsorship fee limit")
-    while True:
+    for _ in range(100):
         now = time.time()
         raw = await store.get(key)
         try:
@@ -90,3 +89,6 @@ async def reserve_top_up(
         value = json.dumps(_Usage(entries=entries).model_dump(), separators=(",", ":"))
         if await store.compare_and_set(key, raw, value):
             return
+        if isinstance(raw, bytes) and await store.compare_and_set(key, raw.decode(), value):
+            return
+    raise VerificationFailedError("Sponsorship reservation contention exceeded retry limit")

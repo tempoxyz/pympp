@@ -1856,3 +1856,34 @@ async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lif
                 await verification.broadcast_credential_payload(context)
             assert life.rpc.sent == sent
             assert await life.channel() == before
+
+
+@pytest.mark.parametrize("failure", ["wrong_sender", "simulation"])
+async def test_invalid_top_up_does_not_consume_sponsorship(life: Lifecycle, monkeypatch, failure):
+    from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+
+    await life.open(100)
+    budget_store = MemoryStore()
+    limit = SessionSponsorshipLimit(per_payer=1, store=budget_store)
+    payload = await life.top_up_payload(500)
+    transaction = await chain.build_top_up_transaction(
+        PAYEE if failure == "wrong_sender" else PAYER,
+        life.descriptor,
+        500,
+        rpc_url=RPC,
+        fee_payer=True,
+        client=life.rpc.client,
+    )
+    payload = payload.model_copy(update={"transaction": transaction})
+    context = life.context(payload, fee_payer=SPONSOR, sponsorship_limit=limit)
+    if failure == "simulation":
+
+        async def fail_simulation(*args, **kwargs):
+            raise VerificationFailedError("preflight simulation reverted")
+
+        monkeypatch.setattr(chain, "_simulate_call", fail_simulation)
+    sent = list(life.rpc.sent)
+    with pytest.raises(VerificationFailedError, match="channel payer|simulation reverted"):
+        await verification.broadcast_credential_payload(context)
+    assert life.rpc.sent == sent
+    assert not budget_store._data

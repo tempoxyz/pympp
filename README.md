@@ -340,8 +340,10 @@ transfers cannot safely authorize the enclosing split charge.
 
 Sponsored session top-ups use a rolling 24-hour allowance: five attempts per payer
 across its channels, 100 attempts across all payers, and an aggregate fee allowance
-of 100 default maximum envelope fees. Each attempt reserves its full configured
-maximum fee for the window, even after success, failure, or an uncertain result.
+of 100 default maximum envelope fees. After successful simulation, each submission reserves its full configured
+maximum fee for the window, even after success, a mined revert, or an uncertain result.
+Invalid signatures and failed simulations consume no allowance. Sponsored top-ups
+must be signed by the channel payer.
 This is conservative: unused fee allowance is not refunded. Unsponsored top-ups
 and server settlement/close transactions are unaffected.
 

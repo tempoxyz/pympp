@@ -70,6 +70,7 @@ from mpp.server.method import (
     ValidateContext,
     VerifyContext,
 )
+from mpp.store import CompareAndSetStore
 
 if TYPE_CHECKING:
     import httpx
@@ -242,18 +243,28 @@ def session(
     if fee_payer is True and account is None:
         raise ValueError("fee_payer=True requires an account")
     schedule = resolve_settlement_schedule(settlement_schedule, decimals)
-    channel_stores: list[StoreChannelStore] = [from_store(store)] if store is not None else []
+
+    def checked_store(value: Store) -> StoreChannelStore:
+        if (
+            resolved_fee_payer is not None
+            and (sponsorship_limit is None or sponsorship_limit.store is None)
+            and not isinstance(value, CompareAndSetStore)
+        ):
+            raise TypeError("Sponsored sessions require a compare-and-set sponsorship store")
+        return from_store(value)
+
+    channel_stores: list[StoreChannelStore] = [checked_store(store)] if store is not None else []
 
     def channel_store() -> StoreChannelStore:
         # Without its own store, the method adopts `Mpp(store=...)` (`use_store`) or, failing
         # that, the per-process fallback on first use.
         if not channel_stores:
-            channel_stores.append(from_store(_fallback_store()))
+            channel_stores.append(checked_store(_fallback_store()))
         return channel_stores[0]
 
     def use_store(engine_store: Store) -> None:
         if not channel_stores:
-            channel_stores.append(from_store(engine_store))
+            channel_stores.append(checked_store(engine_store))
 
     last_on_chain_verified: dict[str, int] = {}
     chain_ids: list[int] = [chain_id] if chain_id is not None else []

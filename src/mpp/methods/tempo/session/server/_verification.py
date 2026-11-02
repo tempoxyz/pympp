@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -945,6 +945,7 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
     )
     assert channel.descriptor is not None
     await check_atomic_update(context.store, channel_id)
+    before_send: Callable[[], Awaitable[None]] | None = None
     if context.fee_payer is not None:
         validated = chain.validate_top_up_credential_transaction(
             serialized_transaction=payload.transaction,
@@ -959,6 +960,8 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
             allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
             challenge_expires=context.challenge.expires,
         )
+        if validated.transaction.sender.lower() != channel.descriptor.payer.lower():
+            raise VerificationFailedError("Sponsored top-ups must be signed by the channel payer")
         limit = context.sponsorship_limit
         budget_store = limit.store
         if budget_store is None and isinstance(context.store, StoreChannelStore):
@@ -969,14 +972,20 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
             raise VerificationFailedError(
                 "Sponsored top-ups require a shared compare-and-set store"
             )
-        await reserve_top_up(
-            limit=limit,
-            store=budget_store,
-            chain_id=context.chain_id,
-            sponsor=context.fee_payer.address,
-            payer=validated.transaction.sender,
-            maximum_fee=get_policy(context.chain_id, context.fee_payer_policy).max_total_fee,
-        )
+        sponsor = context.fee_payer.address
+        payer = channel.descriptor.payer
+
+        async def reserve() -> None:
+            await reserve_top_up(
+                limit=limit,
+                store=budget_store,
+                chain_id=context.chain_id,
+                sponsor=sponsor,
+                payer=payer,
+                maximum_fee=get_policy(context.chain_id, context.fee_payer_policy).max_total_fee,
+            )
+
+        before_send = reserve
     result = await chain.broadcast_top_up_transaction(
         context.rpc_url,
         serialized_transaction=payload.transaction,
@@ -990,7 +999,9 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
         fee_payer_policy=context.fee_payer_policy,
         allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
         challenge_expires=context.challenge.expires,
-        client=context.http_client,
+        client=cast(
+            "httpx.AsyncClient", _SendTracker(context.http_client, before_send=before_send)
+        ),
     )
     validate_channel_state(result.state)
     updated = await context.store.update_channel(
@@ -1115,8 +1126,14 @@ _SEND_METHODS = frozenset(
 class _SendTracker:
     """An RPC client wrapper recording whether a transaction was handed to the node."""
 
-    def __init__(self, client: httpx.AsyncClient | None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None,
+        *,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._client = client
+        self._before_send = before_send
         self.attempted = False
 
     async def post(self, url: str, *, json: Any = None, **kwargs: Any) -> httpx.Response:
@@ -1125,6 +1142,8 @@ class _SendTracker:
         content: object = json
         method = cast(dict[str, Any], content).get("method") if isinstance(content, dict) else None
         if method in _SEND_METHODS:
+            if self._before_send is not None:
+                await self._before_send()
             self.attempted = True
         if self._client is not None:
             return await self._client.post(url, json=cast(Any, content), **kwargs)
