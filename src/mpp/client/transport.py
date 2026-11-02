@@ -365,6 +365,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             for retry in range(self._max_payment_retries):
                 if response.status_code != 402:
                     return response
+                # EIP-3009 authorizations remain spendable even after a 402 response.
+                if sent is not None and (
+                    is_x402_challenge(sent.challenge)
+                    or (sent.challenge.method == "evm" and sent.challenge.intent == "charge")
+                ):
+                    return response
 
                 if original_origin != current_origin:
                     error = PaymentError("Refusing to send payment credential across redirect")
