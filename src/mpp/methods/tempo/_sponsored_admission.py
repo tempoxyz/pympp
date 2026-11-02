@@ -8,9 +8,10 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
-from mpp._typing import is_dict
+from mpp._typing import is_dict, is_list
 from mpp.errors import CredentialReplayedError, InternalPaymentError, VerificationError
 from mpp.store import CompareAndSetStore, ExpiringStore
 
@@ -20,6 +21,7 @@ class Claim:
     key: str
     value: str
     created: bool
+    attempt: str | None = None
 
 
 def _text(value: str | bytes | None) -> str | None:
@@ -60,22 +62,21 @@ async def claim_challenge(
     if not challenge_id:
         raise InternalPaymentError() from ValueError("Sponsored charges require a challenge ID")
     key = _key("challenge", realm, chain_id, challenge_id, payer.lower())
-    value = json.dumps(
-        {
-            "hash": transaction_hash.lower(),
-            "payer": payer.lower(),
-            "currency": currency.lower(),
-            "amount": amount,
-        },
-        sort_keys=True,
-    )
+    binding = {
+        "hash": transaction_hash.lower(),
+        "payer": payer.lower(),
+        "currency": currency.lower(),
+        "amount": amount,
+    }
+    attempt = uuid4().hex
+    value = json.dumps({**binding, "attempts": [attempt], "retained": False}, sort_keys=True)
     for _ in range(100):
         if expires_at is not None and isinstance(store, ExpiringStore):
             inserted = await store.put_if_absent_until(key, value, expires_at)
         else:
             inserted = await store.put_if_absent(key, value)
         if inserted:
-            return Claim(key, value, True)
+            return Claim(key, value, True, attempt)
         raw = await store.get(key)
         current = _text(raw)
         if current is None:
@@ -87,17 +88,18 @@ async def claim_challenge(
         if not is_dict(parsed):
             raise InternalPaymentError() from ValueError("Malformed challenge binding")
         bound = dict(parsed)
-        if {k: v for k, v in bound.items() if k != "adopted"} != json.loads(value):
+        if _binding(bound) != binding:
             raise CredentialReplayedError("Challenge is already bound to another transaction")
-        if bound.get("adopted") is True:
-            return Claim(key, current, False)
-        # Mark the binding adopted so its creator's pre-broadcast cleanup, which
-        # releases only the exact value it wrote, cannot delete it under this attempt.
-        adopted = json.dumps({**bound, "adopted": True}, sort_keys=True)
+        attempts = _attempts(bound)
+        # Legacy bindings cannot prove that every pre-upgrade attempt failed before submission.
+        retained = bound.get("retained", True)
+        adopted = json.dumps(
+            {**binding, "attempts": [*attempts, attempt], "retained": retained}, sort_keys=True
+        )
         if await store.compare_and_set(key, raw, adopted) or (
             isinstance(raw, bytes) and await store.compare_and_set(key, current, adopted)
         ):
-            return Claim(key, adopted, False)
+            return Claim(key, adopted, False, attempt)
     raise InternalPaymentError() from RuntimeError("Challenge admission contention")
 
 
@@ -163,12 +165,55 @@ async def claim_payer(
     raise InternalPaymentError() from RuntimeError("Payer admission contention")
 
 
-async def release(store: CompareAndSetStore, claim: Claim) -> None:
-    """Release only the observed owner, preserving backend byte snapshots for CAS."""
-    raw = await store.get(claim.key)
-    if _text(raw) != claim.value:
-        return
-    if await store.compare_and_set(claim.key, raw, None):
-        return
-    if isinstance(raw, bytes):
-        await store.compare_and_set(claim.key, raw.decode(), None)
+def _binding(value: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in value.items() if k not in ("adopted", "attempts", "retained")}
+
+
+def _attempts(value: dict[str, Any]) -> list[str]:
+    attempts = value.get("attempts", [])
+    if (
+        not is_list(attempts)
+        or not all(isinstance(item, str) for item in attempts)
+        or not isinstance(value.get("retained", True), bool)
+    ):
+        raise InternalPaymentError() from ValueError("Malformed challenge ownership")
+    return attempts
+
+
+async def release(
+    store: CompareAndSetStore,
+    claim: Claim,
+    *,
+    retain: bool = False,
+    reset_retained: bool = False,
+) -> None:
+    """Release this attempt; keep shared bindings until all attempts safely finish."""
+    for _ in range(100):
+        raw = await store.get(claim.key)
+        current = _text(raw)
+        value = None
+        if claim.attempt is None:
+            if current != claim.value:
+                return
+        else:
+            if current is None:
+                return
+            bound = json.loads(current)
+            if not is_dict(bound) or _binding(bound) != _binding(json.loads(claim.value)):
+                return
+            attempts = _attempts(bound)
+            if claim.attempt not in attempts:
+                return
+            attempts = [item for item in attempts if item != claim.attempt]
+            retained = retain or (bound.get("retained", True) and not reset_retained)
+            if not reset_retained and (attempts or retained):
+                value = json.dumps(
+                    {**_binding(bound), "attempts": attempts, "retained": retained}, sort_keys=True
+                )
+        if await store.compare_and_set(claim.key, raw, value):
+            return
+        if isinstance(raw, bytes) and await store.compare_and_set(claim.key, current, value):
+            return
+        if claim.attempt is None:
+            return
+    raise InternalPaymentError() from RuntimeError("Admission cleanup contention")
