@@ -583,16 +583,13 @@ class TestNonSecp256k1SenderSignatures:
             rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
         )
 
-    def test_cosigns_verified_keychain_p256_and_webauthn_senders(self) -> None:
+    def test_cosigns_verified_p256_and_webauthn_senders(self) -> None:
         from pytempo import TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
         from pytempo.signatures import (  # pyright: ignore[reportMissingTypeStubs]
             P256Account,
             WebAuthnAccount,
         )
 
-        from mpp.methods.tempo import TempoAccount
-
-        root = "0x" + "77" * 20
         unsigned = attrs.evolve(
             _make_signed_tx(valid_before=int(time.time()) + 300), sender_signature=None
         )
@@ -600,10 +597,7 @@ class TestNonSecp256k1SenderSignatures:
         webauthn = WebAuthnAccount(
             "0x" + "66" * 32, rp_id="example.com", origin="https://example.com"
         )
-        access = TempoAccount.from_key("0x" + "cd" * 32)
         signed = [
-            unsigned.sign_access_key(access.private_key, root),
-            unsigned.sign_access_key_with(p256, root),
             unsigned.sign_with(p256),
             unsigned.sign_with(webauthn),
         ]
@@ -615,6 +609,28 @@ class TestNonSecp256k1SenderSignatures:
             decoded = TempoTransaction.decode(raw)
             assert decoded.recover_sender().lower() == sender.lower()
             assert decoded.fee_payer_signature is not None
+
+    @pytest.mark.parametrize("key_type", ["secp256k1", "p256"])
+    def test_refuses_valid_keychain_signature_without_permission_simulation(self, key_type):
+        from pytempo.signatures import P256Account
+
+        from mpp.errors import VerificationError
+        from mpp.methods.tempo import TempoAccount
+
+        root = "0x" + "77" * 20
+        unsigned = attrs.evolve(
+            _make_signed_tx(valid_before=int(time.time()) + 300), sender_signature=None
+        )
+        if key_type == "secp256k1":
+            access = TempoAccount.from_key("0x" + "cd" * 32)
+            signed = unsigned.sign_access_key(access.private_key, root)
+        else:
+            signed = unsigned.sign_access_key_with(P256Account("0x" + "55" * 32), root)
+        assert signed.recover_signer().account.lower() == root
+        with pytest.raises(VerificationError, match="permission-aware simulation"):
+            self._intent()._cosign_as_fee_payer(
+                "0x" + encode_fee_payer_envelope(signed).hex(), CURRENCY
+            )
 
     @pytest.mark.parametrize("signature", [_p256_signature(), _webauthn_signature()])
     def test_rejects_unverified_local_sponsorship(self, signature: bytes) -> None:
@@ -759,3 +775,73 @@ def test_key_authorization_rpc_keeps_an_empty_limits_list() -> None:
 
     payload = [[b"\x01", b"", b"\x11" * 20, b"", []], b"\x22" * 64 + b"\x1b"]
     assert key_authorization_rpc(payload)["limits"] == []
+
+
+def _authorization_fields(**overrides):
+    fields = [b"\x01", b"", bytes.fromhex(RECIPIENT[2:]), b"", b"", b"", b"", b"", b""]
+    for index, value in overrides.items():
+        fields[int(index)] = value
+    return fields
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"invalid",
+        [],
+        [[], b""],
+        [b"fields", b"signature"],
+        [_authorization_fields(), []],
+        [_authorization_fields(**{"0": []}), b"\x00" * 65],
+        [_authorization_fields(**{"1": b"\xff"}), b"\x00" * 65],
+        [_authorization_fields(), b""],
+        [_authorization_fields(**{"2": b"short"}), b"\x00" * 65],
+        [_authorization_fields(), b"\x00" * 64 + b"\x02"],
+        [_authorization_fields(), b"\xff\x00"],
+        [_authorization_fields(**{"4": b"invalid"}), b"\x00" * 65],
+        [_authorization_fields(**{"4": [b"invalid"]}), b"\x00" * 65],
+        [_authorization_fields(**{"4": [[b"\x01" * 20, b"\x01", []]]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": b"invalid"}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [b"invalid"]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [[b"\x01" * 20, [b"invalid"]]]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [[b"\x01" * 20, [[b"short", []]]]]}), b"\x00" * 65],
+        [_authorization_fields(**{"6": b"short"}), b"\x00" * 65],
+        [_authorization_fields(**{"7": b"\x02"}), b"\x00" * 65],
+        [_authorization_fields(**{"1": b"\x03"}), b"\x00" * 65],
+    ],
+)
+def test_malformed_sponsored_key_authorization_fails_before_simulation(payload):
+    from mpp.methods.tempo._fee_payer import key_authorization_rpc
+
+    with pytest.raises(ValueError):
+        key_authorization_rpc(payload)
+
+
+@pytest.mark.parametrize("period", [b"", b"\x01"])
+def test_sponsored_key_authorization_preserves_call_and_spending_restrictions(period):
+    from mpp.methods.tempo._fee_payer import key_authorization_rpc
+
+    token = bytes.fromhex(CURRENCY[2:])
+    recipient = bytes.fromhex(RECIPIENT[2:])
+    fields = _authorization_fields(
+        **{
+            "4": [[token, b"\x05", period]],
+            "5": [[token, [[bytes.fromhex("a9059cbb"), [recipient]]]]],
+            "6": b"\x11" * 32,
+            "7": b"\x01",
+            "8": recipient,
+        }
+    )
+    rpc = key_authorization_rpc([fields, b"\x00" * 65])
+    assert rpc["limits"] == [
+        {"token": CURRENCY, "limit": "0x5", **({"period": "0x1"} if period else {})}
+    ]
+    assert rpc["allowedCalls"] == [
+        {
+            "target": CURRENCY,
+            "selectorRules": [{"selector": "0xa9059cbb", "recipients": [RECIPIENT.lower()]}],
+        }
+    ]
+    assert rpc["isAdmin"] is True
+    assert rpc["account"] == RECIPIENT.lower()
+    assert rpc["witness"] == "0x" + "11" * 32
