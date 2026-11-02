@@ -12,8 +12,9 @@ envelope); P256, WebAuthn and smart-account (ERC-1271) proofs are not supported 
 
 from __future__ import annotations
 
+import math
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from eth_abi.abi import decode, encode
 from eth_hash.auto import keccak
@@ -22,6 +23,9 @@ from mpp.methods.tempo.session._proof import proof_digest
 from mpp.methods.tempo.session._voucher import (
     _recover_canonical,  # pyright: ignore[reportPrivateUsage]
 )
+
+if TYPE_CHECKING:
+    from mpp.store import Store
 
 ACCOUNT_KEYCHAIN_ADDRESS = "0xaAAAaaAA00000000000000000000000000000000"
 """The AccountKeychain precompile."""
@@ -91,3 +95,57 @@ def is_active_key_info(result: Any, access_key: str, now: int | None = None) -> 
         return False
     current = int(time.time()) if now is None else now
     return not revoked and int(expiry) > current
+
+
+PROOF_CLAIM_PREFIX = "mppx:charge:proof:"
+"""Store key prefix claiming a used proof's challenge ID, shared with mppx and session bootstrap."""
+
+_REPLAY_MARKER_TYPE = "mppx:replay"
+
+
+def proof_claim_key(challenge_id: str) -> str:
+    """The store key claiming a proof's challenge (mppx ``getProofStoreKey``)."""
+    return PROOF_CLAIM_PREFIX + challenge_id
+
+
+def _is_live_claim(value: Any, now: float) -> bool:
+    """Whether a stored claim still holds: anything but an expired replay marker (as mppx)."""
+    if value is None:
+        return False
+    if not isinstance(value, dict):
+        return True
+    marker = cast("dict[str, Any]", value)
+    if marker.get("type") != _REPLAY_MARKER_TYPE:
+        return True
+    expires = marker.get("expires")
+    return not isinstance(expires, int | float) or expires > now * 1000
+
+
+async def claim_proof(store: Store, challenge_id: str, expires_at: float) -> bool:
+    """Record a proof's first use until ``expires_at`` (mppx ``Store.tryClaim``).
+
+    Returns ``False`` when the proof was already claimed or its challenge has
+    expired. Stores with ``put_if_absent_until`` claim until the challenge expires;
+    compare-and-set stores write mppx's expiring replay marker, which a later claim
+    may replace once it has expired. Other stores only offer ``put_if_absent``, so
+    their claim (the same marker) is never released: still single-use, but kept.
+    """
+    from mpp.store import CompareAndSetStore, ExpiringStore
+
+    if not math.isfinite(expires_at) or expires_at <= time.time():
+        return False
+    key = proof_claim_key(challenge_id)
+    marker = {"expires": math.floor(expires_at * 1000), "type": _REPLAY_MARKER_TYPE}
+    if isinstance(store, ExpiringStore):
+        return await store.put_if_absent_until(key, marker, expires_at)
+    if isinstance(store, CompareAndSetStore):
+        current = await store.get(key)
+        if _is_live_claim(current, time.time()):
+            return False
+        return await store.compare_and_set(key, current, marker)
+    return await store.put_if_absent(key, marker)
+
+
+async def is_proof_claimed(store: Store, challenge_id: str) -> bool:
+    """Whether a proof's challenge is already claimed (see :func:`claim_proof`)."""
+    return _is_live_claim(await store.get(proof_claim_key(challenge_id)), time.time())

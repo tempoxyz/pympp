@@ -884,6 +884,7 @@ module mpp.methods.tempo.schemas
         field chain_id: int | None = None (alias 'chainId')
         field fee_payer: bool = False (alias 'feePayer')
         field splits: list[mpp.methods.tempo.schemas.Split] | None = None
+        field supported_modes: list[typing.Literal['pull', 'push']] | None = None (alias 'supportedModes')
         field external_id: str | None = None (alias 'externalId')
         field extra: dict[str, str] | None = None
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
@@ -893,7 +894,7 @@ module mpp.methods.tempo.schemas
     charge: mpp.methods.Method
 
 module mpp.methods.tempo.server
-    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
+    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, supported_modes: Sequence[Literal['pull', 'push']] | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> list[ServerMethod]
     def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False) -> ServerMethod
 
 module mpp.methods.tempo.session

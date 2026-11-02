@@ -122,8 +122,8 @@ class ChargeInput(BaseModel):
     """Route input for a Tempo charge, serialized to its wire :class:`ChargeRequest`.
 
     ``amount`` is a decimal string converted to base units with ``decimals``;
-    ``splits`` are already in base units. ``chain_id``, ``fee_payer`` and
-    ``splits`` serialize under ``methodDetails``; ``extra`` is string metadata
+    ``splits`` are already in base units. ``chain_id``, ``fee_payer``, ``splits``
+    and ``supported_modes`` serialize under ``methodDetails``; ``extra`` is string metadata
     embedded in the request.
     """
 
@@ -136,6 +136,9 @@ class ChargeInput(BaseModel):
     chain_id: int | None = Field(default=None, alias="chainId")
     fee_payer: bool = Field(default=False, alias="feePayer")
     splits: list[Split] | None = None
+    supported_modes: list[Literal["pull", "push"]] | None = Field(
+        default=None, alias="supportedModes", min_length=1
+    )
     external_id: str | None = Field(default=None, alias="externalId")
     extra: dict[str, str] | None = None
 
@@ -157,6 +160,8 @@ class ChargeInput(BaseModel):
             details["feePayer"] = True
         if self.chain_id is not None:
             details["chainId"] = self.chain_id
+        if self.supported_modes is not None:
+            details["supportedModes"] = list(self.supported_modes)
         wire: dict[str, Any] = {
             "amount": str(parse_units(self.amount, self.decimals)),
             "currency": self.currency,

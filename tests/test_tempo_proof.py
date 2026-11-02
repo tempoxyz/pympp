@@ -277,3 +277,106 @@ def test_client_skips_push_only_offers() -> None:
     method = tempo_client.TempoMethod(account=SOURCE, chain_id=CHAIN_ID)
     assert method.can_handle_challenge(_challenge("1000", ["pull", "push"]))
     assert not method.can_handle_challenge(_challenge("1000", ["push"]))
+
+
+async def test_server_advertises_supported_modes() -> None:
+    from mpp.methods.tempo import server as tempo_server
+    from mpp.server import Mpp
+    from tests import challenge, http_request
+
+    async def issue(**route: Any) -> dict[str, Any]:
+        server = Mpp(
+            methods=tempo_server.charge(
+                recipient="0x742d35cc6634c0532925a3b844bc9e7595f8fe00",
+                currency="0x20c0000000000000000000000000000000000000",
+                supported_modes=["pull"],
+            ),
+            realm=TEST_REALM,
+            secret_key="secret",
+        )
+        return challenge(await server.charge(amount="1", **route)(http_request())).request
+
+    assert (await issue())["methodDetails"]["supportedModes"] == ["pull"]
+    overridden = await issue(supported_modes=["push"])
+    assert overridden["methodDetails"]["supportedModes"] == ["push"]
+
+
+def test_charge_input_rejects_unknown_or_empty_modes() -> None:
+    from pydantic import ValidationError
+
+    from mpp.methods.tempo.schemas import ChargeInput
+
+    base = {
+        "amount": "1",
+        "currency": "0x20c0000000000000000000000000000000000000",
+        "recipient": "0x742d35cc6634c0532925a3b844bc9e7595f8fe00",
+    }
+    for modes in ([], ["stream"]):
+        with pytest.raises(ValidationError):
+            ChargeInput.model_validate({**base, "supported_modes": modes})
+    wire = ChargeInput.model_validate({**base, "supported_modes": ["pull", "push"]}).model_dump()
+    assert wire["methodDetails"]["supportedModes"] == ["pull", "push"]
+
+
+async def test_charge_and_bootstrap_share_proof_claims() -> None:
+    from mpp.methods.tempo.session.server import _bootstrap as bootstrap
+
+    store = MemoryStore()
+    credential = _credential(_eoa_proof())
+    await _intent(store=store).verify(credential, _request())
+    assert await store.get("mppx:charge:proof:" + CHALLENGE_ID) is not None
+    claim = bootstrap._claim_proof  # pyright: ignore[reportPrivateUsage]
+    assert not await claim(store, CHALLENGE_ID, _expires())
+
+    other = MemoryStore()
+    assert await claim(other, CHALLENGE_ID, _expires())
+    with pytest.raises(CredentialReplayedError):
+        await _intent(store=other).verify(credential, _request())
+
+
+class _CasStore:
+    """A store with compare-and-set but no absolute expiry, as mppx's update-only stores."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+
+    async def get(self, key: str) -> Any:
+        return self.data.get(key)
+
+    async def put(self, key: str, value: Any) -> None:
+        self.data[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        raise AssertionError("compare-and-set stores claim with an expiring marker")
+
+    async def compare_and_set(self, key: str, expected: Any, value: Any) -> bool:
+        if self.data.get(key) != expected:
+            return False
+        self.data[key] = value
+        return True
+
+
+async def test_proof_claims_expire_on_compare_and_set_stores() -> None:
+    from mpp.methods.tempo import _proof
+
+    store: Any = _CasStore()
+    expires_at = time.time() + 60
+    assert await _proof.claim_proof(store, "c", expires_at)
+    assert await _proof.is_proof_claimed(store, "c")
+    assert not await _proof.claim_proof(store, "c", expires_at)
+    # Like mppx's replay marker, an expired claim no longer holds.
+    store.data["mppx:charge:proof:c"]["expires"] = int((time.time() - 1) * 1000)
+    assert not await _proof.is_proof_claimed(store, "c")
+    assert await _proof.claim_proof(store, "c", expires_at)
+    assert not await _proof.claim_proof(store, "d", time.time() - 1)
+
+
+async def test_proof_claims_expire_with_the_challenge() -> None:
+    from mpp.methods.tempo import _proof
+
+    store = MemoryStore()
+    assert await _proof.claim_proof(store, "c", time.time() + 60)
+    assert store._expiry_deadlines  # pyright: ignore[reportPrivateUsage]

@@ -1062,32 +1062,24 @@ class ChargeIntent:
         """Consume a proof's challenge in a configured store (mppx ``tryClaimProof``).
 
         Like mppx, proofs are single-use only when a store was configured; the
-        in-memory fallback store does not make them so.
+        in-memory fallback store does not make them so. The claim key is
+        mppx's, shared with session bootstrap, so one proof is claimed once.
         """
         if self._store is None or self._store_is_fallback:
             return
-        key = self._proof_store_key(challenge_id)
         expires_at = _expires_timestamp(expires)
-        if expires_at is not None and expires_at <= time.time():
+        if expires_at is None or expires_at <= time.time():
             raise VerificationError("Request has expired")
-        if expires_at is not None and isinstance(self._store, ExpiringStore):
-            claimed = await self._store.put_if_absent_until(key, challenge_id, expires_at)
-        else:
-            claimed = await self._store.put_if_absent(key, challenge_id)
-        if not claimed:
+        if not await _charge_proof.claim_proof(self._store, challenge_id, expires_at):
             raise CredentialReplayedError("Proof credential has already been used")
 
     async def _ensure_proof_unused(self, challenge_id: str) -> None:
         if (
             self._store is not None
             and not self._store_is_fallback
-            and await self._store.get(self._proof_store_key(challenge_id)) is not None
+            and await _charge_proof.is_proof_claimed(self._store, challenge_id)
         ):
             raise CredentialReplayedError("Proof credential has already been used")
-
-    @staticmethod
-    def _proof_store_key(challenge_id: str) -> str:
-        return f"mpp:charge:proof:{challenge_id}"
 
     async def validate(
         self,

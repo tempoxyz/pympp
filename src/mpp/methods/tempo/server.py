@@ -59,6 +59,7 @@ def charge(
     timeout: float = DEFAULT_TIMEOUT,
     confirmation_timeout: float = DEFAULT_CONFIRMATION_TIMEOUT,
     relay: Relay | None = None,
+    supported_modes: Sequence[Literal["pull", "push"]] | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
 ) -> list[ServerMethod]:
@@ -66,8 +67,8 @@ def charge(
 
     Routes take ``amount`` (decimal string), and optionally ``currency``,
     ``recipient``, ``chain_id``, ``fee_payer`` (sponsor the client's fees),
-    ``splits`` (base units) and ``external_id``. A route naming a ``currency``
-    offers only that one.
+    ``splits`` (base units), ``supported_modes`` and ``external_id``. A route
+    naming a ``currency`` offers only that one.
 
     Args:
         recipient: Default payment recipient.
@@ -91,6 +92,9 @@ def charge(
         timeout: RPC request timeout in seconds.
         confirmation_timeout: Seconds to wait for a broadcast transaction's receipt.
         relay: Serve validation and settlement through the Tempo API relay.
+        supported_modes: Settlement modes challenges advertise by default:
+            ``"pull"`` (a signed transaction) and/or ``"push"`` (a transaction
+            hash). All modes when omitted; a route's ``supported_modes`` overrides it.
         can_offer: Decides whether to advertise an offer for a wire request.
         on_payment_success: Called with each successful Tempo charge event.
     """
@@ -128,6 +132,8 @@ def charge(
         input.setdefault("recipient", config.recipient)
         input.setdefault("chain_id", config.chain_id)
         input.setdefault("decimals", config.decimals)
+        if supported_modes is not None:
+            input.setdefault("supported_modes", list(supported_modes))
         # No route promises sponsorship nobody can give (as mppx). Routes still opt in:
         # local cosigning accepts only secp256k1 sender signatures, so sponsoring by
         # default would refuse access-key and passkey payers.
