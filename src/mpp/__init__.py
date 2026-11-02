@@ -16,6 +16,7 @@ from typing import Any, Literal
 from mpp._canonical import canonical_b64url
 from mpp._parsing import (
     ParseError,
+    _validate_expires,
     format_authorization,
     format_payment_receipt,
     format_www_authenticate,
@@ -253,6 +254,8 @@ class Challenge:
         Returns:
             A Challenge with an HMAC-bound ID.
         """
+        if expires:
+            _validate_expires(expires)
         header = advertised_credential_header(header)
         challenge_id = generate_challenge_id(
             secret_key=secret_key,

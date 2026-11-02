@@ -53,6 +53,12 @@ _DATETIME_RE = re.compile(
 )
 
 
+def _validate_expires(expires: str) -> None:
+    """Reject an ``expires`` the challenge parser would refuse, as mppx's Challenge schema does."""
+    if not _DATETIME_RE.fullmatch(expires):
+        raise ValueError(f"Invalid expires format: {expires!r}")
+
+
 def _b64_encode(data: dict[str, Any]) -> str:
     """Encode dict as URL-safe base64 JSON (compact, no padding)."""
     compact_json = json.dumps(data, separators=(",", ":"), sort_keys=True)

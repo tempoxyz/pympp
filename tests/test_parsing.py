@@ -164,6 +164,18 @@ class TestChallenge:
         with pytest.raises(ParseError, match="Invalid expires format"):
             Challenge.from_www_authenticate(header)
 
+    @pytest.mark.parametrize("expires", ["not-a-date", "2026-01-01T00:00:00", "1767225600"])
+    def test_create_rejects_expires_the_parser_refuses(self, expires: str) -> None:
+        with pytest.raises(ValueError, match="Invalid expires format"):
+            Challenge.create(
+                secret_key="secret",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={},
+                expires=expires,
+            )
+
     @pytest.mark.parametrize(
         "expires", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00+02:00"]
     )

@@ -4,7 +4,8 @@ from typing import Any
 
 import pytest
 
-from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode
+from mpp import Challenge, ChallengeEcho, Credential, _b64url_encode, generate_challenge_id
+from mpp._canonical import canonical_b64url
 from mpp.errors import InternalPaymentError
 from mpp.server import PaymentRequired, Request
 from tests.network import TEMPO
@@ -70,15 +71,28 @@ def make_bound_credential(
     if expires is None:
         expires = _default_expires()
 
-    challenge = Challenge.create(
-        secret_key=secret_key,
+    # Bind the ID by hand rather than with Challenge.create, which refuses a
+    # malformed expires: tests also model peers that echo one.
+    challenge = Challenge(
+        id=generate_challenge_id(
+            secret_key=secret_key,
+            realm=realm,
+            method=method,
+            intent=intent,
+            request=request,
+            expires=expires,
+            digest=digest,
+            opaque=meta,
+            header=header,
+        ),
         realm=realm,
         method=method,
         intent=intent,
         request=request,
+        request_b64=canonical_b64url(request),
         expires=expires,
         digest=digest,
-        meta=meta,
+        opaque=meta,
         header=header,
     )
     echo = challenge.to_echo()
