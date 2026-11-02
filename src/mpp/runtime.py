@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -9,7 +10,12 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
-from mpp.errors import InvalidChallengeError, NoMethodFoundError, PaymentExpiredError
+from mpp.errors import (
+    InvalidChallengeError,
+    NoMethodFoundError,
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+)
 from mpp.events import CHALLENGE_RECEIVED, CREDENTIAL_CREATED, EventDispatcher
 from mpp.methods import Method as MethodDefinition
 from mpp.x402._client import is_x402_challenge, x402_credential
@@ -240,10 +246,22 @@ class PaymentRuntime:
                 credential = x402_credential(challenge, serialized)
             else:
                 credential = Credential.from_authorization(serialized)
-        await self.events.emit(
-            CREDENTIAL_CREATED,
-            {**payload, "credential": credential},
-        )
+        try:
+            await self.events.emit(
+                CREDENTIAL_CREATED,
+                {**payload, "credential": credential},
+            )
+        except asyncio.CancelledError as error:
+            tx_hash = credential.payload.get("hash")
+            if credential.payload.get("type") == "hash" and isinstance(tx_hash, str):
+                raise PaymentOutcomeUnknownError(
+                    challenge,
+                    error,
+                    credential=credential,
+                    request=request,
+                    transaction_hash=tx_hash,
+                ) from error
+            raise
         return credential
 
 
