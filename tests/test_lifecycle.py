@@ -6,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from mpp import Challenge, Credential, Receipt, _body_digest
+from mpp import Challenge, Credential, Receipt, _body_digest, generate_challenge_id
+from mpp._canonical import canonical_b64url
 from mpp.errors import (
     InvalidChallengeError,
     MalformedCredentialError,
@@ -420,12 +421,21 @@ async def test_mpp_rejects_malformed_serialized_credential(value: str) -> None:
     ],
 )
 async def test_mpp_rejects_missing_or_invalid_expiry(expires: str | None) -> None:
-    challenge = Challenge.create(
-        secret_key="test-secret",
+    # Challenge.create refuses a malformed expires, so bind one by hand as a peer could.
+    challenge = Challenge(
+        id=generate_challenge_id(
+            secret_key="test-secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={},
+            expires=expires,
+        ),
         realm="api.example.com",
         method="tempo",
         intent="charge",
         request={},
+        request_b64=canonical_b64url({}),
         expires=expires,
     )
     credential = Credential(challenge=challenge.to_echo(), payload={})

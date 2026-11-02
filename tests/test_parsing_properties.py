@@ -56,6 +56,10 @@ scheme_like_text = st.tuples(
     header_text,
 ).map("".join)
 quoted_field = st.one_of(nonempty_header_text, scheme_like_text)
+# Challenge parsing validates expires as an RFC 3339 date-time, like mppx.
+rfc3339_datetimes = st.datetimes(timezones=st.just(UTC)).map(
+    lambda value: value.isoformat().replace("+00:00", "Z")
+)
 method_ids = st.from_regex(r"\A[a-z][a-z0-9:_-]{0,15}\Z")
 json_scalars = st.one_of(
     st.none(), st.booleans(), st.integers(min_value=-(2**63), max_value=2**63), st.text()
@@ -177,8 +181,8 @@ class TestRoundtrip:
         intent=quoted_field,
         request=request_dicts,
         description=st.none() | quoted_field,
-        expires=st.none() | quoted_field,
-        digest=st.none() | quoted_field,
+        expires=st.none() | rfc3339_datetimes,
+        digest=st.none() | quoted_field.map(lambda value: f"sha-256={value}"),
         opaque=st.none() | st.dictionaries(st.text(), st.text(), max_size=3),
         header=st.sampled_from([None, "Payment-Authorization", "X-Pay"]),
     )

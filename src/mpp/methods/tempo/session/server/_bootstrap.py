@@ -24,6 +24,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationFailedError,
 )
+from mpp.methods.tempo._proof import PROOF_CLAIM_PREFIX
 from mpp.methods.tempo.session._proof import parse_pkh_source, verify_proof
 from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS
 from mpp.methods.tempo.session._snapshot import (
@@ -46,9 +47,6 @@ if TYPE_CHECKING:
     from mpp.store import Store
 
 __all__ = ["handle_bootstrap_preflight"]
-
-PROOF_CLAIM_PREFIX = "mppx:charge:proof:"
-"""Store key prefix claiming a used proof's challenge ID, shared with mppx."""
 
 
 def _respond_challenge(challenge: Challenge, error: PaymentError | None = None) -> Response:

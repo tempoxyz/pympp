@@ -1191,7 +1191,9 @@ class ChargeIntent:
 
     @staticmethod
     def _proof_store_key(challenge_id: str) -> str:
-        return f"mpp:charge:proof:{challenge_id}"
+        from mpp.methods.tempo._proof import PROOF_CLAIM_PREFIX
+
+        return PROOF_CLAIM_PREFIX + challenge_id
 
     async def _ensure_proof_unused(self, challenge_id: str) -> None:
         store = self._proof_store()
