@@ -2273,3 +2273,44 @@ async def test_native_evm_authorization_is_not_replaced_after_402(fresh_id):
     assert response.status_code == 402
     assert len(inner.requests) == 2
     create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wildcard", [False, True])
+async def test_cancelled_credential_observer_preserves_completed_push(wildcard):
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1000"})
+    tx_hash = "0x" + "ab" * 32
+    credential = make_credential(payload={"type": "hash", "hash": tx_hash}, challenge_id="test-id")
+    method = MockMethod()
+    method.create_credential.return_value = credential
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers={
+                    "www-authenticate": challenge.to_www_authenticate("example.com"),
+                },
+            )
+        ]
+    )
+    transport = PaymentTransport(methods=[method.client], inner=inner)
+    observed = asyncio.Event()
+
+    async def observer(event):
+        if wildcard and event.name != CREDENTIAL_CREATED:
+            return
+        observed.set()
+        await asyncio.Future()
+
+    transport.on("*" if wildcard else CREDENTIAL_CREATED, observer)
+    task = asyncio.create_task(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    await asyncio.wait_for(observed.wait(), 2)
+    task.cancel()
+    with pytest.raises(PaymentOutcomeUnknownError) as raised:
+        await task
+    assert raised.value.transaction_hash == tx_hash
+    assert raised.value.credential.payload == credential.payload
+    assert len(inner.requests) == 1
+    method.create_credential.assert_awaited_once()
