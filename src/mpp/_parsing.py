@@ -16,7 +16,7 @@ import base64
 import json
 import re
 import string
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp._canonical import canonical_b64url
@@ -475,7 +475,11 @@ def format_payment_receipt(receipt: Receipt) -> str:
     Output format:
         <base64-receipt>
     """
-    timestamp_str = receipt.timestamp.isoformat().replace("+00:00", "Z")
+    timestamp = receipt.timestamp
+    # A naive datetime has no offset, which the receipt schema requires: treat it as UTC.
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    timestamp_str = timestamp.isoformat().replace("+00:00", "Z")
 
     payload: dict[str, Any] = {
         "status": receipt.status,

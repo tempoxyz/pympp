@@ -560,6 +560,18 @@ class TestAuthorizationSizeLimit:
 
 
 class TestReceipt:
+    def test_format_naive_timestamp_as_utc(self) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, 12, 30),
+            reference="0xabc",
+            method="tempo",
+        )
+
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+
+        assert parsed.timestamp == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
     def test_roundtrip(self) -> None:
         """Receipt should survive roundtrip through header format."""
         timestamp = datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC)
