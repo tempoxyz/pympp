@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -215,7 +216,12 @@ def _json_equal(a: object, b: object) -> bool:
             stack.extend(zip(left_list, right_list, strict=True))
         elif isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
             return False
-        elif left != right:
+        elif left != right and not (
+            isinstance(left, float)
+            and isinstance(right, float)
+            and math.isnan(left)
+            and math.isnan(right)
+        ):
             return False
     return True
 

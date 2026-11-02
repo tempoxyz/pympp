@@ -1041,6 +1041,18 @@ class TestOpaqueEcho:
         )
         assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
 
+    def test_unchanged_nan_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"x":NaN}').rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
     def test_json_equal_mismatched_shapes(self) -> None:
         from mpp import _json_equal
 
