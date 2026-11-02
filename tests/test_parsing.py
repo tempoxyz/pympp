@@ -960,6 +960,21 @@ class TestOpaqueEcho:
         challenge = Challenge.from_www_authenticate(header)
         assert challenge.verify("secret", "api.example.com")
 
+    @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
+    def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = "eyJyb3V0ZSI6Ii92MS9zZWFyY2giLCJwbGFuIjoicHJvIn0"
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}{suffix}"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        canonical = canonical_b64url({"plan": "pro", "route": "/v1/search"})
+        assert challenge.to_echo().opaque == canonical
+        assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
+
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
 

@@ -55,6 +55,9 @@ def _b64_encode(data: dict[str, Any]) -> str:
     return encoded.rstrip("=")
 
 
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
+
+
 def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
     """Decode URL-safe base64 JSON to dict.
 
@@ -233,7 +236,9 @@ def parse_www_authenticate(header: str) -> Challenge:
         description=params.get("description"),
         opaque=opaque,
         header=credential_header,
-        _opaque_b64=opaque_b64 or None,
+        # Keep the issuer's string only when it is strict base64url, so that
+        # echoing or re-formatting it cannot inject header parameters.
+        _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
     )
 
 
