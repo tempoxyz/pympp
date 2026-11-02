@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from mpp.errors import CredentialReplayedError, InternalPaymentError
+from mpp.errors import CredentialReplayedError, InternalPaymentError, VerificationError
 from mpp.methods.tempo import _sponsored_admission as admission
 from mpp.store import MemoryStore
 
@@ -59,7 +59,7 @@ async def test_payer_is_serialized_and_retry_keeps_expiry():
     retry = await payer(store, reconciling=True)
     assert not retry.created
     assert retry.value == first.value
-    with pytest.raises(InternalPaymentError):
+    with pytest.raises(VerificationError, match="not submitted"):
         await payer(store, "0x02")
     await admission.release(store, first)
     assert (await payer(store, "0x02")).created
@@ -175,7 +175,7 @@ async def test_busy_payer_waits_for_release():
 async def test_payer_lock_covers_swap_source_tokens():
     store = MemoryStore()
     await payer(store)
-    with pytest.raises(InternalPaymentError):
+    with pytest.raises(VerificationError, match="not submitted"):
         await admission.claim_payer(
             store,
             chain_id=1,
@@ -197,7 +197,7 @@ async def test_wall_clock_expiry_does_not_admit_another_transaction_on_a_lagging
         checked.append(tx_hash)
         return False
 
-    with pytest.raises(InternalPaymentError):
+    with pytest.raises(VerificationError, match="not submitted"):
         await payer(store, "0x02", is_settled=unresolved)
     assert checked == ["0x01"]
     assert await store.get(first.key) == first.value

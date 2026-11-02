@@ -849,7 +849,7 @@ async def test_next_charge_reconciles_payer_claim(status, excluded, remaining):
     envelope = signed_tx((pay_call(),), fee_payer=True)
     with patch.object(intent, "_confirm_not_included", AsyncMock(return_value=excluded)):
         if status is None and not excluded:
-            with pytest.raises(InternalPaymentError):
+            with pytest.raises(VerificationError, match="not submitted"):
                 await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
             assert rpc.sent == []
             assert await intent._store.get(claim.key) == claim.value

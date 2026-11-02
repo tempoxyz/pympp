@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import uuid4
 
-from mpp.errors import CredentialReplayedError, InternalPaymentError
+from mpp.errors import CredentialReplayedError, InternalPaymentError, VerificationError
 from mpp.store import CompareAndSetStore, ExpiringStore
 
 
@@ -130,6 +130,11 @@ async def claim_payer(
             if expiry > time.time() and time.time() < wait_until:
                 await asyncio.sleep(max(0, min(0.05, wait_until - time.time())))
                 continue
+            if not reconciling and prior["hash"] != transaction_hash.lower():
+                raise VerificationError(
+                    "Payer has another pending sponsored transaction; "
+                    "this transaction was not submitted"
+                )
             raise InternalPaymentError() from RuntimeError(
                 "Payer's earlier submission is not confirmed settled or excluded by chain time"
             )
