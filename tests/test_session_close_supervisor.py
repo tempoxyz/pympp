@@ -332,7 +332,8 @@ async def test_unsent_close_releases_reservation_and_uses_fresh_deadline(life, m
     ]
 
 
-async def test_lost_cas_does_not_authorize_a_second_close(life, monkeypatch):
+@pytest.mark.parametrize("store_raises", [False, True])
+async def test_lost_cas_does_not_authorize_a_second_close(life, monkeypatch, store_raises):
     from dataclasses import replace
     from unittest.mock import AsyncMock
 
@@ -349,11 +350,14 @@ async def test_lost_cas_does_not_authorize_a_second_close(life, monkeypatch):
             await original_update(
                 channel_id, lambda current: replace(current, pending_close_valid_before=NOW + 25)
             )
+            if store_raises:
+                raise RuntimeError("CAS response lost")
         return await original_update(channel_id, fn)
 
     monkeypatch.setattr(life.store, "update_channel", contended_update)
     close = AsyncMock()
     monkeypatch.setattr(chain, "close_on_chain", close)
     life.rpc.states[life.channel_id] = (0, DEPOSIT, CLOSE_REQUESTED)
-    assert outcomes(await life.supervise()) == ["closing"]
+    assert outcomes(await life.supervise()) == ["failed" if store_raises else "closing"]
+    assert (await life.channel()).pending_close_valid_before == NOW + 25
     close.assert_not_called()

@@ -409,6 +409,7 @@ async def _close_at_spend(
     tracker = _SendTracker(options.http_client)
     valid_before: int | None = None
     reserved = False
+    acquired = False
     try:
         voucher = channel.highest_voucher
         if voucher is None or channel.descriptor is None:
@@ -454,6 +455,7 @@ async def _close_at_spend(
         await options.store.update_channel(channel_id, reserve)
         if not reserved:
             return "closing", None
+        acquired = True
         tx_hash = await chain.close_on_chain(
             options.rpc_url,
             account,
@@ -499,7 +501,7 @@ async def _close_at_spend(
         )
         return "closed", tx_hash
     except Exception as error:
-        if reserved and not tracker.attempted:
+        if acquired and not tracker.attempted:
             await options.store.update_channel(
                 channel_id,
                 lambda current: (
