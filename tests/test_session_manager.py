@@ -4,6 +4,7 @@ unknown funding outcomes. HTTP goes through httpx.MockTransport and chain access
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 from mpp import Challenge, Credential
 from mpp.errors import PaymentOutcomeUnknownError
 from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._protocol import (
     ChannelDescriptor,
     create_session_receipt,
@@ -29,7 +31,7 @@ from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
     is_expected_close_receipt,
 )
-from mpp.methods.tempo.session.client._store import entry_key
+from mpp.methods.tempo.session.client._store import entry_key, store_lock
 from tests import test_session_client as client_tests
 from tests.test_session_client import (
     ACCOUNT,
@@ -396,6 +398,38 @@ class TestOrigin:
         async with manager_for(FakeSessionServer().handler, channel_store=store) as other:
             with pytest.raises(ValueError, match="stored channel origin mismatch"):
                 await other.fetch("http://other.test/paid")
+
+    def test_managers_sharing_a_store_share_its_channel_locks(self) -> None:
+        store = create_channel_store()
+        first = manager_for(FakeSessionServer().handler, channel_store=store)
+        second = manager_for(FakeSessionServer().handler, channel_store=store)
+        views = [first._method.store, second._method.store]  # pyright: ignore[reportPrivateUsage]
+        assert views[0] is not views[1]
+        for scope in ("channel:k", "write:k", "funding:k"):
+            lock = store_lock(store, scope)
+            assert all(store_lock(view, scope) is lock for view in views)
+
+    async def test_managers_sharing_a_store_serialize_the_automatic_open(
+        self, fake_chain: dict[str, list[Any]], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        build_open = chain.build_open_transaction
+
+        async def slow_open(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0.01)  # let the other manager race for the channel
+            return await build_open(*args, **kwargs)
+
+        monkeypatch.setattr(chain, "build_open_transaction", slow_open)
+        store = create_channel_store()
+        server = FakeSessionServer(suggested_deposit="100000")
+        async with (
+            manager_for(server.handler, channel_store=store) as first,
+            manager_for(server.handler, channel_store=store) as second,
+        ):
+            responses = await asyncio.gather(first.fetch(URL), second.fetch(URL))
+            assert all(r.status_code == 200 for r in responses)
+            assert len(fake_chain["open"]) == 1
+            assert first.channel_id is not None and first.channel_id == second.channel_id
+            assert sorted(r.cumulative for r in responses) == [100, 200]
 
     async def test_legacy_channel_is_bound_on_reuse(self, fake_chain: dict[str, list[Any]]) -> None:
         store = create_channel_store()

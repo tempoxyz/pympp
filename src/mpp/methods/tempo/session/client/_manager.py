@@ -49,7 +49,9 @@ from mpp.methods.tempo.session.client._store import (
     entry_key,
     persist_channel,
     register_funding_store,
+    store_delete,
     store_get,
+    store_set,
     with_funding_lock,
 )
 
@@ -116,11 +118,15 @@ class _OriginBoundStore:
             raise ValueError("SessionManager: stored channel origin mismatch")
         return entry
 
+    # Callers reach set and delete through persist_channel and delete_channel, which hold the
+    # write lock this view shares with its backing store, so they write the backing store
+    # directly instead of locking again.
     async def set(self, entry: ChannelEntry) -> None:
-        await self._manager._persist(entry)  # pyright: ignore[reportPrivateUsage]
+        self._manager._bind_entry(entry)  # pyright: ignore[reportPrivateUsage]
+        await store_set(self._backing, entry)
 
     async def delete(self, key: str) -> None:
-        await delete_channel(self._backing, key)
+        await store_delete(self._backing, key)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -324,11 +330,15 @@ class SessionManager:
         self._origin = origin
         return origin
 
-    async def _persist(self, entry: ChannelEntry) -> None:
-        """Store ``entry`` bound to the manager's origin."""
+    def _bind_entry(self, entry: ChannelEntry) -> None:
+        """Bind ``entry`` to the manager's origin, rejecting one bound to another."""
         if entry.origin is not None and entry.origin != self._origin:
             raise ValueError("SessionManager: stored channel origin mismatch")
         entry.origin = self._origin
+
+    async def _persist(self, entry: ChannelEntry) -> None:
+        """Store ``entry`` bound to the manager's origin."""
+        self._bind_entry(entry)
         await persist_channel(self._store, entry)
 
     def _on_channel_update(self, entry: ChannelEntry) -> None:

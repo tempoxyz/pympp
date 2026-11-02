@@ -242,7 +242,11 @@ _funding_stores = _StoreMap()
 
 
 def register_funding_store(view: ChannelStore, backing: ChannelStore) -> None:
-    """Share funding coordination between a store view and its backing store."""
+    """Share lock coordination between a store view and its backing store.
+
+    Views of one backing store (one per origin-bound session manager) then serialize channel
+    opens, writes and funding decisions together.
+    """
     shared = _funding_stores.get(backing)
     _funding_stores.set(view, backing if shared is None else shared)
 
@@ -285,6 +289,9 @@ def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
     Acquire it without awaiting anything else first: its entry is dropped when its last
     holder releases it.
     """
+    shared = _funding_stores.get(store)
+    if shared is not None:
+        store = shared
     locks: dict[str, _ScopeLock] | None = _locks.get(store)
     if locks is None:
         locks = {}
@@ -300,8 +307,7 @@ async def with_funding_lock(
     store: ChannelStore, key: str, operation: Callable[[], Awaitable[T]]
 ) -> T:
     """Serialize funding decisions for callers sharing ``store`` in this process."""
-    shared = _funding_stores.get(store)
-    async with store_lock(store if shared is None else shared, f"funding:{key}"):
+    async with store_lock(store, f"funding:{key}"):
         return await operation()
 
 
