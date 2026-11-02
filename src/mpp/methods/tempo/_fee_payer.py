@@ -606,9 +606,10 @@ def cosign_fee_payer_envelope(
     clients name the channel token, as mppx does). The co-signed transaction
     pays fees in the envelope's fee token, else `fee_token`, else pathUSD.
 
-    Sender signatures may be secp256k1 (recovered here) or keychain, P256,
-    WebAuthn or multisig envelopes, which must name the envelope's sender. A
-    key authorization is carried through; an authorization list is refused, as
+    Local sponsorship requires a recovered secp256k1 sender signature. The
+    current simulation does not authenticate other envelope types or enforce
+    access-key spending limits. A key authorization is carried through;
+    an authorization list is refused, as
     mppx does. With `require_remaining_validity=False` only an already expired `valid_before` is
     rejected; with `allow_expired=True` as well, an expired one is not either.
     `max_valid_before` further caps `valid_before` (such as the challenge expiry).
@@ -637,6 +638,11 @@ def cosign_fee_payer_envelope(
     recovered_address, sender_signature = envelope_sender(
         tx_for_recovery, sender_addr_bytes, sender_sig
     )
+    if len(sender_sig) != 65:
+        raise VerificationError(
+            "Local sponsorship requires a secp256k1 sender signature; "
+            "other signatures require an independently authorizing hosted sponsor"
+        )
 
     tx_to_sign = attrs.evolve(
         tx_for_recovery,

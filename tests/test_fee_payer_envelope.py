@@ -430,7 +430,7 @@ class TestKeyAuthorizationRoundtrip:
         tx = attrs.evolve(
             _make_signed_tx(valid_before=int(time.time()) + 300), key_authorization=auth
         )
-        signed = tx.sign_access_key(access.private_key, root.address)
+        signed = tx.sign(root.private_key)
         envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
         intent = ChargeIntent(
             rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
@@ -572,7 +572,7 @@ def _envelope_with_signature(signature: bytes, sender: str) -> str:
 
 
 class TestNonSecp256k1SenderSignatures:
-    """Like mppx, keychain, P256 and WebAuthn senders are co-signed; the chain verifies them."""
+    """Local sponsorship rejects signatures its preflight cannot authenticate."""
 
     @staticmethod
     def _intent():
@@ -583,7 +583,7 @@ class TestNonSecp256k1SenderSignatures:
             rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
         )
 
-    def test_cosigns_keychain_signature(self) -> None:
+    def test_rejects_local_keychain_sponsorship(self) -> None:
         from mpp.methods.tempo import TempoAccount
 
         root = "0x" + "77" * 20
@@ -594,25 +594,22 @@ class TestNonSecp256k1SenderSignatures:
         signed = unsigned.sign_access_key(access.private_key, root)
         envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
 
-        raw, simulate_payload = self._intent()._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        from mpp.errors import VerificationError
 
-        assert signed.sender_signature is not None
-        assert rlp.decode(bytes.fromhex(raw[4:]))[-1] == signed.sender_signature.to_bytes()
-        assert all(request["from"].lower() == root for request in simulate_payload)
+        with pytest.raises(VerificationError, match="Local sponsorship requires"):
+            self._intent()._cosign_as_fee_payer(envelope_hex, CURRENCY)
 
     @pytest.mark.parametrize("signature", [_p256_signature(), _webauthn_signature()])
-    def test_cosigns_p256_and_webauthn_signatures(self, signature: bytes) -> None:
+    def test_rejects_unverified_local_sponsorship(self, signature: bytes) -> None:
         from eth_hash.auto import keccak
 
         sender = "0x" + keccak(_P256_PUBLIC_KEY)[-20:].hex()
-        raw, simulate_payload = self._intent()._cosign_as_fee_payer(
-            _envelope_with_signature(signature, sender), CURRENCY
-        )
+        from mpp.errors import VerificationError
 
-        fields = rlp.decode(bytes.fromhex(raw[4:]))
-        assert fields[-1] == signature
-        assert fields[11] != b""  # the fee payer signature
-        assert all(request["from"].lower() == sender for request in simulate_payload)
+        with pytest.raises(VerificationError, match="Local sponsorship requires"):
+            self._intent()._cosign_as_fee_payer(
+                _envelope_with_signature(signature, sender), CURRENCY
+            )
 
     def test_rejects_signature_naming_another_sender(self) -> None:
         from mpp.errors import VerificationError

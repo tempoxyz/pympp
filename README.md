@@ -368,3 +368,9 @@ outside the MPP format. Servers reject this configuration before issuing a
 challenge, and clients reject it before signing or broadcasting. Drain or
 replace outstanding challenges with fixed MPP memos before upgrading; their
 transfers cannot safely authorize the enclosing split charge.
+
+Local fee sponsorship accepts only secp256k1 sender signatures. Keychain, P256,
+WebAuthn and multisig envelopes remain usable without local sponsorship, or
+through a hosted sponsor that independently authenticates the signature and
+checks the key's current authorization and spending limits. Root-account
+`eth_call` simulation alone cannot establish those permissions.
