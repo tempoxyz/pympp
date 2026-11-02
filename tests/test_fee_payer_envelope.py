@@ -583,16 +583,13 @@ class TestNonSecp256k1SenderSignatures:
             rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
         )
 
-    def test_cosigns_verified_keychain_p256_and_webauthn_senders(self) -> None:
+    def test_cosigns_verified_p256_and_webauthn_senders(self) -> None:
         from pytempo import TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
         from pytempo.signatures import (  # pyright: ignore[reportMissingTypeStubs]
             P256Account,
             WebAuthnAccount,
         )
 
-        from mpp.methods.tempo import TempoAccount
-
-        root = "0x" + "77" * 20
         unsigned = attrs.evolve(
             _make_signed_tx(valid_before=int(time.time()) + 300), sender_signature=None
         )
@@ -600,10 +597,7 @@ class TestNonSecp256k1SenderSignatures:
         webauthn = WebAuthnAccount(
             "0x" + "66" * 32, rp_id="example.com", origin="https://example.com"
         )
-        access = TempoAccount.from_key("0x" + "cd" * 32)
         signed = [
-            unsigned.sign_access_key(access.private_key, root),
-            unsigned.sign_access_key_with(p256, root),
             unsigned.sign_with(p256),
             unsigned.sign_with(webauthn),
         ]
@@ -615,6 +609,28 @@ class TestNonSecp256k1SenderSignatures:
             decoded = TempoTransaction.decode(raw)
             assert decoded.recover_sender().lower() == sender.lower()
             assert decoded.fee_payer_signature is not None
+
+    @pytest.mark.parametrize("key_type", ["secp256k1", "p256"])
+    def test_refuses_valid_keychain_signature_without_permission_simulation(self, key_type):
+        from pytempo.signatures import P256Account
+
+        from mpp.errors import VerificationError
+        from mpp.methods.tempo import TempoAccount
+
+        root = "0x" + "77" * 20
+        unsigned = attrs.evolve(
+            _make_signed_tx(valid_before=int(time.time()) + 300), sender_signature=None
+        )
+        if key_type == "secp256k1":
+            access = TempoAccount.from_key("0x" + "cd" * 32)
+            signed = unsigned.sign_access_key(access.private_key, root)
+        else:
+            signed = unsigned.sign_access_key_with(P256Account("0x" + "55" * 32), root)
+        assert signed.recover_signer().account.lower() == root
+        with pytest.raises(VerificationError, match="permission-aware simulation"):
+            self._intent()._cosign_as_fee_payer(
+                "0x" + encode_fee_payer_envelope(signed).hex(), CURRENCY
+            )
 
     @pytest.mark.parametrize("signature", [_p256_signature(), _webauthn_signature()])
     def test_rejects_unverified_local_sponsorship(self, signature: bytes) -> None:

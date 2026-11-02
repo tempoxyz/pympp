@@ -524,14 +524,15 @@ class TestTransport:
         await transport.handle_async_request(request)
         assert PAYMENT_RESPONSE_HEADER not in server.requests[1].headers
 
-    async def test_rejected_payments_are_retried_a_bounded_number_of_times(self) -> None:
+    async def test_repeated_offer_does_not_authorize_another_payment(self) -> None:
         server = Server(required())
         async with mpp(server, max_payment_retries=3) as client:
             response = await client.fetch(URL)
         assert response.status_code == 402
         signatures = [r.headers.get(PAYMENT_SIGNATURE_HEADER) for r in server.requests]
         assert signatures[0] is None
-        assert len(set(signatures[1:])) == 3
+        assert len(signatures) == 2
+        assert signatures[1] is not None
 
     async def test_server_error_after_paying_is_an_unknown_outcome(self) -> None:
         server = Server(required(), httpx.Response(500, text="boom"))

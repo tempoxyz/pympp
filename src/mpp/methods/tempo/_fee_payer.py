@@ -606,12 +606,9 @@ def cosign_fee_payer_envelope(
     clients name the channel token, as mppx does). The co-signed transaction
     pays fees in the envelope's fee token, else `fee_token`, else pathUSD.
 
-    Local sponsorship requires a secp256k1, P256, WebAuthn or keychain sender
-    signature that verifies (pytempo's ``recover_signer``). As in mppx, an access
-    key's expiry, revocation and spending limits are left to the chain: the
-    pre-broadcast simulation runs from the root account without a signature, so
-    a keychain transfer over its key's limit reverts on chain at the sponsor's
-    expense. Use a hosted sponsor that enforces access-key limits to avoid that.
+    Local sponsorship requires a verified secp256k1, P256 or WebAuthn sender.
+    Keychain senders require a hosted sponsor that enforces access-key permissions:
+    root-account eth_call does not enforce key authorization or spending limits.
     A key authorization is carried through; an authorization list is refused, as
     mppx does. With `require_remaining_validity=False` only an already expired `valid_before` is
     rejected; with `allow_expired=True` as well, an expired one is not either.
@@ -662,14 +659,12 @@ def cosign_fee_payer_envelope(
 
 
 def _verified_sender_signature(tx: Any, sender: str, sender_sig: bytes) -> Any:
-    """Verify a P256, WebAuthn or keychain sender signature before a local co-sign.
-
-    pytempo's ``recover_signer`` checks it as tempo-primitives does, so a local
-    sponsor never pays for an envelope whose signature does not authorize
-    ``sender``. As in mppx, whether a keychain access key is authorized, unexpired
-    and within its limits is left to the chain. Multisig and other envelopes
-    pytempo cannot verify are refused.
-    """
+    """Verify a root-key signature; refuse access keys without permission-aware simulation."""
+    if sender_sig[:1] in (b"\x03", b"\x04"):
+        raise VerificationError(
+            "Local keychain sponsorship requires access-key permission-aware simulation; "
+            "use an independently authorizing hosted sponsor"
+        )
     import pytempo.signatures  # pyright: ignore[reportMissingTypeStubs]
 
     signatures: Any = pytempo.signatures
@@ -678,7 +673,7 @@ def _verified_sender_signature(tx: Any, sender: str, sender_sig: bytes) -> Any:
         recovered: Any = signatures.recover_signer(tx.get_signing_hash(for_fee_payer=False), parsed)
     except ValueError as err:
         raise VerificationError(
-            "Local sponsorship requires a secp256k1, P256, WebAuthn or keychain "
+            "Local sponsorship requires a secp256k1, P256 or WebAuthn "
             "sender signature that verifies"
         ) from err
     if recovered.account.lower() != sender.lower():
