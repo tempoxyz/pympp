@@ -989,6 +989,23 @@ class TestOpaqueEcho:
         )
         assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
 
+    @pytest.mark.parametrize(("sent", "changed"), [(1, True), (0, False), (True, 1)])
+    def test_bool_int_change_falls_back_to_canonical(self, sent: object, changed: object) -> None:
+        import base64
+        import json
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = base64.urlsafe_b64encode(json.dumps({"x": sent}).encode()).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
+        assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
+
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
 

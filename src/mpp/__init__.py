@@ -352,13 +352,16 @@ class Challenge:
         """
         if self.opaque is None:
             return None
+        canonical = canonical_b64url(self.opaque)
         if self._opaque_b64:
+            # Compare canonical encodings, not decoded values: Python treats
+            # True == 1 and False == 0, which JSON does not.
             try:
-                if _b64_decode(self._opaque_b64) == self.opaque:
+                if canonical_b64url(_b64_decode(self._opaque_b64)) == canonical:
                     return self._opaque_b64
             except ParseError:
                 pass
-        return canonical_b64url(self.opaque)
+        return canonical
 
     def to_echo(self) -> ChallengeEcho:
         """Create a ChallengeEcho for use in credentials.
