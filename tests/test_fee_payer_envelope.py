@@ -760,6 +760,7 @@ def test_key_authorization_rpc_keeps_an_empty_limits_list() -> None:
     payload = [[b"\x01", b"", b"\x11" * 20, b"", []], b"\x22" * 64 + b"\x1b"]
     assert key_authorization_rpc(payload)["limits"] == []
 
+
 def _authorization_fields(**overrides):
     fields = [b"\x01", b"", bytes.fromhex(RECIPIENT[2:]), b"", b"", b"", b"", b"", b""]
     for index, value in overrides.items():
