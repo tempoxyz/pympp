@@ -60,3 +60,18 @@ def test_raw_challenge_is_bounded_before_normalization() -> None:
     with pytest.raises(ParseError, match="maximum size"):
         parse_www_authenticate(header)
     assert _payment_challenges(header) == []
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        'description="Pay for "Premium" now"',
+        'junk "comma, inside"',
+    ],
+)
+def test_malformed_item_preserves_later_routing_and_opaque_parameters(malformed):
+    params = _parse_auth_params(
+        'id="payment", ' + malformed + ', header="payment-authorization", opaque="e30"'
+    )
+    assert params["header"] == "payment-authorization"
+    assert params["opaque"] == "e30"

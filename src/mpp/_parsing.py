@@ -158,6 +158,22 @@ def _validate_payment_method_id(method: str) -> None:
         raise ParseError(f"Invalid payment method id: {method!r}")
 
 
+def _next_auth_param(params: str, pos: int) -> int:
+    """Skip a malformed item once, respecting quoted commas and escaped quotes."""
+    quoted = False
+    while pos < len(params):
+        char = params[pos]
+        if quoted and char == "\\":
+            pos += 2
+            continue
+        if char == '"':
+            quoted = not quoted
+        elif char == "," and not quoted:
+            return pos + 1
+        pos += 1
+    return len(params)
+
+
 def _parse_auth_params(params_str: str) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
     params: dict[str, str] = {}
@@ -171,8 +187,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
             break
         match = _AUTH_PARAM_RE.match(params_str, pos)
         if match is None:
-            # Preserve permissive trailing-extension handling without searching every suffix.
-            break
+            pos = _next_auth_param(params_str, pos)
+            continue
         # Auth-param names are case-insensitive (RFC 9110 §11.2).
         key = match.group(1).lower()
         if key in params:
@@ -186,7 +202,8 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         if pos == len(params_str):
             break
         if params_str[pos] != ",":
-            break
+            pos = _next_auth_param(params_str, pos)
+            continue
         pos += 1
     return params
 
