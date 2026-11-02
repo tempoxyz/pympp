@@ -91,6 +91,9 @@ def _serialize(body: str | bytes | dict[str, Any]) -> bytes:
     return body
 
 
+_BYTE_SEQUENCE = re.compile(r"sha-256=:([^:]+):")
+
+
 def _encode(data: bytes) -> str:
     digest = hashlib.sha256(data).digest()
     encoded = base64.b64encode(digest).decode("ascii")
@@ -126,7 +129,8 @@ def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
     replica) still verify. New digests are always issued in the mppx form.
 
     Args:
-        digest: The digest string to verify (format: ``sha-256=<base64>``).
+        digest: The digest string to verify: ``sha-256=<base64>`` or the RFC 9530
+            byte-sequence form ``sha-256=:<base64>:``.
         body: The request body to check against.
 
     Returns:
@@ -136,6 +140,11 @@ def verify(digest: str, body: str | bytes | dict[str, Any]) -> bool:
     # raises TypeError for non-ASCII str inputs, so reject those outright.
     if not isinstance(digest, str) or not digest.isascii():
         return False
+    # Accept the RFC 9530 byte-sequence form (sha-256=:<base64>:), which the
+    # Payment spec shows, by stripping its colons.
+    match = _BYTE_SEQUENCE.fullmatch(digest)
+    if match is not None:
+        digest = f"sha-256={match.group(1)}"
     if hmac.compare_digest(compute(body), digest):
         return True
     if isinstance(body, dict):
