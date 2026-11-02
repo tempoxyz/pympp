@@ -48,6 +48,12 @@ class ParseError(Exception):
     """
 
 
+# RFC 3339 date-time with a timezone, as mppx's `z.datetime()` accepts.
+_DATETIME_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
 def _b64_encode(data: dict[str, Any]) -> str:
     """Encode dict as URL-safe base64 JSON (compact, no padding)."""
     compact_json = json.dumps(data, separators=(",", ":"), sort_keys=True)
@@ -436,19 +442,27 @@ def parse_payment_receipt(header: str) -> Receipt:
     if status != "success":
         raise ParseError("Invalid receipt status")
 
-    timestamp = _parse_timestamp(str(data["timestamp"]))
-    method = str(data["method"])
+    # Base fields must be JSON strings and the timestamp RFC 3339 with a timezone,
+    # as mppx's Receipt schema requires.
+    timestamp_str = data["timestamp"]
+    if not isinstance(timestamp_str, str) or not _DATETIME_RE.fullmatch(timestamp_str):
+        raise ParseError("Invalid timestamp format")
+    timestamp = _parse_timestamp(timestamp_str)
+    for field in ("method", "reference", "externalId", "subscriptionId", "fundingCurrency"):
+        if field in data and not isinstance(data[field], str):
+            raise ParseError(f"Receipt field {field} must be a string")
+    method = data["method"]
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
     return Receipt(
         status=status,
         timestamp=timestamp,
-        reference=str(data["reference"]),
+        reference=data["reference"],
         method=method,
-        external_id=str(data["externalId"]) if data.get("externalId") else None,
-        subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
-        funding_currency=str(data["fundingCurrency"]) if data.get("fundingCurrency") else None,
+        external_id=data.get("externalId") or None,
+        subscription_id=data.get("subscriptionId") or None,
+        funding_currency=data.get("fundingCurrency") or None,
         extra=extra if is_dict(extra) else None,
         extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
         or None,

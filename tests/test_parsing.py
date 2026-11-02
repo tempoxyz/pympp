@@ -719,6 +719,61 @@ class TestReceipt:
         with pytest.raises(ParseError, match="Invalid timestamp format"):
             Receipt.from_payment_receipt(b64)
 
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-01-01T00:00:00",
+            "2026-01-01",
+            "2026-01-01 00:00:00Z",
+            "20260101T000000Z",
+            1767225600,
+        ],
+    )
+    def test_parse_rejects_noncanonical_timestamp(self, timestamp: object) -> None:
+        """Like mppx, the timestamp must be an RFC 3339 string with a timezone."""
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        with pytest.raises(ParseError, match="Invalid timestamp format"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reference", 123),
+            ("method", ["tempo"]),
+            ("externalId", 42),
+            ("externalId", None),
+            ("subscriptionId", True),
+            ("fundingCurrency", {"token": "0x"}),
+        ],
+    )
+    def test_parse_rejects_non_string_base_fields(self, field: str, value: object) -> None:
+        """Like mppx, base fields are not coerced to strings."""
+        payload = {
+            "status": "success",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reference": "0xabc",
+            "method": "tempo",
+            field: value,
+        }
+        with pytest.raises(ParseError, match=f"Receipt field {field} must be a string"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize("timestamp", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5+02:00"])
+    def test_parse_accepts_rfc3339_timestamp(self, timestamp: str) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        parsed = Receipt.from_payment_receipt(_b64_json(payload))
+        assert parsed.timestamp.tzinfo is not None
+
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_method_id(self, method: str) -> None:
         payload = {
