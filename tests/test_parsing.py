@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -634,6 +634,32 @@ class TestAuthorizationSizeLimit:
 
 
 class TestReceipt:
+    def test_format_naive_timestamp_as_utc(self) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, 12, 30),
+            reference="0xabc",
+            method="tempo",
+        )
+
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+
+        assert parsed.timestamp == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "offset",
+        [timedelta(hours=5, minutes=30), timedelta(hours=-3), timedelta(hours=1, seconds=30)],
+    )
+    def test_format_converts_offsets_to_utc(self, offset: timedelta) -> None:
+        timestamp = datetime(2026, 1, 1, 12, 30, tzinfo=timezone(offset))
+        receipt = Receipt(status="success", timestamp=timestamp, reference="0xabc", method="tempo")
+
+        header = receipt.to_payment_receipt()
+        raw = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+
+        assert raw["timestamp"].endswith("Z")
+        assert Receipt.from_payment_receipt(header).timestamp == timestamp
+
     def test_roundtrip(self) -> None:
         """Receipt should survive roundtrip through header format."""
         timestamp = datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC)
@@ -792,6 +818,61 @@ class TestReceipt:
         b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         with pytest.raises(ParseError, match="Invalid timestamp format"):
             Receipt.from_payment_receipt(b64)
+
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-01-01T00:00:00",
+            "2026-01-01",
+            "2026-01-01 00:00:00Z",
+            "20260101T000000Z",
+            1767225600,
+        ],
+    )
+    def test_parse_rejects_noncanonical_timestamp(self, timestamp: object) -> None:
+        """Like mppx, the timestamp must be an RFC 3339 string with a timezone."""
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        with pytest.raises(ParseError, match="Invalid timestamp format"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reference", 123),
+            ("method", ["tempo"]),
+            ("externalId", 42),
+            ("externalId", None),
+            ("subscriptionId", True),
+            ("fundingCurrency", {"token": "0x"}),
+        ],
+    )
+    def test_parse_rejects_non_string_base_fields(self, field: str, value: object) -> None:
+        """Like mppx, base fields are not coerced to strings."""
+        payload = {
+            "status": "success",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reference": "0xabc",
+            "method": "tempo",
+            field: value,
+        }
+        with pytest.raises(ParseError, match=f"Receipt field {field} must be a string"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize("timestamp", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5+02:00"])
+    def test_parse_accepts_rfc3339_timestamp(self, timestamp: str) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        parsed = Receipt.from_payment_receipt(_b64_json(payload))
+        assert parsed.timestamp.tzinfo is not None
 
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_method_id(self, method: str) -> None:
@@ -983,3 +1064,188 @@ class TestEncodingBoundaries:
         assert Receipt.from_payment_receipt(_b64_json(receipt)).extra is None
         receipt["extra"] = {"k": "v"}
         assert Receipt.from_payment_receipt(_b64_json(receipt)).extra == {"k": "v"}
+
+
+class TestOpaqueEcho:
+    """The credential echoes the issuer's opaque string unchanged (pympp#370)."""
+
+    @staticmethod
+    def _header(opaque_json: bytes) -> tuple[str, str]:
+        import base64
+
+        raw = base64.urlsafe_b64encode(opaque_json).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        return header, raw
+
+    @pytest.mark.parametrize(
+        "opaque_json",
+        [
+            b'{"route":"/v1/search","plan":"pro"}',
+            b'{"plan": "pro", "route": "/v1/search"}',
+            b'{"plan":"pro","route":"/v1/search"}',
+        ],
+    )
+    def test_to_echo_and_format_keep_issuer_string(self, opaque_json: bytes) -> None:
+        from mpp import Challenge
+
+        header, raw = self._header(opaque_json)
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.opaque == {"plan": "pro", "route": "/v1/search"}
+        assert challenge.to_echo().opaque == raw
+        assert f'opaque="{raw}"' in challenge.to_www_authenticate("api.example.com")
+
+    def test_non_canonical_opaque_verifies_against_issuer_encoding(self) -> None:
+        import base64
+        import hashlib
+        import hmac
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"route":"/v1/search","plan":"pro"}').rstrip(b"=")
+        hmac_input = f"api.example.com|tempo|charge|e30|||{raw.decode()}"
+        mac = hmac.new(b"secret", hmac_input.encode(), hashlib.sha256).digest()
+        challenge_id = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
+        header = (
+            f'Payment id="{challenge_id}", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", opaque="{raw.decode()}"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.verify("secret", "api.example.com")
+
+    @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
+    def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = "eyJyb3V0ZSI6Ii92MS9zZWFyY2giLCJwbGFuIjoicHJvIn0"
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}{suffix}"'
+        )
+        challenge = Challenge.from_www_authenticate(header)
+        canonical = canonical_b64url({"plan": "pro", "route": "/v1/search"})
+        assert challenge.to_echo().opaque == canonical
+        assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
+
+    def test_undecodable_stored_opaque_falls_back_to_canonical(self) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        challenge = Challenge(
+            id="abc",
+            method="tempo",
+            intent="charge",
+            request={},
+            opaque={"plan": "pro"},
+            _opaque_b64="not-json",
+        )
+        assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
+
+    @pytest.mark.parametrize(("sent", "changed"), [(1, True), (0, False), (True, 1)])
+    def test_bool_int_change_falls_back_to_canonical(self, sent: object, changed: object) -> None:
+        import base64
+        import json
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = base64.urlsafe_b64encode(json.dumps({"x": sent}).encode()).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
+        assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
+
+    def test_unchanged_large_integer_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = (
+            base64.urlsafe_b64encode(b'{"value":1267650600228229401496703205376}')
+            .rstrip(b"=")
+            .decode()
+        )
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    @pytest.mark.parametrize("pair", [([1], [True]), ({"a": [0]}, {"a": [False]})])
+    def test_nested_bool_int_change_is_detected(self, pair: tuple[object, object]) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal(*pair)
+
+    def test_deeply_nested_opaque_does_not_exhaust_the_stack(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        nested = b'{"x":' + b"[" * 900 + b"]" * 900 + b"}"
+        raw = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_unchanged_nan_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"x":NaN}').rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_json_equal_mismatched_shapes(self) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal({"a": 1}, {"b": 1})
+        assert not _json_equal([1, 2], [1])
+        assert not _json_equal({"a": [1]}, {"a": 1})
+        assert not _json_equal({"a": 1}, {"a": 2})
+        assert _json_equal({"a": [1, {"b": True}]}, {"a": [1, {"b": True}]})
+
+    def test_changed_opaque_falls_back_to_canonical(self) -> None:
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        header, raw = self._header(b'{"route":"/v1/search","plan":"pro"}')
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"plan": "free"})
+        assert challenge.to_echo().opaque == canonical_b64url({"plan": "free"})
+
+    def test_created_challenge_ids_are_unchanged(self) -> None:
+        from mpp import Challenge, generate_challenge_id
+
+        challenge = Challenge.create(
+            secret_key="secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            meta={"route": "/v1/search", "plan": "pro"},
+        )
+        assert challenge.id == generate_challenge_id(
+            secret_key="secret",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            opaque={"plan": "pro", "route": "/v1/search"},
+        )
+        parsed = Challenge.from_www_authenticate(challenge.to_www_authenticate("api.example.com"))
+        assert parsed.verify("secret", "api.example.com")
+        assert parsed.to_echo().opaque == challenge.to_echo().opaque

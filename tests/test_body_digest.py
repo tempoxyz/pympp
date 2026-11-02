@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from mpp._body_digest import compute, verify
 
 
@@ -185,3 +187,32 @@ class TestLoneSurrogates:
     def test_str_body_replaces_lone_surrogates_like_text_encoder(self) -> None:
         assert compute("a\ud800b") == compute("a\ufffdb".encode())
         assert compute("\ud83d\ude00") == compute("\U0001f600".encode())
+
+
+class TestRfc9530ByteSequence:
+    HELLO = "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ="
+
+    def test_accepts_byte_sequence(self) -> None:
+        assert verify(f"sha-256=:{self.HELLO}:", "hello")
+        assert verify("sha-256=:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=:", b"")
+        assert not verify(f"sha-256=:{self.HELLO}:", "changed body")
+
+    def test_accepts_unpadded_byte_sequence(self) -> None:
+        unpadded = self.HELLO.rstrip("=")
+        assert verify(f"sha-256=:{unpadded}:", "hello")
+        assert not verify(f"sha-256=:{unpadded}:", "changed body")
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "sha-256=:{h}",
+            "sha-256={h}:",
+            "sha-256=::{h}::",
+            "sha-256=:{h}: ",
+            "sha-256=:{h}:;param=1",
+            "SHA-256=:{h}:",
+        ],
+    )
+    def test_rejects_malformed_byte_sequences(self, template: str) -> None:
+        assert not verify(template.format(h=self.HELLO), "hello")
+        assert not verify("sha-256=::", "hello")

@@ -31,7 +31,7 @@ from x402.http.middleware.fastapi import payment_middleware as x402_payment_midd
 from x402.mechanisms.evm.exact.server import ExactEvmScheme
 from x402.server import x402ResourceServer
 
-from mpp import Challenge, Credential, Receipt
+from mpp import Challenge, Credential, NoMethodFoundError, Receipt
 from mpp.client import Mpp as Client
 from mpp.methods.evm import BASE_SEPOLIA_USDC, BASE_USDC
 from mpp.methods.evm import client as evm_client
@@ -234,18 +234,18 @@ async def test_wrong_network_or_asset_is_not_paid() -> None:
     async with coinbase() as (url, facilitator, app):
         async with paying_client(currency=BASE_USDC) as (client, recorder):
             client.on_payment_failed(failures.append)
-            response = await client.fetch(url)
-    assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError):
+                await client.fetch(url)
     assert recorder.signatures() == []
     assert facilitator.verify_requests == [] and app.state.handled == 0
-    assert "No compatible payment method" in str(failures[0]["error"])
+    assert "No method found for challenges" in str(failures[0]["error"])
 
 
 async def test_amount_above_policy_is_not_paid() -> None:
     async with coinbase(accepts(price="$0.01")) as (url, facilitator, app):
         async with paying_client(max_amount="0.001") as (client, recorder):
-            response = await client.fetch(url)
-    assert response.status_code == 402
+            with pytest.raises(NoMethodFoundError):
+                await client.fetch(url)
     assert recorder.signatures() == []
     assert facilitator.verify_requests == [] and app.state.handled == 0
 
@@ -279,18 +279,16 @@ async def test_replayed_payment_is_rejected() -> None:
     assert facilitator.check(facilitator.verify_requests[-1])["invalidReason"] == "nonce_used"
 
 
-async def test_expired_payment_is_rejected_then_paid_afresh() -> None:
-    async with coinbase(accepts(timeout=1)) as (url, facilitator, app):
-        async with paying_client(Recorder(delay_paid=2.2)) as (client, recorder):
+async def test_expired_payment_is_rejected_without_another_authorization() -> None:
+    async with coinbase(accepts(timeout=5)) as (url, facilitator, app):
+        async with paying_client(Recorder(delay_paid=6.2)) as (client, recorder):
             response = await client.fetch(url)
-    assert response.status_code == 200
-    first, second = recorder.signatures()
-    assert first != second
-    assert facilitator.check({**facilitator.verify_requests[0]})["invalidReason"] in {
-        "authorization_window",
-        "nonce_used",
-    }
-    assert len(facilitator.settle_requests) == 1 and app.state.handled == 1
+    assert response.status_code == 402
+    assert len(recorder.signatures()) == 1
+    assert facilitator.check({**facilitator.verify_requests[0]})["invalidReason"] == (
+        "authorization_window"
+    )
+    assert facilitator.settle_requests == [] and app.state.handled == 0
 
 
 async def test_facilitator_rejection_is_not_paid() -> None:
@@ -301,7 +299,7 @@ async def test_facilitator_rejection_is_not_paid() -> None:
         async with paying_client(max_payment_retries=2) as (client, recorder):
             response = await client.fetch(url)
     assert response.status_code == 402
-    assert len(recorder.signatures()) == 2
+    assert len(recorder.signatures()) == 1
     assert facilitator.settle_requests == [] and app.state.handled == 0
     error = decode_payment_required(response.headers[PAYMENT_REQUIRED_HEADER]).get("error")
     assert error

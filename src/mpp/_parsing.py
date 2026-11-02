@@ -16,7 +16,7 @@ import base64
 import json
 import re
 import string
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp._canonical import canonical_b64url
@@ -64,6 +64,9 @@ def _b64_encode(data: dict[str, Any]) -> str:
     compact_json = json.dumps(data, separators=(",", ":"), sort_keys=True)
     encoded = base64.urlsafe_b64encode(compact_json.encode()).decode()
     return encoded.rstrip("=")
+
+
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 
 def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
@@ -303,6 +306,9 @@ def parse_www_authenticate(header: str) -> Challenge:
         description=params.get("description"),
         opaque=opaque,
         header=credential_header,
+        # Keep the issuer's string only when it is strict base64url, so that
+        # echoing or re-formatting it cannot inject header parameters.
+        _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
     )
 
 
@@ -333,8 +339,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
     if challenge.header:
         parts.append(f'header="{_escape_quoted(challenge.header)}"')
-    if challenge.opaque is not None:
-        opaque_b64 = canonical_b64url(challenge.opaque)
+    opaque_b64 = challenge._encoded_opaque()
+    if opaque_b64 is not None:
         parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
@@ -506,19 +512,27 @@ def parse_payment_receipt(header: str) -> Receipt:
     if status != "success":
         raise ParseError("Invalid receipt status")
 
-    timestamp = _parse_timestamp(str(data["timestamp"]))
-    method = str(data["method"])
+    # Base fields must be JSON strings and the timestamp RFC 3339 with a timezone,
+    # as mppx's Receipt schema requires.
+    timestamp_str = data["timestamp"]
+    if not isinstance(timestamp_str, str) or not _DATETIME_RE.fullmatch(timestamp_str):
+        raise ParseError("Invalid timestamp format")
+    timestamp = _parse_timestamp(timestamp_str)
+    for field in ("method", "reference", "externalId", "subscriptionId", "fundingCurrency"):
+        if field in data and not isinstance(data[field], str):
+            raise ParseError(f"Receipt field {field} must be a string")
+    method = data["method"]
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
     return Receipt(
         status=status,
         timestamp=timestamp,
-        reference=str(data["reference"]),
+        reference=data["reference"],
         method=method,
-        external_id=str(data["externalId"]) if data.get("externalId") else None,
-        subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
-        funding_currency=str(data["fundingCurrency"]) if data.get("fundingCurrency") else None,
+        external_id=data.get("externalId") or None,
+        subscription_id=data.get("subscriptionId") or None,
+        funding_currency=data.get("fundingCurrency") or None,
         extra=extra if is_dict(extra) else None,
         extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
         or None,
@@ -531,7 +545,12 @@ def format_payment_receipt(receipt: Receipt) -> str:
     Output format:
         <base64-receipt>
     """
-    timestamp_str = receipt.timestamp.isoformat().replace("+00:00", "Z")
+    timestamp = receipt.timestamp
+    # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets
+    # (such as ones with seconds) don't fit the receipt schema. A naive datetime is UTC.
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    timestamp_str = timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     payload: dict[str, Any] = {
         "status": receipt.status,

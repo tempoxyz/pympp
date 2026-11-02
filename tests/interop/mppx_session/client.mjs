@@ -15,6 +15,9 @@
 //                      is set (top-up and close are manager APIs), else fetch.
 //   MPPX_METHOD        HTTP method of the paid calls (default GET)
 //   MPPX_TRACE         "1" also prints every HTTP exchange ({"http":...})
+//   MPPX_BOOTSTRAP     "1" runs the manager with bootstrap: true (HEAD recovery of the payer's
+//                      channel from the server's session snapshot)
+//   MPPX_TRUSTED_REALMS JSON trustedTempoProofRealms for bootstrap, e.g. {"http://127.0.0.1:1":"r"}
 //
 // Prints one JSON line per call ({"call":i,...}), per management action ({"topUp":...},
 // {"close":...}) and a final {"final":...} line with the channel info.
@@ -42,7 +45,11 @@ const calls = Number(process.env.MPPX_CALLS || 3)
 const maxDeposit = process.env.MPPX_MAX_DEPOSIT || '1'
 const topUp = process.env.MPPX_TOP_UP
 const close = process.env.MPPX_CLOSE === '1'
-const mode = process.env.MPPX_MODE || (topUp || close ? 'manager' : 'fetch')
+const bootstrap = process.env.MPPX_BOOTSTRAP === '1'
+const trustedTempoProofRealms = process.env.MPPX_TRUSTED_REALMS
+  ? JSON.parse(process.env.MPPX_TRUSTED_REALMS)
+  : undefined
+const mode = process.env.MPPX_MODE || (topUp || close || bootstrap ? 'manager' : 'fetch')
 const method = process.env.MPPX_METHOD || 'GET'
 const trace = process.env.MPPX_TRACE === '1'
 
@@ -76,7 +83,13 @@ function receiptFields(response) {
 let manager
 let fetcher
 if (mode === 'manager') {
-  manager = tempo.session.manager({ client, account, maxDeposit, fetch: tracingFetch })
+  manager = tempo.session.manager({
+    client,
+    account,
+    maxDeposit,
+    fetch: tracingFetch,
+    ...(bootstrap ? { bootstrap, trustedTempoProofRealms } : {}),
+  })
   fetcher = (input, init) => manager.fetch(input, init)
 } else if (mode === 'fetch') {
   const mppx = Mppx.create({

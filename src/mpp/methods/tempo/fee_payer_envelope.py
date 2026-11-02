@@ -11,8 +11,8 @@ Wire format::
         validBefore?, validAfter?, feeToken?,
         senderAddress,           # 20 bytes (replaces feePayerSignature slot)
         authorizationList, keyAuthorization?,
-        signatureEnvelope        # serialized sender signature; local cosigning
-                                 # currently supports only 65-byte secp256k1
+        signatureEnvelope        # serialized sender signature (secp256k1,
+                                 # P256, WebAuthn, keychain or multisig)
     ])
 """
 
