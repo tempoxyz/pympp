@@ -975,6 +975,20 @@ class TestOpaqueEcho:
         assert challenge.to_echo().opaque == canonical
         assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
 
+    def test_undecodable_stored_opaque_falls_back_to_canonical(self) -> None:
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        challenge = Challenge(
+            id="abc",
+            method="tempo",
+            intent="charge",
+            request={},
+            opaque={"plan": "pro"},
+            _opaque_b64="not-json",
+        )
+        assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
+
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
 
