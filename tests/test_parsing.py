@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -560,6 +560,32 @@ class TestAuthorizationSizeLimit:
 
 
 class TestReceipt:
+    def test_format_naive_timestamp_as_utc(self) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, 12, 30),
+            reference="0xabc",
+            method="tempo",
+        )
+
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+
+        assert parsed.timestamp == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "offset",
+        [timedelta(hours=5, minutes=30), timedelta(hours=-3), timedelta(hours=1, seconds=30)],
+    )
+    def test_format_converts_offsets_to_utc(self, offset: timedelta) -> None:
+        timestamp = datetime(2026, 1, 1, 12, 30, tzinfo=timezone(offset))
+        receipt = Receipt(status="success", timestamp=timestamp, reference="0xabc", method="tempo")
+
+        header = receipt.to_payment_receipt()
+        raw = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+
+        assert raw["timestamp"].endswith("Z")
+        assert Receipt.from_payment_receipt(header).timestamp == timestamp
+
     def test_roundtrip(self) -> None:
         """Receipt should survive roundtrip through header format."""
         timestamp = datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC)
@@ -718,6 +744,61 @@ class TestReceipt:
         b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         with pytest.raises(ParseError, match="Invalid timestamp format"):
             Receipt.from_payment_receipt(b64)
+
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-01-01T00:00:00",
+            "2026-01-01",
+            "2026-01-01 00:00:00Z",
+            "20260101T000000Z",
+            1767225600,
+        ],
+    )
+    def test_parse_rejects_noncanonical_timestamp(self, timestamp: object) -> None:
+        """Like mppx, the timestamp must be an RFC 3339 string with a timezone."""
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        with pytest.raises(ParseError, match="Invalid timestamp format"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reference", 123),
+            ("method", ["tempo"]),
+            ("externalId", 42),
+            ("externalId", None),
+            ("subscriptionId", True),
+            ("fundingCurrency", {"token": "0x"}),
+        ],
+    )
+    def test_parse_rejects_non_string_base_fields(self, field: str, value: object) -> None:
+        """Like mppx, base fields are not coerced to strings."""
+        payload = {
+            "status": "success",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reference": "0xabc",
+            "method": "tempo",
+            field: value,
+        }
+        with pytest.raises(ParseError, match=f"Receipt field {field} must be a string"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize("timestamp", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5+02:00"])
+    def test_parse_accepts_rfc3339_timestamp(self, timestamp: str) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        parsed = Receipt.from_payment_receipt(_b64_json(payload))
+        assert parsed.timestamp.tzinfo is not None
 
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_method_id(self, method: str) -> None:
