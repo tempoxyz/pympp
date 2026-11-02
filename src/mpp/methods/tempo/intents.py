@@ -2144,9 +2144,11 @@ class ChargeIntent:
 
         try:
             if request.methodDetails.feePayer and self.fee_payer is not None:
+                # The implicit fallback store is per intent; admission must be
+                # process-wide so separate charge methods serialize one payer.
                 configured_admission_store = (
                     self._sponsor_budget.store if self._sponsor_budget is not None else None
-                ) or self._store
+                ) or (_sponsor_budget.process_store() if self._fallback_store_used else self._store)
                 if not isinstance(configured_admission_store, CompareAndSetStore):
                     raise InternalPaymentError() from TypeError(
                         "Sponsored admission requires compare_and_set"
@@ -2404,7 +2406,9 @@ class ChargeIntent:
         except (Exception, asyncio.CancelledError) as err:
             if isinstance(err, (_TransactionReverted, _TransactionNotIncluded)):
                 outcome_unknown = reconciling = False
-                if isinstance(err, _TransactionNotIncluded) and challenge_claim is not None:
+                # A reverted or excluded transaction moved no funds: release the
+                # challenge so the retry its 402 invites can bind a new transaction.
+                if challenge_claim is not None:
                     challenge_claim = replace(challenge_claim, created=True)
             # Remove admission ownership before reopening transaction replay claims.
             # A same-envelope retry must not adopt a binding we later delete.

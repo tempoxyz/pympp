@@ -781,6 +781,59 @@ async def test_reconciled_revert_releases_payer_admission() -> None:
     assert not any(key.startswith("mpp:charge-admission:payer:") for key in stored_keys(intent))
 
 
+async def test_intents_without_a_store_share_sponsored_admission() -> None:
+    from mpp.methods.tempo import _sponsored_admission as admission
+    from mpp.methods.tempo import sponsor_budget
+
+    stores: list[object] = []
+
+    async def capture(store, **_kwargs):
+        stores.append(store)
+        raise VerificationError("stop")
+
+    rpc = FakeRpc()
+    intents = [
+        ChargeIntent(
+            rpc_url="https://rpc.test",
+            http_client=rpc.client,
+            fee_payer=TempoAccount.from_key(FEE_PAYER_KEY),
+            fee_token=PATH_USD,
+        )
+        for _ in range(2)
+    ]
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    with patch.object(admission, "claim_challenge", capture):
+        for intent in intents:
+            with pytest.raises(VerificationError, match="stop"):
+                await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+
+    assert intents[0]._store is not intents[1]._store
+    assert stores == [sponsor_budget.process_store()] * 2
+
+
+async def test_reconciled_revert_lets_the_challenge_bind_a_new_transaction() -> None:
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+
+    def timeout(raw_tx: str) -> dict[str, dict[str, Any]]:
+        raise httpx.ReadTimeout("lost reply")
+
+    rpc.send = timeout
+    intent._confirmation_timeout = 0.01
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert any(key.startswith("mpp:charge-admission:challenge:") for key in stored_keys(intent))
+
+    cosigned = rpc.sent[-1]
+    rpc.receipts[_raw_transaction_hash(cosigned)] = receipt(
+        _raw_transaction_hash(cosigned), status="0x0"
+    )
+    with pytest.raises(VerificationError, match="reverted"):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert not any(key.startswith("mpp:charge-admission:challenge:") for key in stored_keys(intent))
+
+
 async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims() -> None:
     from unittest.mock import AsyncMock
 
