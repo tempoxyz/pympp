@@ -8,15 +8,17 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from mpp._canonical import canonical_b64url
 from mpp._parsing import (
     ParseError,
     _b64_decode,
+    _validate_expires,
     format_authorization,
     format_payment_receipt,
     format_www_authenticate,
@@ -190,6 +192,42 @@ def _challenge_id(
     return _b64url_encode_bytes(mac)
 
 
+def _json_equal(a: object, b: object) -> bool:
+    """Compare decoded JSON values, telling booleans apart from numbers.
+
+    Python treats True == 1 and False == 0, which JSON does not. Iterative, so
+    deeply nested values the JSON decoder accepted cannot exhaust the stack.
+    """
+    stack: list[tuple[object, object]] = [(a, b)]
+    while stack:
+        left, right = stack.pop()
+        if isinstance(left, bool) or isinstance(right, bool):
+            if type(left) is not type(right) or left != right:
+                return False
+        elif isinstance(left, dict) and isinstance(right, dict):
+            left_dict = cast("dict[str, object]", left)
+            right_dict = cast("dict[str, object]", right)
+            if left_dict.keys() != right_dict.keys():
+                return False
+            stack.extend((v, right_dict[k]) for k, v in left_dict.items())
+        elif isinstance(left, list) and isinstance(right, list):
+            left_list = cast("list[object]", left)
+            right_list = cast("list[object]", right)
+            if len(left_list) != len(right_list):
+                return False
+            stack.extend(zip(left_list, right_list, strict=True))
+        elif isinstance(left, (dict, list)) or isinstance(right, (dict, list)):
+            return False
+        elif left != right and not (
+            isinstance(left, float)
+            and isinstance(right, float)
+            and math.isnan(left)
+            and math.isnan(right)
+        ):
+            return False
+    return True
+
+
 def _constant_time_equal(a: str, b: str) -> bool:
     """Constant-time string comparison to prevent timing attacks."""
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
@@ -281,6 +319,8 @@ class Challenge:
         Returns:
             A Challenge with an HMAC-bound ID.
         """
+        if expires:
+            _validate_expires(expires)
         header = advertised_credential_header(header)
         challenge_id = generate_challenge_id(
             secret_key=secret_key,
@@ -355,7 +395,7 @@ class Challenge:
             return None
         if self._opaque_b64:
             try:
-                if _b64_decode(self._opaque_b64) == self.opaque:
+                if _json_equal(_b64_decode(self._opaque_b64), self.opaque):
                     return self._opaque_b64
             except ParseError:
                 pass

@@ -5,7 +5,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -114,6 +114,80 @@ class TestChallenge:
 
         challenge = Challenge.from_www_authenticate(header)
         assert challenge.method == method
+
+    @pytest.mark.parametrize(
+        "header",
+        [
+            'Payment id="test", @@@, realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", ="x", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30", description="unterminated',
+        ],
+        ids=["junk", "missing-name", "unterminated"],
+    )
+    def test_parse_rejects_malformed_auth_params(self, header: str) -> None:
+        """Like mppx, a position that cannot begin an auth-param fails parsing."""
+        with pytest.raises(ParseError):
+            Challenge.from_www_authenticate(header)
+
+    def test_parse_stops_at_next_auth_scheme(self) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30", Bearer realm="other"'
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.realm == "api.example.com"
+
+    @pytest.mark.parametrize("digest", ["md5=abc", "SHA-256=abc", "abc"])
+    def test_parse_rejects_invalid_digest(self, digest: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", digest="{digest}"'
+        )
+
+        with pytest.raises(ParseError, match="Invalid digest format"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize(
+        "expires",
+        ["not-a-date", "2026-01-01", "2026-01-01T00:00:00", "2026-01-01 00:00:00Z", "1767225600"],
+    )
+    def test_parse_rejects_invalid_expires(self, expires: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", expires="{expires}"'
+        )
+
+        with pytest.raises(ParseError, match="Invalid expires format"):
+            Challenge.from_www_authenticate(header)
+
+    @pytest.mark.parametrize("expires", ["not-a-date", "2026-01-01T00:00:00", "1767225600"])
+    def test_create_rejects_expires_the_parser_refuses(self, expires: str) -> None:
+        with pytest.raises(ValueError, match="Invalid expires format"):
+            Challenge.create(
+                secret_key="secret",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={},
+                expires=expires,
+            )
+
+    @pytest.mark.parametrize(
+        "expires", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.123Z", "2026-01-01T00:00:00+02:00"]
+    )
+    def test_parse_accepts_rfc3339_expires(self, expires: str) -> None:
+        header = (
+            'Payment id="test", realm="api.example.com", method="tempo", '
+            f'intent="charge", request="e30", expires="{expires}", digest="sha-256=abc"'
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert challenge.expires == expires
+        assert challenge.digest == "sha-256=abc"
 
     def test_roundtrip_with_optional_fields(self) -> None:
         """Challenge with optional fields should survive roundtrip."""
@@ -560,6 +634,32 @@ class TestAuthorizationSizeLimit:
 
 
 class TestReceipt:
+    def test_format_naive_timestamp_as_utc(self) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, 12, 30),
+            reference="0xabc",
+            method="tempo",
+        )
+
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+
+        assert parsed.timestamp == datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "offset",
+        [timedelta(hours=5, minutes=30), timedelta(hours=-3), timedelta(hours=1, seconds=30)],
+    )
+    def test_format_converts_offsets_to_utc(self, offset: timedelta) -> None:
+        timestamp = datetime(2026, 1, 1, 12, 30, tzinfo=timezone(offset))
+        receipt = Receipt(status="success", timestamp=timestamp, reference="0xabc", method="tempo")
+
+        header = receipt.to_payment_receipt()
+        raw = json.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+
+        assert raw["timestamp"].endswith("Z")
+        assert Receipt.from_payment_receipt(header).timestamp == timestamp
+
     def test_roundtrip(self) -> None:
         """Receipt should survive roundtrip through header format."""
         timestamp = datetime(2024, 1, 20, 12, 0, 0, tzinfo=UTC)
@@ -718,6 +818,61 @@ class TestReceipt:
         b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
         with pytest.raises(ParseError, match="Invalid timestamp format"):
             Receipt.from_payment_receipt(b64)
+
+    @pytest.mark.parametrize(
+        "timestamp",
+        [
+            "2026-01-01T00:00:00",
+            "2026-01-01",
+            "2026-01-01 00:00:00Z",
+            "20260101T000000Z",
+            1767225600,
+        ],
+    )
+    def test_parse_rejects_noncanonical_timestamp(self, timestamp: object) -> None:
+        """Like mppx, the timestamp must be an RFC 3339 string with a timezone."""
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        with pytest.raises(ParseError, match="Invalid timestamp format"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("reference", 123),
+            ("method", ["tempo"]),
+            ("externalId", 42),
+            ("externalId", None),
+            ("subscriptionId", True),
+            ("fundingCurrency", {"token": "0x"}),
+        ],
+    )
+    def test_parse_rejects_non_string_base_fields(self, field: str, value: object) -> None:
+        """Like mppx, base fields are not coerced to strings."""
+        payload = {
+            "status": "success",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "reference": "0xabc",
+            "method": "tempo",
+            field: value,
+        }
+        with pytest.raises(ParseError, match=f"Receipt field {field} must be a string"):
+            Receipt.from_payment_receipt(_b64_json(payload))
+
+    @pytest.mark.parametrize("timestamp", ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00.5+02:00"])
+    def test_parse_accepts_rfc3339_timestamp(self, timestamp: str) -> None:
+        payload = {
+            "status": "success",
+            "timestamp": timestamp,
+            "reference": "0xabc",
+            "method": "tempo",
+        }
+        parsed = Receipt.from_payment_receipt(_b64_json(payload))
+        assert parsed.timestamp.tzinfo is not None
 
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_method_id(self, method: str) -> None:
@@ -988,6 +1143,79 @@ class TestOpaqueEcho:
             _opaque_b64="not-json",
         )
         assert challenge.to_echo().opaque == canonical_b64url({"plan": "pro"})
+
+    @pytest.mark.parametrize(("sent", "changed"), [(1, True), (0, False), (True, 1)])
+    def test_bool_int_change_falls_back_to_canonical(self, sent: object, changed: object) -> None:
+        import base64
+        import json
+        from dataclasses import replace
+
+        from mpp import Challenge
+        from mpp._canonical import canonical_b64url
+
+        raw = base64.urlsafe_b64encode(json.dumps({"x": sent}).encode()).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        challenge = replace(Challenge.from_www_authenticate(header), opaque={"x": changed})
+        assert challenge.to_echo().opaque == canonical_b64url({"x": changed})
+
+    def test_unchanged_large_integer_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = (
+            base64.urlsafe_b64encode(b'{"value":1267650600228229401496703205376}')
+            .rstrip(b"=")
+            .decode()
+        )
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    @pytest.mark.parametrize("pair", [([1], [True]), ({"a": [0]}, {"a": [False]})])
+    def test_nested_bool_int_change_is_detected(self, pair: tuple[object, object]) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal(*pair)
+
+    def test_deeply_nested_opaque_does_not_exhaust_the_stack(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        nested = b'{"x":' + b"[" * 900 + b"]" * 900 + b"}"
+        raw = base64.urlsafe_b64encode(nested).rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_unchanged_nan_opaque_is_echoed(self) -> None:
+        import base64
+
+        from mpp import Challenge
+
+        raw = base64.urlsafe_b64encode(b'{"x":NaN}').rstrip(b"=").decode()
+        header = (
+            'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
+            f'request="e30", opaque="{raw}"'
+        )
+        assert Challenge.from_www_authenticate(header).to_echo().opaque == raw
+
+    def test_json_equal_mismatched_shapes(self) -> None:
+        from mpp import _json_equal
+
+        assert not _json_equal({"a": 1}, {"b": 1})
+        assert not _json_equal([1, 2], [1])
+        assert not _json_equal({"a": [1]}, {"a": 1})
+        assert not _json_equal({"a": 1}, {"a": 2})
+        assert _json_equal({"a": [1, {"b": True}]}, {"a": [1, {"b": True}]})
 
     def test_changed_opaque_falls_back_to_canonical(self) -> None:
         from dataclasses import replace
