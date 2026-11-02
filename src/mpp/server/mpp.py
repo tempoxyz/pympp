@@ -394,6 +394,7 @@ class Mpp:
             # input that reads both ways, such as `amount` in display or base units, is
             # always checked in its stricter route-input reading.
             matching: list[ServerMethod] = []
+            exact: list[ServerMethod] = []
             scopes: dict[int, Any] = {}
             normalized = False
             expected_scope: Any = None
@@ -405,9 +406,11 @@ class Mpp:
                     # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True
-                if _comparable(expected) == echoed:
+                if _binding_matches(candidate, expected, echoed):
                     matching.append(candidate)
                     scopes[id(candidate)] = expected.get("_mppx_scope")
+                    if _comparable(expected) == echoed:
+                        exact.append(candidate)
             if not normalized and _comparable(request) == echoed:
                 # The wire form matches every candidate alike.
                 matching = list(candidates)
@@ -415,6 +418,9 @@ class Mpp:
                 wire_scope = True
             if not matching:
                 raise InvalidChallengeError(echo.id, "credential request does not match")
+            if len(matching) > 1 and exact:
+                # Like compose, prefer the methods whose whole request the client signed.
+                matching = exact
             if len(matching) > 1 and not _settle_alike(matching):
                 raise InvalidChallengeError(
                     echo.id,
@@ -644,6 +650,23 @@ async def _expected_request(
             method.resolve_request(RequestContext(request=input, credential=parsed))
         )
     return method.method.normalize_request(input)
+
+
+def _binding_matches(
+    method: ServerMethod, expected: Mapping[str, Any], echoed: Mapping[str, Any]
+) -> bool:
+    """Whether an echoed request pays for the expected one, through the method's stable binding.
+
+    Like mppx's route validation, a method with a stable binding (such as a session whose
+    challenges carry a per-request snapshot) compares only the fields that binding keeps.
+    """
+    expected = _comparable(expected)
+    if method.stable_binding is None:
+        return expected == echoed
+    try:
+        return dict(method.stable_binding(expected)) == dict(method.stable_binding(echoed))
+    except Exception:
+        return False
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:

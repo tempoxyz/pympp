@@ -116,6 +116,96 @@ class AutoSwap:
         return explicit + tuple(t for t in AUTO_SWAP_CURRENCIES if t.lower() not in chosen)
 
 
+async def _find_auto_swap_calls(
+    auto_swap: AutoSwap,
+    *,
+    account: str,
+    amount_out: int,
+    token_out: str,
+    rpc_url: str,
+    fee_headroom: int = 0,
+    token_in: str | None = None,
+    trusted_currencies: Sequence[str] | None = None,
+    client: Any | None = None,
+) -> tuple[list[tuple[str, str]], dict[str, int]]:
+    """Return ``(to, data)`` approve and swap calls that top ``token_out`` up to ``amount_out``.
+
+    Also returns the balance each token's calls spend, keyed by lowercase
+    address. ``fee_headroom`` buys that much more ``token_out`` so the
+    payer's existing balance can pay the transaction fee. ``token_in``
+    limits the swap to that one fallback currency. ``trusted_currencies``, when
+    given, are the only currencies a swap may buy. Returns no calls when
+    ``account`` already holds enough ``token_out``. Charge and session
+    clients share it.
+
+    Raises:
+        InsufficientFundsError: When no fallback currency can fund the swap.
+    """
+    from mpp.methods.tempo.intents import (
+        APPROVE_SELECTOR,
+        STABLECOIN_DEX,
+        SWAP_EXACT_AMOUNT_OUT_SELECTOR,
+    )
+
+    rpc: dict[str, Any] = {} if client is None else {"client": client}
+    candidates = [
+        t
+        for t in auto_swap.currencies()
+        if t.lower() != token_out.lower() and (token_in is None or t.lower() == token_in.lower())
+    ]
+    target, *balances = await asyncio.gather(
+        _tip20_balance(rpc_url, token_out, account, **rpc),
+        *(_tip20_balance(rpc_url, token, account, **rpc) for token in candidates),
+        return_exceptions=True,
+    )
+    held = 0 if isinstance(target, BaseException) else target
+    if held >= amount_out + fee_headroom:
+        return [], {}
+    if trusted_currencies is not None and token_out.lower() not in {
+        t.lower() for t in trusted_currencies
+    }:
+        # A recipient allowlist does not protect funds swapped into a token
+        # the challenge names: only buy currencies the client chose.
+        raise TransactionError(
+            f"Auto-swap with expected_recipients only buys a pinned or fallback "
+            f"currency, not {token_out}"
+        )
+    # Buy only the shortfall; the payer's existing balance covers the rest.
+    deficit = amount_out + fee_headroom - held
+    slippage_bps = math.floor(auto_swap.slippage * 100 + 0.5)
+    for candidate, balance in zip(candidates, balances, strict=True):
+        if isinstance(balance, BaseException) or balance <= 0:
+            continue
+        quote = {
+            "to": STABLECOIN_DEX,
+            "data": "0x"
+            + _QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR
+            + _abi_words(candidate, token_out, deficit),
+        }
+        try:
+            quoted = int(await _rpc_call(rpc_url, "eth_call", [quote, "latest"], **rpc), 16)
+        except Exception:
+            continue
+        max_amount_in = quoted + quoted * slippage_bps // 10_000
+        # The swap may spend up to the slippage-adjusted maximum.
+        if balance < max_amount_in:
+            continue
+        calls = [
+            (candidate, f"0x{APPROVE_SELECTOR}" + _abi_words(STABLECOIN_DEX, max_amount_in)),
+            (
+                STABLECOIN_DEX,
+                f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
+                + _abi_words(candidate, token_out, deficit, max_amount_in),
+            ),
+        ]
+        spent = {
+            candidate.lower(): max_amount_in,
+            token_out.lower(): max(0, amount_out - deficit),
+        }
+        return calls, spent
+    raise InsufficientFundsError(token_out)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Charge client method
 # ──────────────────────────────────────────────────────────────────
@@ -295,81 +385,25 @@ class TempoMethod:
     ) -> tuple[list[tuple[str, str]], dict[str, int]]:
         """Return ``(to, data)`` approve and swap calls that top ``token_out`` up to ``amount_out``.
 
-        Also returns the balance each token's calls spend, keyed by lowercase
-        address. ``fee_headroom`` buys that much more ``token_out`` so the
-        payer's existing balance can pay the transaction fee. ``token_in``
-        limits the swap to that one fallback currency. Returns no calls when
-        ``account`` already holds enough ``token_out``.
-
-        Raises:
-            InsufficientFundsError: When no fallback currency can fund the swap.
+        See :func:`_find_auto_swap_calls`. With ``expected_recipients``, only buys
+        a currency the client pinned or listed as a fallback.
         """
-        from mpp.methods.tempo.intents import (
-            APPROVE_SELECTOR,
-            STABLECOIN_DEX,
-            SWAP_EXACT_AMOUNT_OUT_SELECTOR,
-        )
-
         assert self.auto_swap is not None
-        candidates = [
-            t
-            for t in self.auto_swap.currencies()
-            if t.lower() != token_out.lower()
-            and (token_in is None or t.lower() == token_in.lower())
-        ]
-        target, *balances = await asyncio.gather(
-            _tip20_balance(rpc_url, token_out, account),
-            *(_tip20_balance(rpc_url, token, account) for token in candidates),
-            return_exceptions=True,
+        trusted = (
+            None
+            if self.expected_recipients is None
+            else (*self._pinned_currencies(), *self.auto_swap.currencies())
         )
-        held = 0 if isinstance(target, BaseException) else target
-        if held >= amount_out + fee_headroom:
-            return [], {}
-        if self.expected_recipients is not None:
-            # A recipient allowlist does not protect funds swapped into a token
-            # the challenge names: only buy currencies the client chose.
-            trusted = {
-                t.lower() for t in (*self._pinned_currencies(), *self.auto_swap.currencies())
-            }
-            if token_out.lower() not in trusted:
-                raise TransactionError(
-                    f"Auto-swap with expected_recipients only buys a pinned or fallback "
-                    f"currency, not {token_out}"
-                )
-        # Buy only the shortfall; the payer's existing balance covers the rest.
-        deficit = amount_out + fee_headroom - held
-        slippage_bps = math.floor(self.auto_swap.slippage * 100 + 0.5)
-        for token_in, balance in zip(candidates, balances, strict=True):
-            if isinstance(balance, BaseException) or balance <= 0:
-                continue
-            quote = {
-                "to": STABLECOIN_DEX,
-                "data": "0x"
-                + _QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR
-                + _abi_words(token_in, token_out, deficit),
-            }
-            try:
-                quoted = int(await _rpc_call(rpc_url, "eth_call", [quote, "latest"]), 16)
-            except Exception:
-                continue
-            max_amount_in = quoted + quoted * slippage_bps // 10_000
-            # The swap may spend up to the slippage-adjusted maximum.
-            if balance < max_amount_in:
-                continue
-            calls = [
-                (token_in, f"0x{APPROVE_SELECTOR}" + _abi_words(STABLECOIN_DEX, max_amount_in)),
-                (
-                    STABLECOIN_DEX,
-                    f"0x{SWAP_EXACT_AMOUNT_OUT_SELECTOR}"
-                    + _abi_words(token_in, token_out, deficit, max_amount_in),
-                ),
-            ]
-            spent = {
-                token_in.lower(): max_amount_in,
-                token_out.lower(): max(0, amount_out - deficit),
-            }
-            return calls, spent
-        raise InsufficientFundsError(token_out)
+        return await _find_auto_swap_calls(
+            self.auto_swap,
+            account=account,
+            amount_out=amount_out,
+            token_out=token_out,
+            rpc_url=rpc_url,
+            fee_headroom=fee_headroom,
+            token_in=token_in,
+            trusted_currencies=trusted,
+        )
 
     def _check_charge_policy(self, request: dict[str, Any], expected_chain_id: int | None) -> None:
         """Reject a challenge whose chain, recipients, amount or split memos violate the policy.

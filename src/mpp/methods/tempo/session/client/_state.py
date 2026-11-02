@@ -15,6 +15,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from mpp import Challenge
 from mpp._typing import is_dict
 from mpp._units import parse_units
+from mpp.methods.tempo.client import (
+    AutoSwap,
+    _find_auto_swap_calls,  # pyright: ignore[reportPrivateUsage]
+)
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id
 from mpp.methods.tempo.session._channel import (
@@ -61,7 +65,8 @@ class SessionContext:
 
     Omit ``action`` for automatic open/recover/voucher management. Amount fields
     are human-readable (parsed with the method's decimals); their ``_raw``
-    variants are raw token units and take precedence.
+    variants are raw token units and take precedence. ``auto_swap`` overrides the
+    method's auto-swap for this credential (``False`` disables it).
     """
 
     action: SessionAction | None = None
@@ -73,6 +78,7 @@ class SessionContext:
     additional_deposit: str | None = None
     additional_deposit_raw: str | None = None
     deposit_raw: str | None = None
+    auto_swap: bool | AutoSwap | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -434,6 +440,7 @@ def _recover_context(
         additional_deposit=base.additional_deposit,
         additional_deposit_raw=base.additional_deposit_raw,
         deposit_raw=base.deposit_raw,
+        auto_swap=base.auto_swap,
     )
 
 
@@ -540,10 +547,73 @@ async def _apply_cumulative(sink: ChannelSink, key: str, payload: SessionCredent
     await _store_channel_entry(sink, entry)
 
 
+def resolve_auto_swap(value: bool | AutoSwap | None) -> AutoSwap | None:
+    """The auto-swap options for ``value``: defaults for ``True``, none when off."""
+    if value is True:
+        return AutoSwap()
+    return value or None
+
+
+async def resolve_auto_swap_calls(
+    auto_swap: AutoSwap | None,
+    *,
+    account: TempoAccount,
+    amount_out: int,
+    resolved: ChallengeContext,
+    client: httpx.AsyncClient | None = None,
+) -> list[tuple[str, str]]:
+    """Approve and swap calls buying the channel token the payer lacks (mppx
+    ``resolveAutoSwapCalls``); none when auto-swap is off or the balance suffices."""
+    if auto_swap is None:
+        return []
+    calls, _ = await _find_auto_swap_calls(
+        auto_swap,
+        account=account.address,
+        amount_out=amount_out,
+        token_out=resolved.token,
+        rpc_url=resolved.rpc_url,
+        fee_headroom=await _unsponsored_fee_headroom(resolved, client),
+        client=client,
+    )
+    return calls
+
+
+async def _unsponsored_fee_headroom(
+    resolved: ChallengeContext, client: httpx.AsyncClient | None
+) -> int:
+    """The fee, in channel token units, a transaction pays in the token it swaps for.
+
+    Unsponsored opens and top-ups pay their fee in the channel token unless the challenge
+    names another fee token, so a swap that bought only the deposit would leave none for gas.
+    The bound uses the gas limit the transaction falls back to when it cannot be estimated.
+    """
+    from mpp.methods.tempo.client import ATTODOLLARS_PER_MICRODOLLAR
+    from mpp.methods.tempo.session import _chain as chain
+
+    if resolved.fee_payer:
+        return 0
+    if resolved.fee_token is not None and resolved.fee_token.lower() != resolved.token.lower():
+        return 0
+    gas_price = int(
+        await chain._rpc(resolved.rpc_url, "eth_gasPrice", [], client),  # pyright: ignore[reportPrivateUsage]
+        16,
+    )
+    cost = chain.DEFAULT_GAS_LIMIT * gas_price
+    return max(1, -(-cost // ATTODOLLARS_PER_MICRODOLLAR))
+
+
 async def execute_credential_plan(
-    plan: CredentialPlan, sink: ChannelSink, *, client: httpx.AsyncClient | None = None
+    plan: CredentialPlan,
+    sink: ChannelSink,
+    *,
+    client: httpx.AsyncClient | None = None,
+    auto_swap: AutoSwap | None = None,
 ) -> SessionCredentialPayload:
-    """Execute ``plan`` and return the credential payload; updates the store."""
+    """Execute ``plan`` and return the credential payload; updates the store.
+
+    With ``auto_swap``, an open or manual top-up the payer cannot fund in the
+    channel token first buys it on the stablecoin DEX in the same transaction.
+    """
     resolved = plan.resolved
     account = plan.account
     if plan.type == "open":
@@ -565,6 +635,9 @@ async def execute_credential_plan(
             operator=resolved.operator,
             fee_payer=resolved.fee_payer,
             fee_token=resolved.fee_token,
+            prefix_calls=await resolve_auto_swap_calls(
+                auto_swap, account=account, amount_out=deposit, resolved=resolved, client=client
+            ),
             client=client,
         )
         await _store_channel_entry(
@@ -635,13 +708,13 @@ async def execute_credential_plan(
         await _store_channel_entry(sink, entry.copy(cumulative_amount=cumulative))
         return payload
 
-    payload = await _manual(plan, client=client)
+    payload = await _manual(plan, client=client, auto_swap=auto_swap)
     await _apply_cumulative(sink, resolved.key, payload)
     return payload
 
 
 async def _manual(
-    plan: CredentialPlan, *, client: httpx.AsyncClient | None
+    plan: CredentialPlan, *, client: httpx.AsyncClient | None, auto_swap: AutoSwap | None
 ) -> SessionCredentialPayload:
     context = plan.context
     assert context is not None and context.descriptor is not None
@@ -693,6 +766,9 @@ async def _manual(
             chain_id=resolved.chain_id,
             fee_payer=resolved.fee_payer,
             escrow=resolved.escrow,
+            prefix_calls=await resolve_auto_swap_calls(
+                auto_swap, account=account, amount_out=additional, resolved=resolved, client=client
+            ),
             fee_token=resolved.fee_token,
             client=client,
         )
