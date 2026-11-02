@@ -685,3 +685,36 @@ class TestP256AndWebAuthnProofs:
         assert recover_proof_signer(envelope, account=ACCESS.address, digest=digest) is None
         assert recover_proof_signer(envelope, account=ROOT.address, digest=bytes(32)) is None
         assert recover_proof_signer("0x" + inner.hex(), account=ROOT.address, digest=wrapped)
+
+
+@pytest.mark.parametrize("during_build", [False, True])
+async def test_push_reserves_time_to_deliver_hash_credential(monkeypatch, during_build):
+    import time
+    from dataclasses import replace
+
+    from mpp.errors import PaymentExpiredError
+    from mpp.methods.tempo.client import _expiring_valid_before
+
+    now = [time.time()]
+    expiry = now[0] + (60 if during_build else 15)
+    offered = replace(
+        _challenge("1000", supportedModes=["push"]),
+        expires=datetime.fromtimestamp(expiry, UTC).isoformat(),
+    )
+    method = _tempo_method(account=ROOT, chain_id=CHAIN)
+    monkeypatch.setattr("mpp.methods.tempo.client.time.time", lambda: now[0])
+
+    async def build(**kwargs):
+        assert _expiring_valid_before(kwargs["expires"]) <= int(expiry) - 15
+        now[0] = expiry - 10
+        return "0x76signed", CHAIN
+
+    rpc = AsyncMock()
+    with (
+        patch.object(method, "_build_tempo_transfer", side_effect=build) as builder,
+        patch("mpp.methods.tempo.client._rpc_call", rpc),
+        pytest.raises(PaymentExpiredError),
+    ):
+        await method.create_credential(offered)
+    assert builder.call_count == int(during_build)
+    rpc.assert_not_awaited()

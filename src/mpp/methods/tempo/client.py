@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
@@ -661,7 +661,9 @@ class TempoMethod:
             expected_chain_id=expected_chain_id,
             awaiting_fee_payer=use_fee_payer,
             splits=splits,
-            expires=challenge.expires,
+            expires=(
+                _push_transaction_expiry(challenge.expires) if mode == "push" else challenge.expires
+            ),
         )
 
         if mode == "push":
@@ -1070,6 +1072,8 @@ async def _send_raw_transaction_sync(
         tx_hash = "0x" + keccak(bytes.fromhex(raw_tx.removeprefix("0x"))).hex()
         return PaymentOutcomeUnknownError(challenge, error, transaction_hash=tx_hash)
 
+    if challenge is not None:
+        _push_transaction_expiry(challenge.expires)
     try:
         receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx])
     except RpcError as error:
@@ -1123,6 +1127,22 @@ def _assert_sponsored_challenge_time_left(expires: str | None) -> None:
             "Sponsored challenge expires in less than "
             f"{MIN_REMAINING_VALIDITY_SECONDS} seconds; request a new challenge"
         )
+
+
+def _push_transaction_expiry(expires: str | None) -> str | None:
+    """Leave time after inclusion to deliver a hash credential to the merchant."""
+    if expires is None:
+        return None
+    try:
+        deadline = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            raise ValueError("missing timezone")
+    except ValueError as error:
+        raise PaymentExpiredError(expires) from error
+    if deadline.timestamp() - time.time() <= MIN_REMAINING_VALIDITY_SECONDS:
+        raise PaymentExpiredError(expires)
+    # _expiring_valid_before adds one second to the supplied expiry.
+    return (deadline - timedelta(seconds=MIN_REMAINING_VALIDITY_SECONDS + 1)).isoformat()
 
 
 def _expiring_valid_before(expires: str | None) -> int:

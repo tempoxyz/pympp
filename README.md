@@ -374,3 +374,8 @@ WebAuthn and multisig envelopes remain usable without local sponsorship, or
 through a hosted sponsor that independently authenticates the signature and
 checks the key's current authorization and spending limits. Root-account
 `eth_call` simulation alone cannot establish those permissions.
+
+Push payments require more than 15 seconds of challenge lifetime before signing
+and again immediately before submission. Their signed inclusion deadline leaves
+15 seconds for returning the hash credential. This margin reduces expiry races;
+applications must still allow enough time for network delays and recovery.
