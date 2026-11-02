@@ -756,8 +756,7 @@ class _P256Key:
 
 
 class TestSponsoredSignatureKinds:
-    """A local fee payer co-signs keychain, P256 and WebAuthn senders and key
-    authorizations, as mppx does; each payment settles on chain."""
+    """Local sponsorship accepts root signatures and refuses access-key senders."""
 
     AMOUNT = 10_000
 
