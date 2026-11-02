@@ -4239,10 +4239,20 @@ class TestCosignAsFeePayer:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("as_bytes", [False, True])
-    async def test_recovery_uses_original_sponsor_transaction(self, as_bytes):
+    @pytest.mark.parametrize("probe_capacity", [False, True])
+    async def test_recovery_uses_original_sponsor_transaction(self, as_bytes, probe_capacity):
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
         await store.put(marker, signed.encode() if as_bytes else signed)
+        if not probe_capacity:
+            put_if_absent = store.put_if_absent
+
+            async def refuse_new_probe(key, value):
+                if key.startswith("mpp:charge-admission:probe:"):
+                    raise RuntimeError("store capacity exhausted")
+                return await put_if_absent(key, value)
+
+            store.put_if_absent = refuse_new_probe
         intent.fee_payer = TempoAccount.from_key("0x" + "cd" * 32)
         lookups = []
 
