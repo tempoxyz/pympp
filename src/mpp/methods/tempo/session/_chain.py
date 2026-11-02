@@ -9,6 +9,7 @@ transactions and send `requestClose` and `withdraw`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import random
 import time
@@ -815,6 +816,13 @@ async def simulate_credential_transaction(
     )
 
 
+sponsored_sends: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "sponsored_sends", default=None
+)
+"""When set, collects each fee-payer co-signed transaction handed to the node for broadcast,
+so a caller can tell a sponsored transaction that may have landed from one never sent."""
+
+
 async def send_credential_transaction(
     rpc_url: str,
     transaction: ParsedCredentialTransaction,
@@ -863,6 +871,10 @@ async def send_credential_transaction(
             )
             if transaction.valid_before is not None:
                 _fee_payer.assert_remaining_validity(transaction.valid_before)
+        if fee_payer is not None:
+            sends = sponsored_sends.get()
+            if sends is not None:
+                sends.append(raw)
         tx_hash = await send_raw_transaction(rpc_url, raw, client=http)
         try:
             return await wait_for_successful_receipt(rpc_url, tx_hash, client=http)
