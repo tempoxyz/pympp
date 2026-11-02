@@ -779,3 +779,55 @@ async def test_push_reserves_time_to_deliver_hash_credential(monkeypatch, during
         await method.create_credential(offered)
     assert builder.call_count == int(during_build)
     rpc.assert_not_awaited()
+
+
+async def test_cancelled_push_after_submission_returns_recovery_hash():
+    import asyncio
+
+    from eth_hash.auto import keccak
+
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    method = _tempo_method(account=ROOT, chain_id=CHAIN)
+    raw = "0x76" + "ab" * 40
+    tx_hash = "0x" + keccak(bytes.fromhex(raw[2:])).hex()
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def rpc(*args, **kwargs):
+        started.set()
+        await finish.wait()
+        return {"transactionHash": tx_hash, "status": "0x1"}
+
+    with (
+        patch.object(method, "_build_tempo_transfer", AsyncMock(return_value=(raw, CHAIN))),
+        patch("mpp.methods.tempo.client._rpc_call", rpc),
+    ):
+        waiter = asyncio.create_task(
+            method.create_credential(_challenge("1000", supportedModes=["push"]))
+        )
+        await asyncio.wait_for(started.wait(), 2)
+        attempt = next(iter(method._signing.values()))[0]
+        waiter.cancel()
+        try:
+            with pytest.raises(PaymentOutcomeUnknownError) as raised:
+                await waiter
+            assert raised.value.transaction_hash == tx_hash
+        finally:
+            finish.set()
+            await attempt
+        assert not method._signing
+
+
+@pytest.mark.parametrize("amount", ["0", "1"])
+def test_empty_splits_are_an_unsplit_charge(amount):
+    from mpp.methods.tempo.schemas import ChargeInput
+
+    request = ChargeInput.model_validate(
+        {
+            "amount": amount,
+            "currency": "0x20c0000000000000000000000000000000000000",
+            "recipient": ROOT.address,
+            "splits": [],
+        }
+    )
+    assert "splits" not in request.model_dump(by_alias=True)

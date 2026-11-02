@@ -142,11 +142,11 @@ class ChargeInput(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> ChargeInput:
         total = parse_units(self.amount, self.decimals)
-        if self.splits is not None:
+        if self.splits:
             # As mppx's charge request schema: every split is positive and together
             # they leave the primary recipient something, so a zero amount has none.
             amounts = [_split_amount(split.amount) for split in self.splits]
-            if not self.splits or any(a <= 0 for a in amounts) or sum(amounts) >= total:
+            if any(a <= 0 for a in amounts) or sum(amounts) >= total:
                 raise ValueError("Invalid splits")
         if any(is_fixed_attribution_memo(split.memo) for split in self.splits or ()):
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
