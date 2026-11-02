@@ -1856,8 +1856,14 @@ async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lif
         else:
             sent = list(life.rpc.sent)
             before = await life.channel()
-            with pytest.raises(VerificationFailedError, match="allowance"):
-                await verification.broadcast_credential_payload(context)
+            daily_sends: list[str] = []
+            token = chain.sponsored_sends.set(daily_sends)
+            try:
+                with pytest.raises(VerificationFailedError, match="allowance"):
+                    await verification.broadcast_credential_payload(context)
+            finally:
+                chain.sponsored_sends.reset(token)
+            assert daily_sends == []
             assert life.rpc.sent == sent
             assert await life.channel() == before
 
@@ -1891,3 +1897,23 @@ async def test_invalid_top_up_does_not_consume_sponsorship(life: Lifecycle, monk
         await verification.broadcast_credential_payload(context)
     assert life.rpc.sent == sent
     assert not budget_store._data
+
+
+@pytest.mark.parametrize("params", [None, [], [None], ["other"], ["raw"]])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_rejected_send_reservation_preserves_unrelated_daily_attempts(params, cancelled):
+    async def reject():
+        if cancelled:
+            raise asyncio.CancelledError()
+        raise VerificationFailedError("allowance exhausted")
+
+    tracker = verification._SendTracker(None, before_send=reject)
+    sends = ["prior", "raw"]
+    token = chain.sponsored_sends.set(sends)
+    try:
+        with pytest.raises(asyncio.CancelledError if cancelled else VerificationFailedError):
+            await tracker.post(RPC, json={"method": "eth_sendRawTransaction", "params": params})
+    finally:
+        chain.sponsored_sends.reset(token)
+    assert not tracker.attempted
+    assert sends == (["prior"] if params == ["raw"] else ["prior", "raw"])

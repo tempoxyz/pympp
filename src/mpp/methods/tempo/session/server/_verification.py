@@ -1423,7 +1423,18 @@ class _SendTracker:
         method = cast(dict[str, Any], content).get("method") if isinstance(content, dict) else None
         if method in _SEND_METHODS:
             if self._before_send is not None:
-                await self._before_send()
+                try:
+                    await self._before_send()
+                except (Exception, asyncio.CancelledError):
+                    # The chain registered this attempt before calling the transport.
+                    # A rejected reservation sent nothing and must release daily capacity.
+                    sends = chain.sponsored_sends.get()
+                    params = cast(dict[str, Any], content).get("params")
+                    if sends is not None and isinstance(params, list) and params:
+                        raw = cast(list[object], params)[0]
+                        if isinstance(raw, str) and raw in sends:
+                            sends.remove(raw)
+                    raise
             self.attempted = True
         if self._client is not None:
             return await self._client.post(url, json=cast(Any, content), **kwargs)
