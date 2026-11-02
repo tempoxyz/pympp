@@ -639,6 +639,10 @@ class TestComposedOffers:
                 "cannot both be set",
             ),
             (
+                ("contract", {"amount": "1", "expires": "2026-01-01T00:00:00"}),
+                "Invalid expires format",
+            ),
+            (
                 ("contract", {"amount": "1", "splits": [{}], "fee_payer": True}),
                 "splits and fee_payer",
             ),

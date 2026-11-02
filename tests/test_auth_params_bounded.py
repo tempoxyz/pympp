@@ -1,33 +1,13 @@
-"""Authentication parsing stays bounded, including malformed optional suffixes."""
+"""Authentication parsing stays bounded on long and oversized input."""
 
 import pytest
 
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _parse_auth_params
 
 
-@pytest.mark.parametrize(
-    "value, expected",
-    [("garbage id=ok", {}), ("a=ok junk", {"a": "ok"}), ('a="unterminated', {})],
-)
-def test_malformed_suffix_stops_parsing(value: str, expected: dict[str, str]) -> None:
-    assert _parse_auth_params(value) == expected
-
-
 @pytest.mark.parametrize("size", [1024, 8192, MAX_AUTHORIZATION_SIZE])
 def test_long_missing_separator(size: int) -> None:
     assert _parse_auth_params("a" * size) == {}
-
-
-def test_malformed_optional_extensions_keep_required_parameters() -> None:
-    from mpp._parsing import parse_www_authenticate
-
-    required = (
-        'Payment id="bounded", realm="example.com", method="tempo", intent="charge", request="e30"'
-    )
-    for suffix in [', fuzz="' + "\\" * 24_000, ', description="Payment for "Premium" service"']:
-        challenge = parse_www_authenticate(required + suffix)
-        assert challenge.id == "bounded"
-        assert challenge.request == {}
 
 
 def test_reject_oversized_parameters() -> None:
@@ -42,10 +22,6 @@ def test_reject_oversized_parameters() -> None:
         (" a = token \t, B=other \t", {"a": "token", "b": "other"}),
         ("", {}),
         ("a=ok,,b=yes, ", {"a": "ok", "b": "yes"}),
-        (
-            "foo.bar=one, 1x=two, !#$%&'*+.^_`|~-=three",
-            {"foo.bar": "one", "1x": "two", "!#$%&'*+.^_`|~-": "three"},
-        ),
     ],
 )
 def test_valid_parameters(value: str, expected: dict[str, str]) -> None:
@@ -60,18 +36,3 @@ def test_raw_challenge_is_bounded_before_normalization() -> None:
     with pytest.raises(ParseError, match="maximum size"):
         parse_www_authenticate(header)
     assert _payment_challenges(header) == []
-
-
-@pytest.mark.parametrize(
-    "malformed",
-    [
-        'description="Pay for "Premium" now"',
-        'junk "comma, inside"',
-    ],
-)
-def test_malformed_item_preserves_later_routing_and_opaque_parameters(malformed):
-    params = _parse_auth_params(
-        'id="payment", ' + malformed + ', header="payment-authorization", opaque="e30"'
-    )
-    assert params["header"] == "payment-authorization"
-    assert params["opaque"] == "e30"

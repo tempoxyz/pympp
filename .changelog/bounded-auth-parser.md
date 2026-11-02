@@ -2,4 +2,4 @@
 pympp: patch
 ---
 
-Parse authentication parameters at a bounded cursor and reject malformed or oversized inputs before repeated suffix searches can block async clients.
+Bounded `WWW-Authenticate` and authentication-parameter parsing at 64 KiB, so oversized challenges are rejected before they are scanned.
