@@ -63,6 +63,10 @@ def _is_idempotent_replay(headers: Any) -> bool:
     )
 
 
+class _StripeOutcomeUnknown(Exception):
+    """A Stripe submission may have reached the processor."""
+
+
 class ChargeIntent:
     """Stripe charge intent for one-time payments via SPTs.
 
@@ -223,16 +227,14 @@ class ChargeIntent:
                     payment_options=payment_options,
                     settlement=settlement,
                 )
-        except (VerificationFailedError, TypeError):
-            raise
-        except Exception as err:
+        except _StripeOutcomeUnknown as err:
             raise PaymentOutcomeUnknownError(
                 challenge, err, credential=credential, request=request
             ) from err
 
         if pi["replayed"] and pi["status"] == "succeeded":
             raise CredentialReplayedError("Payment has already been processed")
-        if pi["replayed"] or pi["status"] not in {
+        if (pi["replayed"] and pi["status"] == "requires_action") or pi["status"] not in {
             "succeeded",
             "requires_action",
             "requires_payment_method",
@@ -287,16 +289,31 @@ class ChargeIntent:
             if settlement and settlement.stripe_account is not None:
                 options["stripe_account"] = settlement.stripe_account
 
+        except Exception as err:
+            raise VerificationFailedError("Invalid Stripe PaymentIntent parameters") from err
+        _resolve_payment_intents(client)
+        try:
             result = await _create_payment_intent(client, body, options)
             last_response = getattr(result, "last_response", None)
             replayed = _is_idempotent_replay(getattr(last_response, "headers", None))
             return {"id": result.id, "status": result.status, "replayed": replayed}
-        except (VerificationFailedError, TypeError):
-            raise
-        except Exception as err:
-            if getattr(err, "http_status", None) in {400, 401, 402, 403, 404, 422}:
+        except (Exception, asyncio.CancelledError) as err:
+            error_body = getattr(err, "json_body", None)
+            error_detail = error_body.get("error") if is_dict(error_body) else None
+            idempotency_error = type(err).__name__ == "IdempotencyError" or (
+                is_dict(error_detail) and error_detail.get("type") == "idempotency_error"
+            )
+            if not idempotency_error and getattr(err, "http_status", None) in {
+                400,
+                401,
+                402,
+                403,
+                404,
+                422,
+                429,
+            }:
                 raise VerificationFailedError("Stripe PaymentIntent failed") from err
-            raise
+            raise _StripeOutcomeUnknown() from err
 
     async def _create_with_secret_key(
         self,
@@ -347,12 +364,24 @@ class ChargeIntent:
             if settlement.stripe_account is not None:
                 headers["Stripe-Account"] = settlement.stripe_account
 
-        response = await http_client.post(
-            f"{stripe_defaults.STRIPE_API_BASE}/payment_intents", headers=headers, data=body
-        )
+        try:
+            response = await http_client.post(
+                f"{stripe_defaults.STRIPE_API_BASE}/payment_intents", headers=headers, data=body
+            )
+        except (Exception, asyncio.CancelledError) as err:
+            raise _StripeOutcomeUnknown() from err
 
-        if response.status_code >= 500 or response.status_code in {408, 409, 429}:
-            raise RuntimeError("Stripe settlement requires reconciliation")
+        if response.status_code >= 500 or response.status_code in {408, 409}:
+            raise _StripeOutcomeUnknown("Stripe settlement requires reconciliation")
+        if response.status_code == 400:
+            try:
+                idempotency_error = (
+                    response.json().get("error", {}).get("type") == "idempotency_error"
+                )
+            except Exception:
+                idempotency_error = False
+            if idempotency_error:
+                raise _StripeOutcomeUnknown("Stripe idempotency conflict requires reconciliation")
         if not response.is_success:
             # Stripe's text can echo server-only options and Connect accounts.
             if not payment_options and settlement is None:
@@ -368,9 +397,12 @@ class ChargeIntent:
                 f"Stripe PaymentIntent failed (HTTP {response.status_code})"
             )
 
-        result = response.json()
-        return {
-            "id": result["id"],
-            "status": result["status"],
-            "replayed": _is_idempotent_replay(response.headers),
-        }
+        try:
+            result = response.json()
+            return {
+                "id": result["id"],
+                "status": result["status"],
+                "replayed": _is_idempotent_replay(response.headers),
+            }
+        except Exception as err:
+            raise _StripeOutcomeUnknown() from err

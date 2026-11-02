@@ -1017,7 +1017,8 @@ async def test_cached_stripe_success_never_issues_replacement_challenge(backend,
 
 @pytest.mark.parametrize("backend", ["sdk", "http"])
 @pytest.mark.parametrize(
-    "outcome", ["timeout", "500", "processing", "requires_capture", "malformed"]
+    "outcome",
+    ["timeout", "cancelled", "500", "idempotency", "processing", "requires_capture", "malformed"],
 )
 async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
     from mpp.server.verify import verify_or_challenge
@@ -1027,6 +1028,16 @@ async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
         client = FakeAsyncStripeClient(FakePaymentIntent(status=outcome))
         if outcome == "timeout":
             client.payment_intents.create_async.side_effect = TimeoutError("lost reply")
+        elif outcome == "cancelled":
+            import asyncio
+
+            client.payment_intents.create_async.side_effect = asyncio.CancelledError()
+        elif outcome == "idempotency":
+
+            class IdempotencyError(RuntimeError):
+                http_status = 400
+
+            client.payment_intents.create_async.side_effect = IdempotencyError()
         elif outcome == "500":
 
             class ServerError(RuntimeError):
@@ -1038,6 +1049,14 @@ async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
         client = AsyncMock(spec=httpx.AsyncClient)
         if outcome == "timeout":
             client.post.side_effect = httpx.ReadTimeout("lost reply")
+        elif outcome == "cancelled":
+            import asyncio
+
+            client.post.side_effect = asyncio.CancelledError()
+        elif outcome == "idempotency":
+            client.post.return_value = httpx.Response(
+                400, json={"error": {"type": "idempotency_error"}}
+            )
         else:
             client.post.return_value = httpx.Response(
                 500 if outcome == "500" else 200,
@@ -1058,3 +1077,40 @@ async def test_uncertain_stripe_payment_has_no_retry_offer(backend, outcome):
         await verify_or_challenge(authorization=credential.to_authorization(), **options)
     assert caught.value.retry_challenge is None
     assert caught.value.credential.payload == credential.payload
+
+
+@pytest.mark.parametrize("backend", ["sdk", "http"])
+@pytest.mark.parametrize("outcome", ["requires_payment_method", "canceled", "429"])
+async def test_definitive_stripe_rejection_remains_retryable(backend, outcome):
+    if backend == "sdk":
+        client = FakeAsyncStripeClient(
+            FakePaymentIntent(
+                status=outcome,
+                last_response=FakeLastResponse(headers={"idempotent-replayed": "true"}),
+            )
+        )
+        if outcome == "429":
+
+            class RateLimitError(RuntimeError):
+                http_status = 429
+
+            client.payment_intents.create_async.side_effect = RateLimitError()
+        intent = ChargeIntent(client=client)
+    else:
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.post.return_value = httpx.Response(
+            429 if outcome == "429" else 200,
+            json={"id": "pi_declined", "status": outcome},
+            headers={"idempotent-replayed": "true"},
+        )
+        intent = ChargeIntent(secret_key="sk_test", http_client=client)
+    with pytest.raises(VerificationFailedError):
+        await intent.verify(_make_credential(), SAMPLE_REQUEST)
+
+
+async def test_invalid_sdk_amount_fails_before_submission():
+    client = FakeAsyncStripeClient(FakePaymentIntent())
+    intent = ChargeIntent(client=client)
+    with pytest.raises(VerificationFailedError, match="parameters"):
+        await intent.verify(_make_credential(), {**SAMPLE_REQUEST, "amount": "1.5"})
+    client.payment_intents.create_async.assert_not_called()
