@@ -2,4 +2,4 @@
 pympp: patch
 ---
 
-Keep local fee sponsorship restricted to recoverable secp256k1 senders until preflight can authenticate non-secp256k1 envelopes and enforce access-key permissions. Hosted sponsors must independently enforce those controls.
+Local fee sponsorship now verifies the sender signature with pytempo before co-signing: secp256k1, P256, WebAuthn and keychain (access-key) senders are accepted when their signature verifies, and multisig or forged envelopes are refused. As in mppx, an access key's expiry, revocation and spending limits are left to the chain, so a local sponsor can pay gas for an over-limit keychain transfer that reverts; use a hosted sponsor that enforces access-key limits to avoid that.
