@@ -104,3 +104,15 @@ async def test_permanent_contention_is_bounded():
 
     with pytest.raises(VerificationFailedError, match="contention"):
         await reserve(BusyStore(), SessionSponsorshipLimit())
+
+
+def test_configured_budget_store_requires_atomic_compare_and_set():
+    with pytest.raises(TypeError, match="compare_and_set"):
+        SessionSponsorshipLimit(store=object())  # pyright: ignore[reportArgumentType]
+
+
+async def test_negative_fee_cannot_credit_the_sponsorship_budget():
+    store = MemoryStore()
+    with pytest.raises(VerificationFailedError, match="Invalid sponsorship fee"):
+        await reserve(store, SessionSponsorshipLimit(), fee=-1)
+    assert not store._data

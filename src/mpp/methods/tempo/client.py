@@ -1082,12 +1082,16 @@ async def _send_raw_transaction_sync(
         raise TransactionError(f"Transaction submission failed: {error}") from error
     except RuntimeError as error:
         raise TransactionError(f"Transaction submission failed: {error}") from error
-    except (httpx.HTTPError, ValueError) as error:
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
         raise unknown(error) from error
     tx_hash = receipt.get("transactionHash") if is_dict(receipt) else None
-    if not isinstance(tx_hash, str):
-        raise TransactionError("No transaction receipt returned.")
-    if receipt.get("status") != "0x1":
+    if (
+        not isinstance(tx_hash, str)
+        or re.fullmatch(r"0x[0-9a-fA-F]{64}", tx_hash) is None
+        or receipt.get("status") not in ("0x0", "0x1")
+    ):
+        raise unknown(TransactionError("Incomplete transaction receipt returned"))
+    if receipt.get("status") == "0x0":
         raise TransactionError(f"Transaction {tx_hash} reverted")
     return tx_hash
 
