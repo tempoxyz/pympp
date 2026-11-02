@@ -48,6 +48,7 @@ from mpp.methods.tempo.session.client._store import (
     delete_channel,
     entry_key,
     persist_channel,
+    register_funding_store,
     store_get,
     with_funding_lock,
 )
@@ -78,6 +79,48 @@ def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
             if challenge.method == "tempo" and challenge.intent == "charge":
                 return challenge if _is_zero_tempo_charge(challenge) else None
     return None
+
+
+def _http_origin(url: httpx.URL) -> str:
+    """The ASCII serialization of an http(s) URL's origin (lowercase host, default port dropped)."""
+    from mpp.client.transport import _origin  # pyright: ignore[reportPrivateUsage]
+
+    scheme, host, port = _origin(url)
+    if scheme not in ("http", "https") or not host:
+        raise ValueError("SessionManager: session payments require an HTTP origin")
+    if ":" in host:
+        host = f"[{host}]"
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" if port == default else f"{scheme}://{host}:{port}"
+
+
+class _OriginBoundStore:
+    """The manager's view of its channel store (mppx SessionManager's ``store``).
+
+    Reusing an open channel bound to another origin raises before any credential is signed,
+    and writes bind entries to the manager's origin.
+    """
+
+    def __init__(self, backing: ChannelStore, manager: SessionManager) -> None:
+        self._backing = backing
+        self._manager = manager
+
+    async def get(self, key: str) -> ChannelEntry | None:
+        entry = await store_get(self._backing, key)
+        if (
+            entry is not None
+            and entry.opened
+            and entry.origin is not None
+            and entry.origin != self._manager._origin  # pyright: ignore[reportPrivateUsage]
+        ):
+            raise ValueError("SessionManager: stored channel origin mismatch")
+        return entry
+
+    async def set(self, entry: ChannelEntry) -> None:
+        await self._manager._persist(entry)  # pyright: ignore[reportPrivateUsage]
+
+    async def delete(self, key: str) -> None:
+        await delete_channel(self._backing, key)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
@@ -159,6 +202,9 @@ class SessionManager:
 
     Requests are single-flight: one manager drives one channel, so overlapping
     :meth:`fetch` calls raise. Close it with :meth:`aclose` or ``async with``.
+
+    Each manager is pinned to the HTTP origin of its first request; use a separate manager
+    per origin. Session requests never follow redirects.
     """
 
     def __init__(
@@ -184,6 +230,9 @@ class SessionManager:
         self._store: ChannelStore = (
             channel_store if channel_store is not None else create_channel_store()
         )
+        self._origin: str | None = None
+        view = _OriginBoundStore(self._store, self)
+        register_funding_store(view, self._store)
         self._method = SessionMethod(
             account=account,
             max_deposit=max_deposit,
@@ -193,7 +242,7 @@ class SessionManager:
             allow_custom_escrow=allow_custom_escrow,
             allowed_chain_ids=allowed_chain_ids,
             auto_swap=auto_swap,
-            channel_store=self._store,
+            channel_store=view,
             on_channel_update=self._on_channel_update,
             rpc_url=rpc_url,
             http_client=http_client,
@@ -266,6 +315,21 @@ class SessionManager:
     def last_challenge(self) -> Challenge | None:
         """The last session challenge the manager saw."""
         return self._last_challenge
+
+    def _bind_origin(self, url: httpx.URL) -> str:
+        """Pin the manager to ``url``'s origin, rejecting any other origin afterwards."""
+        origin = _http_origin(url)
+        if self._origin is not None and self._origin != origin:
+            raise ValueError("SessionManager: session payment origin mismatch")
+        self._origin = origin
+        return origin
+
+    async def _persist(self, entry: ChannelEntry) -> None:
+        """Store ``entry`` bound to the manager's origin."""
+        if entry.origin is not None and entry.origin != self._origin:
+            raise ValueError("SessionManager: stored channel origin mismatch")
+        entry.origin = self._origin
+        await persist_channel(self._store, entry)
 
     def _on_channel_update(self, entry: ChannelEntry) -> None:
         if self._channel is None or entry.channel_id != self._channel.channel_id:
@@ -376,7 +440,7 @@ class SessionManager:
         if await store_get(self._store, entry_key(entry)) is not None:
             # The store already holds this payee's channel: keep it rather than the server's.
             return None
-        await persist_channel(self._store, entry)
+        await self._persist(entry)
         self._channel = entry
         self._spent = spent
         return entry
@@ -466,7 +530,7 @@ class SessionManager:
             and current.cumulative_amount != previous.cumulative_amount
         ):
             restored = current.copy(cumulative_amount=previous.cumulative_amount)
-            await persist_channel(self._store, restored)
+            await self._persist(restored)
             self._channel = restored
 
     # ── requests ───────────────────────────────────────────────────
@@ -477,7 +541,9 @@ class SessionManager:
         """Send a request, paying its 402 challenge with the session channel.
 
         Keyword arguments go to ``httpx.AsyncClient.request``. Adds a
-        ``Payment-Session`` header naming the open channel, as mppx does.
+        ``Payment-Session`` header naming the open channel, as mppx does. The first request
+        pins the manager to its HTTP origin; a request to another origin raises, and a
+        redirect response is returned rather than followed.
         """
         if self._use is not None:
             raise RuntimeError(
@@ -486,6 +552,7 @@ class SessionManager:
             )
         if self._uncertain_funding is not None:
             raise self._uncertain_funding
+        origin = self._bind_origin(httpx.URL(url))
         self._use = _FetchUse(
             previous=self._channel.copy() if self._channel else None, previous_spent=self._spent
         )
@@ -508,8 +575,12 @@ class SessionManager:
                 self._use = _FetchUse(previous=recovered.copy(), previous_spent=self._spent)
             if self._channel is not None and self._channel.opened:
                 headers.setdefault(PAYMENT_SESSION_HEADER, self._channel.channel_id)
+            # A redirect must not carry the session's hint or credentials to another resource.
+            kwargs["follow_redirects"] = False
             try:
                 response = await self._client.request(method, url, headers=headers, **kwargs)
+                if _http_origin(response.url) != origin:
+                    raise ValueError("SessionManager: session response origin mismatch")
             except UncertainFundingError as error:
                 self._uncertain_funding = error
                 raise
@@ -602,10 +673,10 @@ class SessionManager:
                 stored = await store_get(self._store, entry_key(target))
                 if stored is not None and stored.channel_id == target.channel_id:
                     funded = max(stored.deposit, target.deposit) + additional
-                    await persist_channel(self._store, stored.copy(deposit=funded))
+                    await self._persist(stored.copy(deposit=funded))
                 return receipt
             updated = latest.copy(deposit=max(latest.deposit, target.deposit) + additional)
-            await persist_channel(self._store, updated)
+            await self._persist(updated)
             self._channel = updated
             return receipt
 

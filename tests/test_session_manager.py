@@ -299,6 +299,116 @@ class TestRollback:
                 await manager._rollback()  # pyright: ignore[reportPrivateUsage]
 
 
+# ── origin binding ────────────────────────────────────────────────
+
+
+class TestOrigin:
+    @pytest.mark.parametrize(
+        "other",
+        [
+            "https://evil.example/data",
+            "http://api.example.com/data",
+            "https://api.example.com:8443/data",
+        ],
+    )
+    async def test_rejects_cross_origin_requests_before_fetching(self, other: str) -> None:
+        calls: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url)
+            return httpx.Response(200)
+
+        async with manager_for(handler) as manager:
+            await manager.fetch("https://API.example.com:443/data")
+            with pytest.raises(ValueError, match="session payment origin mismatch"):
+                await manager.fetch(other)
+            assert len(calls) == 1
+            await manager.fetch("https://api.example.com/another")
+            assert len(calls) == 2
+
+    @pytest.mark.parametrize(
+        "url",
+        ["app://trusted/data", "ipfs://content/data", "data:text/plain,hello", "file:///tmp/data"],
+    )
+    async def test_rejects_opaque_payment_origins_before_fetching(self, url: str) -> None:
+        calls: list[httpx.URL] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url)
+            return httpx.Response(200)
+
+        async with manager_for(handler) as manager:
+            with pytest.raises(ValueError, match="require an HTTP origin"):
+                await manager.fetch(url)
+            assert not calls
+            await manager.fetch("https://api.example.com/data")
+            assert len(calls) == 1
+
+    async def test_does_not_follow_redirects(self) -> None:
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            return httpx.Response(302, headers={"Location": "https://evil.example/data"})
+
+        async with manager_for(handler) as manager:
+            response = await manager.fetch("https://api.example.com/data", follow_redirects=True)
+            assert response.status_code == 302
+            assert calls == ["https://api.example.com/data"]
+
+    async def test_rejects_responses_from_another_origin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async with manager_for(lambda request: httpx.Response(200)) as manager:
+
+            async def request(method: str, url: Any, **kwargs: Any) -> httpx.Response:
+                return httpx.Response(200, request=httpx.Request(method, "https://evil.example/"))
+
+            monkeypatch.setattr(manager._client, "request", request)  # pyright: ignore[reportPrivateUsage]
+            with pytest.raises(ValueError, match="session response origin mismatch"):
+                await manager.fetch("https://api.example.com/data")
+
+    async def test_persisted_channel_is_not_authorized_for_another_origin(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        store = create_channel_store()
+        stored = entry_for().copy(origin="https://trusted.example")
+        store.set(stored)
+        server = FakeSessionServer()
+        async with manager_for(server.handler, channel_store=store) as manager:
+            with pytest.raises(ValueError, match="stored channel origin mismatch"):
+                await manager.fetch(URL)
+            assert len(server.requests) == 1
+            assert "authorization" not in server.requests[0].headers
+            assert "payment-session" not in server.requests[0].headers
+            assert store.get(entry_key(stored)) is stored
+            assert stored.cumulative_amount == 100 and manager.channel is None
+
+    async def test_channels_are_bound_to_the_manager_origin(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        store = create_channel_store()
+        async with manager_for(FakeSessionServer().handler, channel_store=store) as manager:
+            await manager.fetch(URL)
+            assert manager.channel is not None
+            stored = store.get(entry_key(manager.channel))
+            assert stored is not None and stored.origin == "http://api.test"
+        async with manager_for(FakeSessionServer().handler, channel_store=store) as other:
+            with pytest.raises(ValueError, match="stored channel origin mismatch"):
+                await other.fetch("http://other.test/paid")
+
+    async def test_legacy_channel_is_bound_on_reuse(self, fake_chain: dict[str, list[Any]]) -> None:
+        store = create_channel_store()
+        legacy = entry_for()
+        store.set(legacy)
+        async with manager_for(FakeSessionServer().handler, channel_store=store) as manager:
+            response = await manager.fetch(URL)
+            assert response.status_code == 200 and manager.channel_id == legacy.channel_id
+            stored = store.get(entry_key(legacy))
+            assert stored is not None and stored.origin == "http://api.test"
+            assert stored.cumulative_amount == 200
+
+
 # ── top-up ────────────────────────────────────────────────────────
 
 

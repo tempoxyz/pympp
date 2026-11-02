@@ -928,6 +928,7 @@ module mpp.methods.tempo.session.client
         field kw_only chain_id: int
         field kw_only opened: bool
         field kw_only uncertain_top_up: bool = False
+        field kw_only origin: str | None = None
         def copy(self, **changes: Any) -> ChannelEntry
     class ChannelStore(typing.Protocol)
         def __init__(self, *args, **kwargs)
