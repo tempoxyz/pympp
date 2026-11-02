@@ -756,8 +756,7 @@ class _P256Key:
 
 
 class TestSponsoredSignatureKinds:
-    """A local fee payer co-signs keychain, P256 and WebAuthn senders and key
-    authorizations, as mppx does; each payment settles on chain."""
+    """Local sponsorship accepts root signatures and refuses access-key senders."""
 
     AMOUNT = 10_000
 
@@ -824,7 +823,7 @@ class TestSponsoredSignatureKinds:
         assert receipt.status == "success"
         return receipt.reference
 
-    async def test_access_key_authorized_in_the_sponsored_transaction(
+    async def test_local_sponsorship_refuses_access_keys_before_and_after_authorization(
         self, rpc_url, funded_recipient, currency, chain_id
     ):
         import os
@@ -846,11 +845,21 @@ class TestSponsoredSignatureKinds:
             rpc_url, currency, recipient, "integ-key-auth", key_authorization=authorization
         )
         signed = tx.sign_access_key(access.private_key, root.address)
-        reference = await self._pay(intent, signed, "integ-key-auth", currency, recipient, chain_id)
+        sponsor_before = await _tip20(rpc_url, currency, sponsor.address)
+        recipient_before = await _tip20(rpc_url, currency, recipient)
+        with pytest.raises(VerificationError, match="permission-aware simulation"):
+            await self._pay(intent, signed, "integ-key-auth", currency, recipient, chain_id)
+        assert await _tip20(rpc_url, currency, sponsor.address) == sponsor_before
+        assert await _tip20(rpc_url, currency, recipient) == recipient_before
+
+        # The root may install an access key while paying with its own signature.
+        reference = await self._pay(
+            intent, tx.sign(root.private_key), "integ-key-auth", currency, recipient, chain_id
+        )
         receipt = await _wait_for_receipt(rpc_url, reference)
         assert receipt["from"].lower() == root.address.lower()
 
-        # The authorized key now pays through pympp's access-key client.
+        # Even an installed key requires permission-aware sponsorship.
         expires = _future_expires()
         challenge = Challenge(
             id="integ-access-key",
@@ -864,8 +873,12 @@ class TestSponsoredSignatureKinds:
             account=access, root_account=root.address, chain_id=chain_id, rpc_url=rpc_url
         )
         credential = await method.create_credential(challenge)
-        receipt_ = await intent.verify(credential, self._request(currency, recipient, chain_id))
-        assert receipt_.status == "success"
+        sponsor_before = await _tip20(rpc_url, currency, sponsor.address)
+        recipient_before = await _tip20(rpc_url, currency, recipient)
+        with pytest.raises(VerificationError, match="permission-aware simulation"):
+            await intent.verify(credential, self._request(currency, recipient, chain_id))
+        assert await _tip20(rpc_url, currency, sponsor.address) == sponsor_before
+        assert await _tip20(rpc_url, currency, recipient) == recipient_before
 
     @pytest.mark.parametrize("kind", ["p256", "webauthn"])
     async def test_passkey_sender(self, rpc_url, funded_recipient, currency, chain_id, kind):
