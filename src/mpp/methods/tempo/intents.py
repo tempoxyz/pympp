@@ -30,7 +30,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
-from mpp.methods.tempo import _fee_payer
+from mpp.methods.tempo import _fee_payer, _sponsored_admission
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
@@ -97,6 +97,22 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+class _TransactionReverted(VerificationError):
+    """A receipt establishes that the submitted transaction reverted."""
+
+    type = VerificationError.type
+    title = VerificationError.title
+
+
+class _TransactionNotIncluded(VerificationError):
+    """Chain time and receipt lookup establish that an expired transaction cannot land."""
+
+    type = VerificationError.type
+    title = VerificationError.title
+
+
 ACCOUNT_KEYCHAIN = "0xaAAAaaAA00000000000000000000000000000000"
 # getKey(address account,address keyId) -> (uint8,address,uint64,bool,bool)
 GET_KEY_SELECTOR = "bc298553"
@@ -1565,8 +1581,10 @@ class ChargeIntent:
         source_address: str | None = None,
         validate_sender: ValidateSender | None = None,
     ) -> list[MatchedTransferLog]:
+        if receipt_data.get("status") == "0x0":
+            raise _TransactionReverted("Transaction reverted")
         if receipt_data.get("status") != "0x1":
-            raise VerificationError("Transaction reverted")
+            raise VerificationError("Invalid transaction receipt status")
 
         # Bind the transfer sender only when a credential source is present;
         # no source means no sender filtering.
@@ -2097,7 +2115,96 @@ class ChargeIntent:
         # outcome removes it again.
         marker_created = False
         verified = False
+        admission_store: CompareAndSetStore | None = None
+        challenge_claim: _sponsored_admission.Claim | None = None
+        payer_claim: _sponsored_admission.Claim | None = None
+        admitting = False
+
+        async def cleanup_admission() -> None:
+            nonlocal challenge_claim, payer_claim
+            if admission_store is None:
+                return
+            try:
+                if payer_claim is not None and (
+                    verified or (not outcome_unknown and not reconciling)
+                ):
+                    await _sponsored_admission.release(admission_store, payer_claim)
+                if (
+                    challenge_claim is not None
+                    and challenge_claim.created
+                    and not broadcast_attempted
+                    and not reconciling
+                    and not verified
+                ):
+                    await _sponsored_admission.release(admission_store, challenge_claim)
+            except Exception:
+                logger.exception("Sponsored admission cleanup failed")
+            finally:
+                challenge_claim = payer_claim = None
+
         try:
+            if request.methodDetails.feePayer and self.fee_payer is not None:
+                # The implicit fallback store is per intent; admission must be
+                # process-wide so separate charge methods serialize one payer.
+                configured_admission_store = (
+                    self._sponsor_budget.store if self._sponsor_budget is not None else None
+                ) or (_sponsor_budget.process_store() if self._fallback_store_used else self._store)
+                if not isinstance(configured_admission_store, CompareAndSetStore):
+                    raise InternalPaymentError() from TypeError(
+                        "Sponsored admission requires compare_and_set"
+                    )
+                admission_store = configured_admission_store
+                valid_before = _transaction_valid_before(raw_tx)
+                if sender is None or valid_before is None:
+                    raise InternalPaymentError() from ValueError(
+                        "Sponsored transaction lacks payer or expiry"
+                    )
+                transaction_hash = _raw_transaction_hash(payload.signature)
+                claim_expiry = (
+                    max(recovery_expires_at, valid_before + VALID_BEFORE_GRACE)
+                    if recovery_expires_at is not None
+                    else None
+                )
+                admitting = True
+                if not reconciling:
+                    await _sponsored_admission.ensure_atomic_store(admission_store)
+                challenge_claim = await _sponsored_admission.claim_challenge(
+                    admission_store,
+                    realm=realm,
+                    chain_id=request.methodDetails.chainId,
+                    challenge_id=challenge_id,
+                    transaction_hash=transaction_hash,
+                    payer=sender,
+                    currency=request.currency,
+                    amount=request.amount,
+                    expires_at=claim_expiry,
+                )
+
+                async def payer_settled(tx_hash: str, expiry: float) -> bool:
+                    receipt = await self._get_transaction_receipt(client, tx_hash)
+                    if (
+                        receipt is not None
+                        and receipt.get("transactionHash", "").lower() == tx_hash.lower()
+                        and receipt.get("status") in ("0x0", "0x1")
+                    ):
+                        return True
+                    return await self._confirm_not_included(
+                        client, tx_hash, int(expiry - VALID_BEFORE_GRACE)
+                    )
+
+                payer_claim = await _sponsored_admission.claim_payer(
+                    admission_store,
+                    chain_id=request.methodDetails.chainId,
+                    payer=sender,
+                    currency=request.currency,
+                    transaction_hash=transaction_hash,
+                    expires_at=valid_before + VALID_BEFORE_GRACE,
+                    reconciling=reconciling,
+                    wait_until=min(time.time() + 5, valid_before),
+                    receipt_hash=_raw_transaction_hash(raw_tx),
+                    is_settled=payer_settled,
+                )
+            admitting = False
             if reconciling:
                 prior = await self._check_sponsored_validity(
                     client,
@@ -2119,6 +2226,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
                 # Simulate before reserving, like mppx, so a transaction that
                 # reverts (such as one from an unfunded key) never holds sponsor
@@ -2128,6 +2236,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
                 budget_store, reservation = await self._reserve_sponsor_budget(
                     client, raw_tx, sponsored_fee, request, recovery_expires_at, sponsor
@@ -2142,6 +2251,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
 
             # The send and any receipt recovery share one confirmation deadline.
@@ -2294,6 +2404,15 @@ class ChargeIntent:
             await self._clear_broadcast_marker(broadcast_key)
             return Receipt.success(receipt_tx_hash)
         except (Exception, asyncio.CancelledError) as err:
+            if isinstance(err, (_TransactionReverted, _TransactionNotIncluded)):
+                outcome_unknown = reconciling = False
+                # A reverted or excluded transaction moved no funds: release the
+                # challenge so the retry its 402 invites can bind a new transaction.
+                if challenge_claim is not None:
+                    challenge_claim = replace(challenge_claim, created=True)
+            # Remove admission ownership before reopening transaction replay claims.
+            # A same-envelope retry must not adopt a binding we later delete.
+            await cleanup_admission()
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if not verified and self._store is not None:
@@ -2319,8 +2438,15 @@ class ChargeIntent:
                 and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
             ):
                 raise InternalPaymentError() from err
+            if (
+                admitting
+                and isinstance(err, Exception)
+                and not isinstance(err, (VerificationError, InternalPaymentError))
+            ):
+                raise InternalPaymentError() from err
             raise
         finally:
+            await cleanup_admission()
             if reservation is not None and budget_store is not None:
                 try:
                     # A transaction that may still land keeps its fee reserved
@@ -2475,7 +2601,7 @@ class ChargeIntent:
                 # Chain time is past its inclusion window with no receipt: it
                 # never landed.
                 await self._clear_broadcast_marker(broadcast_key)
-                raise VerificationError(
+                raise _TransactionNotIncluded(
                     "Fee payer envelope expired: valid_before "
                     f"({valid_before}) is not in the future"
                 )

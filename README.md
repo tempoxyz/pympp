@@ -385,6 +385,26 @@ and again immediately before submission. Their signed inclusion deadline leaves
 15 seconds for returning the hash credential. This margin reduces expiry races;
 applications must still allow enough time for network delays and recovery.
 
+Local sponsored charges atomically bind each payer and challenge to its first
+submitted transaction and allow only one pending sponsored charge per payer on
+a chain, across currencies. Busy payers wait up to five seconds (bounded by the
+new transaction's expiry). A preflight rejection releases its claims without
+consuming sponsorship. Submitted transactions keep their challenge binding for
+its acceptance window.
+
+Unknown payer claims remain until a receipt or chain-time non-inclusion check
+resolves them. Wall-clock expiry alone does not release a claim; a later request
+for that payer performs reconciliation. Provision storage for retained records
+and apply capacity limits rather than evicting pending payments.
+
+Use an atomic `SponsorBudget(store=...)` backend or a replay store supporting
+`compare_and_set`. The Redis adapter requires permission to execute its CAS Lua
+script (`EVAL`). Admission probes the operation before creating payment claims or
+sending transactions; an adapter whose CAS operation is disabled is rejected.
+Failed conditional cleanup retains the claim rather than deleting another
+request's reservation. Without a configured store these claims are process-local,
+so use a shared atomic store across server instances.
+
 ### Session top-up sponsorship limits
 
 Sponsored session top-ups use a rolling 24-hour allowance: five attempts per payer

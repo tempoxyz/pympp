@@ -767,3 +767,146 @@ async def test_sponsored_broadcast_requires_its_own_marker(outcome: str, cause: 
     assert cause in str(internal_cause(raised.value))
     assert rpc.sent == []
     assert stored_keys(intent) == []
+
+
+async def test_reconciled_revert_releases_payer_admission() -> None:
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    cosigned = await _seed_unknown_submission(intent, envelope)
+    tx_hash = _raw_transaction_hash(cosigned)
+    rpc.receipts[tx_hash] = receipt(tx_hash, status="0x0")
+    with pytest.raises(VerificationError, match="reverted"):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert not any(key.startswith("mpp:charge-admission:payer:") for key in stored_keys(intent))
+
+
+async def test_intents_without_a_store_share_sponsored_admission() -> None:
+    from mpp.methods.tempo import _sponsored_admission as admission
+    from mpp.methods.tempo import sponsor_budget
+
+    stores: list[object] = []
+
+    async def capture(store, **_kwargs):
+        stores.append(store)
+        raise VerificationError("stop")
+
+    rpc = FakeRpc()
+    intents = [
+        ChargeIntent(
+            rpc_url="https://rpc.test",
+            http_client=rpc.client,
+            fee_payer=TempoAccount.from_key(FEE_PAYER_KEY),
+            fee_token=PATH_USD,
+        )
+        for _ in range(2)
+    ]
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    with patch.object(admission, "claim_challenge", capture):
+        for intent in intents:
+            with pytest.raises(VerificationError, match="stop"):
+                await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+
+    assert intents[0]._store is not intents[1]._store
+    assert stores == [sponsor_budget.process_store()] * 2
+
+
+async def test_reconciled_revert_lets_the_challenge_bind_a_new_transaction() -> None:
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+
+    def timeout(raw_tx: str) -> dict[str, dict[str, Any]]:
+        raise httpx.ReadTimeout("lost reply")
+
+    rpc.send = timeout
+    intent._confirmation_timeout = 0.01
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert any(key.startswith("mpp:charge-admission:challenge:") for key in stored_keys(intent))
+
+    cosigned = rpc.sent[-1]
+    rpc.receipts[_raw_transaction_hash(cosigned)] = receipt(
+        _raw_transaction_hash(cosigned), status="0x0"
+    )
+    with pytest.raises(VerificationError, match="reverted"):
+        await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+    assert not any(key.startswith("mpp:charge-admission:challenge:") for key in stored_keys(intent))
+
+
+async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims() -> None:
+    from unittest.mock import AsyncMock
+
+    from mpp.methods.tempo import _sponsored_admission as admission
+
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    credential, request = _tx_credential(envelope), _request(fee_payer=True)
+    entered, resume = asyncio.Event(), asyncio.Event()
+    release = admission.release
+
+    async def delayed_release(store, claim):
+        entered.set()
+        await resume.wait()
+        await release(store, claim)
+
+    with (
+        patch.object(
+            intent,
+            "_simulate_before_broadcast",
+            AsyncMock(side_effect=VerificationError("simulation failed")),
+        ),
+        patch.object(admission, "release", delayed_release),
+    ):
+        first = asyncio.create_task(intent.verify(credential, request))
+        await asyncio.wait_for(entered.wait(), 2)
+        try:
+            with pytest.raises(CredentialReplayedError):
+                await intent.verify(credential, request)
+        finally:
+            resume.set()
+        with pytest.raises(VerificationError, match="simulation failed"):
+            await first
+    await intent.verify(credential, request)
+    replacement = signed_tx((pay_call(),), fee_payer=True, nonce=1)
+    with pytest.raises(CredentialReplayedError):
+        await intent.verify(_tx_credential(replacement), request)
+    assert len(rpc.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "status, excluded", [("0x1", False), ("0x0", False), (None, True), (None, False)]
+)
+@pytest.mark.parametrize("remaining", [-10, 60])
+async def test_next_charge_reconciles_payer_claim(status, excluded, remaining):
+    from unittest.mock import AsyncMock
+
+    from mpp.methods.tempo import _sponsored_admission as admission
+
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    assert isinstance(intent._store, MemoryStore)
+    prior_hash = "0x" + "88" * 32
+    claim = await admission.claim_payer(
+        intent._store,
+        chain_id=CHAIN_ID,
+        payer=TempoAccount.from_key(PAYER_KEY).address,
+        currency=CURRENCY,
+        transaction_hash="0xold",
+        receipt_hash=prior_hash,
+        expires_at=time.time() + remaining,
+    )
+    if status is not None:
+        rpc.receipts[prior_hash] = receipt(prior_hash, status=status)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    with patch.object(intent, "_confirm_not_included", AsyncMock(return_value=excluded)):
+        if status is None and not excluded:
+            with pytest.raises(VerificationError, match="not submitted"):
+                await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+            assert rpc.sent == []
+            assert await intent._store.get(claim.key) == claim.value
+        else:
+            await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+            assert len(rpc.sent) == 1
+            assert await intent._store.get(claim.key) is None
