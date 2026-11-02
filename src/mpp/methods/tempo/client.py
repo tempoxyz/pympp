@@ -265,8 +265,10 @@ class TempoMethod:
     # client then pays on the chain each challenge names, as mppx does. A
     # directly constructed method stays pinned to its own chain.
     _follow_challenge_chain: bool = field(default=False, init=False, repr=False)
-    _signing: dict[tuple[str, str], asyncio.Task[Credential]] = field(
-        default_factory=dict[tuple[str, str], "asyncio.Task[Credential]"], init=False, repr=False
+    _signing: dict[tuple[str, str], tuple[asyncio.Task[Credential], list[str]]] = field(
+        default_factory=dict[tuple[str, str], tuple[asyncio.Task[Credential], list[str]]],
+        init=False,
+        repr=False,
     )
     # Callers still awaiting each in-flight signing: a push payment is not
     # broadcast once every caller has been cancelled.
@@ -577,18 +579,38 @@ class TempoMethod:
         # Share an in-flight signing so concurrent calls for one challenge cannot
         # yield two independently settleable transactions.
         key = ((self.root_account or self.account.address).lower(), challenge.id)
-        task = self._signing.get(key)
-        if task is None:
+        attempt = self._signing.get(key)
+        if attempt is None:
+            submitted: list[str] = []
             task = asyncio.ensure_future(
                 self._create_credential(
-                    challenge, wanted=lambda: self._signing_waiters.get(key, 0) > 0
+                    challenge,
+                    wanted=lambda: self._signing_waiters.get(key, 0) > 0,
+                    on_submission=submitted.append,
                 )
             )
-            self._signing[key] = task
-            task.add_done_callback(lambda _: self._signing.pop(key, None))
+            self._signing[key] = (task, submitted)
+
+            def finished(task: asyncio.Task[Credential]) -> None:
+                self._signing.pop(key, None)
+                if not task.cancelled():
+                    task.exception()
+
+            task.add_done_callback(finished)
+        else:
+            task, submitted = attempt
         self._signing_waiters[key] = self._signing_waiters.get(key, 0) + 1
         try:
             return await asyncio.shield(task)
+        except asyncio.CancelledError as error:
+            if submitted:
+                from eth_hash.auto import keccak
+
+                tx_hash = "0x" + keccak(bytes.fromhex(submitted[0].removeprefix("0x"))).hex()
+                raise PaymentOutcomeUnknownError(
+                    challenge, error, transaction_hash=tx_hash
+                ) from error
+            raise
         finally:
             remaining = self._signing_waiters[key] - 1
             if remaining:
@@ -597,7 +619,10 @@ class TempoMethod:
                 del self._signing_waiters[key]
 
     async def _create_credential(
-        self, challenge: Challenge, wanted: Callable[[], bool] = lambda: True
+        self,
+        challenge: Challenge,
+        wanted: Callable[[], bool] = lambda: True,
+        on_submission: Callable[[str], None] | None = None,
     ) -> Credential:
         if self.account is None:
             raise ValueError("No account configured for signing")
@@ -671,6 +696,8 @@ class TempoMethod:
             # broadcast now would pay with no one left to receive the hash.
             if not wanted():
                 raise asyncio.CancelledError("Push payment cancelled before broadcast")
+            if on_submission is not None:
+                on_submission(raw_tx)
             tx_hash = await _send_raw_transaction_sync(rpc_url, raw_tx, challenge)
             return Credential(
                 challenge=challenge.to_echo(),
