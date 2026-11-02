@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -108,6 +108,14 @@ __all__ = [
     "validate_voucher",
     "verify_and_accept_voucher",
 ]
+
+
+from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.session.server.sponsorship_limit import (
+    SessionSponsorshipLimit,
+    reserve_top_up,
+)
+from mpp.store import CompareAndSetStore
 
 
 def _now_ms() -> int:
@@ -546,6 +554,9 @@ class CredentialContext:
     fee_payer: TempoAccount | None = None
     fee_payer_policy: Mapping[str, int] | None = None
     fee_token: str | None = None
+    top_up_sponsorship_limit: SessionSponsorshipLimit = field(
+        default_factory=SessionSponsorshipLimit
+    )
     last_on_chain_verified: dict[str, int] = field(default_factory=dict[str, int])
     min_voucher_delta: int = 0
     on_session_settlement: OnSessionSettlement | None = None
@@ -1024,6 +1035,50 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
     )
     assert channel.descriptor is not None
     await check_atomic_update(context.store, channel_id)
+    before_send: Callable[[], Awaitable[None]] | None = None
+    if context.fee_payer is not None:
+        validated = chain.validate_top_up_credential_transaction(
+            serialized_transaction=payload.transaction,
+            additional_deposit=additional,
+            chain_id=context.chain_id,
+            descriptor=channel.descriptor,
+            escrow_contract=context.escrow,
+            expected_channel_id=channel_id,
+            expected_currency=request.currency,
+            fee_payer=context.fee_payer,
+            fee_payer_policy=context.fee_payer_policy,
+            allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
+            challenge_expires=context.challenge.expires,
+        )
+        if validated.transaction.sender.lower() != channel.descriptor.payer.lower():
+            raise VerificationFailedError("Sponsored top-ups must be signed by the channel payer")
+        limit = context.top_up_sponsorship_limit
+        budget_store = limit.store
+        if budget_store is None and isinstance(context.store, StoreChannelStore):
+            candidate = context.store.store
+            if isinstance(candidate, CompareAndSetStore):
+                budget_store = candidate
+        if budget_store is None:
+            raise VerificationFailedError(
+                "Sponsored top-ups require a shared compare-and-set store"
+            )
+        sponsor = context.fee_payer.address
+        payer = channel.descriptor.payer
+
+        async def reserve() -> None:
+            await reserve_top_up(
+                limit=limit,
+                store=budget_store,
+                chain_id=context.chain_id,
+                sponsor=sponsor,
+                payer=payer,
+                maximum_fee=get_policy(context.chain_id, context.fee_payer_policy).max_total_fee,
+                transaction_id=chain.expiring_nonce_hash(
+                    payload.transaction, payer, fee_payer=True
+                ),
+            )
+
+        before_send = reserve
     result = await chain.broadcast_top_up_transaction(
         context.rpc_url,
         serialized_transaction=payload.transaction,
@@ -1037,7 +1092,9 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
         fee_payer_policy=context.fee_payer_policy,
         allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
         challenge_expires=context.challenge.expires,
-        client=context.http_client,
+        client=cast(
+            "httpx.AsyncClient", _SendTracker(context.http_client, before_send=before_send)
+        ),
     )
     validate_channel_state(result.state)
     updated = await context.store.update_channel(
@@ -1352,8 +1409,14 @@ _SEND_METHODS = frozenset(
 class _SendTracker:
     """An RPC client wrapper recording whether a transaction was handed to the node."""
 
-    def __init__(self, client: httpx.AsyncClient | None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None,
+        *,
+        before_send: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
         self._client = client
+        self._before_send = before_send
         self.attempted = False
 
     async def post(self, url: str, *, json: Any = None, **kwargs: Any) -> httpx.Response:
@@ -1362,6 +1425,19 @@ class _SendTracker:
         content: object = json
         method = cast(dict[str, Any], content).get("method") if isinstance(content, dict) else None
         if method in _SEND_METHODS:
+            if self._before_send is not None:
+                try:
+                    await self._before_send()
+                except (Exception, asyncio.CancelledError):
+                    # The chain registered this attempt before calling the transport.
+                    # A rejected reservation sent nothing and must release daily capacity.
+                    sends = chain.sponsored_sends.get()
+                    params = cast(dict[str, Any], content).get("params")
+                    if sends is not None and isinstance(params, list) and params:
+                        raw = cast(list[object], params)[0]
+                        if isinstance(raw, str) and raw in sends:
+                            sends.remove(raw)
+                    raise
             self.attempted = True
         if self._client is not None:
             return await self._client.post(url, json=cast(Any, content), **kwargs)
