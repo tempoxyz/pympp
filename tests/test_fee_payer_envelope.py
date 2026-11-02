@@ -583,21 +583,38 @@ class TestNonSecp256k1SenderSignatures:
             rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
         )
 
-    def test_rejects_local_keychain_sponsorship(self) -> None:
+    def test_cosigns_verified_keychain_p256_and_webauthn_senders(self) -> None:
+        from pytempo import TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
+        from pytempo.signatures import (  # pyright: ignore[reportMissingTypeStubs]
+            P256Account,
+            WebAuthnAccount,
+        )
+
         from mpp.methods.tempo import TempoAccount
 
         root = "0x" + "77" * 20
-        access = TempoAccount.from_key("0x" + "cd" * 32)
         unsigned = attrs.evolve(
             _make_signed_tx(valid_before=int(time.time()) + 300), sender_signature=None
         )
-        signed = unsigned.sign_access_key(access.private_key, root)
-        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
-
-        from mpp.errors import VerificationError
-
-        with pytest.raises(VerificationError, match="Local sponsorship requires"):
-            self._intent()._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        p256 = P256Account("0x" + "55" * 32)
+        webauthn = WebAuthnAccount(
+            "0x" + "66" * 32, rp_id="example.com", origin="https://example.com"
+        )
+        access = TempoAccount.from_key("0x" + "cd" * 32)
+        signed = [
+            unsigned.sign_access_key(access.private_key, root),
+            unsigned.sign_access_key_with(p256, root),
+            unsigned.sign_with(p256),
+            unsigned.sign_with(webauthn),
+        ]
+        for tx in signed:
+            sender = tx.recover_signer().account
+            raw, _ = self._intent()._cosign_as_fee_payer(
+                "0x" + encode_fee_payer_envelope(tx).hex(), CURRENCY
+            )
+            decoded = TempoTransaction.decode(raw)
+            assert decoded.recover_sender().lower() == sender.lower()
+            assert decoded.fee_payer_signature is not None
 
     @pytest.mark.parametrize("signature", [_p256_signature(), _webauthn_signature()])
     def test_rejects_unverified_local_sponsorship(self, signature: bytes) -> None:

@@ -639,9 +639,8 @@ def cosign_fee_payer_envelope(
         tx_for_recovery, sender_addr_bytes, sender_sig
     )
     if len(sender_sig) != 65:
-        raise VerificationError(
-            "Local sponsorship requires a secp256k1 sender signature; "
-            "other signatures require an independently authorizing hosted sponsor"
+        sender_signature = _verified_sender_signature(
+            tx_for_recovery, recovered_address, sender_sig
         )
 
     tx_to_sign = attrs.evolve(
@@ -657,6 +656,33 @@ def cosign_fee_payer_envelope(
         raise InternalPaymentError() from err
 
     return "0x" + cosigned.encode().hex(), cosigned, recovered_address
+
+
+def _verified_sender_signature(tx: Any, sender: str, sender_sig: bytes) -> Any:
+    """Verify a P256, WebAuthn or keychain sender signature before a local co-sign.
+
+    pytempo's ``recover_signer`` checks it as tempo-primitives does, so a local
+    sponsor never pays for an envelope whose signature does not authorize
+    ``sender``. Whether a keychain access key is authorized is on-chain state the
+    node checks before inclusion. Multisig and other envelopes pytempo cannot
+    verify are refused.
+    """
+    from pytempo.signatures import (  # pyright: ignore[reportMissingTypeStubs]
+        parse_signature,
+        recover_signer,
+    )
+
+    try:
+        parsed: Any = parse_signature(sender_sig)
+        recovered: Any = recover_signer(tx.get_signing_hash(for_fee_payer=False), parsed)
+    except ValueError as err:
+        raise VerificationError(
+            "Local sponsorship requires a secp256k1, P256, WebAuthn or keychain "
+            "sender signature that verifies"
+        ) from err
+    if recovered.account.lower() != sender.lower():
+        raise VerificationError("Sender address does not match recovered signer")
+    return parsed
 
 
 def resolve_fee_payer(
