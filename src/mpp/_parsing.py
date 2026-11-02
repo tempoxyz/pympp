@@ -16,7 +16,7 @@ import base64
 import json
 import re
 import string
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from mpp._canonical import canonical_b64url
@@ -32,13 +32,12 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # JSON and base64url encoding. Matches mppx.
 MAX_AUTHORIZATION_SIZE = 64 * 1024
 
-# RFC 9110 auth-param: token BWS "=" BWS ( token / quoted-string )
-# Matches: key="value" or key=token, handles escaped quotes in quoted strings
-_AUTH_PARAM_RE = re.compile(r'([a-zA-Z_][\w-]*)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))')
 # Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
 # Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
 # colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
 _PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+# Characters mppx accepts in an auth-param name.
+_AUTH_PARAM_KEY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 
 
 class ParseError(Exception):
@@ -46,6 +45,18 @@ class ParseError(Exception):
 
     Error messages are sanitized to avoid leaking sensitive credential data.
     """
+
+
+# RFC 3339 date-time with a timezone, as mppx's `z.datetime()` accepts.
+_DATETIME_RE = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
+)
+
+
+def _validate_expires(expires: str) -> None:
+    """Reject an ``expires`` the challenge parser would refuse, as mppx's Challenge schema does."""
+    if not _DATETIME_RE.fullmatch(expires):
+        raise ValueError(f"Invalid expires format: {expires!r}")
 
 
 def _b64_encode(data: dict[str, Any]) -> str:
@@ -157,17 +168,65 @@ def _validate_payment_method_id(method: str) -> None:
 
 
 def _parse_auth_params(params_str: str) -> dict[str, str]:
-    """Parse RFC 9110 auth-params: key="value" or key=token pairs."""
+    """Parse RFC 9110 auth-params: key="value" or key=token pairs.
+
+    Consumes the input sequentially like mppx's `parseAuthParams`: a position that
+    cannot begin an auth-param is rejected rather than skipped, and parsing stops
+    at a token without `=`, which begins another auth scheme.
+    """
     params: dict[str, str] = {}
-    for match in _AUTH_PARAM_RE.finditer(params_str):
+    length = len(params_str)
+    index = 0
+    while index < length:
+        while index < length and (params_str[index].isspace() or params_str[index] == ","):
+            index += 1
+        if index >= length:
+            break
+
+        key_start = index
+        while index < length and params_str[index] in _AUTH_PARAM_KEY_CHARS:
+            index += 1
         # Auth-param names are case-insensitive (RFC 9110 §11.2).
-        key = match.group(1).lower()
+        key = params_str[key_start:index].lower()
+        if not key:
+            raise ParseError("Malformed auth-param")
+
+        while index < length and params_str[index].isspace():
+            index += 1
+        if index >= length or params_str[index] != "=":
+            break
+        index += 1
+        while index < length and params_str[index].isspace():
+            index += 1
+
+        if index < length and params_str[index] == '"':
+            value, index = _read_quoted_auth_param(params_str, index + 1)
+        else:
+            value_end = params_str.find(",", index)
+            if value_end == -1:
+                value_end = length
+            value, index = params_str[index:value_end].strip(), value_end
+
         if key in params:
             raise ParseError(f"Duplicate parameter: {key}")
-        # Group 2 is quoted value, group 3 is unquoted token
-        value = match.group(2) if match.group(2) is not None else match.group(3)
-        params[key] = _unescape_quoted(value) if match.group(2) is not None else value
+        params[key] = value
     return params
+
+
+def _read_quoted_auth_param(params_str: str, start: int) -> tuple[str, int]:
+    """Read a quoted-string value starting after its opening quote."""
+    index = start
+    escaped = False
+    while index < len(params_str):
+        character = params_str[index]
+        index += 1
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            return _unescape_quoted(params_str[start : index - 1]), index
+    raise ParseError("Unterminated quoted-string")
 
 
 def parse_www_authenticate(header: str) -> Challenge:
@@ -224,6 +283,17 @@ def parse_www_authenticate(header: str) -> Challenge:
     except ValueError as error:
         raise ParseError(str(error)) from error
 
+    # Match mppx's Challenge schema: `digest` is `sha-256=...` and `expires` is RFC 3339.
+    digest = params.get("digest")
+    if digest and not digest.startswith("sha-256="):
+        raise ParseError("Invalid digest format")
+    expires = params.get("expires")
+    if expires:
+        try:
+            _validate_expires(expires)
+        except ValueError:
+            raise ParseError("Invalid expires format") from None
+
     return Challenge(
         id=id_,
         method=method,
@@ -231,8 +301,8 @@ def parse_www_authenticate(header: str) -> Challenge:
         request=request,
         realm=realm,
         request_b64=request_b64,
-        digest=params.get("digest"),
-        expires=params.get("expires"),
+        digest=digest,
+        expires=expires,
         description=params.get("description"),
         opaque=opaque,
         header=credential_header,
@@ -442,19 +512,27 @@ def parse_payment_receipt(header: str) -> Receipt:
     if status != "success":
         raise ParseError("Invalid receipt status")
 
-    timestamp = _parse_timestamp(str(data["timestamp"]))
-    method = str(data["method"])
+    # Base fields must be JSON strings and the timestamp RFC 3339 with a timezone,
+    # as mppx's Receipt schema requires.
+    timestamp_str = data["timestamp"]
+    if not isinstance(timestamp_str, str) or not _DATETIME_RE.fullmatch(timestamp_str):
+        raise ParseError("Invalid timestamp format")
+    timestamp = _parse_timestamp(timestamp_str)
+    for field in ("method", "reference", "externalId", "subscriptionId", "fundingCurrency"):
+        if field in data and not isinstance(data[field], str):
+            raise ParseError(f"Receipt field {field} must be a string")
+    method = data["method"]
     _validate_payment_method_id(method)
 
     extra = data.get("extra")
     return Receipt(
         status=status,
         timestamp=timestamp,
-        reference=str(data["reference"]),
+        reference=data["reference"],
         method=method,
-        external_id=str(data["externalId"]) if data.get("externalId") else None,
-        subscription_id=str(data["subscriptionId"]) if data.get("subscriptionId") else None,
-        funding_currency=str(data["fundingCurrency"]) if data.get("fundingCurrency") else None,
+        external_id=data.get("externalId") or None,
+        subscription_id=data.get("subscriptionId") or None,
+        funding_currency=data.get("fundingCurrency") or None,
         extra=extra if is_dict(extra) else None,
         extensions={key: value for key, value in data.items() if key not in _RECEIPT_BASE_FIELDS}
         or None,
@@ -467,7 +545,12 @@ def format_payment_receipt(receipt: Receipt) -> str:
     Output format:
         <base64-receipt>
     """
-    timestamp_str = receipt.timestamp.isoformat().replace("+00:00", "Z")
+    timestamp = receipt.timestamp
+    # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets
+    # (such as ones with seconds) don't fit the receipt schema. A naive datetime is UTC.
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    timestamp_str = timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     payload: dict[str, Any] = {
         "status": receipt.status,

@@ -28,6 +28,13 @@ TYPES: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+PROOF_CLAIM_PREFIX = "mppx:charge:proof:"
+"""Store key prefix claiming a used proof's challenge ID (mppx ``getProofStoreKey``).
+
+Charges and session bootstrap claim proofs under the same key, so a proof used
+for one cannot be used again for the other.
+"""
+
 _DOMAIN_TYPEHASH = keccak(b"EIP712Domain(string name,string version,uint256 chainId)")
 _PROOF_TYPEHASH = keccak(b"Proof(address account,string challengeId,string realm)")
 
