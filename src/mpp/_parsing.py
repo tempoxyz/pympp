@@ -233,6 +233,7 @@ def parse_www_authenticate(header: str) -> Challenge:
         description=params.get("description"),
         opaque=opaque,
         header=credential_header,
+        _opaque_b64=opaque_b64 or None,
     )
 
 
@@ -263,8 +264,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
     if challenge.header:
         parts.append(f'header="{_escape_quoted(challenge.header)}"')
-    if challenge.opaque is not None:
-        opaque_b64 = canonical_b64url(challenge.opaque)
+    opaque_b64 = challenge._encoded_opaque()
+    if opaque_b64 is not None:
         parts.append(f'opaque="{opaque_b64}"')
 
     return "Payment " + ", ".join(parts)
