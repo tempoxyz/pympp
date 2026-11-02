@@ -759,3 +759,72 @@ def test_key_authorization_rpc_keeps_an_empty_limits_list() -> None:
 
     payload = [[b"\x01", b"", b"\x11" * 20, b"", []], b"\x22" * 64 + b"\x1b"]
     assert key_authorization_rpc(payload)["limits"] == []
+
+def _authorization_fields(**overrides):
+    fields = [b"\x01", b"", bytes.fromhex(RECIPIENT[2:]), b"", b"", b"", b"", b"", b""]
+    for index, value in overrides.items():
+        fields[int(index)] = value
+    return fields
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"invalid",
+        [],
+        [[], b""],
+        [b"fields", b"signature"],
+        [_authorization_fields(), []],
+        [_authorization_fields(**{"0": []}), b"\x00" * 65],
+        [_authorization_fields(**{"1": b"\xff"}), b"\x00" * 65],
+        [_authorization_fields(), b""],
+        [_authorization_fields(**{"2": b"short"}), b"\x00" * 65],
+        [_authorization_fields(), b"\x00" * 64 + b"\x02"],
+        [_authorization_fields(), b"\xff\x00"],
+        [_authorization_fields(**{"4": b"invalid"}), b"\x00" * 65],
+        [_authorization_fields(**{"4": [b"invalid"]}), b"\x00" * 65],
+        [_authorization_fields(**{"4": [[b"\x01" * 20, b"\x01", []]]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": b"invalid"}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [b"invalid"]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [[b"\x01" * 20, [b"invalid"]]]}), b"\x00" * 65],
+        [_authorization_fields(**{"5": [[b"\x01" * 20, [[b"short", []]]]]}), b"\x00" * 65],
+        [_authorization_fields(**{"6": b"short"}), b"\x00" * 65],
+        [_authorization_fields(**{"7": b"\x02"}), b"\x00" * 65],
+        [_authorization_fields(**{"1": b"\x03"}), b"\x00" * 65],
+    ],
+)
+def test_malformed_sponsored_key_authorization_fails_before_simulation(payload):
+    from mpp.methods.tempo._fee_payer import key_authorization_rpc
+
+    with pytest.raises(ValueError):
+        key_authorization_rpc(payload)
+
+
+@pytest.mark.parametrize("period", [b"", b"\x01"])
+def test_sponsored_key_authorization_preserves_call_and_spending_restrictions(period):
+    from mpp.methods.tempo._fee_payer import key_authorization_rpc
+
+    token = bytes.fromhex(CURRENCY[2:])
+    recipient = bytes.fromhex(RECIPIENT[2:])
+    fields = _authorization_fields(
+        **{
+            "4": [[token, b"\x05", period]],
+            "5": [[token, [[bytes.fromhex("a9059cbb"), [recipient]]]]],
+            "6": b"\x11" * 32,
+            "7": b"\x01",
+            "8": recipient,
+        }
+    )
+    rpc = key_authorization_rpc([fields, b"\x00" * 65])
+    assert rpc["limits"] == [
+        {"token": CURRENCY, "limit": "0x5", **({"period": "0x1"} if period else {})}
+    ]
+    assert rpc["allowedCalls"] == [
+        {
+            "target": CURRENCY,
+            "selectorRules": [{"selector": "0xa9059cbb", "recipients": [RECIPIENT.lower()]}],
+        }
+    ]
+    assert rpc["isAdmin"] is True
+    assert rpc["account"] == RECIPIENT.lower()
+    assert rpc["witness"] == "0x" + "11" * 32
