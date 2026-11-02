@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -143,8 +144,12 @@ async def _serve(
     suggested_deposit: str | None = None,
     fee_payer: TempoAccount | None = None,
     settlement_schedule: SettlementSchedule | None = None,
+    port: int = 0,
 ) -> AsyncIterator[SessionServer]:
-    """Serve `GET /paid` behind `pay(mpp.session(...))` on a fresh uvicorn instance."""
+    """Serve `GET /paid` behind `pay(mpp.session(...))` on a fresh uvicorn instance.
+
+    `port` 0 picks a free port; pass an earlier server's port to restart it at the same origin.
+    """
     store = store if store is not None else MemoryStore()
     state = SessionServer(url="", store=store, payee=payee)
     mpp = Mpp(
@@ -173,7 +178,7 @@ async def _serve(
         return JSONResponse({"ok": True})
 
     app = Starlette(routes=[Route("/paid", paid, methods=["GET", "POST"])])
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="off")
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
     try:
@@ -691,12 +696,22 @@ async def test_restart_on_persistent_store_keeps_the_channel(
             await close_store()
         channel_id = manager.channel_id
         assert channel_id is not None
+        # The manager binds its channel to the origin, so the restart keeps the host and port.
+        port = urlsplit(first.url).port
+        assert port is not None
 
         store, close_store = await open_store()
         try:
             async with _serve(
-                rpc_url, chain_id, currency, payee, store=store, suggested_deposit="0.001"
+                rpc_url,
+                chain_id,
+                currency,
+                payee,
+                store=store,
+                suggested_deposit="0.001",
+                port=port,
             ) as second:
+                assert second.url == first.url
                 channel = await second.channel(channel_id)
                 assert (channel.spent, channel.units) == (30, 3)
                 await _calls(manager, second.url, 4, first=4)

@@ -921,6 +921,23 @@ class TestStores:
         await _store.delete_channel(store, KEY)
         assert store.get(KEY) is None
 
+    async def test_stored_origin_survives_reload_and_rejects_rebinding(self) -> None:
+        kv = SyncKv()
+        await persist_channel(
+            create_json_channel_store(kv), entry_for().copy(origin="https://api.example.test")
+        )
+        reloaded = create_json_channel_store(kv)
+        retained = entry_for()
+        await persist_channel(reloaded, retained)
+        assert retained.origin == "https://api.example.test"
+        stored = await reloaded.get(KEY)
+        assert stored is not None and stored.origin == "https://api.example.test"
+        with pytest.raises(ValueError, match="stored channel origin mismatch"):
+            await persist_channel(reloaded, entry_for().copy(origin="https://evil.example"))
+        legacy = _store.serialize_entry(entry_for())
+        assert "origin" not in legacy
+        assert _store.deserialize_entry(legacy).origin is None
+
     @pytest.mark.parametrize("store_type", [DataclassStore, SlottedStore])
     async def test_session_accepts_any_store_object(self, store_type: type[Any]) -> None:
         store = store_type()

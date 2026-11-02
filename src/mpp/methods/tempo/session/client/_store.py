@@ -36,6 +36,8 @@ class ChannelEntry:
         chain_id: Chain ID used for channel ID and voucher domain separation.
         opened: Whether the client considers the channel reusable for new vouchers.
         uncertain_top_up: Blocks new deposits until an uncertain top-up is reconciled.
+        origin: HTTP origin a session manager bound the channel to; None on legacy or
+            standalone method entries.
     """
 
     channel_id: str
@@ -46,6 +48,7 @@ class ChannelEntry:
     chain_id: int
     opened: bool
     uncertain_top_up: bool = False
+    origin: str | None = None
 
     def copy(self, **changes: Any) -> ChannelEntry:
         """A copy with ``changes`` applied."""
@@ -138,6 +141,8 @@ def serialize_entry(entry: ChannelEntry) -> dict[str, Any]:
     }
     if entry.uncertain_top_up:
         stored["uncertainTopUp"] = True
+    if entry.origin is not None:
+        stored["origin"] = entry.origin
     return stored
 
 
@@ -152,6 +157,7 @@ def deserialize_entry(stored: dict[str, Any]) -> ChannelEntry:
         chain_id=int(stored["chainId"]),
         opened=bool(stored["opened"]),
         uncertain_top_up=bool(stored.get("uncertainTopUp", False)),
+        origin=str(stored["origin"]) if stored.get("origin") is not None else None,
     )
 
 
@@ -232,6 +238,17 @@ class _StoreMap:
 
 
 _locks = _StoreMap()
+_funding_stores = _StoreMap()
+
+
+def register_funding_store(view: ChannelStore, backing: ChannelStore) -> None:
+    """Share lock coordination between a store view and its backing store.
+
+    Views of one backing store (one per origin-bound session manager) then serialize channel
+    opens, writes and funding decisions together.
+    """
+    shared = _funding_stores.get(backing)
+    _funding_stores.set(view, backing if shared is None else shared)
 
 
 class _ScopeLock(asyncio.Lock):
@@ -272,6 +289,9 @@ def store_lock(store: ChannelStore, key: str) -> asyncio.Lock:
     Acquire it without awaiting anything else first: its entry is dropped when its last
     holder releases it.
     """
+    shared = _funding_stores.get(store)
+    if shared is not None:
+        store = shared
     locks: dict[str, _ScopeLock] | None = _locks.get(store)
     if locks is None:
         locks = {}
@@ -296,10 +316,17 @@ class UncertainFundingError(Exception):
 
 
 async def persist_channel(store: ChannelStore, entry: ChannelEntry) -> None:
-    """Write ``entry``, preserving an unresolved top-up flag across stale copies."""
+    """Write ``entry``, preserving an unresolved top-up flag across stale copies.
+
+    A stored origin is kept; an entry naming another origin is rejected.
+    """
     key = entry_key(entry)
     async with store_lock(store, f"write:{key}"):
         current = await store_get(store, key)
+        if current is not None and current.origin is not None:
+            if entry.origin is not None and entry.origin != current.origin:
+                raise ValueError("SessionManager: stored channel origin mismatch")
+            entry.origin = current.origin
         if current is not None and current.uncertain_top_up:
             if current.channel_id != entry.channel_id:
                 raise UncertainFundingError(
