@@ -820,3 +820,39 @@ async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims
     with pytest.raises(CredentialReplayedError):
         await intent.verify(_tx_credential(replacement), request)
     assert len(rpc.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "status, excluded", [("0x1", False), ("0x0", False), (None, True), (None, False)]
+)
+async def test_next_charge_reconciles_expired_payer_claim(status, excluded):
+    from unittest.mock import AsyncMock
+
+    from mpp.methods.tempo import _sponsored_admission as admission
+
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    assert isinstance(intent._store, MemoryStore)
+    prior_hash = "0x" + "88" * 32
+    claim = await admission.claim_payer(
+        intent._store,
+        chain_id=CHAIN_ID,
+        payer=TempoAccount.from_key(PAYER_KEY).address,
+        currency=CURRENCY,
+        transaction_hash="0xold",
+        receipt_hash=prior_hash,
+        expires_at=time.time() - 10,
+    )
+    if status is not None:
+        rpc.receipts[prior_hash] = receipt(prior_hash, status=status)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    with patch.object(intent, "_confirm_not_included", AsyncMock(return_value=excluded)):
+        if status is None and not excluded:
+            with pytest.raises(InternalPaymentError):
+                await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+            assert rpc.sent == []
+            assert await intent._store.get(claim.key) == claim.value
+        else:
+            await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
+            assert len(rpc.sent) == 1
+            assert await intent._store.get(claim.key) is None
