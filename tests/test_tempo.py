@@ -7454,14 +7454,16 @@ class TestSponsoredChallengeLifetime:
             await server.charge(amount="1.00", fee_payer=True, expires=expires)(http_request())
 
     @pytest.mark.anyio
-    async def test_routes_sponsored_by_default_keep_the_floor(
+    async def test_local_routes_sponsor_only_when_opted_in(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A configured fee payer sponsors routes by default, so mppx's floor applies to them."""
+        """An unsponsored default route does not inherit the sponsorship validity floor."""
         server = self._server(monkeypatch)
         expires = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
-        with pytest.raises(ValueError, match="at least 15 seconds after issuance"):
-            await server.charge(amount="1.00", expires=expires)(http_request())
+        result = await server.charge(amount="1.00", expires=expires)(http_request())
+        assert challenges(result)
+        for challenge in challenges(result):
+            assert not challenge.request.get("methodDetails", {}).get("feePayer")
 
     @pytest.mark.anyio
     @pytest.mark.parametrize(
@@ -7489,8 +7491,7 @@ class TestSponsoredChallengeLifetime:
 
 
 class TestSponsorshipDefault:
-    """A configured fee payer sponsors routes unless they opt out (mppx resolvedFeePayer);
-    a route never promises a sponsor nobody configured."""
+    """Local sponsorship is opt-in; hosted sponsorship defaults on."""
 
     @staticmethod
     def _issued(server_methods, **options):
@@ -7506,21 +7507,28 @@ class TestSponsorshipDefault:
     @pytest.mark.parametrize(
         ("sponsor", "options", "sponsored"),
         [
-            (True, {}, True),
-            (True, {"fee_payer": True}, True),
-            (True, {"fee_payer": False}, False),
-            (False, {}, False),
-            (False, {"fee_payer": True}, False),
+            ("local", {}, False),
+            ("local", {"fee_payer": True}, True),
+            ("local", {"fee_payer": False}, False),
+            (None, {}, False),
+            (None, {"fee_payer": True}, False),
+            ("remote", {}, True),
+            ("remote", {"fee_payer": False}, False),
         ],
-        ids=["sponsored-by-default", "opted-in", "opt-out", "no-sponsor", "no-sponsor-asked"],
     )
     async def test_fee_payer_follows_the_configured_sponsor(
-        self, sponsor: bool, options: dict, sponsored: bool
+        self, sponsor: str | None, options: dict, sponsored: bool
     ) -> None:
         methods = tempo_server.charge(
             rpc_url="https://rpc.test",
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            fee_payer=TempoAccount.from_key(TEST_PRIVATE_KEY) if sponsor else None,
+            fee_payer=(
+                TempoAccount.from_key(TEST_PRIVATE_KEY)
+                if sponsor == "local"
+                else "https://sponsor.test"
+                if sponsor == "remote"
+                else None
+            ),
         )
         for challenge in await self._issued(methods, **options):
             assert bool(challenge.request.get("methodDetails", {}).get("feePayer")) is sponsored
