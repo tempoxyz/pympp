@@ -12,6 +12,7 @@ envelope); P256, WebAuthn and smart-account (ERC-1271) proofs are not supported 
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from typing import TYPE_CHECKING, Any, cast
@@ -112,6 +113,12 @@ def _is_live_claim(value: Any, now: float) -> bool:
     """Whether a stored claim still holds: anything but an expired replay marker (as mppx)."""
     if value is None:
         return False
+    if isinstance(value, bytes | str):
+        # Stores such as Redis keep values as strings: the marker is JSON there.
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return True
     if not isinstance(value, dict):
         return True
     marker = cast("dict[str, Any]", value)
@@ -135,7 +142,11 @@ async def claim_proof(store: Store, challenge_id: str, expires_at: float) -> boo
     if not math.isfinite(expires_at) or expires_at <= time.time():
         return False
     key = proof_claim_key(challenge_id)
-    marker = {"expires": math.floor(expires_at * 1000), "type": _REPLAY_MARKER_TYPE}
+    # JSON, not a dict, so string-valued stores such as Redis can hold it.
+    marker = json.dumps(
+        {"expires": math.floor(expires_at * 1000), "type": _REPLAY_MARKER_TYPE},
+        separators=(",", ":"),
+    )
     if isinstance(store, ExpiringStore):
         return await store.put_if_absent_until(key, marker, expires_at)
     if isinstance(store, CompareAndSetStore):

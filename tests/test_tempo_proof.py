@@ -8,6 +8,7 @@ settlement modes a challenge accepts.
 
 from __future__ import annotations
 
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -368,7 +369,9 @@ async def test_proof_claims_expire_on_compare_and_set_stores() -> None:
     assert await _proof.is_proof_claimed(store, "c")
     assert not await _proof.claim_proof(store, "c", expires_at)
     # Like mppx's replay marker, an expired claim no longer holds.
-    store.data["mppx:charge:proof:c"]["expires"] = int((time.time() - 1) * 1000)
+    marker = json.loads(store.data["mppx:charge:proof:c"])
+    marker["expires"] = int((time.time() - 1) * 1000)
+    store.data["mppx:charge:proof:c"] = json.dumps(marker)
     assert not await _proof.is_proof_claimed(store, "c")
     assert await _proof.claim_proof(store, "c", expires_at)
     assert not await _proof.claim_proof(store, "d", time.time() - 1)
