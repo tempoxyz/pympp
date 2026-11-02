@@ -86,8 +86,9 @@ def charge(
             given as a :class:`~mpp.methods.tempo.remote_fee_payer.RemoteFeePayer`,
             its URL, or a ``{"url": ..., "headers": ...}`` mapping (``headers``
             may be a callable returning them per request). The server
-            simulates and broadcasts either way. Routes are sponsored unless
-            they pass ``fee_payer=False``.
+            simulates and broadcasts either way. Hosted sponsorship is on by default;
+            local sponsorship requires route-level ``fee_payer=True`` so access-key
+            clients retain an unsponsored payment path.
         fee_token: Token a local ``fee_payer`` pays gas in. Requires a local
             ``fee_payer``.
         allowed_fee_tokens: Tokens a sponsored charge may pay gas in.
@@ -153,11 +154,10 @@ def charge(
         input.setdefault("decimals", config.decimals)
         if supported_modes is not None:
             input.setdefault("supported_modes", list(supported_modes))
-        # As mppx's resolvedFeePayer: a configured fee payer sponsors every route
-        # unless it passes fee_payer=False; none promises a sponsor nobody configured.
+        # Local simulation cannot authorize access keys: keep sponsorship opt-in.
         if fee_payer is None:
             input.pop("fee_payer", None)
-        else:
+        elif local_fee_payer is None:
             input.setdefault("fee_payer", True)
         return input
 

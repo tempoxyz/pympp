@@ -266,8 +266,9 @@ an origin you have already approved.
 
 `tempo.charge(fee_payer=...)` also takes a hosted fee payer: its URL, or
 `{"url": ..., "headers": ...}` (or a `RemoteFeePayer`), where `headers` may be a
-sync or async callable returning them per request. As with a local fee payer,
-routes then sponsor by default.
+sync or async callable returning them per request. Hosted sponsorship is on by
+default. Local account sponsorship requires route-level `fee_payer=True`;
+otherwise access-key clients retain an unsponsored payment path.
 The server enforces its sponsor policy and simulates the calls before asking the
 service to co-sign with `eth_fillTransaction`, keeps only the returned
 `feePayerSignature` and `feeToken` (`allowed_fee_tokens` restricts it), simulates
@@ -374,7 +375,10 @@ before co-signing. Keychain sponsorship is refused locally: root-account
 `eth_call` does not enforce access-key authorization or spending limits, so even
 a cryptographically valid access-key signature is insufficient. Keychain and
 unsupported signature formats require an independently authorizing hosted sponsor
-that enforces those permissions before spending its gas.
+that enforces those permissions before spending its gas. For locally configured
+charge and session routes, pass `fee_payer=False` to offer unsponsored payments.
+Local charge sponsorship is opt-in (`fee_payer=True` on the route); configuring
+a local sponsor alone does not make every charge route inaccessible to access keys.
 
 Push payments require more than 15 seconds of challenge lifetime before signing
 and again immediately before submission. Their signed inclusion deadline leaves
