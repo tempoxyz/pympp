@@ -8,6 +8,7 @@ import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from uuid import uuid4
 
 from mpp.errors import CredentialReplayedError, InternalPaymentError
 from mpp.store import CompareAndSetStore, ExpiringStore
@@ -27,6 +28,19 @@ def _text(value: str | bytes | None) -> str | None:
 def _key(kind: str, *scope: object) -> str:
     digest = hashlib.sha256(json.dumps(scope, separators=(",", ":")).encode()).hexdigest()
     return f"mpp:charge-admission:{kind}:{digest}"
+
+
+async def ensure_atomic_store(store: CompareAndSetStore) -> None:
+    """Verify that admission owners can be released before reserving any payment."""
+    key = f"mpp:charge-admission:probe:{uuid4().hex}"
+    try:
+        if not await store.put_if_absent(key, "probe"):
+            raise RuntimeError("Admission store probe could not be reserved")
+        await release(store, Claim(key, "probe", True))
+        if await store.get(key) is not None:
+            raise RuntimeError("Admission store requires working compare_and_set")
+    finally:
+        await store.delete(key)
 
 
 async def claim_challenge(
@@ -96,6 +110,7 @@ async def claim_payer(
     if reconciling and expires_at <= time.time():
         # An expired envelope can only be reconciled, not newly included.
         return Claim(key, value, False)
+    checked: str | None = None
     for _ in range(200):
         raw = await store.get(key)
         current = _text(raw)
@@ -104,23 +119,20 @@ async def claim_payer(
                 prior = json.loads(current)
                 if reconciling and prior["hash"] == transaction_hash.lower():
                     return Claim(key, current, False)
-                if float(prior["expiresAt"]) > time.time():
-                    if time.time() < wait_until:
-                        await asyncio.sleep(min(0.05, wait_until - time.time()))
-                        continue
-                    raise InternalPaymentError() from RuntimeError(
-                        "Payer has a pending sponsored transaction; retry the same credential"
-                    )
+                expiry = float(prior["expiresAt"])
             except (TypeError, ValueError, KeyError) as error:
                 raise InternalPaymentError() from error
-            if is_settled is None or not await is_settled(
-                prior.get("receiptHash", prior["hash"]), float(prior["expiresAt"])
-            ):
-                raise InternalPaymentError() from RuntimeError(
-                    "Payer's earlier submission is not confirmed settled or excluded by chain time"
-                )
-            await release(store, Claim(key, current, False))
-            continue
+            if is_settled is not None and (checked != current or time.time() >= wait_until):
+                if await is_settled(prior.get("receiptHash", prior["hash"]), expiry):
+                    await release(store, Claim(key, current, False))
+                    continue
+                checked = current
+            if expiry > time.time() and time.time() < wait_until:
+                await asyncio.sleep(max(0, min(0.05, wait_until - time.time())))
+                continue
+            raise InternalPaymentError() from RuntimeError(
+                "Payer's earlier submission is not confirmed settled or excluded by chain time"
+            )
         # Wall-clock expiry cannot prove that a lagging chain excluded the transaction.
         # Retain unknown attempts until a later admission checks receipt and chain time.
         inserted = await store.put_if_absent(key, value)

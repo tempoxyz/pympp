@@ -825,7 +825,8 @@ async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims
 @pytest.mark.parametrize(
     "status, excluded", [("0x1", False), ("0x0", False), (None, True), (None, False)]
 )
-async def test_next_charge_reconciles_expired_payer_claim(status, excluded):
+@pytest.mark.parametrize("remaining", [-10, 60])
+async def test_next_charge_reconciles_payer_claim(status, excluded, remaining):
     from unittest.mock import AsyncMock
 
     from mpp.methods.tempo import _sponsored_admission as admission
@@ -841,7 +842,7 @@ async def test_next_charge_reconciles_expired_payer_claim(status, excluded):
         currency=CURRENCY,
         transaction_hash="0xold",
         receipt_hash=prior_hash,
-        expires_at=time.time() - 10,
+        expires_at=time.time() + remaining,
     )
     if status is not None:
         rpc.receipts[prior_hash] = receipt(prior_hash, status=status)

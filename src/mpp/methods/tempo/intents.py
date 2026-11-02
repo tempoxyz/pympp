@@ -2162,6 +2162,7 @@ class ChargeIntent:
                     else None
                 )
                 admitting = True
+                await _sponsored_admission.ensure_atomic_store(admission_store)
                 challenge_claim = await _sponsored_admission.claim_challenge(
                     admission_store,
                     realm=realm,

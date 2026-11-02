@@ -201,3 +201,41 @@ async def test_wall_clock_expiry_does_not_admit_another_transaction_on_a_lagging
         await payer(store, "0x02", is_settled=unresolved)
     assert checked == ["0x01"]
     assert await store.get(first.key) == first.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken", [False, True])
+async def test_atomic_store_probe_cleans_up_and_rejects_broken_cas(broken):
+    from unittest.mock import AsyncMock
+
+    store = MemoryStore()
+    if broken:
+        store.compare_and_set = AsyncMock(return_value=False)
+        with pytest.raises(RuntimeError, match="working compare_and_set"):
+            await admission.ensure_atomic_store(store)
+    else:
+        await admission.ensure_atomic_store(store)
+    assert not store._data
+
+
+@pytest.mark.asyncio
+async def test_settled_payer_is_released_before_waiting():
+    from unittest.mock import AsyncMock, patch
+
+    store = MemoryStore()
+    await payer(store)
+    settled = AsyncMock(return_value=True)
+    with patch.object(admission.asyncio, "sleep", AsyncMock()) as sleep:
+        claim = await admission.claim_payer(
+            store,
+            chain_id=1,
+            payer="0xAA",
+            currency="0xBB",
+            transaction_hash="0x02",
+            expires_at=time.time() + 60,
+            wait_until=time.time() + 5,
+            is_settled=settled,
+        )
+    assert claim.created
+    sleep.assert_not_awaited()
+    settled.assert_awaited_once()

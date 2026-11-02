@@ -394,7 +394,8 @@ and apply capacity limits rather than evicting pending payments.
 
 Use an atomic `SponsorBudget(store=...)` backend or a replay store supporting
 `compare_and_set`. The Redis adapter requires permission to execute its CAS Lua
-script (`EVAL`); an adapter whose CAS operation is disabled is unsupported.
+script (`EVAL`). Admission probes the operation before creating payment claims or
+sending transactions; an adapter whose CAS operation is disabled is rejected.
 Failed conditional cleanup retains the claim rather than deleting another
 request's reservation. Without a configured store these claims are process-local,
 so use a shared atomic store across server instances.
