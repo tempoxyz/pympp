@@ -499,8 +499,8 @@ async def test_challenge_fee_payer_url_is_ignored() -> None:
         (FEE_PAYER_URL, {}, True),
         ({"url": FEE_PAYER_URL, "headers": {"Authorization": "Bearer secret"}}, {}, True),
         (FEE_PAYER_URL, {"fee_payer": False}, False),
-        # Local and hosted fee payers both sponsor by default (mppx resolvedFeePayer).
-        (TempoAccount.from_key(SPONSOR_KEY), {}, True),
+        # Local sponsorship is opt-in so access keys retain an unsponsored route.
+        (TempoAccount.from_key(SPONSOR_KEY), {}, False),
         (TempoAccount.from_key(SPONSOR_KEY), {"fee_payer": False}, False),
         (TempoAccount.from_key(SPONSOR_KEY), {"fee_payer": True}, True),
         (None, {"fee_payer": True}, False),
