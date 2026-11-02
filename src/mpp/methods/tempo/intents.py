@@ -30,7 +30,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
-from mpp.methods.tempo import _fee_payer
+from mpp.methods.tempo import _fee_payer, _sponsored_admission
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
@@ -2095,7 +2095,46 @@ class ChargeIntent:
         # outcome removes it again.
         marker_created = False
         verified = False
+        admission_store: CompareAndSetStore | None = None
+        challenge_claim: _sponsored_admission.Claim | None = None
+        payer_claim: _sponsored_admission.Claim | None = None
         try:
+            if request.methodDetails.feePayer and self.fee_payer is not None:
+                if self._store is not None and not isinstance(self._store, CompareAndSetStore):
+                    raise InternalPaymentError() from TypeError(
+                        "Sponsored admission requires compare_and_set"
+                    )
+                admission_store = self._store or _sponsor_budget.process_store()
+                valid_before = _transaction_valid_before(raw_tx)
+                if sender is None or valid_before is None:
+                    raise InternalPaymentError() from ValueError(
+                        "Sponsored transaction lacks payer or expiry"
+                    )
+                transaction_hash = _raw_transaction_hash(payload.signature)
+                claim_expiry = (
+                    max(recovery_expires_at, valid_before + VALID_BEFORE_GRACE)
+                    if recovery_expires_at is not None
+                    else None
+                )
+                challenge_claim = await _sponsored_admission.claim_challenge(
+                    admission_store,
+                    realm=realm,
+                    chain_id=request.methodDetails.chainId,
+                    challenge_id=challenge_id,
+                    transaction_hash=transaction_hash,
+                    payer=sender,
+                    currency=request.currency,
+                    amount=request.amount,
+                    expires_at=claim_expiry,
+                )
+                payer_claim = await _sponsored_admission.claim_payer(
+                    admission_store,
+                    chain_id=request.methodDetails.chainId,
+                    payer=sender,
+                    currency=request.currency,
+                    transaction_hash=transaction_hash,
+                    expires_at=valid_before + VALID_BEFORE_GRACE,
+                )
             if reconciling:
                 prior = await self._check_sponsored_validity(
                     client,
@@ -2117,6 +2156,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
                 # Simulate before reserving, like mppx, so a transaction that
                 # reverts (such as one from an unfunded key) never holds sponsor
@@ -2126,6 +2166,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
                 budget_store, reservation = await self._reserve_sponsor_budget(
                     client, raw_tx, sponsored_fee, request, recovery_expires_at, sponsor
@@ -2140,6 +2181,7 @@ class ChargeIntent:
                     client, raw_tx, broadcast_key, request, challenge_id, realm
                 )
                 if prior is not None:
+                    verified = True
                     return prior
 
             # The send and any receipt recovery share one confirmation deadline.
@@ -2317,8 +2359,26 @@ class ChargeIntent:
                 and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
             ):
                 raise InternalPaymentError() from err
+            if isinstance(err, NotImplementedError) and admission_store is not None:
+                raise InternalPaymentError() from err
             raise
         finally:
+            if admission_store is not None:
+                try:
+                    if payer_claim is not None and (
+                        verified or (not outcome_unknown and not reconciling)
+                    ):
+                        await _sponsored_admission.release(admission_store, payer_claim)
+                    if (
+                        challenge_claim is not None
+                        and challenge_claim.created
+                        and not broadcast_attempted
+                        and not reconciling
+                        and not verified
+                    ):
+                        await _sponsored_admission.release(admission_store, challenge_claim)
+                except Exception:
+                    logger.exception("Sponsored admission cleanup failed")
             if reservation is not None and budget_store is not None:
                 try:
                     # A transaction that may still land keeps its fee reserved

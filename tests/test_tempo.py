@@ -4101,6 +4101,49 @@ class TestCosignAsFeePayer:
         return intent, store, raw, signed, credential, request, receipt
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["success", "reverted", "unknown", "preflight"])
+    async def test_sponsored_challenge_cannot_fund_distinct_envelopes(self, outcome):
+        intent, store, raw, signed, credential, request, receipt = self._recovery_case()
+        replacement = self._build_client_tx(
+            currency=PATH_USD,
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+            valid_before=int(time.time()) + 250,
+        )
+        assert replacement != raw
+        second = replace(credential, payload={"type": "transaction", "signature": replacement})
+        intent._confirmation_timeout = 0.01
+        if outcome == "unknown":
+            post = AsyncMock(side_effect=httpx.ReadTimeout("unknown"))
+        else:
+            if outcome == "reverted":
+                receipt = {**receipt, "status": "0x0", "logs": []}
+            post = AsyncMock(return_value=mock_response(200, {"result": receipt}))
+        intent._http_client = AsyncMock(post=post)
+        simulation = AsyncMock(
+            side_effect=VerificationError("preflight failed") if outcome == "preflight" else None
+        )
+        with patch.object(intent, "_simulate_before_broadcast", simulation):
+            if outcome == "success":
+                await intent.verify(credential, request)
+            elif outcome == "preflight":
+                with pytest.raises(VerificationError):
+                    await intent.verify(credential, request)
+            else:
+                with pytest.raises(InternalPaymentError):
+                    await intent.verify(credential, request)
+            calls = simulation.await_count
+            sends = post.await_count
+            if outcome == "preflight":
+                with pytest.raises(VerificationError, match="preflight failed"):
+                    await intent.verify(second, request)
+                assert simulation.await_count == calls + 1
+            else:
+                with pytest.raises(CredentialReplayedError):
+                    await intent.verify(second, request)
+                assert simulation.await_count == calls
+            assert post.await_count == sends
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("challenge_seconds", [60, 3600])
     async def test_unknown_recovery_expires_after_challenge_and_transaction(
         self, challenge_seconds
@@ -4351,7 +4394,13 @@ class TestCosignAsFeePayer:
         assert await store.get(marker) == sends[0]
         # The unknown submission also keeps its fee reserved against the sponsor budget.
         budget = [key for key in store._data if key.startswith("mpp:charge:sponsor-budget:")]
-        assert sorted(store._data) == sorted([marker, *budget])
+        admissions = [key for key in store._data if key.startswith("mpp:charge-admission:")]
+        assert len(admissions) == 2
+        for key in admissions:
+            claim_value = await store.get(key)
+            assert isinstance(claim_value, str)
+            assert _raw_transaction_hash(raw) in claim_value
+        assert sorted(store._data) == sorted([marker, *budget, *admissions])
         assert len(budget) == 1
 
     def _sponsor_budget_key(self, intent: ChargeIntent) -> str:
@@ -4560,7 +4609,7 @@ class TestCosignAsFeePayer:
         assert second._sponsor_budget_store() is fallback
 
     @pytest.mark.asyncio
-    async def test_sponsor_budget_falls_back_when_store_cannot_compare_and_set(self):
+    async def test_sponsored_admission_fails_closed_when_store_cannot_compare_and_set(self):
         from mpp.methods.tempo import sponsor_budget
         from mpp.store import CompareAndSetStore
 
@@ -4580,13 +4629,11 @@ class TestCosignAsFeePayer:
         with (
             patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
             patch.object(sponsor_budget, "reserve", reserve),
+            pytest.raises(InternalPaymentError),
         ):
             await intent.verify(credential, request)
-        # The budget moved to the process-scoped store instead of failing the charge.
-        assert reserve.await_args is not None
-        assert reserve.await_args.args[0] is sponsor_budget.process_store()
-        assert intent._sponsor_budget_store() is sponsor_budget.process_store()
-        intent._http_client.post.assert_awaited()
+        reserve.assert_not_awaited()
+        intent._http_client.post.assert_not_awaited()
 
     def _cosign_payload(self, intent: ChargeIntent) -> list[dict[str, Any]]:
         currency = "0x20c0000000000000000000000000000000000000"

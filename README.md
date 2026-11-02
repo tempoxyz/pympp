@@ -379,3 +379,10 @@ Push payments require more than 15 seconds of challenge lifetime before signing
 and again immediately before submission. Their signed inclusion deadline leaves
 15 seconds for returning the hash credential. This margin reduces expiry races;
 applications must still allow enough time for network delays and recovery.
+Local sponsored charges atomically bind each challenge to its first submitted
+transaction and allow only one pending sponsored charge per payer and currency.
+Unknown outcomes retain both claims until reconciliation or signed transaction
+expiry; a preflight rejection releases claims without consuming sponsorship.
+Configured stores must support atomic `compare_and_set`; unsupported backends
+fail closed before simulation or broadcast. Without a configured store these
+claims are process-local, so use a shared atomic store across server instances.
