@@ -853,6 +853,7 @@ module mpp.methods.tempo.schemas
         field feePayer: bool = False
         field feePayerUrl: str | None = None
         field splits: list[mpp.methods.tempo.schemas.Split] | None = None
+        field supportedModes: list[str] | None = None
         model_config = {}
     class ChargeRequest(pydantic.main.BaseModel)
         field amount: str
@@ -870,7 +871,11 @@ module mpp.methods.tempo.schemas
         field type: Literal['transaction']
         field signature: str
         model_config = {}
-    CredentialPayload = mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload
+    class ProofCredentialPayload(pydantic.main.BaseModel)
+        field type: Literal['proof']
+        field signature: str
+        model_config = {}
+    CredentialPayload = mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload
     class ChargeInput(pydantic.main.BaseModel)
         field amount: str
         field currency: str
@@ -883,7 +888,7 @@ module mpp.methods.tempo.schemas
         field extra: dict[str, str] | None = None
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
     class ChargePayload(pydantic.main.BaseModel, typing.Generic[~RootModelRootType])
-        field root: mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload
+        field root: mpp.methods.tempo.schemas.HashCredentialPayload | mpp.methods.tempo.schemas.TransactionCredentialPayload | mpp.methods.tempo.schemas.ProofCredentialPayload
         model_config = {}
     charge: mpp.methods.Method
 

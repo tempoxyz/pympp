@@ -69,6 +69,13 @@ class MethodDetails(BaseModel):
         ),
     )
     splits: list[Split] | None = None
+    supportedModes: list[str] | None = Field(
+        default=None,
+        description=(
+            "Settlement modes the server accepts: pull (a signed transaction) and/or "
+            "push (a transaction hash). All modes when absent."
+        ),
+    )
 
 
 class ChargeRequest(BaseModel):
@@ -101,7 +108,14 @@ class TransactionCredentialPayload(BaseModel):
     signature: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
 
 
-CredentialPayload = HashCredentialPayload | TransactionCredentialPayload
+class ProofCredentialPayload(BaseModel):
+    """Credential payload for a zero-amount charge: an EIP-712 proof of the source account."""
+
+    type: Literal["proof"]
+    signature: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
+
+
+CredentialPayload = HashCredentialPayload | TransactionCredentialPayload | ProofCredentialPayload
 
 
 class ChargeInput(BaseModel):
@@ -158,7 +172,8 @@ class ChargeInput(BaseModel):
 
 
 class ChargePayload(RootModel[Annotated[CredentialPayload, Field(discriminator="type")]]):
-    """Charge credential payload: a pushed transaction ``hash`` or a signed ``transaction``."""
+    """Charge credential payload: a pushed transaction ``hash``, a signed ``transaction``,
+    or, for a zero-amount charge, a ``proof``."""
 
 
 charge: Method[ChargeInput, ChargePayload] = Method(

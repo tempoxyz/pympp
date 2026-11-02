@@ -31,6 +31,7 @@ from mpp.errors import (
     VerificationError,
 )
 from mpp.methods.tempo import _fee_payer
+from mpp.methods.tempo import _proof as _charge_proof
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
@@ -39,6 +40,7 @@ from mpp.methods.tempo.schemas import (
     ChargeRequest,
     CredentialPayload,
     HashCredentialPayload,
+    ProofCredentialPayload,
     Split,
     TransactionCredentialPayload,
 )
@@ -52,6 +54,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _warned_fallback_stores: set[str] = set()
+
+
+_ZERO_AMOUNT_RE = re.compile(r"0+")
+
+
+def _expires_timestamp(expires: str | None) -> float | None:
+    """The challenge's ``expires`` as a Unix timestamp, or ``None`` if absent or invalid."""
+    if not expires:
+        return None
+    try:
+        return datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def _challenge_expired(expires: str) -> bool:
@@ -888,6 +903,7 @@ class ChargeIntent:
         self._owns_client = http_client is None
         self._timeout = timeout
         self._store = store
+        self._store_is_fallback = False
         self._validate_sender = validate_sender
         self._confirmation_timeout = confirmation_timeout
         self._sponsor_budget = (
@@ -964,10 +980,97 @@ class ChargeIntent:
             payload = HashCredentialPayload.model_validate(payload_data)
         elif payload_data["type"] == "transaction":
             payload = TransactionCredentialPayload.model_validate(payload_data)
+        elif payload_data["type"] == "proof":
+            payload = ProofCredentialPayload.model_validate(payload_data)
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
+        # As mppx: a zero-amount challenge is paid only with a proof, a proof only
+        # pays a zero-amount challenge, and supportedModes limits push and pull.
+        is_zero_amount = _ZERO_AMOUNT_RE.fullmatch(req.amount) is not None
+        if is_zero_amount and not isinstance(payload, ProofCredentialPayload):
+            raise VerificationError("Zero-amount challenges require a proof credential.")
+        if isinstance(payload, ProofCredentialPayload) and not is_zero_amount:
+            raise VerificationError("Proof credentials are only valid for zero-amount challenges.")
+        modes = req.methodDetails.supportedModes
+        if modes is not None:
+            if isinstance(payload, HashCredentialPayload) and "push" not in modes:
+                raise VerificationError("Hash credentials are not supported for this challenge.")
+            if isinstance(payload, TransactionCredentialPayload) and "pull" not in modes:
+                raise VerificationError(
+                    "Transaction credentials are not supported for this challenge."
+                )
+
         return req, payload
+
+    async def _validate_proof(
+        self, credential: Credential, payload: ProofCredentialPayload, request: ChargeRequest
+    ) -> str:
+        """Verify a zero-amount proof credential; return the lowercase source address.
+
+        The proof must be signed by the ``did:pkh`` source account, or by an access
+        key the AccountKeychain holds for it, unrevoked and unexpired (bare or in a
+        Keychain V1/V2 envelope naming the source), as mppx verifies it.
+        """
+        source = credential.source
+        if not source:
+            raise VerificationError("Proof credential must include a source.")
+        chain_id = request.methodDetails.chainId
+        parsed = parse_pkh_source(source)
+        if parsed is None or parsed.chain_id != chain_id:
+            raise VerificationError("Proof credential source is invalid.")
+        signer = _charge_proof.recover_authorized_proof_signer(
+            payload.signature,
+            source=parsed.address,
+            chain_id=chain_id,
+            challenge_id=credential.challenge.id,
+            realm=credential.challenge.realm,
+        )
+        if signer is None:
+            raise VerificationError("Proof signature does not match source.")
+        if signer.lower() != parsed.address.lower() and not await self._is_active_access_key(
+            account=parsed.address, access_key=signer, chain_id=chain_id
+        ):
+            raise VerificationError("Proof signature does not match source.")
+        return parsed.address.lower()
+
+    async def _is_active_access_key(self, *, account: str, access_key: str, chain_id: int) -> bool:
+        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``."""
+        await self._assert_rpc_chain_id(chain_id)
+        try:
+            result = await _rpc_call(
+                self._get_rpc_url(),
+                "eth_call",
+                [
+                    {
+                        "to": _charge_proof.ACCOUNT_KEYCHAIN_ADDRESS,
+                        "data": _charge_proof.get_key_call_data(account, access_key),
+                    },
+                    "latest",
+                ],
+                client=await self._get_client(),
+            )
+        except Exception:
+            # As mppx's isActiveAccessKey: a key that cannot be read is not authorized.
+            return False
+        return _charge_proof.is_active_key_info(result, access_key)
+
+    async def _claim_proof(self, challenge_id: str, expires: str | None) -> None:
+        """Consume a proof's challenge in a configured store (mppx ``tryClaimProof``).
+
+        Like mppx, proofs are single-use only when a store was configured; the
+        in-memory fallback store does not make them so.
+        """
+        if self._store is None or self._store_is_fallback:
+            return
+        key = f"mpp:charge:proof:{challenge_id}"
+        expires_at = _expires_timestamp(expires)
+        if expires_at is not None and isinstance(self._store, ExpiringStore):
+            claimed = await self._store.put_if_absent_until(key, challenge_id, expires_at)
+        else:
+            claimed = await self._store.put_if_absent(key, challenge_id)
+        if not claimed:
+            raise CredentialReplayedError("Proof credential has already been used")
 
     async def validate(
         self,
@@ -998,7 +1101,11 @@ class ChargeIntent:
         """
         req, payload = self._prepare_credential(credential, request)
 
-        if isinstance(payload, HashCredentialPayload):
+        if isinstance(payload, ProofCredentialPayload):
+            sender = await self._validate_proof(credential, payload, req)
+            payer = sender
+            details: dict[str, Any] = {"mode": "proof", "sender": sender}
+        elif isinstance(payload, HashCredentialPayload):
             await self._ensure_hash_unused(payload.hash)
             receipt = await self._validate_hash(
                 payload,
@@ -1008,7 +1115,7 @@ class ChargeIntent:
                 source=credential.source,
             )
             payer = receipt.payer
-            details: dict[str, Any] = {"mode": "push"}
+            details = {"mode": "push"}
         else:
             legs = self._validate_transaction_payload(payload.signature, req, strict=True)
             if legs is not None:
@@ -1057,11 +1164,17 @@ class ChargeIntent:
             InternalPaymentError: If settlement cannot be confirmed, including
                 any other failure after the transaction was broadcast.
         """
+        req, payload = self._prepare_credential(credential, request)
+
+        if isinstance(payload, ProofCredentialPayload):
+            sender = await self._validate_proof(credential, payload, req)
+            await self._claim_proof(credential.challenge.id, credential.challenge.expires)
+            return replace(Receipt.success(credential.challenge.id), payer=sender)
+
         # Defer the default so Mpp can inject its configured shared store.
         if self._store is None:
             self._store = _fallback_store("tempo.charge")
-
-        req, payload = self._prepare_credential(credential, request)
+            self._store_is_fallback = True
 
         if isinstance(payload, HashCredentialPayload):
             store_key = await self._reserve_hash(payload.hash)
