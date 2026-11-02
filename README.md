@@ -354,7 +354,7 @@ method = tempo.session(
     account=operator,
     fee_payer=sponsor,
     store=shared_store,
-    sponsorship_limit=SessionSponsorshipLimit(per_payer=10, max_transactions=200),
+    top_up_sponsorship_limit=SessionSponsorshipLimit(per_payer=10, max_transactions=200),
 )
 ```
 

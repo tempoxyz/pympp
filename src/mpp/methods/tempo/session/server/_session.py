@@ -169,7 +169,7 @@ def session(
     store: Store | None = None,
     fee_payer: TempoAccount | Literal[True] | None = None,
     fee_payer_policy: Mapping[str, int] | None = None,
-    sponsorship_limit: SessionSponsorshipLimit | None = None,
+    top_up_sponsorship_limit: SessionSponsorshipLimit | None = None,
     fee_token: str | None = None,
     min_voucher_delta: str | None = None,
     settlement_schedule: SettlementSchedule | None = None,
@@ -207,7 +207,7 @@ def session(
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
-        sponsorship_limit: Rolling sponsored top-up limits; default five per payer and 100
+        top_up_sponsorship_limit: Rolling sponsored top-up limits; default five per payer and 100
             aggregate attempts per 24 hours, subject to the aggregate maximum-fee budget.
             The limit is operator-owned and cannot be overridden by a route request.
         fee_token: Fee token clients use for open/top-up and the server for settle/close.
@@ -247,7 +247,7 @@ def session(
     def checked_store(value: Store) -> StoreChannelStore:
         if (
             resolved_fee_payer is not None
-            and (sponsorship_limit is None or sponsorship_limit.store is None)
+            and (top_up_sponsorship_limit is None or top_up_sponsorship_limit.store is None)
             and not isinstance(value, CompareAndSetStore)
         ):
             raise TypeError("Sponsored sessions require a compare-and-set sponsorship store")
@@ -328,7 +328,7 @@ def session(
             escrow=verification.escrow,
             rpc_url=resolved_rpc_url,
             store=channel_store(),
-            sponsorship_limit=sponsorship_limit or SessionSponsorshipLimit(),
+            top_up_sponsorship_limit=top_up_sponsorship_limit or SessionSponsorshipLimit(),
             account=account,
             http_client=http_client,
             channel_state_ttl=channel_state_ttl,

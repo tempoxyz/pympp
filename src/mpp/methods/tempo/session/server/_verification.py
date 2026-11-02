@@ -498,7 +498,7 @@ class CredentialContext:
     fee_payer: TempoAccount | None = None
     fee_payer_policy: Mapping[str, int] | None = None
     fee_token: str | None = None
-    sponsorship_limit: SessionSponsorshipLimit = field(default_factory=SessionSponsorshipLimit)
+    top_up_sponsorship_limit: SessionSponsorshipLimit = field(default_factory=SessionSponsorshipLimit)
     last_on_chain_verified: dict[str, int] = field(default_factory=dict[str, int])
     min_voucher_delta: int = 0
     on_session_settlement: OnSessionSettlement | None = None
@@ -962,7 +962,7 @@ async def _handle_top_up(context: CredentialContext, payload: TopUpPayload) -> S
         )
         if validated.transaction.sender.lower() != channel.descriptor.payer.lower():
             raise VerificationFailedError("Sponsored top-ups must be signed by the channel payer")
-        limit = context.sponsorship_limit
+        limit = context.top_up_sponsorship_limit
         budget_store = limit.store
         if budget_store is None and isinstance(context.store, StoreChannelStore):
             candidate = context.store.store

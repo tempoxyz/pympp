@@ -1841,7 +1841,7 @@ async def test_sponsored_top_ups_stop_before_broadcast_after_allowance(life: Lif
             client=life.rpc.client,
         )
         payload = payload.model_copy(update={"transaction": transaction})
-        context = life.context(payload, fee_payer=SPONSOR, sponsorship_limit=limit)
+        context = life.context(payload, fee_payer=SPONSOR, top_up_sponsorship_limit=limit)
         if index == 0:
             life.rpc.logs = [
                 top_up_log(life.descriptor, life.channel_id, additional, DEPOSIT + additional)
@@ -1875,7 +1875,7 @@ async def test_invalid_top_up_does_not_consume_sponsorship(life: Lifecycle, monk
         client=life.rpc.client,
     )
     payload = payload.model_copy(update={"transaction": transaction})
-    context = life.context(payload, fee_payer=SPONSOR, sponsorship_limit=limit)
+    context = life.context(payload, fee_payer=SPONSOR, top_up_sponsorship_limit=limit)
     if failure == "simulation":
 
         async def fail_simulation(*args, **kwargs):
