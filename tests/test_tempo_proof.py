@@ -16,9 +16,10 @@ import httpx
 import pytest
 from eth_hash.auto import keccak
 
-from mpp import Credential
+from mpp import Challenge, Credential
 from mpp.errors import CredentialReplayedError, VerificationError
 from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo._proof import ACCOUNT_KEYCHAIN_ADDRESS
 from mpp.methods.tempo.intents import ChargeIntent
 from mpp.methods.tempo.session._proof import proof_digest, proof_source, sign_proof
@@ -225,3 +226,54 @@ async def test_push_only_rejects_transaction() -> None:
     credential = _credential({"type": "transaction", "signature": "0x76"})
     with pytest.raises(VerificationError, match="Transaction credentials are not supported"):
         await _intent().verify(credential, _request(amount="1000", modes=["push"]))
+
+
+async def test_zero_amount_with_splits_rejected() -> None:
+    request = _request()
+    request["methodDetails"]["splits"] = [
+        {"amount": "1", "recipient": "0x9999999999999999999999999999999999999999"}
+    ]
+    with pytest.raises(VerificationError, match="cannot have splits"):
+        await _intent().verify(_credential(_eoa_proof()), request)
+
+
+async def test_validate_rejects_consumed_proof() -> None:
+    intent = _intent(store=MemoryStore())
+    credential = _credential(_eoa_proof())
+    await intent.verify(credential, _request())
+    with pytest.raises(CredentialReplayedError):
+        await intent.validate(credential, _request())
+
+
+def _challenge(amount: str = "0", modes: list[str] | None = None) -> Challenge:
+    return Challenge(
+        id=CHALLENGE_ID,
+        method="tempo",
+        intent="charge",
+        request=_request(amount, modes),
+        realm=TEST_REALM,
+        expires=_expires(),
+    )
+
+
+@pytest.mark.parametrize("root", [None, SOURCE.address], ids=["eoa", "access-key"])
+async def test_client_pays_zero_amount_with_proof(root: str | None) -> None:
+    signer = SOURCE if root is None else ACCESS_KEY
+    method = tempo_client.TempoMethod(account=signer, root_account=root, chain_id=CHAIN_ID)
+    challenge = _challenge()
+    credential = await method.create_credential(challenge)
+    assert credential.payload["type"] == "proof"
+    assert credential.source == proof_source(SOURCE.address, CHAIN_ID)
+    server_credential = Credential(
+        challenge=credential.challenge,
+        payload=credential.payload,
+        source=credential.source,
+    )
+    receipt = await _intent(FakeKeychainRpc(ACTIVE)).verify(server_credential, challenge.request)
+    assert receipt.payer == SOURCE.address.lower()
+
+
+def test_client_skips_push_only_offers() -> None:
+    method = tempo_client.TempoMethod(account=SOURCE, chain_id=CHAIN_ID)
+    assert method.can_handle_challenge(_challenge("1000", ["pull", "push"]))
+    assert not method.can_handle_challenge(_challenge("1000", ["push"]))

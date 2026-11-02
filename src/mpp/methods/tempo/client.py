@@ -437,6 +437,13 @@ class TempoMethod:
         _check_recipient_addresses(request)
         self._check_expected_recipients(request)
         self._check_amount_caps(request)
+        details = request.get("methodDetails")
+        modes = details.get("supportedModes") if is_dict(details) else None
+        amount = request.get("amount")
+        zero = isinstance(amount, str) and re.fullmatch(r"0+", amount) is not None
+        if not zero and is_list(modes) and "pull" not in modes:
+            # This client settles only by signing a transaction (pull mode).
+            raise ValueError("Tempo charge challenge does not accept transaction credentials")
         from mpp.methods.tempo.schemas import reject_fixed_attribution_memos
 
         reject_fixed_attribution_memos(request)
@@ -577,6 +584,13 @@ class TempoMethod:
             expected_chain_id = _challenge_chain_id(request)
         if expected_chain_id is None:
             expected_chain_id = self.chain_id
+        amount = request.get("amount")
+        if isinstance(amount, str) and re.fullmatch(r"0+", amount) is not None:
+            proof_chain_id = expected_chain_id
+            if proof_chain_id is None:
+                proof_chain_id = await self._get_chain_id(self._rpc_url_for(request))
+            self._check_allowed_chain_id(proof_chain_id)
+            return self._proof_credential(challenge, proof_chain_id)
         method_details = request.get("methodDetails", {})
         use_fee_payer = method_details.get("feePayer", False) if is_dict(method_details) else False
         if use_fee_payer:
@@ -611,6 +625,41 @@ class TempoMethod:
             challenge=challenge.to_echo(),
             payload={"type": "transaction", "signature": raw_tx},
             source=f"did:pkh:eip155:{chain_id}:{source_address}",
+        )
+
+    def _proof_credential(self, challenge: Challenge, chain_id: int) -> Credential:
+        """Pay a zero-amount challenge with an EIP-712 proof, as mppx's Tempo client does.
+
+        The proof binds the paying account (``root_account`` when signing with an
+        access key) to the challenge. An access key signs it in a Keychain V2
+        envelope naming the root account, which servers check against the
+        AccountKeychain.
+        """
+        from eth_hash.auto import keccak
+
+        from mpp.methods.tempo.session._proof import proof_digest, proof_source, sign_proof
+
+        assert self.account is not None
+        if self.root_account and self.root_account.lower() != self.account.address.lower():
+            root = bytes.fromhex(self.root_account.removeprefix("0x"))
+            digest = proof_digest(
+                account=self.root_account,
+                chain_id=chain_id,
+                challenge_id=challenge.id,
+                realm=challenge.realm,
+            )
+            payload = keccak(b"\x04" + bytes.fromhex(digest.removeprefix("0x")) + root)
+            signature = "0x" + (b"\x04" + root + self.account.sign_hash(payload)).hex()
+            address = self.root_account
+        else:
+            signature = sign_proof(
+                self.account, chain_id=chain_id, challenge_id=challenge.id, realm=challenge.realm
+            )
+            address = self.account.address
+        return Credential(
+            challenge=challenge.to_echo(),
+            payload={"type": "proof", "signature": signature},
+            source=proof_source(address, chain_id),
         )
 
     def transaction_hash(self, credential: Credential) -> str | None:

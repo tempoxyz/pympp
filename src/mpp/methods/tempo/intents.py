@@ -992,6 +992,9 @@ class ChargeIntent:
             raise VerificationError("Zero-amount challenges require a proof credential.")
         if isinstance(payload, ProofCredentialPayload) and not is_zero_amount:
             raise VerificationError("Proof credentials are only valid for zero-amount challenges.")
+        if is_zero_amount and req.methodDetails.splits:
+            # A proof moves no funds, so it cannot pay split recipients.
+            raise VerificationError("Zero-amount challenges cannot have splits.")
         modes = req.methodDetails.supportedModes
         if modes is not None:
             if isinstance(payload, HashCredentialPayload) and "push" not in modes:
@@ -1063,14 +1066,28 @@ class ChargeIntent:
         """
         if self._store is None or self._store_is_fallback:
             return
-        key = f"mpp:charge:proof:{challenge_id}"
+        key = self._proof_store_key(challenge_id)
         expires_at = _expires_timestamp(expires)
+        if expires_at is not None and expires_at <= time.time():
+            raise VerificationError("Request has expired")
         if expires_at is not None and isinstance(self._store, ExpiringStore):
             claimed = await self._store.put_if_absent_until(key, challenge_id, expires_at)
         else:
             claimed = await self._store.put_if_absent(key, challenge_id)
         if not claimed:
             raise CredentialReplayedError("Proof credential has already been used")
+
+    async def _ensure_proof_unused(self, challenge_id: str) -> None:
+        if (
+            self._store is not None
+            and not self._store_is_fallback
+            and await self._store.get(self._proof_store_key(challenge_id)) is not None
+        ):
+            raise CredentialReplayedError("Proof credential has already been used")
+
+    @staticmethod
+    def _proof_store_key(challenge_id: str) -> str:
+        return f"mpp:charge:proof:{challenge_id}"
 
     async def validate(
         self,
@@ -1102,6 +1119,7 @@ class ChargeIntent:
         req, payload = self._prepare_credential(credential, request)
 
         if isinstance(payload, ProofCredentialPayload):
+            await self._ensure_proof_unused(credential.challenge.id)
             sender = await self._validate_proof(credential, payload, req)
             payer = sender
             details: dict[str, Any] = {"mode": "proof", "sender": sender}
