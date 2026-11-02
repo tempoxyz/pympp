@@ -69,6 +69,7 @@ async def claim_payer(
     currency: str,
     transaction_hash: str,
     expires_at: float,
+    reconciling: bool = False,
 ) -> Claim:
     """Permit one pending transaction per chain, payer, and charge token before simulation."""
     key = _key("payer", chain_id, payer.lower(), currency.lower())
@@ -78,7 +79,7 @@ async def claim_payer(
         if current is not None:
             try:
                 prior = json.loads(current)
-                if prior["hash"] == transaction_hash.lower():
+                if reconciling and prior["hash"] == transaction_hash.lower():
                     return Claim(key, current, False)
                 if float(prior["expiresAt"]) > time.time():
                     raise InternalPaymentError() from RuntimeError(

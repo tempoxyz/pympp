@@ -2134,6 +2134,7 @@ class ChargeIntent:
                     currency=request.currency,
                     transaction_hash=transaction_hash,
                     expires_at=valid_before + VALID_BEFORE_GRACE,
+                    reconciling=reconciling,
                 )
             if reconciling:
                 prior = await self._check_sponsored_validity(

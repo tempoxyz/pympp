@@ -24,7 +24,7 @@ async def challenge(store, tx="0x01"):
     )
 
 
-async def payer(store, tx="0x01"):
+async def payer(store, tx="0x01", *, reconciling=False):
     return await admission.claim_payer(
         store,
         chain_id=1,
@@ -32,6 +32,7 @@ async def payer(store, tx="0x01"):
         currency="0xBB",
         transaction_hash=tx,
         expires_at=time.time() + 60,
+        reconciling=reconciling,
     )
 
 
@@ -52,7 +53,9 @@ async def test_distinct_envelopes_have_one_challenge_winner():
 async def test_payer_is_serialized_and_retry_keeps_expiry():
     store = MemoryStore()
     first = await payer(store)
-    retry = await payer(store)
+    with pytest.raises(InternalPaymentError):
+        await payer(store)
+    retry = await payer(store, reconciling=True)
     assert not retry.created
     assert retry.value == first.value
     with pytest.raises(InternalPaymentError):
