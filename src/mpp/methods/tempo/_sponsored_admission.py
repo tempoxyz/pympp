@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -42,7 +43,7 @@ async def claim_challenge(
     """Bind a challenge permanently to one transaction until its acceptance window expires."""
     if not challenge_id:
         raise InternalPaymentError() from ValueError("Sponsored charges require a challenge ID")
-    key = _key("challenge", realm, chain_id, challenge_id)
+    key = _key("challenge", realm, chain_id, challenge_id, payer.lower())
     value = json.dumps(
         {
             "hash": transaction_hash.lower(),
@@ -52,13 +53,20 @@ async def claim_challenge(
         },
         sort_keys=True,
     )
-    if expires_at is not None and isinstance(store, ExpiringStore):
-        inserted = await store.put_if_absent_until(key, value, expires_at)
-    else:
-        inserted = await store.put_if_absent(key, value)
-    if not inserted and _text(await store.get(key)) != value:
-        raise CredentialReplayedError("Challenge is already bound to another transaction")
-    return Claim(key, value, inserted)
+    for _ in range(100):
+        if expires_at is not None and isinstance(store, ExpiringStore):
+            inserted = await store.put_if_absent_until(key, value, expires_at)
+        else:
+            inserted = await store.put_if_absent(key, value)
+        if inserted:
+            return Claim(key, value, True)
+        current = _text(await store.get(key))
+        if current is None:
+            continue
+        if current != value:
+            raise CredentialReplayedError("Challenge is already bound to another transaction")
+        return Claim(key, value, False)
+    raise InternalPaymentError() from RuntimeError("Challenge admission contention")
 
 
 async def claim_payer(
@@ -70,27 +78,48 @@ async def claim_payer(
     transaction_hash: str,
     expires_at: float,
     reconciling: bool = False,
+    wait_until: float = 0,
 ) -> Claim:
     """Permit one pending transaction per chain, payer, and charge token before simulation."""
     key = _key("payer", chain_id, payer.lower(), currency.lower())
     value = json.dumps({"hash": transaction_hash.lower(), "expiresAt": expires_at}, sort_keys=True)
-    while True:
-        current = _text(await store.get(key))
+    if reconciling and expires_at <= time.time():
+        # An expired envelope can only be reconciled, not newly included.
+        return Claim(key, value, False)
+    for _ in range(200):
+        raw = await store.get(key)
+        current = _text(raw)
         if current is not None:
             try:
                 prior = json.loads(current)
                 if reconciling and prior["hash"] == transaction_hash.lower():
                     return Claim(key, current, False)
                 if float(prior["expiresAt"]) > time.time():
+                    if time.time() < wait_until:
+                        await asyncio.sleep(min(0.05, wait_until - time.time()))
+                        continue
                     raise InternalPaymentError() from RuntimeError(
-                        "Payer has a pending sponsored transaction"
+                        "Payer has a pending sponsored transaction; retry the same credential"
                     )
             except (TypeError, ValueError, KeyError) as error:
                 raise InternalPaymentError() from error
-        if await store.compare_and_set(key, current, value):
+            await release(store, Claim(key, current, False))
+            continue
+        if isinstance(store, ExpiringStore):
+            inserted = await store.put_if_absent_until(key, value, expires_at)
+        else:
+            inserted = await store.put_if_absent(key, value)
+        if inserted:
             return Claim(key, value, True)
+    raise InternalPaymentError() from RuntimeError("Payer admission contention")
 
 
 async def release(store: CompareAndSetStore, claim: Claim) -> None:
-    """Release only the exact claim this operation observed, preserving a newer owner."""
-    await store.compare_and_set(claim.key, claim.value, None)
+    """Release only the observed owner, preserving backend byte snapshots for CAS."""
+    raw = await store.get(claim.key)
+    if _text(raw) != claim.value:
+        return
+    if await store.compare_and_set(claim.key, raw, None):
+        return
+    if isinstance(raw, bytes):
+        await store.compare_and_set(claim.key, raw.decode(), None)

@@ -4609,7 +4609,7 @@ class TestCosignAsFeePayer:
         assert second._sponsor_budget_store() is fallback
 
     @pytest.mark.asyncio
-    async def test_sponsored_admission_fails_closed_when_store_cannot_compare_and_set(self):
+    async def test_sponsored_admission_retains_ttl_when_store_cannot_compare_and_set(self):
         from mpp.methods.tempo import sponsor_budget
         from mpp.store import CompareAndSetStore
 
@@ -4629,11 +4629,13 @@ class TestCosignAsFeePayer:
         with (
             patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
             patch.object(sponsor_budget, "reserve", reserve),
-            pytest.raises(InternalPaymentError),
         ):
             await intent.verify(credential, request)
-        reserve.assert_not_awaited()
-        intent._http_client.post.assert_not_awaited()
+        reserve.assert_awaited()
+        intent._http_client.post.assert_awaited()
+        claims = [key for key in store._data if key.startswith("mpp:charge-admission:payer:")]
+        assert len(claims) == 1
+        assert claims[0] in store._expiry_deadlines
 
     def _cosign_payload(self, intent: ChargeIntent) -> list[dict[str, Any]]:
         currency = "0x20c0000000000000000000000000000000000000"

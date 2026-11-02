@@ -2100,11 +2100,14 @@ class ChargeIntent:
         payer_claim: _sponsored_admission.Claim | None = None
         try:
             if request.methodDetails.feePayer and self.fee_payer is not None:
-                if self._store is not None and not isinstance(self._store, CompareAndSetStore):
+                configured_admission_store = (
+                    self._sponsor_budget.store if self._sponsor_budget is not None else None
+                ) or self._store
+                if not isinstance(configured_admission_store, CompareAndSetStore):
                     raise InternalPaymentError() from TypeError(
                         "Sponsored admission requires compare_and_set"
                     )
-                admission_store = self._store or _sponsor_budget.process_store()
+                admission_store = configured_admission_store
                 valid_before = _transaction_valid_before(raw_tx)
                 if sender is None or valid_before is None:
                     raise InternalPaymentError() from ValueError(
@@ -2135,6 +2138,7 @@ class ChargeIntent:
                     transaction_hash=transaction_hash,
                     expires_at=valid_before + VALID_BEFORE_GRACE,
                     reconciling=reconciling,
+                    wait_until=min(time.time() + 5, valid_before),
                 )
             if reconciling:
                 prior = await self._check_sponsored_validity(

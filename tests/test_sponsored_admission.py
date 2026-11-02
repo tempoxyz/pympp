@@ -10,14 +10,14 @@ from mpp.methods.tempo import _sponsored_admission as admission
 from mpp.store import MemoryStore
 
 
-async def challenge(store, tx="0x01"):
+async def challenge(store, tx="0x01", payer="0xAA"):
     return await admission.claim_challenge(
         store,
         realm="merchant.example",
         chain_id=1,
         challenge_id="challenge",
         transaction_hash=tx,
-        payer="0xAA",
+        payer=payer,
         currency="0xBB",
         amount="1",
         expires_at=time.time() + 60,
@@ -99,3 +99,68 @@ async def test_redis_bytes_preserve_challenge_retry():
     assert not retry.created
     await admission.release(store, retry)
     assert await store.get(first.key) is None
+
+
+@pytest.mark.asyncio
+async def test_literal_bytes_store_releases_both_claims():
+    class LiteralBytesStore(MemoryStore):
+        async def put_if_absent(self, key, value):
+            return await super().put_if_absent(key, value.encode())
+
+    store = LiteralBytesStore()
+    for claim in [await challenge(store), await payer(store)]:
+        assert isinstance(await store.get(claim.key), bytes)
+        await admission.release(store, claim)
+        assert await store.get(claim.key) is None
+
+
+@pytest.mark.asyncio
+async def test_payer_claim_has_backend_expiry():
+    store = MemoryStore()
+    claim = await payer(store)
+    assert time.time() < store._expiry_deadlines[claim.key] <= time.time() + 60
+
+
+@pytest.mark.asyncio
+async def test_shared_challenge_allows_distinct_payers():
+    store = MemoryStore()
+    first = await challenge(store)
+    second = await challenge(store, "0x02", payer="0xCC")
+    assert first.key != second.key
+
+
+@pytest.mark.asyncio
+async def test_released_competing_challenge_is_retried():
+    class RacingStore(MemoryStore):
+        raced = False
+
+        async def put_if_absent(self, key, value):
+            if not self.raced:
+                self.raced = True
+                return False
+            return await super().put_if_absent(key, value)
+
+    assert (await challenge(RacingStore())).created
+
+
+@pytest.mark.asyncio
+async def test_busy_payer_waits_for_release():
+    store = MemoryStore()
+    first = await payer(store)
+
+    async def finish():
+        await asyncio.sleep(0.01)
+        await admission.release(store, first)
+
+    waiter = asyncio.create_task(finish())
+    second = await admission.claim_payer(
+        store,
+        chain_id=1,
+        payer="0xAA",
+        currency="0xBB",
+        transaction_hash="0x02",
+        expires_at=time.time() + 60,
+        wait_until=time.time() + 1,
+    )
+    await waiter
+    assert second.created
