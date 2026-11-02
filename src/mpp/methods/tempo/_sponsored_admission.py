@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from mpp.errors import CredentialReplayedError, InternalPaymentError
@@ -79,10 +80,19 @@ async def claim_payer(
     expires_at: float,
     reconciling: bool = False,
     wait_until: float = 0,
+    receipt_hash: str | None = None,
+    is_settled: Callable[[str, float], Awaitable[bool]] | None = None,
 ) -> Claim:
     """Permit one pending transaction per chain and payer before simulation."""
     key = _key("payer", chain_id, payer.lower())
-    value = json.dumps({"hash": transaction_hash.lower(), "expiresAt": expires_at}, sort_keys=True)
+    value = json.dumps(
+        {
+            "hash": transaction_hash.lower(),
+            "receiptHash": receipt_hash or transaction_hash.lower(),
+            "expiresAt": expires_at,
+        },
+        sort_keys=True,
+    )
     if reconciling and expires_at <= time.time():
         # An expired envelope can only be reconciled, not newly included.
         return Claim(key, value, False)
@@ -103,12 +113,17 @@ async def claim_payer(
                     )
             except (TypeError, ValueError, KeyError) as error:
                 raise InternalPaymentError() from error
+            if is_settled is None or not await is_settled(
+                prior.get("receiptHash", prior["hash"]), float(prior["expiresAt"])
+            ):
+                raise InternalPaymentError() from RuntimeError(
+                    "Payer's earlier submission is not confirmed settled or excluded by chain time"
+                )
             await release(store, Claim(key, current, False))
             continue
-        if isinstance(store, ExpiringStore):
-            inserted = await store.put_if_absent_until(key, value, expires_at)
-        else:
-            inserted = await store.put_if_absent(key, value)
+        # Wall-clock expiry cannot prove that a lagging chain excluded the transaction.
+        # Retain unknown attempts until a later admission checks receipt and chain time.
+        inserted = await store.put_if_absent(key, value)
         if inserted:
             return Claim(key, value, True)
     raise InternalPaymentError() from RuntimeError("Payer admission contention")

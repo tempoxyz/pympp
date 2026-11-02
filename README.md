@@ -391,3 +391,8 @@ Use an atomic `SponsorBudget(store=...)` backend or a replay store supporting
 failed conditional cleanup retains the claim until expiry rather than deleting
 another request's reservation. Without a configured store these
 claims are process-local, so use a shared atomic store across server instances.
+
+Payer admission for an unknown sponsored charge is retained until a receipt or chain-time
+non-inclusion check resolves it. Wall-clock expiry alone does not release the claim; a
+later request for that payer performs reconciliation. Backends should provision for
+these retained records and apply capacity limits rather than evicting pending payments.

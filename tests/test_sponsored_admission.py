@@ -24,7 +24,7 @@ async def challenge(store, tx="0x01", payer="0xAA"):
     )
 
 
-async def payer(store, tx="0x01", *, reconciling=False):
+async def payer(store, tx="0x01", *, reconciling=False, is_settled=None):
     return await admission.claim_payer(
         store,
         chain_id=1,
@@ -33,6 +33,7 @@ async def payer(store, tx="0x01", *, reconciling=False):
         transaction_hash=tx,
         expires_at=time.time() + 60,
         reconciling=reconciling,
+        is_settled=is_settled,
     )
 
 
@@ -69,7 +70,11 @@ async def test_stale_release_cannot_delete_replacement(monkeypatch):
     store = MemoryStore()
     first = await payer(store)
     monkeypatch.setattr(admission.time, "time", lambda: 99999999999)
-    second = await payer(store, "0x02")
+
+    async def settled(*args):
+        return True
+
+    second = await payer(store, "0x02", is_settled=settled)
     await admission.release(store, first)
     assert await store.get(second.key) == second.value
 
@@ -115,10 +120,10 @@ async def test_literal_bytes_store_releases_both_claims():
 
 
 @pytest.mark.asyncio
-async def test_payer_claim_has_backend_expiry():
+async def test_payer_claim_survives_wall_clock_expiry_until_chain_confirmation():
     store = MemoryStore()
     claim = await payer(store)
-    assert time.time() < store._expiry_deadlines[claim.key] <= time.time() + 60
+    assert claim.key not in store._expiry_deadlines
 
 
 @pytest.mark.asyncio
@@ -179,3 +184,20 @@ async def test_payer_lock_covers_swap_source_tokens():
             transaction_hash="0x02",
             expires_at=time.time() + 60,
         )
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_expiry_does_not_admit_another_transaction_on_a_lagging_chain(monkeypatch):
+    store = MemoryStore()
+    first = await payer(store)
+    monkeypatch.setattr(admission.time, "time", lambda: 99999999999)
+    checked = []
+
+    async def unresolved(tx_hash, expiry):
+        checked.append(tx_hash)
+        return False
+
+    with pytest.raises(InternalPaymentError):
+        await payer(store, "0x02", is_settled=unresolved)
+    assert checked == ["0x01"]
+    assert await store.get(first.key) == first.value

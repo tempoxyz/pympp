@@ -4609,7 +4609,7 @@ class TestCosignAsFeePayer:
         assert second._sponsor_budget_store() is fallback
 
     @pytest.mark.asyncio
-    async def test_sponsored_admission_retains_ttl_when_store_cannot_compare_and_set(self):
+    async def test_sponsored_admission_retains_claim_when_store_cannot_compare_and_set(self):
         from mpp.methods.tempo import sponsor_budget
         from mpp.store import CompareAndSetStore
 
@@ -4635,7 +4635,7 @@ class TestCosignAsFeePayer:
         intent._http_client.post.assert_awaited()
         claims = [key for key in store._data if key.startswith("mpp:charge-admission:payer:")]
         assert len(claims) == 1
-        assert claims[0] in store._expiry_deadlines
+        assert claims[0] not in store._expiry_deadlines
 
     @pytest.mark.asyncio
     async def test_admission_uses_explicit_sponsor_store_and_maps_backend_failure(self):

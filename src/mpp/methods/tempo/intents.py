@@ -2173,6 +2173,19 @@ class ChargeIntent:
                     amount=request.amount,
                     expires_at=claim_expiry,
                 )
+
+                async def payer_settled(tx_hash: str, expiry: float) -> bool:
+                    receipt = await self._get_transaction_receipt(client, tx_hash)
+                    if (
+                        receipt is not None
+                        and receipt.get("transactionHash", "").lower() == tx_hash.lower()
+                        and receipt.get("status") in ("0x0", "0x1")
+                    ):
+                        return True
+                    return await self._confirm_not_included(
+                        client, tx_hash, int(expiry - VALID_BEFORE_GRACE)
+                    )
+
                 payer_claim = await _sponsored_admission.claim_payer(
                     admission_store,
                     chain_id=request.methodDetails.chainId,
@@ -2182,6 +2195,8 @@ class ChargeIntent:
                     expires_at=valid_before + VALID_BEFORE_GRACE,
                     reconciling=reconciling,
                     wait_until=min(time.time() + 5, valid_before),
+                    receipt_hash=_raw_transaction_hash(raw_tx),
+                    is_settled=payer_settled,
                 )
             admitting = False
             if reconciling:
