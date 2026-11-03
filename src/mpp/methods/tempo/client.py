@@ -1060,6 +1060,13 @@ class TempoMethod:
                 "Charges require a funded supported stablecoin for transaction fees"
             )
 
+        if awaiting_fee_payer:
+            # The RPC round trips above take time: check again immediately before
+            # signing (mppx#1131). valid_before is set from the current time below,
+            # capped at the challenge expiry, so it keeps at least as much validity
+            # as the challenge and needs no separate check (mppx#1137).
+            _assert_sponsored_challenge_time_left(expires)
+
         tx = TempoTransaction.create(
             chain_id=chain_id,
             gas_limit=gas_limit,

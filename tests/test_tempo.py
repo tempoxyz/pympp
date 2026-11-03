@@ -1189,6 +1189,36 @@ class TestExpiringNonce:
         assert rpc_methods == []
 
     @pytest.mark.asyncio
+    async def test_sponsored_challenge_rechecked_after_slow_preparation(self) -> None:
+        """A sponsored challenge that drops under 15s while preparing is not signed."""
+        method = _tempo_method(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+        )
+        clock = [float(_NOW)]
+        rpc_methods: list[str] = []
+
+        async def slow_rpc(_url: str, method_name: str, *_: object, **__: object) -> str:
+            rpc_methods.append(method_name)
+            clock[0] += 10
+            return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[method_name]
+
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=slow_rpc),
+            patch("mpp.methods.tempo.client.estimate_gas", new=AsyncMock(return_value=100_000)),
+            patch("mpp.methods.tempo.client.time.time", side_effect=lambda: clock[0]),
+            pytest.raises(PaymentExpiredError) as excinfo,
+        ):
+            await method.create_credential(
+                self._challenge("slow-sponsored", fee_payer=True, expires=_iso(_NOW + 20))
+            )
+        # Fresh enough before preparation, under the floor once the RPC calls return.
+        assert rpc_methods
+        assert clock[0] > _NOW + 5
+        assert "expires in less than 15 seconds" in str(excinfo.value.__cause__)
+
+    @pytest.mark.asyncio
     async def test_unsponsored_challenge_near_expiry_still_signs(self) -> None:
         method = _tempo_method(
             account=TempoAccount.from_key(TEST_PRIVATE_KEY),
