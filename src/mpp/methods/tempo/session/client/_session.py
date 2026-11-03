@@ -246,6 +246,14 @@ class _SpendingPolicy:
         if self.max_amount is not None and amount > self.max_amount:
             raise ValueError("Tempo session amount exceeds max_amount.")
 
+    def swap_currencies(self, auto_swap: AutoSwap | None) -> tuple[str, ...] | None:
+        """The only tokens auto-swap may buy, as for charge: with ``expected_recipients``, a
+        pinned or fallback currency, since a recipient allowlist does not protect funds swapped
+        into a token the challenge names. ``None`` allows any."""
+        if self.expected_recipients is None or auto_swap is None:
+            return None
+        return (*(self.currencies or ()), *auto_swap.currencies())
+
     def allows(self, request: dict[str, Any]) -> bool:
         """Whether a session request satisfies the policy."""
         try:
@@ -414,15 +422,17 @@ class SessionMethod:
                 sink = ChannelSink(
                     store=_PendingOpenStore(self.store, pending), notify_update=_ignore
                 )
+            auto_swap = (
+                resolve_auto_swap(context.auto_swap)
+                if context is not None and context.auto_swap is not None
+                else self.auto_swap
+            )
             payload = await execute_credential_plan(
                 plan,
                 sink,
                 client=self.http_client,
-                auto_swap=(
-                    resolve_auto_swap(context.auto_swap)
-                    if context is not None and context.auto_swap is not None
-                    else self.auto_swap
-                ),
+                auto_swap=auto_swap,
+                trusted_currencies=self._policy.swap_currencies(auto_swap),
             )
             credential = serialize_credential(challenge, payload, resolved.chain_id, plan.account)
             if attempt is not None:
