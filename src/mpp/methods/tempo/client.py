@@ -1104,7 +1104,9 @@ async def _send_raw_transaction_sync(
     try:
         receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx])
     except RpcError as error:
-        if _is_ambiguous_broadcast_error(error.response):
+        # A replay of the payer's own transaction means it may already be
+        # paid, never that nothing was, so it is an unknown outcome here.
+        if _is_ambiguous_broadcast_error(error.response, resubmitted=True):
             raise unknown(error) from error
         raise TransactionError(f"Transaction submission failed: {error}") from error
     except RuntimeError as error:
