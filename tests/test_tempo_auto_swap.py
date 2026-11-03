@@ -387,3 +387,61 @@ async def test_expected_recipients_only_swap_into_currencies_the_client_chose() 
         expected_recipients=[RECIPIENT],
     )
     assert calls[1][0] == STABLECOIN_DEX
+
+
+@pytest.mark.asyncio
+async def test_explicit_fee_token_swap_input_keeps_the_fee() -> None:
+    # pathUSD covers the swap's slippage maximum and the fee, so it funds both.
+    calls, fee_token = await sign(
+        True,
+        {PATH_USD: 1_010_000 + FEE, USDC: 2_000_000},
+        {PATH_USD: 1_000_000, USDC: 1_000_000},
+        payer_fee_token=PATH_USD,
+    )
+
+    assert calls[0][0] == PATH_USD.lower()
+    assert fee_token == PATH_USD.lower()
+
+
+@pytest.mark.asyncio
+async def test_explicit_fee_token_swap_input_without_the_fee_swaps_from_another_currency() -> None:
+    # Swapping from pathUSD would leave less than the fee in it: USDC.e funds the swap.
+    calls, fee_token = await sign(
+        True,
+        {PATH_USD: 1_010_000 + FEE - 1, USDC: 2_000_000},
+        {PATH_USD: 1_000_000, USDC: 1_000_000},
+        payer_fee_token=PATH_USD,
+    )
+
+    assert calls[0][0] == USDC.lower()
+    assert fee_token == PATH_USD.lower()
+
+    # No other currency can fund the swap, so the client fails before signing.
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await sign(
+            True,
+            {PATH_USD: 1_010_000 + FEE - 1},
+            {PATH_USD: 1_000_000},
+            payer_fee_token=PATH_USD,
+        )
+
+
+@pytest.mark.asyncio
+async def test_explicit_fee_token_swap_output_buys_the_fee() -> None:
+    # The fee token is the charge currency the payment spends, so the swap also buys the fee.
+    held = AMOUNT // 2
+
+    def one_to_one(amount: int) -> int:
+        return amount
+
+    calls, fee_token = await sign(
+        True,
+        {USDC: held, PATH_USD: 2_000_000},
+        {PATH_USD: one_to_one},
+        currency=USDC,
+        payer_fee_token=USDC,
+    )
+
+    assert calls[0][0] == PATH_USD.lower()
+    assert word(calls[1][2], 2) == AMOUNT - held + FEE
+    assert fee_token == USDC.lower()

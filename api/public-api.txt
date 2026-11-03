@@ -755,6 +755,7 @@ module mpp.methods.tempo.client
         field kw_only currencies: tuple[str, ...] = ()
         field kw_only fee_token: str | None = None
         field kw_only allowed_fee_tokens: tuple[str, ...] | None = None
+        field kw_only payer_fee_token: str | None = None
         field kw_only max_atomic_amount: int | str | None = None
         field kw_only max_amount: str | Decimal | None = None
         field kw_only max_amount_decimals: int | None = None
@@ -765,7 +766,7 @@ module mpp.methods.tempo.client
         def can_handle_challenge(self, challenge: Challenge) -> bool
         async def create_credential(self, challenge: Challenge) -> Credential
         def transaction_hash(self, credential: Credential) -> str | None
-    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None) -> ClientMethod
+    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None) -> ClientMethod
 
 module mpp.methods.tempo.fee_payer_envelope
     FEE_PAYER_ENVELOPE_TYPE_ID = 120

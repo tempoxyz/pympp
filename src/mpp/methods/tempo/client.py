@@ -928,6 +928,59 @@ class TempoMethod:
             # An explicit fee token, such as one an access key's spending limits
             # cover (mppx#1149). Sponsored transactions leave it to the fee payer.
             fee_token = self.payer_fee_token
+            explicit = fee_token.lower()
+            if swapping and (explicit == currency.lower() or swap_spent.get(explicit, 0) > 0):
+                # The batch spends the fee token: keep the fee out of what it spends.
+                required_balance = fee_requirement(gas_limit)
+                fee_balance = await _tip20_balance(resolved_rpc, fee_token, sender)
+                if fee_balance - swap_spent.get(explicit, 0) < required_balance:
+                    rebuilt: tuple[list[tuple[str, str]], dict[str, int]] | None = None
+                    if explicit == currency.lower():
+                        # The payment spends all the fee token the payer holds: buy the fee too.
+                        rebuilt = await self._find_swap_calls(
+                            account=sender,
+                            amount_out=int(amount),
+                            token_out=currency,
+                            rpc_url=resolved_rpc,
+                            fee_headroom=required_balance,
+                        )
+                    else:
+                        # The fee token funds the swap: swap from another currency instead.
+                        assert self.auto_swap is not None
+                        for token_in in self.auto_swap.currencies():
+                            if token_in.lower() in (explicit, currency.lower()):
+                                continue
+                            try:
+                                rebuilt = await self._find_swap_calls(
+                                    account=sender,
+                                    amount_out=int(amount),
+                                    token_out=currency,
+                                    rpc_url=resolved_rpc,
+                                    token_in=token_in,
+                                )
+                            except InsufficientFundsError:
+                                continue
+                            break
+                    if rebuilt is None:
+                        raise TransactionError(
+                            "Charges require a funded fee token for transaction fees"
+                        )
+                    swap_calls, swap_spent = rebuilt
+                    if not swap_calls:
+                        # The currency balance rose since the first read: no swap is needed.
+                        swap_spent = {currency.lower(): int(amount)}
+                    calls_tuple = (
+                        *(Call.create(to=to, value=0, data=data) for to, data in swap_calls),
+                        *transfer_calls,
+                    )
+                    # The calls changed: size gas and the fee for the batch that is signed.
+                    gas_limit = await estimate_gas_limit(calls_tuple, bool(swap_calls))
+                    required_balance = fee_requirement(gas_limit)
+                    fee_balance = await _tip20_balance(resolved_rpc, fee_token, sender)
+                    if fee_balance - swap_spent.get(explicit, 0) < required_balance:
+                        raise TransactionError(
+                            "Charges require a funded fee token for transaction fees"
+                        )
         elif not awaiting_fee_payer:
             fee_token = currency
             # A swapping payer may not hold the currency before the swap, so
