@@ -238,6 +238,9 @@ class TempoMethod:
     # and the tokens it may select. ``None`` selects defaults at broadcast.
     fee_token: str | None = field(default=None, kw_only=True)
     allowed_fee_tokens: tuple[str, ...] | None = field(default=None, kw_only=True)
+    # Client-side: the token the payer pays an unsponsored transaction's fee in.
+    # ``None`` selects it from the charge currency and balances.
+    payer_fee_token: str | None = field(default=None, kw_only=True)
     # Client-side charge policy. ``max_atomic_amount`` is in base units;
     # ``max_amount`` is in token units and requires ``max_amount_decimals``.
     # Caps are validated at construction and read on every check. ``None``
@@ -921,7 +924,11 @@ class TempoMethod:
         gas_limit = await estimate_gas_limit(calls_tuple, swapping)
 
         fee_token: str | None = None
-        if not awaiting_fee_payer:
+        if not awaiting_fee_payer and self.payer_fee_token is not None:
+            # An explicit fee token, such as one an access key's spending limits
+            # cover (mppx#1149). Sponsored transactions leave it to the fee payer.
+            fee_token = self.payer_fee_token
+        elif not awaiting_fee_payer:
             fee_token = currency
             # A swapping payer may not hold the currency before the swap, so
             # it pays fees in a funded supported stablecoin.
@@ -1218,6 +1225,7 @@ def _tempo_method(
     allowed_chain_ids: Sequence[int] | None = None,
     auto_swap: bool | AutoSwap = False,
     mode: ChargeMode | None = None,
+    payer_fee_token: str | None = None,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
 
@@ -1324,6 +1332,11 @@ def _tempo_method(
 
     if fee_token is not None and fee_payer is None:
         raise ValueError("fee_token can only be configured for a local fee_payer")
+    if payer_fee_token is not None and (
+        not isinstance(payer_fee_token, str)  # pyright: ignore[reportUnnecessaryIsInstance]
+        or _ADDRESS_RE.fullmatch(payer_fee_token) is None
+    ):
+        raise ValueError(f"Invalid Tempo fee token address: {payer_fee_token!r}")
     if fee_token is not None and _ADDRESS_RE.fullmatch(fee_token) is None:
         raise ValueError(f"Invalid Tempo fee token address: {fee_token!r}")
     resolved_allowed_fee_tokens: tuple[str, ...] | None = None
@@ -1366,6 +1379,7 @@ def _tempo_method(
         allowed_chain_ids=allowed_chain_ids,
         auto_swap=AutoSwap() if auto_swap is True else auto_swap or None,
         mode=mode,
+        payer_fee_token=payer_fee_token,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
@@ -1392,6 +1406,7 @@ def charge(
     allowed_chain_ids: Sequence[int] | None = None,
     auto_swap: bool | AutoSwap = False,
     mode: ChargeMode | None = None,
+    fee_token: str | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
 
@@ -1409,6 +1424,12 @@ def charge(
     ``supportedModes`` allow it and otherwise pushes; an explicit mode the
     challenge does not support fails. Zero-amount charges are paid with a
     signed EIP-712 proof, without a transaction.
+
+    ``fee_token`` is the token the payer pays the transaction fee in when the
+    challenge is not fee-sponsored. Set it for an access key whose spending
+    limits do not cover the default fee token, such as a key limited to OUSD
+    paying a USDC.e charge. By default the fee is paid in the charge currency,
+    or in a funded supported stablecoin when that currency cannot pay fees.
 
     Example:
         from mpp.client import Mpp
@@ -1435,6 +1456,7 @@ def charge(
             allowed_chain_ids=allowed_chain_ids,
             auto_swap=auto_swap,
             mode=mode,
+            payer_fee_token=fee_token,
         )
     )
 
