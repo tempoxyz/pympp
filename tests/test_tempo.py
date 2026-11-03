@@ -455,6 +455,68 @@ class TestTempoMethod:
         assert decoded[10] == bytes.fromhex(USDC[2:])
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("currency", "fee_payer", "expected"),
+        [
+            pytest.param(PATH_USD, False, OUSD, id="unsponsored"),
+            pytest.param(MACH, False, OUSD, id="unsponsored-mach-skips-resolution"),
+            pytest.param(PATH_USD, True, None, id="sponsored-defers-to-fee-payer"),
+        ],
+    )
+    async def test_explicit_payer_fee_token(
+        self, currency: str, fee_payer: bool, expected: str | None
+    ) -> None:
+        """An explicit fee token pays an unsponsored charge's fee (mppx#1149)."""
+        method = _tempo_method(
+            account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+            chain_id=CHAIN_ID,
+            rpc_url="https://rpc.test",
+            payer_fee_token=OUSD,
+        )
+        challenge = Challenge(
+            id="explicit-fee-token",
+            method="tempo",
+            intent="charge",
+            request={
+                "amount": "1000",
+                "currency": currency,
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                "methodDetails": {"feePayer": fee_payer, "chainId": CHAIN_ID},
+            },
+        )
+
+        async def fake_rpc_call(
+            _rpc_url: str,
+            method_name: str,
+            _params: list[object],
+            *,
+            client: object | None = None,
+        ) -> str:
+            del client
+            return {"eth_chainId": hex(CHAIN_ID), "eth_gasPrice": "0x1"}[method_name]
+
+        balance = AsyncMock(return_value=10**12)
+        with (
+            patch("mpp.methods.tempo.client._rpc_call", side_effect=fake_rpc_call),
+            patch("mpp.methods.tempo.client._tip20_balance", balance),
+            patch(
+                "mpp.methods.tempo.client.estimate_gas",
+                new=AsyncMock(return_value=100_000),
+            ),
+        ):
+            credential = await method.create_credential(challenge)
+
+        decoded = _decode_signed_charge(credential.payload["signature"])
+        assert decoded[10] == (b"" if expected is None else bytes.fromhex(expected[2:]))
+        balance.assert_not_awaited()
+
+    def test_charge_rejects_invalid_fee_token(self) -> None:
+        from mpp.methods.tempo.client import charge
+
+        with pytest.raises(ValueError, match="Invalid Tempo fee token address"):
+            charge(account=TempoAccount.from_key(TEST_PRIVATE_KEY), fee_token="usdc")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("currency", [MACH, OUSD])
     async def test_sponsored_mach_charge_defers_fee_token_to_fee_payer(self, currency: str) -> None:
         account = TempoAccount.from_key(TEST_PRIVATE_KEY)
