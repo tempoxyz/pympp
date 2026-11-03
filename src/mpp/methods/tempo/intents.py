@@ -120,7 +120,12 @@ STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 
 MAX_SPLITS = 10
 MAX_TRANSFERS = MAX_SPLITS + 1
+# Broadcast errors meaning the node already holds this transaction.
 ALREADY_KNOWN_TRANSACTION_RE = re.compile(r"\b(?:already ?known|known transaction)\b", re.I)
+# Tempo's answer when the sender-signed transaction was already accepted. Its
+# replay key leaves out both signatures, so another envelope of the same
+# transaction (re-signed, or co-signed by another fee payer) raises it too.
+EXPIRING_NONCE_REPLAY_RE = re.compile(r"\bExpiringNonceReplay\b", re.I)
 # EIP-7966: the transaction was pooled but not confirmed within the sync timeout.
 SYNC_CONFIRMATION_TIMEOUT_CODE = 4
 # Seconds between receipt lookups; matches mppx's default Tempo polling interval.
@@ -467,7 +472,9 @@ def _rpc_error_msg(result: dict[str, Any]) -> str:
 _EXECUTION_ERROR_CODES = frozenset({3})
 
 
-def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
+def _is_ambiguous_broadcast_error(
+    error: Exception | dict[str, Any], *, resubmitted: bool = False
+) -> bool:
     """Return true when a failed broadcast may have reached the mempool.
 
     ``error`` is the exception raised by the send, matched anywhere in its
@@ -479,7 +486,12 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
       it was never sent.
     - HTTP 5xx responses. Other statuses are definitive.
     - JSON-RPC code 4, the EIP-7966 timeout for a pooled, unconfirmed transaction.
-    - Messages matching "already known" or "known transaction".
+    - Messages matching "already known" or "known transaction": already pooled.
+    - Tempo's ``ExpiringNonceReplay``, only when ``resubmitted``: this server
+      already broadcast this exact envelope (a reconciled retry), so it may be
+      pooled. Otherwise the error only says some envelope of the same
+      sender-signed transaction was accepted, possibly with another hash that
+      polling this one would never find, so it is definitive (one lookup).
 
     Everything else (e.g. -32601, -32602, insufficient funds) is definitive.
     """
@@ -489,7 +501,10 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
         rpc_error = error.get("error")
         if is_dict(rpc_error) and rpc_error.get("code") == SYNC_CONFIRMATION_TIMEOUT_CODE:
             return True
-        return ALREADY_KNOWN_TRANSACTION_RE.search(_rpc_error_msg(error)) is not None
+        message = _rpc_error_msg(error)
+        if EXPIRING_NONCE_REPLAY_RE.search(message):
+            return resubmitted
+        return ALREADY_KNOWN_TRANSACTION_RE.search(message) is not None
 
     seen: set[int] = set()
     cause: BaseException | None = error
@@ -504,6 +519,8 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
             (TimeoutError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError),
         ):
             return True
+        if EXPIRING_NONCE_REPLAY_RE.search(str(cause)):
+            return resubmitted
         if ALREADY_KNOWN_TRANSACTION_RE.search(str(cause)):
             return True
         cause = cause.__cause__ or cause.__context__
@@ -2323,7 +2340,7 @@ class ChargeIntent:
                     send_error = TimeoutError(
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
-                if not _is_ambiguous_broadcast_error(send_error):
+                if not _is_ambiguous_broadcast_error(send_error, resubmitted=reconciling):
                     outcome_unknown = False
                     raise
                 receipt = await self._recover_broadcast_receipt(
@@ -2344,7 +2361,7 @@ class ChargeIntent:
                 rpc_error = VerificationError(
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
-                if not _is_ambiguous_broadcast_error(result):
+                if not _is_ambiguous_broadcast_error(result, resubmitted=reconciling):
                     outcome_unknown = False
                     # The node answered, so it may have included the transaction
                     # before its reply failed: look for a receipt once.

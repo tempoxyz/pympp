@@ -78,6 +78,10 @@ from tests import TEST_REALM, challenges, http_request, internal_cause, make_cre
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Tempo's answer to an expiring-nonce transaction it already accepted.
+EXPIRING_NONCE_REPLAY_MESSAGE = (
+    "nonce manager error: Tempo Transaction nonce error: ExpiringNonceReplay(ExpiringNonceReplay)"
+)
 
 
 def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Response:
@@ -2829,6 +2833,23 @@ class TestChargeIntent:
             pytest.param({"error": {"code": -32000, "message": "already known"}}, True),
             pytest.param({"error": {"code": -32010, "message": "Known transaction: 0xab"}}, True),
             pytest.param({"error": {"code": 4, "message": "not confirmed"}}, True, id="eip-7966"),
+            pytest.param(
+                {
+                    "error": {
+                        "code": -32000,
+                        "message": EXPIRING_NONCE_REPLAY_MESSAGE,
+                    }
+                },
+                True,
+                id="expiring-nonce-replay",
+            ),
+            pytest.param(
+                VerificationError(
+                    f"Transaction submission failed: {EXPIRING_NONCE_REPLAY_MESSAGE}"
+                ),
+                True,
+                id="expiring-nonce-replay-exception",
+            ),
             pytest.param(httpx.ConnectError("connection refused"), False, id="connect-error"),
             pytest.param(httpx.ConnectTimeout("connect timed out"), False, id="connect-timeout"),
             pytest.param(httpx.PoolTimeout("pool exhausted"), False, id="pool-timeout"),
@@ -2848,13 +2869,41 @@ class TestChargeIntent:
         ],
     )
     def test_is_ambiguous_broadcast_error(self, error: Exception | dict, expected: bool) -> None:
-        assert _is_ambiguous_broadcast_error(error) is expected
+        assert _is_ambiguous_broadcast_error(error, resubmitted=True) is expected
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            pytest.param(
+                {"error": {"code": -32000, "message": EXPIRING_NONCE_REPLAY_MESSAGE}},
+                id="rpc-error",
+            ),
+            pytest.param(
+                VerificationError(
+                    f"Transaction submission failed: {EXPIRING_NONCE_REPLAY_MESSAGE}"
+                ),
+                id="exception",
+            ),
+        ],
+    )
+    def test_expiring_nonce_replay_is_definitive_for_a_first_submission(
+        self, error: Exception | dict
+    ) -> None:
+        """Another envelope of the same sender transaction may hold the replay slot."""
+        assert _is_ambiguous_broadcast_error(error) is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("send", "lookup_plan", "expected_error", "expected_lookups"),
         [
             pytest.param("already_known", ["pending", "mined"], None, 2, id="already-known-mined"),
+            pytest.param(
+                "expiring_nonce_replay",
+                ["mined"],
+                None,
+                1,
+                id="expiring-nonce-replay-mined",
+            ),
             pytest.param("sync_timeout", ["pending", "mined"], None, 2, id="sync-timeout-mined"),
             pytest.param("read_timeout", ["pending", "mined"], None, 2, id="read-timeout-mined"),
             pytest.param("disconnect", ["mined"], None, 1, id="disconnect-mined"),
@@ -2880,6 +2929,13 @@ class TestChargeIntent:
                 (TimeoutError, "timed out after 0.2s"),
                 2,
                 id="send-budget-exhausted-polls-reserved-window",
+            ),
+            pytest.param(
+                "expiring_nonce_replay",
+                ["pending"],
+                (VerificationError, "ExpiringNonceReplay"),
+                1,
+                id="expiring-nonce-replay-not-mined",
             ),
             pytest.param(
                 "already_known",
@@ -2951,6 +3007,9 @@ class TestChargeIntent:
         }
         send_results: dict[str, httpx.Response | Exception] = {
             "already_known": mock_response(200, {"error": {"message": "already known"}}),
+            "expiring_nonce_replay": mock_response(
+                200, {"error": {"code": -32000, "message": EXPIRING_NONCE_REPLAY_MESSAGE}}
+            ),
             "sync_timeout": mock_response(
                 200, {"error": {"code": 4, "message": "wasn't confirmed within 200ms"}}
             ),
@@ -5258,6 +5317,96 @@ class TestCosignAsFeePayer:
                 await intent.verify(credential, request)
         assert resolve.await_count == 1
         assert receipt_lookups == [first_hash]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reconciling", [False, True], ids=["first-submission", "reconciled"])
+    async def test_sponsored_expiring_nonce_replay_polls_only_a_resubmitted_envelope(
+        self, monkeypatch: pytest.MonkeyPatch, reconciling: bool
+    ) -> None:
+        """ExpiringNonceReplay is per sender transaction, not per co-signed envelope.
+
+        A first submission may collide with another envelope of the same sender
+        transaction whose hash differs, so it gets one receipt lookup. Only a
+        reconciled retry, which rebroadcasts this server's own envelope, polls.
+        """
+        from mpp.store import MemoryStore
+
+        monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        start = float(int(time.time()))
+        clock = [start]
+
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        intent._confirmation_timeout = 0.2
+        raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(start) + 60,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+        }
+        sends: list[str] = []
+        lookups: list[str] = []
+        send_results = ["timeout", "replay"] if reconciling else ["replay"]
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if json["method"] == "eth_sendRawTransactionSync":
+                outcome = send_results[len(sends)]
+                sends.append(outcome)
+                if outcome == "timeout":
+                    raise httpx.ReadTimeout("send timed out")
+                return mock_response(
+                    200, {"error": {"code": -32000, "message": EXPIRING_NONCE_REPLAY_MESSAGE}}
+                )
+            assert json["method"] == "eth_getTransactionReceipt"
+            lookups.append(json["params"][0])
+            return mock_response(200, {"result": None})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+        marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
+
+        with (
+            patch("mpp.methods.tempo.intents.time.time", side_effect=lambda: clock[0]),
+            patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
+            patch.object(intent, "_resolve_fee_token", AsyncMock(return_value=PATH_USD)),
+        ):
+            if reconciling:
+                with pytest.raises(InternalPaymentError):
+                    await intent.verify(credential, request)
+                assert await store.get(marker) is not None
+                clock[0] = start + 1
+                lookups.clear()
+            with pytest.raises(InternalPaymentError) as raised:
+                await intent.verify(credential, request)
+
+        cause = internal_cause(raised.value)
+        assert isinstance(cause, VerificationError)
+        assert "ExpiringNonceReplay" in str(cause)
+        assert sends[-1] == "replay"
+        if reconciling:
+            # This server's own envelope may still be pooled: poll for it.
+            assert len(lookups) > 1
+            assert len(set(lookups)) == 1
+            assert await store.get(marker) is not None
+        else:
+            # Another envelope may hold the replay slot: one lookup, then release.
+            assert len(lookups) == 1
+            assert await store.get(marker) is None
 
     @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_after_expiry_is_reconciled(
