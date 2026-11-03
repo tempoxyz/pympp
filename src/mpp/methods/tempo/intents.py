@@ -120,7 +120,12 @@ STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 
 MAX_SPLITS = 10
 MAX_TRANSFERS = MAX_SPLITS + 1
-ALREADY_KNOWN_TRANSACTION_RE = re.compile(r"\b(?:already ?known|known transaction)\b", re.I)
+# Broadcast errors meaning the node already holds the transaction: "already
+# known"/"known transaction" for a pooled one, and Tempo's ``ExpiringNonceReplay``
+# for an expiring-nonce transaction it already accepted (such as a retried send).
+ALREADY_KNOWN_TRANSACTION_RE = re.compile(
+    r"\b(?:already ?known|known transaction|ExpiringNonceReplay)\b", re.I
+)
 # EIP-7966: the transaction was pooled but not confirmed within the sync timeout.
 SYNC_CONFIRMATION_TIMEOUT_CODE = 4
 # Seconds between receipt lookups; matches mppx's default Tempo polling interval.
@@ -479,7 +484,10 @@ def _is_ambiguous_broadcast_error(error: Exception | dict[str, Any]) -> bool:
       it was never sent.
     - HTTP 5xx responses. Other statuses are definitive.
     - JSON-RPC code 4, the EIP-7966 timeout for a pooled, unconfirmed transaction.
-    - Messages matching "already known" or "known transaction".
+    - Messages matching "already known" or "known transaction": already pooled.
+    - Tempo's ``ExpiringNonceReplay``: an expiring-nonce transaction with this
+      hash was already accepted, such as when a transport retries a send the
+      node took.
 
     Everything else (e.g. -32601, -32602, insufficient funds) is definitive.
     """

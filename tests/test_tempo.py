@@ -78,6 +78,10 @@ from tests import TEST_REALM, challenges, http_request, internal_cause, make_cre
 
 # Valid test private key (must be < secp256k1 order)
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Tempo's answer to an expiring-nonce transaction it already accepted.
+EXPIRING_NONCE_REPLAY_MESSAGE = (
+    "nonce manager error: Tempo Transaction nonce error: ExpiringNonceReplay(ExpiringNonceReplay)"
+)
 
 
 def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Response:
@@ -2767,6 +2771,23 @@ class TestChargeIntent:
             pytest.param({"error": {"code": -32000, "message": "already known"}}, True),
             pytest.param({"error": {"code": -32010, "message": "Known transaction: 0xab"}}, True),
             pytest.param({"error": {"code": 4, "message": "not confirmed"}}, True, id="eip-7966"),
+            pytest.param(
+                {
+                    "error": {
+                        "code": -32000,
+                        "message": EXPIRING_NONCE_REPLAY_MESSAGE,
+                    }
+                },
+                True,
+                id="expiring-nonce-replay",
+            ),
+            pytest.param(
+                VerificationError(
+                    f"Transaction submission failed: {EXPIRING_NONCE_REPLAY_MESSAGE}"
+                ),
+                True,
+                id="expiring-nonce-replay-exception",
+            ),
             pytest.param(httpx.ConnectError("connection refused"), False, id="connect-error"),
             pytest.param(httpx.ConnectTimeout("connect timed out"), False, id="connect-timeout"),
             pytest.param(httpx.PoolTimeout("pool exhausted"), False, id="pool-timeout"),
@@ -2793,6 +2814,13 @@ class TestChargeIntent:
         ("send", "lookup_plan", "expected_error", "expected_lookups"),
         [
             pytest.param("already_known", ["pending", "mined"], None, 2, id="already-known-mined"),
+            pytest.param(
+                "expiring_nonce_replay",
+                ["pending", "mined"],
+                None,
+                2,
+                id="expiring-nonce-replay-mined",
+            ),
             pytest.param("sync_timeout", ["pending", "mined"], None, 2, id="sync-timeout-mined"),
             pytest.param("read_timeout", ["pending", "mined"], None, 2, id="read-timeout-mined"),
             pytest.param("disconnect", ["mined"], None, 1, id="disconnect-mined"),
@@ -2889,6 +2917,9 @@ class TestChargeIntent:
         }
         send_results: dict[str, httpx.Response | Exception] = {
             "already_known": mock_response(200, {"error": {"message": "already known"}}),
+            "expiring_nonce_replay": mock_response(
+                200, {"error": {"code": -32000, "message": EXPIRING_NONCE_REPLAY_MESSAGE}}
+            ),
             "sync_timeout": mock_response(
                 200, {"error": {"code": 4, "message": "wasn't confirmed within 200ms"}}
             ),
