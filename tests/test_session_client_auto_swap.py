@@ -12,7 +12,7 @@ import pytest
 from mpp import Challenge, Credential
 from mpp.methods.tempo import PATH_USD, USDC, TempoAccount
 from mpp.methods.tempo import client as tempo_client
-from mpp.methods.tempo.client import AutoSwap, InsufficientFundsError
+from mpp.methods.tempo.client import AutoSwap, InsufficientFundsError, TransactionError
 from mpp.methods.tempo.intents import STABLECOIN_DEX
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id
@@ -268,3 +268,19 @@ def test_factories_accept_auto_swap() -> None:
     assert isinstance(manager, SessionManager)
     assert manager._method.auto_swap is options  # pyright: ignore[reportPrivateUsage]
     assert session_manager(account=ACCOUNT)._method.auto_swap is None  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_expected_recipients_only_swap_into_chosen_currencies(fake: FakeChain) -> None:
+    # A recipient allowlist alone does not let auto-swap buy the token a challenge names.
+    fake.balances = {PATH_USD: 10_000}
+    fake.quotes = {PATH_USD.lower(): 1_000}
+    with pytest.raises(TransactionError, match="only buys a pinned or fallback currency"):
+        await pay(SessionMethod(account=ACCOUNT, auto_swap=True, expected_recipients=[PAYEE]))
+    assert fake.opens == []
+    # Pinning the challenge currency allows it again.
+    await pay(
+        SessionMethod(
+            account=ACCOUNT, auto_swap=True, expected_recipients=[PAYEE], currencies=[TOKEN]
+        )
+    )
+    assert_swap(fake.opens[0]["prefix_calls"], PATH_USD, DEPOSIT + FEE, 1_010)

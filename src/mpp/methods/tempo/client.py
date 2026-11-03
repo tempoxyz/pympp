@@ -1597,7 +1597,7 @@ def _parse_max_atomic_amount(value: int | str) -> int:
     raise ValueError("max_atomic_amount must be a non-negative integer or digit string")
 
 
-def _parse_max_amount(value: str | Decimal, decimals: int) -> int:
+def _parse_max_amount(value: str | Decimal, decimals: int, *, intent: str = "charge") -> int:
     """Convert a token-unit cap to base units exactly.
 
     Rejects significant fractional digits beyond ``decimals`` instead of
@@ -1625,7 +1625,7 @@ def _parse_max_amount(value: str | Decimal, decimals: int) -> int:
     atomic, remainder = divmod(coefficient, 10**-shift)
     if remainder:
         raise ValueError(
-            f"Tempo charge max_amount {value} has more fractional digits "
+            f"Tempo {intent} max_amount {value} has more fractional digits "
             f"than {decimals} decimals allow."
         )
     return atomic
