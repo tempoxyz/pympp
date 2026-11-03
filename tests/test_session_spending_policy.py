@@ -364,3 +364,18 @@ async def test_rejects_a_non_integer_amount_under_a_cap() -> None:
     method = SessionMethod(account=ACCOUNT, currencies=[TOKEN], max_atomic_amount="100")
     with pytest.raises(ValueError, match="Challenge amount must be an integer in base units"):
         await method.create_session_credential(make_challenge(amount="1.5"), VOUCHER)
+
+
+@pytest.mark.parametrize("amount", [float("inf"), 1e999, 1.0, True, -1, "1e3", " 100"])
+def test_skips_a_non_digit_amount_under_a_cap(amount: Any) -> None:
+    method = SessionMethod(account=ACCOUNT, currencies=[TOKEN], max_atomic_amount="100")
+    assert not method.can_handle_challenge(make_challenge(amount=amount))
+
+
+def test_reads_one_shot_allowlists_once() -> None:
+    method = SessionMethod(
+        account=ACCOUNT,
+        currencies=(currency for currency in [TOKEN]),  # pyright: ignore[reportArgumentType]
+        expected_recipients=map(str.strip, [PAYEE]),  # pyright: ignore[reportArgumentType]
+    )
+    assert method.can_handle_challenge(make_challenge())

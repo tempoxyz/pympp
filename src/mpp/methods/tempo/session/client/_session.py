@@ -9,6 +9,7 @@ up first when it cannot cover the next voucher.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -231,10 +232,15 @@ class _SpendingPolicy:
             raise ValueError(f"Unexpected session recipient: {recipient}")
         if self.max_atomic_amount is None and self.max_amount is None:
             return
-        try:
-            amount = int(request["amount"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("Challenge amount must be an integer in base units") from error
+        # Accept only base-unit digits, as resolve_challenge_context does: a JSON float such as
+        # Infinity would otherwise raise OverflowError instead of skipping the offer.
+        raw = request.get("amount")
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+            amount = raw
+        elif isinstance(raw, str) and re.fullmatch(r"[0-9]+", raw):
+            amount = int(raw)
+        else:
+            raise ValueError("Challenge amount must be an integer in base units")
         if self.max_atomic_amount is not None and amount > self.max_atomic_amount:
             raise ValueError("Tempo session amount exceeds max_atomic_amount.")
         if self.max_amount is not None and amount > self.max_amount:
@@ -255,6 +261,8 @@ def _address_set(addresses: Sequence[str] | None, kind: str) -> frozenset[str] |
         return None
     if isinstance(addresses, str):
         raise ValueError(f"Tempo session {kind} allowlist must be a sequence of addresses")
+    # Read the input once, so a one-shot iterable is not exhausted by validation.
+    addresses = tuple(addresses)
     for address in addresses:
         if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ValueError(f"Invalid Tempo {kind} address: {address!r}")
