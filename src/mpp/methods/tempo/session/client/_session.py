@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -18,6 +20,11 @@ from mpp import AUTHORIZATION_HEADER, Challenge
 from mpp._parsing import ParseError
 from mpp._typing import is_dict
 from mpp._units import parse_units
+from mpp.methods.tempo.client import (
+    _ADDRESS_RE,  # pyright: ignore[reportPrivateUsage]
+    _parse_max_amount,  # pyright: ignore[reportPrivateUsage]
+    _parse_max_atomic_amount,  # pyright: ignore[reportPrivateUsage]
+)
 from mpp.methods.tempo.session._protocol import (
     SessionReceipt,
     definition,
@@ -168,6 +175,92 @@ async def post_management_credential(
     return await post(fresh[0])
 
 
+@dataclass(frozen=True, slots=True)
+class _SpendingPolicy:
+    """The client's session spending options, validated and parsed once (mppx ``SpendingPolicy``).
+
+    Addresses are lowercased; ``None`` disables a check.
+    """
+
+    currencies: frozenset[str] | None
+    expected_recipients: frozenset[str] | None
+    max_atomic_amount: int | None
+    max_amount: int | None
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        currencies: Sequence[str] | None,
+        expected_recipients: Sequence[str] | None,
+        max_atomic_amount: int | str | None,
+        max_amount: str | Decimal | None,
+        max_amount_decimals: int | None,
+    ) -> _SpendingPolicy:
+        # Caps are denominated in the challenge currency, so they require a currency pin.
+        if (max_atomic_amount is not None or max_amount is not None) and currencies is None:
+            raise ValueError("Tempo session max_amount and max_atomic_amount require currencies.")
+        if max_amount is not None and max_amount_decimals is None:
+            raise ValueError("Tempo session max_amount requires max_amount_decimals.")
+        return cls(
+            currencies=_address_set(currencies, "currency"),
+            expected_recipients=_address_set(expected_recipients, "recipient"),
+            max_atomic_amount=(
+                None if max_atomic_amount is None else _parse_max_atomic_amount(max_atomic_amount)
+            ),
+            max_amount=(
+                None
+                if max_amount is None or max_amount_decimals is None
+                else _parse_max_amount(max_amount, max_amount_decimals, intent="session")
+            ),
+        )
+
+    def check(self, request: dict[str, Any]) -> None:
+        """Reject a session request whose currency, recipient or per-unit amount violates the
+        policy. Runs during challenge selection, before automatic top-ups and before signing."""
+        currency = request.get("currency")
+        if self.currencies is not None and (
+            not isinstance(currency, str) or currency.lower() not in self.currencies
+        ):
+            raise ValueError(f"Tempo session currency is not allowed: {currency}.")
+        # The recipient is the channel payee, so it must be one the client expects, as for charge.
+        recipient = request.get("recipient")
+        if self.expected_recipients is not None and (
+            not isinstance(recipient, str) or recipient.lower() not in self.expected_recipients
+        ):
+            raise ValueError(f"Unexpected session recipient: {recipient}")
+        if self.max_atomic_amount is None and self.max_amount is None:
+            return
+        try:
+            amount = int(request["amount"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("Challenge amount must be an integer in base units") from error
+        if self.max_atomic_amount is not None and amount > self.max_atomic_amount:
+            raise ValueError("Tempo session amount exceeds max_atomic_amount.")
+        if self.max_amount is not None and amount > self.max_amount:
+            raise ValueError("Tempo session amount exceeds max_amount.")
+
+    def allows(self, request: dict[str, Any]) -> bool:
+        """Whether a session request satisfies the policy."""
+        try:
+            self.check(request)
+        except ValueError:
+            return False
+        return True
+
+
+def _address_set(addresses: Sequence[str] | None, kind: str) -> frozenset[str] | None:
+    """Validate an address allowlist and lowercase it; an empty one rejects everything."""
+    if addresses is None:
+        return None
+    if isinstance(addresses, str):
+        raise ValueError(f"Tempo session {kind} allowlist must be a sequence of addresses")
+    for address in addresses:
+        if not isinstance(address, str) or _ADDRESS_RE.fullmatch(address) is None:  # pyright: ignore[reportUnnecessaryIsInstance]
+            raise ValueError(f"Invalid Tempo {kind} address: {address!r}")
+    return frozenset(address.lower() for address in addresses)
+
+
 class SessionMethod:
     """The configured session client method behind :func:`session` and the session manager."""
 
@@ -186,7 +279,19 @@ class SessionMethod:
         on_channel_update: Callable[[ChannelEntry], None] | None = None,
         rpc_url: str | None = None,
         http_client: httpx.AsyncClient | None = None,
+        currencies: Sequence[str] | None = None,
+        expected_recipients: Sequence[str] | None = None,
+        max_atomic_amount: int | str | None = None,
+        max_amount: str | Decimal | None = None,
+        max_amount_decimals: int | None = None,
     ) -> None:
+        self._policy = _SpendingPolicy.resolve(
+            currencies=currencies,
+            expected_recipients=expected_recipients,
+            max_atomic_amount=max_atomic_amount,
+            max_amount=max_amount,
+            max_amount_decimals=max_amount_decimals,
+        )
         if allowed_chain_ids is not None:
             if isinstance(allowed_chain_ids, (str, bytes)):
                 raise ValueError("allowed_chain_ids must be a sequence of chain IDs")
@@ -240,7 +345,10 @@ class SessionMethod:
         )
 
     def can_handle_challenge(self, challenge: Challenge) -> bool:
-        return is_tip1034_session_challenge(challenge)
+        """Whether this method pays ``challenge``: a TIP-1034 session offer within the spending
+        policy, so an acceptable offer can be chosen instead. Explicit closes do not go through
+        selection (they call :meth:`create_session_credential`), so they stay available."""
+        return is_tip1034_session_challenge(challenge) and self._policy.allows(challenge.request)
 
     async def create_session_credential(
         self, challenge: Challenge, context: SessionContext | None = None
@@ -266,6 +374,9 @@ class SessionMethod:
         context = params.context
         if context is not None and not isinstance(context, SessionContext):
             raise TypeError("tempo session context must be a SessionContext")
+        # Closing settles what the channel already spent, so it stays available for any offer.
+        if context is None or context.action != "close":
+            self._policy.check(challenge.request)
         resolved = await self.resolve(challenge)
         automatic = context is None or (context.action is None and context.descriptor is None)
         scope = f"channel:{resolved.key}"
@@ -419,6 +530,7 @@ class SessionMethod:
         authorization: str | None = None,
     ) -> SessionReceipt | None:
         """POST an automatic top-up when ``required_cumulative`` exceeds the deposit."""
+        self._policy.check(challenge.request)
 
         async def run() -> SessionReceipt | None:
             nonlocal channel
@@ -607,6 +719,11 @@ def session(
     on_channel_update: Callable[[ChannelEntry], None] | None = None,
     rpc_url: str | None = None,
     http_client: httpx.AsyncClient | None = None,
+    currencies: Sequence[str] | None = None,
+    expected_recipients: Sequence[str] | None = None,
+    max_atomic_amount: int | str | None = None,
+    max_amount: str | Decimal | None = None,
+    max_amount_decimals: int | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo session (TIP-1034) challenges.
 
@@ -639,6 +756,23 @@ def session(
         rpc_url: Tempo RPC for open/top-up transactions; the challenge chain's
             default RPC when omitted.
         http_client: httpx client for RPC calls.
+        currencies: Allowlist of TIP-20 currency addresses the client pays sessions in,
+            compared case-insensitively. Offers in other currencies are skipped during
+            challenge selection and rejected before signing or topping up; an empty
+            sequence rejects all. Required with ``max_amount`` or ``max_atomic_amount``.
+        expected_recipients: Allowlist of session recipients (the channel payee), compared
+            case-insensitively. Offers to other recipients, or without one, are skipped and
+            rejected the same way.
+        max_atomic_amount: Maximum per-unit amount (the challenge ``amount``) in base units of
+            the challenge currency, as an int or a string of digits. Larger offers are skipped
+            and rejected. Requires ``currencies``.
+        max_amount: Maximum per-unit amount in token units (such as ``"1.5"``), checked like
+            ``max_atomic_amount``. Requires ``max_amount_decimals`` and ``currencies``; a value
+            with more fractional digits than the decimals allow is rejected, not rounded.
+        max_amount_decimals: Token decimals used to convert ``max_amount`` to base units.
+
+    The spending options never block an explicit close (``SessionContext(action="close")``,
+    :meth:`SessionManager.close`), which settles what the channel already spent.
 
     Example:
         from mpp.client import Mpp
@@ -662,4 +796,9 @@ def session(
         on_channel_update=on_channel_update,
         rpc_url=rpc_url,
         http_client=http_client,
+        currencies=currencies,
+        expected_recipients=expected_recipients,
+        max_atomic_amount=max_atomic_amount,
+        max_amount=max_amount,
+        max_amount_decimals=max_amount_decimals,
     ).client_method()

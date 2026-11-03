@@ -987,7 +987,7 @@ module mpp.methods.tempo.session.client
         property spent: int
         async def top_up(self, amount: str | int) -> SessionReceipt | None
     class SessionMethod
-        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None) -> None
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None) -> None
         def can_handle_challenge(self, challenge: Challenge) -> bool
         def client_method(self) -> ClientMethod
         async def create_credential(self, params: CredentialParams) -> str
@@ -1016,7 +1016,7 @@ module mpp.methods.tempo.session.client
     def create_json_channel_store(kv: JsonChannelKv) -> JsonChannelStore
     def deserialize_snapshot(value: str) -> SessionSnapshot
     def serialize_snapshot(snapshot: SessionSnapshot) -> str
-    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None) -> ClientMethod
+    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None) -> ClientMethod
     def session_manager(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None) -> SessionManager
 
 module mpp.methods.tempo.session.server
