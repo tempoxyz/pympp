@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from mpp import Challenge, Credential
-from mpp.methods.tempo import PATH_USD, USDC, TempoAccount
+from mpp.methods.tempo import OUSD, PATH_USD, USDC, TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo.client import AutoSwap, InsufficientFundsError, TransactionError
 from mpp.methods.tempo.intents import STABLECOIN_DEX
@@ -284,3 +284,20 @@ async def test_expected_recipients_only_swap_into_chosen_currencies(fake: FakeCh
         )
     )
     assert_swap(fake.opens[0]["prefix_calls"], PATH_USD, DEPOSIT + FEE, 1_010)
+
+
+async def test_sponsored_open_swaps_from_ousd(fake: FakeChain) -> None:
+    # A payer holding only OUSD funds the deposit by swap; the fee payer pays gas.
+    fake.balances = {OUSD: 10_000}
+    fake.quotes = {OUSD.lower(): DEPOSIT}
+    await pay(SessionMethod(account=ACCOUNT, auto_swap=True), fee_payer=True)
+    assert_swap(fake.opens[0]["prefix_calls"], OUSD, DEPOSIT, DEPOSIT + DEPOSIT // 100)
+
+
+async def test_fallback_false_limits_swaps_to_token_in(fake: FakeChain) -> None:
+    fake.balances = {PATH_USD: 10_000}
+    fake.quotes = {PATH_USD.lower(): 1_000}
+    method = SessionMethod(account=ACCOUNT, auto_swap=AutoSwap(token_in=[USDC], fallback=False))
+    with pytest.raises(InsufficientFundsError):
+        await pay(method)
+    assert fake.opens == []

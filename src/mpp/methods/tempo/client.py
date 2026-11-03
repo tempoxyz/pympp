@@ -86,8 +86,9 @@ class InsufficientFundsError(TransactionError):
         self.currency = currency
 
 
-# Fallback currencies an auto-swap pays from, in priority order.
-AUTO_SWAP_CURRENCIES: tuple[str, ...] = (PATH_USD, USDC)
+# Fallback currencies an auto-swap pays from, in priority order. OUSD can fund a
+# swap but cannot pay transaction fees, so fees still come from a fee token.
+AUTO_SWAP_CURRENCIES: tuple[str, ...] = (PATH_USD, USDC, OUSD)
 # keccak256("quoteSwapExactAmountOut(address,address,uint128)")[:4]
 _QUOTE_SWAP_EXACT_AMOUNT_OUT_SELECTOR = "1576fa0e"
 
@@ -98,12 +99,17 @@ class AutoSwap:
 
     Attributes:
         token_in: Currencies to swap from, in priority order. The default
-            fallback currencies (pathUSD, then USDC.e) are tried after them.
+            fallback currencies (pathUSD, then USDC.e, then OUSD) are tried
+            after them unless ``fallback`` is ``False``.
         slippage: Maximum slippage over the DEX quote, in percent (``1`` = 1%).
+        fallback: Whether to also try the default currencies after
+            ``token_in``. ``False`` swaps only from ``token_in``, as an
+            allowlist. Ignored without ``token_in``.
     """
 
     token_in: Sequence[str] | None = None
     slippage: float = 1
+    fallback: bool = True
 
     def __post_init__(self) -> None:
         if isinstance(self.token_in, str):
@@ -114,6 +120,8 @@ class AutoSwap:
     def currencies(self) -> tuple[str, ...]:
         """Return the currencies to swap from, explicit ones first."""
         explicit = tuple(self.token_in or ())
+        if self.token_in is not None and not self.fallback:
+            return explicit
         chosen = {token.lower() for token in explicit}
         return explicit + tuple(t for t in AUTO_SWAP_CURRENCIES if t.lower() not in chosen)
 
@@ -1355,8 +1363,10 @@ def _tempo_method(
             before signing. An empty sequence rejects every charge.
         auto_swap: When the payer lacks the challenge currency, buy it through
             the Tempo stablecoin DEX from a fallback currency (pathUSD, then
-            USDC.e) in the same transaction. ``True`` uses 1% slippage; pass
-            :class:`AutoSwap` to prepend currencies or change the slippage.
+            USDC.e, then OUSD) in the same transaction. ``True`` uses 1%
+            slippage; pass :class:`AutoSwap` to prepend currencies, restrict
+            them to ``token_in`` (``fallback=False``) or change the slippage.
+            Fees are never paid in OUSD, which is not a fee token.
             Raises :class:`InsufficientFundsError` when no currency can fund it.
             With ``expected_recipients``, it only buys a currency the client
             pinned or swaps from.

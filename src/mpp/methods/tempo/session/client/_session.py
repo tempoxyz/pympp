@@ -766,8 +766,9 @@ def session(
         auto_swap: When the payer lacks the session currency for an open or
             top-up, buy it on the stablecoin DEX from a fallback stablecoin in
             the same transaction. ``True`` uses the defaults; pass an
-            :class:`~mpp.methods.tempo.client.AutoSwap` to prepend currencies or
-            change the slippage. A credential's ``SessionContext.auto_swap``
+            :class:`~mpp.methods.tempo.client.AutoSwap` to prepend currencies,
+            restrict them to ``token_in`` (``fallback=False``) or change the
+            slippage. A credential's ``SessionContext.auto_swap``
             overrides it.
         channel_store: Persistence for reusable channels (in memory by default).
         on_channel_update: Called with the channel entry whenever it changes.
