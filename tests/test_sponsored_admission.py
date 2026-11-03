@@ -10,7 +10,7 @@ from mpp.methods.tempo import _sponsored_admission as admission
 from mpp.store import MemoryStore
 
 
-async def challenge(store, tx="0x01", payer="0xAA"):
+async def challenge(store, tx="0x01", payer="0xAA", *, expiring=True):
     return await admission.claim_challenge(
         store,
         realm="merchant.example",
@@ -20,7 +20,7 @@ async def challenge(store, tx="0x01", payer="0xAA"):
         payer=payer,
         currency="0xBB",
         amount="1",
-        expires_at=time.time() + 60,
+        expires_at=time.time() + 60 if expiring else None,
     )
 
 
@@ -98,12 +98,11 @@ async def test_redis_bytes_preserve_challenge_retry():
             return value.encode() if isinstance(value, str) else value
 
     store = BytesStore()
-    first = await challenge(store)
-    retry = await challenge(store)
-    assert not retry.created
-    assert (await challenge(store)).value == retry.value
-    await admission.release(store, retry)
-    assert await store.get(first.key) is None
+    claims = [await challenge(store) for _ in range(3)]
+    assert claims[0].created and not claims[1].created
+    for index, claim in enumerate(claims):
+        await admission.release(store, claim)
+        assert (await store.get(claim.key) is not None) is (index < 2)
 
 
 @pytest.mark.asyncio
@@ -113,7 +112,11 @@ async def test_adopted_challenge_survives_its_creators_cleanup():
     adopter = await challenge(store)
     assert creator.created and not adopter.created
     await admission.release(store, creator)
-    assert await store.get(creator.key) == adopter.value
+    import json
+
+    current = await store.get(creator.key)
+    assert current is not None
+    assert json.loads(current)["attempts"] == [adopter.attempt]
     with pytest.raises(CredentialReplayedError):
         await challenge(store, "0x02")
 
@@ -251,3 +254,111 @@ async def test_settled_payer_is_released_before_waiting():
     assert claim.created
     sleep.assert_not_awaited()
     settled.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retaining", [0, 1])
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+async def test_submitted_attempt_retains_binding_after_every_attempt_finishes(retaining, order):
+    store = MemoryStore()
+    claims = [await challenge(store), await challenge(store)]
+    for index in order:
+        await admission.release(store, claims[index], retain=index == retaining)
+    with pytest.raises(CredentialReplayedError):
+        await challenge(store, "0x02")
+    reconciliation = await challenge(store)
+    await admission.release(store, reconciliation, reset_retained=True)
+    assert (await challenge(store, "0x02")).created
+
+
+@pytest.mark.asyncio
+async def test_repeated_cleanup_cannot_release_a_replacement_attempt():
+    store = MemoryStore()
+    old = await challenge(store)
+    await admission.release(store, old)
+    replacement = await challenge(store)
+    await admission.release(store, old)
+    assert await store.get(old.key) == replacement.value
+
+
+@pytest.mark.asyncio
+async def test_concurrent_attempt_cleanup_preserves_expiry():
+    class ContendedStore(MemoryStore):
+        async def compare_and_set(self, key, expected, value):
+            await asyncio.sleep(0)
+            return await super().compare_and_set(key, expected, value)
+
+    store = ContendedStore()
+    first = await challenge(store)
+    expiry = store._expiry_deadlines[first.key]
+    claims = [first, *await asyncio.gather(*(challenge(store) for _ in range(10)))]
+    assert store._expiry_deadlines[first.key] == expiry
+    await asyncio.gather(*(admission.release(store, claim) for claim in claims))
+    assert await store.get(first.key) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adopted", [False, True])
+async def test_legacy_binding_retained_when_old_attempt_outcomes_are_unknown(adopted):
+    import json
+
+    store = MemoryStore()
+    initial = await challenge(store)
+    legacy = json.loads(initial.value)
+    legacy.pop("attempts")
+    legacy.pop("retained")
+    if adopted:
+        legacy["adopted"] = True
+    await store.put(initial.key, json.dumps(legacy))
+    retry = await challenge(store)
+    await admission.release(store, retry)
+    with pytest.raises(CredentialReplayedError):
+        await challenge(store, "0x02")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [{"attempts": 1}, {"attempts": [1]}, {"retained": "yes"}])
+async def test_malformed_ownership_fails_closed(invalid):
+    import json
+
+    store = MemoryStore()
+    initial = await challenge(store)
+    await store.put(initial.key, json.dumps({**json.loads(initial.value), **invalid}))
+    with pytest.raises(InternalPaymentError):
+        await challenge(store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("order", [(0, 1), (1, 0)])
+async def test_nonexpiring_binding_is_released_after_both_attempts_fail(order):
+    store = MemoryStore()
+    claims = [await challenge(store, expiring=False), await challenge(store, expiring=False)]
+    await admission.release(store, claims[order[0]])
+    assert await store.get(claims[0].key) is not None
+    await admission.release(store, claims[order[1]])
+    assert await store.get(claims[0].key) is None
+    assert (await challenge(store, "0x02", expiring=False)).created
+
+
+@pytest.mark.asyncio
+async def test_confirmed_exclusion_releases_crashed_attempt_without_deleting_replacement():
+    store = MemoryStore()
+    crashed = await challenge(store)
+    retry = await challenge(store)
+    await admission.release(store, retry, reset_retained=True)
+    replacement = await challenge(store, "0x02")
+    await admission.release(store, crashed)
+    assert await store.get(replacement.key) == replacement.value
+
+
+@pytest.mark.asyncio
+async def test_failed_cleanup_cas_keeps_ownership_and_has_a_retry_bound():
+    from unittest.mock import AsyncMock
+
+    store = MemoryStore()
+    claim = await challenge(store)
+    store.compare_and_set = AsyncMock(return_value=False)
+    with pytest.raises(InternalPaymentError):
+        await admission.release(store, claim)
+    assert store.compare_and_set.await_count == 100
+    assert await store.get(claim.key) == claim.value

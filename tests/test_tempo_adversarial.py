@@ -846,10 +846,10 @@ async def test_admission_cleanup_finishes_before_retry_can_acquire_replay_claims
     entered, resume = asyncio.Event(), asyncio.Event()
     release = admission.release
 
-    async def delayed_release(store, claim):
+    async def delayed_release(store, claim, **kwargs):
         entered.set()
         await resume.wait()
-        await release(store, claim)
+        await release(store, claim, **kwargs)
 
     with (
         patch.object(
@@ -910,3 +910,43 @@ async def test_next_charge_reconciles_payer_claim(status, excluded, remaining):
             await intent.verify(_tx_credential(envelope), _request(fee_payer=True))
             assert len(rpc.sent) == 1
             assert await intent._store.get(claim.key) is None
+
+
+@pytest.mark.parametrize("finish_order", [(0, 1), (1, 0)])
+async def test_overlapping_rejections_release_the_shared_challenge(finish_order):
+    from mpp.methods.tempo import SponsorBudget
+    from mpp.methods.tempo import _sponsored_admission as admission
+
+    shared = MemoryStore()
+    rpc = FakeRpc()
+    intents = [make_intent(rpc, fee_payer=True) for _ in range(2)]
+    for intent in intents:
+        intent._sponsor_budget = SponsorBudget(store=shared)
+    credential = _tx_credential(signed_tx((pay_call(),), fee_payer=True))
+    entered = [asyncio.Event(), asyncio.Event()]
+    finish = [asyncio.Event(), asyncio.Event()]
+    count = 0
+
+    async def reject_payer(*args, **kwargs):
+        nonlocal count
+        index = count
+        count += 1
+        entered[index].set()
+        await finish[index].wait()
+        raise VerificationError("preflight rejected")
+
+    with patch.object(admission, "claim_payer", reject_payer):
+        tasks = []
+        for index, intent in enumerate(intents):
+            tasks.append(asyncio.create_task(intent.verify(credential, _request(fee_payer=True))))
+            await asyncio.wait_for(entered[index].wait(), 2)
+        for offset, index in enumerate(finish_order):
+            finish[index].set()
+            with pytest.raises(VerificationError, match="preflight rejected"):
+                await tasks[index]
+            bindings = [key for key in shared._data if ":challenge:" in key]
+            assert bool(bindings) is (offset == 0)
+    assert rpc.sent == []
+    replacement = _tx_credential(signed_tx((pay_call(),), fee_payer=True, nonce=1))
+    await intents[0].verify(replacement, _request(fee_payer=True))
+    assert len(rpc.sent) == 1

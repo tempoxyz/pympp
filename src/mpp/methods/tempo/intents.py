@@ -2136,6 +2136,7 @@ class ChargeIntent:
         challenge_claim: _sponsored_admission.Claim | None = None
         payer_claim: _sponsored_admission.Claim | None = None
         admitting = False
+        challenge_excluded = False
 
         async def cleanup_admission() -> None:
             nonlocal challenge_claim, payer_claim
@@ -2146,14 +2147,14 @@ class ChargeIntent:
                     verified or (not outcome_unknown and not reconciling)
                 ):
                     await _sponsored_admission.release(admission_store, payer_claim)
-                if (
-                    challenge_claim is not None
-                    and challenge_claim.created
-                    and not broadcast_attempted
-                    and not reconciling
-                    and not verified
-                ):
-                    await _sponsored_admission.release(admission_store, challenge_claim)
+                if challenge_claim is not None:
+                    await _sponsored_admission.release(
+                        admission_store,
+                        challenge_claim,
+                        retain=(broadcast_attempted or reconciling or verified)
+                        and not challenge_excluded,
+                        reset_retained=challenge_excluded,
+                    )
             except Exception:
                 logger.exception("Sponsored admission cleanup failed")
             finally:
@@ -2425,8 +2426,7 @@ class ChargeIntent:
                 outcome_unknown = reconciling = False
                 # A reverted or excluded transaction moved no funds: release the
                 # challenge so the retry its 402 invites can bind a new transaction.
-                if challenge_claim is not None:
-                    challenge_claim = replace(challenge_claim, created=True)
+                challenge_excluded = not broadcast_attempted
             # Remove admission ownership before reopening transaction replay claims.
             # A same-envelope retry must not adopt a binding we later delete.
             await cleanup_admission()
