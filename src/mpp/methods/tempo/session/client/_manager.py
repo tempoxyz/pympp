@@ -781,7 +781,9 @@ class SessionManager:
             challenge_id=close_challenge.id,
             channel_id=channel.channel_id,
             expected_close_amount=str(state["amount"]),
-            minimum_spent=self._spent,
+            # HTTP credits can lower spend acknowledged earlier. The receipt stays bound to this
+            # exact close credential, and a lower final charge benefits the payer.
+            minimum_spent=0,
         ):
             raise ValueError("Session close response included a mismatched payment receipt.")
         self._spent = max(self._spent, int(receipt.spent))

@@ -710,6 +710,32 @@ async def test_credit_rejects_missing_channel_and_invalid_amounts() -> None:
         await store.credit_channel(cs, CHANNEL_ID, 1, idempotency_key="refund-1", units=-1)
 
 
+async def test_credit_marker_capacity() -> None:
+    cs = store.from_store(MemoryStore())
+    await seed(cs, highest_voucher_amount=5_000_000, spent=3_000_000)
+    await store.credit_channel(cs, CHANNEL_ID, 1, idempotency_key="refund-1", max_markers=2)
+    await store.deduct_from_channel(cs, CHANNEL_ID, 1, idempotency_key="charge-1")
+    with pytest.raises(RuntimeError, match="marker capacity reached"):
+        await store.credit_channel(cs, CHANNEL_ID, 1, idempotency_key="refund-2", max_markers=2)
+    # A recorded key still replays at capacity.
+    replay = await store.credit_channel(
+        cs, CHANNEL_ID, 1, idempotency_key="refund-1", max_markers=2
+    )
+    assert replay.status == "credited" and replay.replayed
+    loaded = await cs.get_channel(CHANNEL_ID)
+    assert loaded is not None and loaded.spent == 3_000_000
+
+
+@pytest.mark.parametrize("max_markers", [0, -1, True])
+async def test_credit_rejects_invalid_max_markers(max_markers: int) -> None:
+    cs = store.from_store(MemoryStore())
+    await seed(cs, highest_voucher_amount=5_000_000, spent=3_000_000)
+    with pytest.raises(ValueError, match="max_markers"):
+        await store.credit_channel(
+            cs, CHANNEL_ID, 1, idempotency_key="refund-1", max_markers=max_markers
+        )
+
+
 # ---------- settleable vouchers ----------
 
 

@@ -647,6 +647,7 @@ async def credit(
     amount: int,
     *,
     idempotency_key: str,
+    max_markers: int = 1024,
     retention: int | None = None,
     units: int = 0,
 ) -> CreditResult:
@@ -655,13 +656,15 @@ async def credit(
     The first outcome for a key is final. A credit is ``declined`` when the channel is closing
     or finalized, or when it would take ``spent`` below zero or below what settled, or may still
     settle, on-chain; the caller then refunds another way. ``unknown`` reports a store write
-    that failed and may have committed: retry with the same key.
+    that failed and may have committed: retry with the same key. A new key raises
+    ``RuntimeError`` once the channel holds ``max_markers`` live idempotency markers.
     """
     return await credit_channel(
         resolve_channel_store(store),
         channel_id,
         amount,
         idempotency_key=idempotency_key,
+        max_markers=max_markers,
         retention=retention,
         units=units,
     )
