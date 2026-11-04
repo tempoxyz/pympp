@@ -17,6 +17,7 @@ from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.client import (
     AutoSwap,
+    TransactionError,
     _find_auto_swap_calls,  # pyright: ignore[reportPrivateUsage]
 )
 from mpp.methods.tempo.session import _chain as chain
@@ -578,6 +579,10 @@ async def resolve_auto_swap_calls(
         trusted_currencies=trusted_currencies,
         client=client,
     )
+    # The swap's amountOut is its third word. Servers reject a swap that buys more than
+    # the deposit, so a payer holding less channel token than the fee fails before signing.
+    if calls and int(calls[-1][1][138:202], 16) > amount_out:
+        raise TransactionError("Sessions require a funded channel token for transaction fees")
     return calls
 
 

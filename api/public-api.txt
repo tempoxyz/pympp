@@ -734,11 +734,12 @@ module mpp.methods.tempo.client
     class TransactionError(Exception)
     class InsufficientFundsError(mpp.methods.tempo.client.TransactionError)
         def __init__(self, currency: str) -> None
-    AUTO_SWAP_CURRENCIES = ('0x20c0000000000000000000000000000000000000', '0x20C000000000000000000000b9537d11c60E8b50')
+    AUTO_SWAP_CURRENCIES = ('0x20c0000000000000000000000000000000000000', '0x20C000000000000000000000b9537d11c60E8b50', '0x20c0000000000000000000006a37DA5C996874BE')
     class AutoSwap
         @dataclass(frozen=True, slots=False)
         field token_in: Sequence[str] | None = None
         field slippage: float = 1
+        field fallback: bool = True
         def currencies(self) -> tuple[str, ...]
     class TempoMethod
         @dataclass(frozen=False, slots=False)

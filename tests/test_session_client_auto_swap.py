@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from mpp import Challenge, Credential
-from mpp.methods.tempo import PATH_USD, USDC, TempoAccount
+from mpp.methods.tempo import OUSD, PATH_USD, USDC, TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo.client import AutoSwap, InsufficientFundsError, TransactionError
 from mpp.methods.tempo.intents import STABLECOIN_DEX
@@ -213,19 +213,19 @@ async def test_unsponsored_opens_also_buy_their_fee(fake: FakeChain) -> None:
 
 
 async def test_options_choose_currencies_and_slippage(fake: FakeChain) -> None:
-    fake.balances = {USDC: 10_000, PATH_USD: 10_000}
+    fake.balances = {TOKEN: FEE, USDC: 10_000, PATH_USD: 10_000}
     fake.quotes = {USDC.lower(): 1_000, PATH_USD.lower(): 1_000}
     await pay(SessionMethod(account=ACCOUNT, auto_swap=AutoSwap(token_in=[USDC], slippage=5)))
-    assert_swap(fake.opens[0]["prefix_calls"], USDC, DEPOSIT + FEE, 1_050)
+    assert_swap(fake.opens[0]["prefix_calls"], USDC, DEPOSIT, 1_050)
 
 
 async def test_context_overrides_the_method_option(fake: FakeChain) -> None:
-    fake.balances = {PATH_USD: 10_000}
+    fake.balances = {TOKEN: FEE, PATH_USD: 10_000}
     fake.quotes = {PATH_USD.lower(): 1_000}
     await pay(SessionMethod(account=ACCOUNT, auto_swap=True), SessionContext(auto_swap=False))
     await pay(SessionMethod(account=ACCOUNT), SessionContext(auto_swap=True))
     assert fake.opens[0]["prefix_calls"] == []
-    assert_swap(fake.opens[1]["prefix_calls"], PATH_USD, DEPOSIT + FEE, 1_010)
+    assert_swap(fake.opens[1]["prefix_calls"], PATH_USD, DEPOSIT, 1_010)
 
 
 async def test_no_route_fails_before_signing(fake: FakeChain) -> None:
@@ -235,7 +235,7 @@ async def test_no_route_fails_before_signing(fake: FakeChain) -> None:
 
 
 async def test_top_up_buys_the_additional_deposit(fake: FakeChain) -> None:
-    fake.balances = {PATH_USD: 10_000}
+    fake.balances = {TOKEN: FEE, PATH_USD: 10_000}
     fake.quotes = {PATH_USD.lower(): 500}
     method = SessionMethod(account=ACCOUNT, auto_swap=True)
     context = SessionContext(action="topUp", descriptor=descriptor(), additional_deposit_raw="500")
@@ -245,7 +245,7 @@ async def test_top_up_buys_the_additional_deposit(fake: FakeChain) -> None:
     assert payload["action"] == "topUp"
     (top_up,) = fake.top_ups
     assert top_up["additional"] == 500
-    assert_swap(top_up["prefix_calls"], PATH_USD, 500 + FEE, 505)
+    assert_swap(top_up["prefix_calls"], PATH_USD, 500, 505)
 
 
 async def test_signed_top_up_transaction_is_sent_as_is(fake: FakeChain) -> None:
@@ -272,7 +272,7 @@ def test_factories_accept_auto_swap() -> None:
 
 async def test_expected_recipients_only_swap_into_chosen_currencies(fake: FakeChain) -> None:
     # A recipient allowlist alone does not let auto-swap buy the token a challenge names.
-    fake.balances = {PATH_USD: 10_000}
+    fake.balances = {TOKEN: FEE, PATH_USD: 10_000}
     fake.quotes = {PATH_USD.lower(): 1_000}
     with pytest.raises(TransactionError, match="only buys a pinned or fallback currency"):
         await pay(SessionMethod(account=ACCOUNT, auto_swap=True, expected_recipients=[PAYEE]))
@@ -283,4 +283,36 @@ async def test_expected_recipients_only_swap_into_chosen_currencies(fake: FakeCh
             account=ACCOUNT, auto_swap=True, expected_recipients=[PAYEE], currencies=[TOKEN]
         )
     )
-    assert_swap(fake.opens[0]["prefix_calls"], PATH_USD, DEPOSIT + FEE, 1_010)
+    assert_swap(fake.opens[0]["prefix_calls"], PATH_USD, DEPOSIT, 1_010)
+
+
+async def test_sponsored_open_swaps_from_ousd(fake: FakeChain) -> None:
+    # A payer holding only OUSD funds the deposit by swap; the fee payer pays gas.
+    fake.balances = {OUSD: 10_000}
+    fake.quotes = {OUSD.lower(): DEPOSIT}
+    await pay(SessionMethod(account=ACCOUNT, auto_swap=True), fee_payer=True)
+    assert_swap(fake.opens[0]["prefix_calls"], OUSD, DEPOSIT, DEPOSIT + DEPOSIT // 100)
+
+
+async def test_fallback_false_limits_swaps_to_token_in(fake: FakeChain) -> None:
+    fake.balances = {PATH_USD: 10_000}
+    fake.quotes = {PATH_USD.lower(): 1_000}
+    method = SessionMethod(account=ACCOUNT, auto_swap=AutoSwap(token_in=[USDC], fallback=False))
+    with pytest.raises(InsufficientFundsError):
+        await pay(method)
+    assert fake.opens == []
+
+
+async def test_unsponsored_ousd_only_payer_fails_before_signing(fake: FakeChain) -> None:
+    # Buying the fee as well would swap more than the deposit, which servers reject.
+    fake.balances = {OUSD: 10_000}
+    fake.quotes = {OUSD.lower(): DEPOSIT + FEE}
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await pay(SessionMethod(account=ACCOUNT, auto_swap=True))
+    assert fake.opens == []
+
+    fake.quotes = {OUSD.lower(): 500 + FEE}
+    context = SessionContext(action="topUp", descriptor=descriptor(), additional_deposit_raw="500")
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await pay(SessionMethod(account=ACCOUNT, auto_swap=True), context)
+    assert fake.top_ups == []

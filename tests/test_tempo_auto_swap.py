@@ -176,6 +176,7 @@ def test_explicit_currencies_are_deduplicated_against_defaults() -> None:
     assert AutoSwap(token_in=[USDC.upper().replace("0X", "0x")]).currencies() == (
         USDC.upper().replace("0X", "0x"),
         PATH_USD,
+        OUSD,
     )
 
 
@@ -445,3 +446,44 @@ async def test_explicit_fee_token_swap_output_buys_the_fee() -> None:
     assert calls[0][0] == PATH_USD.lower()
     assert word(calls[1][2], 2) == AMOUNT - held + FEE
     assert fee_token == USDC.lower()
+
+
+def test_default_currencies_try_ousd_after_path_usd_and_usdc() -> None:
+    assert AutoSwap().currencies() == (PATH_USD, USDC, OUSD)
+
+
+def test_fallback_false_swaps_only_from_token_in() -> None:
+    assert AutoSwap(token_in=[OUSD], fallback=False).currencies() == (OUSD,)
+    assert AutoSwap(token_in=[], fallback=False).currencies() == ()
+    # Without token_in, fallback is ignored and the defaults apply.
+    assert AutoSwap(fallback=False).currencies() == (PATH_USD, USDC, OUSD)
+
+
+@pytest.mark.asyncio
+async def test_fallback_false_never_swaps_from_a_default_currency() -> None:
+    # OUSD has no route; pathUSD could fund the swap but is not in the allowlist.
+    with pytest.raises(InsufficientFundsError):
+        await sign(
+            AutoSwap(token_in=[OUSD], fallback=False),
+            {OUSD: 5_000_000, PATH_USD: 5_000_000},
+            {OUSD: RuntimeError("no route"), PATH_USD: AMOUNT},
+        )
+
+
+@pytest.mark.asyncio
+async def test_swaps_from_ousd_and_pays_the_fee_in_a_fee_token() -> None:
+    # The payer holds OUSD to swap and pathUSD for gas: OUSD funds the swap, never the fee.
+    calls, fee_token = await sign(
+        True, {OUSD: 2_000_000, PATH_USD: FEE}, {OUSD: AMOUNT}, currency=USDC
+    )
+
+    assert calls[0][0] == OUSD.lower()
+    assert [word(calls[1][2], i) for i in range(3)] == [int(OUSD, 16), int(USDC, 16), AMOUNT]
+    assert fee_token == PATH_USD.lower()
+
+
+@pytest.mark.asyncio
+async def test_payer_holding_only_ousd_cannot_pay_an_unsponsored_fee() -> None:
+    # OUSD is not a fee token, and buying the fee would make the swap exceed the charge.
+    with pytest.raises(TransactionError, match="transaction fees"):
+        await sign(True, {OUSD: 5_000_000}, {OUSD: lambda amount: amount}, currency=USDC)
