@@ -30,6 +30,7 @@ from mpp.methods.tempo.session._snapshot import (
 )
 from mpp.methods.tempo.session.client._session import (
     SessionMethod,
+    http_origin,
     post_management_credential,
     read_receipt,
 )
@@ -85,22 +86,17 @@ def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
 
 def _http_origin(url: httpx.URL) -> str:
     """The ASCII serialization of an http(s) URL's origin (lowercase host, default port dropped)."""
-    from mpp.client.transport import _origin  # pyright: ignore[reportPrivateUsage]
-
-    scheme, host, port = _origin(url)
-    if scheme not in ("http", "https") or not host:
+    origin = http_origin(url)
+    if origin is None:
         raise ValueError("SessionManager: session payments require an HTTP origin")
-    if ":" in host:
-        host = f"[{host}]"
-    default = 443 if scheme == "https" else 80
-    return f"{scheme}://{host}" if port == default else f"{scheme}://{host}:{port}"
+    return origin
 
 
 class _OriginBoundStore:
     """The manager's view of its channel store (mppx SessionManager's ``store``).
 
-    Reusing an open channel bound to another origin raises before any credential is signed,
-    and writes bind entries to the manager's origin.
+    Reusing an open channel bound to another origin, or to none (a legacy entry), raises
+    before any credential is signed, and writes bind entries to the manager's origin.
     """
 
     def __init__(self, backing: ChannelStore, manager: SessionManager) -> None:
@@ -110,10 +106,7 @@ class _OriginBoundStore:
     async def get(self, key: str) -> ChannelEntry | None:
         entry = await store_get(self._backing, key)
         if (
-            entry is not None
-            and entry.opened
-            and entry.origin is not None
-            and entry.origin != self._manager._origin  # pyright: ignore[reportPrivateUsage]
+            entry is not None and entry.opened and entry.origin != self._manager._origin  # pyright: ignore[reportPrivateUsage]
         ):
             raise ValueError("SessionManager: stored channel origin mismatch")
         return entry
@@ -260,7 +253,9 @@ class SessionManager:
         self._max_voucher_cumulative = self._method.max_deposit
         self._inner = transport if transport is not None else httpx.AsyncHTTPTransport()
         self._payment_transport = PaymentTransport(
-            methods=[self._method.client_method()], inner=self._inner
+            methods=[self._method.client_method()],
+            inner=self._inner,
+            trusted_tempo_realms=trusted_tempo_realms,
         )
         self._payment_transport.on(CHALLENGE_RECEIVED, self._on_challenge_received)
         self._client = httpx.AsyncClient(transport=self._payment_transport)
@@ -752,6 +747,7 @@ class SessionManager:
                     descriptor=channel.descriptor,
                     cumulative_amount_raw=str(state["amount"]),
                 ),
+                origin=self._origin,
             )
 
         response = await post_management_credential(
@@ -823,8 +819,8 @@ def session_manager(
     - ``bootstrap``: before opening a channel, recover the server's snapshot of this payer's
       channel with a same-route ``HEAD`` (answering its zero-amount proof challenge), so a
       client without local channel state resumes the channel instead of opening another.
-    - ``trusted_tempo_realms``: server origins allowed to request bootstrap proofs for a realm
-      other than their hostname, mapped to that realm, such as
+    - ``trusted_tempo_realms``: server origins allowed to request bootstrap proofs or session
+      payments for a realm other than their hostname, mapped to that realm, such as
       ``{"https://api.example.com": "MPP Payment"}``.
 
     Example:

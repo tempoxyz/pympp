@@ -92,6 +92,7 @@ ACCOUNT = TempoAccount.from_key("0x" + "ab" * 32)
 OTHER = TempoAccount.from_key("0x" + "cd" * 32)
 KEY = _store.channel_key(payee=PAYEE, token=TOKEN, escrow=ESCROW_ADDRESS, chain_id=CHAIN_ID)
 URL = "http://api.test/paid"
+ORIGIN = "http://api.test"
 Calls = dict[str, list[Any]]
 
 
@@ -1041,7 +1042,7 @@ class TestSessionMethod:
         assert fake_chain["open"][0]["fee_payer"] is True
 
     async def test_tops_up_exact_shortfall_before_voucher(self, fake_chain: Calls) -> None:
-        method = session(account=ACCOUNT, max_deposit="1")
+        method = session(account=ACCOUNT, max_deposit="1", origin=ORIGIN)
         await pay(method)
         log: list[httpx.Request] = []
         request = httpx.Request("GET", f"{URL}#frag")
@@ -1054,7 +1055,7 @@ class TestSessionMethod:
         assert fake_chain["top_up"][0]["additional"] == 100
 
     async def test_uncovered_voucher_fails(self) -> None:
-        method = session(account=ACCOUNT)
+        method = session(account=ACCOUNT, origin=ORIGIN)
         await pay(method)
         with pytest.raises(ValueError, match="cannot cover the next voucher"):
             await pay(method)
@@ -1063,7 +1064,7 @@ class TestSessionMethod:
 
     async def test_unknown_top_up_outcome_blocks_further_funding(self) -> None:
         store = create_channel_store()
-        method = session(account=ACCOUNT, channel_store=store)
+        method = session(account=ACCOUNT, channel_store=store, origin=ORIGIN)
         await pay(method)
 
         async def broken(request: httpx.Request) -> httpx.Response:
@@ -1150,7 +1151,7 @@ class TestSessionMethod:
 
     async def test_foreign_cached_channel_is_not_topped_up(self) -> None:
         store = create_channel_store()
-        store.set(entry_for(cumulative=1000, deposit=1000, account=OTHER))
+        store.set(entry_for(cumulative=1000, deposit=1000, account=OTHER).copy(origin=ORIGIN))
         log: list[httpx.Request] = []
         opened = await pay(SessionMethod(account=ACCOUNT, channel_store=store), **top_up_via(log))
         assert opened["action"] == "open" and log == []
@@ -1164,7 +1165,7 @@ class TestSessionMethod:
 
     async def test_snapshot_deposit_is_adopted_without_top_up(self, fake_chain: Calls) -> None:
         updates: list[ChannelEntry] = []
-        method = SessionMethod(account=ACCOUNT, on_channel_update=updates.append)
+        method = SessionMethod(account=ACCOUNT, on_channel_update=updates.append, origin=ORIGIN)
         await pay(method)
         channel = updates[-1]
 
@@ -1199,7 +1200,7 @@ class TestSessionMethod:
 
     async def test_top_up_for_uncached_channel_uses_given_entry(self) -> None:
         store = create_channel_store()
-        store.set(entry_for())  # a different channel in the same scope
+        store.set(entry_for().copy(origin=ORIGIN))  # a different channel in the same scope
         channel = entry_for(cumulative=100, deposit=100)
         updates: list[ChannelEntry] = []
         method = SessionMethod(
@@ -1220,7 +1221,7 @@ class TestSessionMethod:
         assert updates[-1].channel_id == channel.channel_id and updates[-1].deposit == 300
 
     async def test_post_top_up(self) -> None:
-        channel = entry_for()
+        channel = entry_for().copy(origin=ORIGIN)
         method = SessionMethod(account=ACCOUNT)
         headers = {"Payment-Receipt": receipt_header(channel.channel_id)}
 
@@ -1711,3 +1712,113 @@ class TestManagerCancellation:
                 with pytest.raises(asyncio.CancelledError):
                     await task
             assert (await manager.fetch(URL)).status_code == 200
+
+
+# ── origin binding (mppx Session.ts) ─────────────────────────────
+
+
+class TestOriginBinding:
+    def required_transport(self, method: SessionMethod) -> tuple[PaymentTransport, list[str]]:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("authorization", ""))
+            return required(make_challenge())
+
+        return (
+            PaymentTransport(methods=[method.client_method()], inner=httpx.MockTransport(handler)),
+            seen,
+        )
+
+    @pytest.mark.parametrize("origin", [None, "https://other.example"])
+    async def test_rejects_shared_store_channels_bound_elsewhere_before_signing(
+        self, origin: str | None, fake_chain: Calls
+    ) -> None:
+        store = create_channel_store()
+        entry = entry_for().copy(origin=origin)
+        store.set(entry)
+        transport, seen = self.required_transport(
+            SessionMethod(account=ACCOUNT, channel_store=store)
+        )
+        with pytest.raises(ValueError, match="origin mismatch"):
+            await transport.handle_async_request(httpx.Request("GET", URL))
+        assert seen == [""]
+        assert store.get(KEY) is entry and entry.origin == origin
+        assert entry.cumulative_amount == 100 and fake_chain["open"] == []
+
+    async def test_new_channels_are_stored_with_the_request_origin(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        opened = await pay(
+            method,
+            make_challenge(suggested_deposit="1000"),
+            request=httpx.Request("GET", "HTTP://API.test:80/paid"),
+        )
+        assert opened["action"] == "open"
+        channel = stored(method)
+        assert channel is not None and channel.origin == ORIGIN
+        # The same origin reuses it; a direct call without an origin does not.
+        voucher = await pay(method, request=httpx.Request("GET", URL))
+        assert voucher["action"] == "voucher"
+        with pytest.raises(ValueError, match="origin mismatch"):
+            await pay(method)
+
+    async def test_configured_origin_must_match_the_request(self) -> None:
+        method = SessionMethod(account=ACCOUNT, origin="http://api.test/ignored")
+        assert method.origin == ORIGIN
+        with pytest.raises(ValueError, match="origin mismatch"):
+            await pay(method, request=httpx.Request("GET", "https://other.test/paid"))
+        await pay(method)
+        channel = stored(method)
+        assert channel is not None and channel.origin == ORIGIN
+
+    @pytest.mark.parametrize("url", ["app://merchant/paid", "ipfs://merchant/paid"])
+    async def test_rejects_opaque_request_origins_before_signing(
+        self, url: str, fake_chain: Calls
+    ) -> None:
+        with pytest.raises(ValueError, match="HTTP or HTTPS origin"):
+            await pay(SessionMethod(account=ACCOUNT), request=httpx.Request("GET", url))
+        assert fake_chain["open"] == []
+
+    def test_rejects_opaque_configured_origins(self) -> None:
+        with pytest.raises(ValueError, match="require HTTP or HTTPS"):
+            session(account=ACCOUNT, origin="app://merchant")
+
+    @pytest.mark.parametrize("trusted", [False, True])
+    async def test_snapshot_recovery_requires_explicit_origin_trust(
+        self, trusted: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_chain(monkeypatch, settled=100, deposit=1000)
+        previous = entry_for(cumulative=300)
+        wire = snapshot_wire(previous, accepted=300, required=300, spent=250)
+        store = create_channel_store()
+        method = SessionMethod(
+            account=ACCOUNT, channel_store=store, origin=ORIGIN if trusted else None
+        )
+        challenge = make_challenge(sessionSnapshot=wire)
+        request = httpx.Request("GET", URL)
+        if trusted:
+            assert (await pay(method, challenge, request=request))["action"] == "voucher"
+            recovered = store.get(KEY)
+            assert recovered is not None and recovered.origin == ORIGIN
+        else:
+            with pytest.raises(ValueError, match="explicitly configured origin or descriptor"):
+                await pay(method, challenge, request=request)
+            assert store.get(KEY) is None
+            # A caller-supplied descriptor is explicit trust in the channel.
+            context = SessionContext(descriptor=previous.descriptor)
+            voucher = await pay(method, challenge, context=context, request=request)
+            assert voucher["action"] == "voucher"
+            recovered = store.get(KEY)
+            assert recovered is not None and recovered.origin == ORIGIN
+
+    async def test_top_ups_are_signed_for_the_request_origin(self, fake_chain: Calls) -> None:
+        store = create_channel_store()
+        store.set(entry_for(cumulative=100, deposit=100).copy(origin=ORIGIN))
+        method = SessionMethod(account=ACCOUNT, channel_store=store)
+        log: list[httpx.Request] = []
+        voucher = await pay(method, **top_up_via(log))
+        assert voucher["action"] == "voucher" and voucher["cumulativeAmount"] == "200"
+        (sent,) = log
+        assert payload_of(sent.headers["authorization"])["action"] == "topUp"
+        entry = store.get(KEY)
+        assert entry is not None and entry.origin == ORIGIN and entry.deposit == 200
