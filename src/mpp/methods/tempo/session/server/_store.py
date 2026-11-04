@@ -1347,7 +1347,9 @@ def _plan_credit(
         return StoreChange(
             "noop", CreditResult("declined", current, replayed=True, reason=recorded.outcome)
         )
-    if len(markers) >= max_markers:
+    # Only credit markers count: keyed charges add markers without a cap, and counting them
+    # would let a busy channel's charges block its refunds.
+    if sum(1 for key in markers if key.startswith("credit:")) >= max_markers:
         return StoreChange("noop", "capacity")
     reason = _credit_decline_reason(current, amount, now)
     marker = IdempotencyMarker(
@@ -1386,12 +1388,12 @@ async def credit_channel(
     zero or below what settled, or may still settle, on-chain (a close captures
     ``max(spent, settled)``). The first outcome for a key is final. ``units`` charge
     operations are taken back from the channel's ``units``. A new key is refused while the
-    channel holds ``max_markers`` live idempotency markers; recorded keys still replay.
+    channel holds ``max_markers`` live credit markers; recorded keys still replay.
 
     Raises:
         ChannelNotFoundError: When the channel does not exist.
         IdempotencyKeyConflictError: When the key was recorded with other terms.
-        RuntimeError: When ``max_markers`` live markers leave no room for a new key.
+        RuntimeError: When ``max_markers`` live credit markers leave no room for a new key.
     """
     assert_idempotency_options(idempotency_key=idempotency_key, retention=retention)
     if not isinstance(idempotency_key, str):  # pyright: ignore[reportUnnecessaryIsInstance]

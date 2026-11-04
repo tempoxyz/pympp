@@ -657,7 +657,7 @@ async def credit(
     or finalized, or when it would take ``spent`` below zero or below what settled, or may still
     settle, on-chain; the caller then refunds another way. ``unknown`` reports a store write
     that failed and may have committed: retry with the same key. A new key raises
-    ``RuntimeError`` once the channel holds ``max_markers`` live idempotency markers.
+    ``RuntimeError`` once the channel holds ``max_markers`` live credit markers.
     """
     return await credit_channel(
         resolve_channel_store(store),

@@ -786,7 +786,8 @@ class SessionManager:
             minimum_spent=0,
         ):
             raise ValueError("Session close response included a mismatched payment receipt.")
-        self._spent = max(self._spent, int(receipt.spent))
+        # The close receipt is the final charge, which credits may have lowered.
+        self._spent = int(receipt.spent)
         return receipt
 
     async def aclose(self) -> None:

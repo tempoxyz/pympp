@@ -716,6 +716,7 @@ class TestClose:
             assert manager.spent > 1
             receipt = await manager.close()
             assert receipt is not None and receipt.spent == "1"
+            assert manager.spent == 1
 
 
 async def test_manager_for_other_account_opens_its_own_channel(
