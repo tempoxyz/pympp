@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import socket
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -198,9 +199,25 @@ async def _serve(
         await task
 
 
-def _manager(payer: TempoAccount, rpc_url: str, **options: Any) -> SessionManager:
+def _trusted(url: str) -> dict[str, str]:
+    """Pin the test server's origin to its realm, as a client of a non-hostname realm must."""
+    parts = urlsplit(url)
+    return {f"{parts.scheme}://{parts.netloc}": REALM}
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _manager(payer: TempoAccount, rpc_url: str, url: str, **options: Any) -> SessionManager:
     return tempo_client.session_manager(
-        account=payer, max_deposit=options.pop("max_deposit", "1"), rpc_url=rpc_url, **options
+        account=payer,
+        max_deposit=options.pop("max_deposit", "1"),
+        rpc_url=rpc_url,
+        trusted_tempo_realms=_trusted(url),
+        **options,
     )
 
 
@@ -255,7 +272,7 @@ async def test_200_sub_cent_calls_on_one_deposit_then_close(
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.01") as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 200)
             assert manager.deposit == 10_000
             channel_id = manager.channel_id
@@ -298,7 +315,7 @@ async def test_mpp_client_tops_up_mid_session(rpc_url: str, chain_id: int, curre
             account=payer, max_deposit="1", top_up_amount="0.0001", rpc_url=rpc_url
         )
         channel_ids: set[str] = set()
-        async with ClientMpp(methods=[method]) as mpp:
+        async with ClientMpp(methods=[method], trusted_tempo_realms=_trusted(server.url)) as mpp:
             for n in range(1, 13):
                 response = await mpp.fetch(server.url)
                 assert response.status_code == 200, response.text
@@ -324,7 +341,7 @@ async def test_manager_top_up_mid_session_then_close(
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.0001") as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 5)
             top_up = await manager.top_up("0.0002")
             assert top_up is not None and top_up.tx_hash
@@ -361,7 +378,7 @@ async def test_settlement_schedule_settles_mid_session(
         suggested_deposit="0.01",
         settlement_schedule=SettlementSchedule(units=3),
     ) as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             tx_hashes: list[bool] = []
             for n in range(1, 8):
                 response = await manager.fetch(server.url)
@@ -397,7 +414,7 @@ async def test_fee_sponsored_server_open_top_up_close(
         payer_before = await _balance(rpc_url, currency, payer.address)
         payee_before = await _balance(rpc_url, currency, payee.address)
         sponsor_before = await _balance(rpc_url, currency, sponsor.address)
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 5)
             top_up = await manager.top_up("0.0001")
             assert top_up is not None and top_up.tx_hash
@@ -428,7 +445,7 @@ async def test_adversarial_credentials_are_rejected_without_charging(
     payer = _new_account(rpc_url, currency)
     attacker = TempoAccount.from_key("0x" + os.urandom(32).hex())
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.0001") as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 3)
             channel_id = manager.channel_id
             entry = manager.channel
@@ -548,7 +565,7 @@ async def test_concurrent_clients_on_separate_channels(
     payee = _new_account(rpc_url, currency)
     payers = [_new_account(rpc_url, currency) for _ in range(4)]
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.0001") as server:
-        managers = [_manager(payer, rpc_url) for payer in payers]
+        managers = [_manager(payer, rpc_url, server.url) for payer in payers]
         try:
             await asyncio.gather(*(_calls(m, server.url, 5) for m in managers))
             channel_ids = [m.channel_id for m in managers]
@@ -571,7 +588,7 @@ async def test_concurrent_vouchers_on_one_channel(
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.001") as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 1)
             channel_id = manager.channel_id
             entry = manager.channel
@@ -685,21 +702,28 @@ async def test_restart_on_persistent_store_keeps_the_channel(
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     stores = _sqlite_stores(tmp_path) if backend == "sqlite" else _redis_stores(tmp_path)
-    async with stores as open_store, _manager(payer, rpc_url) as manager:
+    # The manager pins the server's origin, so both servers listen on one port chosen up front.
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}/paid"
+    async with stores as open_store, _manager(payer, rpc_url, url) as manager:
         store, close_store = await open_store()
         try:
             async with _serve(
-                rpc_url, chain_id, currency, payee, store=store, suggested_deposit="0.001"
+                rpc_url,
+                chain_id,
+                currency,
+                payee,
+                store=store,
+                suggested_deposit="0.001",
+                port=port,
             ) as first:
+                assert first.url == url
                 await _calls(manager, first.url, 3)
         finally:
             await close_store()
         channel_id = manager.channel_id
         assert channel_id is not None
         # The manager binds its channel to the origin, so the restart keeps the host and port.
-        port = urlsplit(first.url).port
-        assert port is not None
-
         store, close_store = await open_store()
         try:
             async with _serve(
@@ -739,7 +763,7 @@ async def test_close_supervisor_closes_a_requested_channel(
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     async with _serve(rpc_url, chain_id, currency, payee, suggested_deposit="0.001") as server:
-        async with _manager(payer, rpc_url) as manager:
+        async with _manager(payer, rpc_url, server.url) as manager:
             await _calls(manager, server.url, 4)
             channel_id = manager.channel_id
             entry = manager.channel
