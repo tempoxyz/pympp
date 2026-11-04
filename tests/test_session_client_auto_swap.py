@@ -316,3 +316,41 @@ async def test_unsponsored_ousd_only_payer_fails_before_signing(fake: FakeChain)
     with pytest.raises(TransactionError, match="transaction fees"):
         await pay(SessionMethod(account=ACCOUNT, auto_swap=True), context)
     assert fake.top_ups == []
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_token"),
+    [(False, None), (AutoSwap(token_in=[USDC], fallback=False), USDC), (None, PATH_USD)],
+)
+async def test_automatic_top_up_preserves_credential_swap_policy(
+    fake: FakeChain, override: bool | AutoSwap | None, expected_token: str | None
+) -> None:
+    method = SessionMethod(account=ACCOUNT, auto_swap=True)
+    await method.create_credential(
+        CredentialParams(
+            challenge=make_challenge(suggested_deposit="100"),
+            context=SessionContext(auto_swap=False),
+        )
+    )
+    fake.balances = {TOKEN: FEE, PATH_USD: 10_000, USDC: 10_000}
+    fake.quotes = {PATH_USD.lower(): 1_000, USDC.lower(): 1_000}
+    sent: list[httpx.Request] = []
+
+    async def send(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200)
+
+    await method.create_credential(
+        CredentialParams(
+            challenge=make_challenge(),
+            context=SessionContext(auto_swap=override),
+            request=httpx.Request("GET", "https://api.test/paid"),
+            fetch=send,
+        )
+    )
+    assert len(sent) == 1
+    (top_up,) = fake.top_ups
+    if expected_token is None:
+        assert top_up["prefix_calls"] == []
+    else:
+        assert_swap(top_up["prefix_calls"], expected_token, top_up["additional"], 1_010)
