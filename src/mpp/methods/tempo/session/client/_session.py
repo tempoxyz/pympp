@@ -534,6 +534,9 @@ class SessionMethod:
             url=request.url,
             send=send,
             authorization=authorization,
+            auto_swap=params.context.auto_swap
+            if isinstance(params.context, SessionContext)
+            else None,
         )
 
     async def top_up_channel_if_needed(
@@ -546,6 +549,7 @@ class SessionMethod:
         url: str | httpx.URL,
         send: Send,
         authorization: str | None = None,
+        auto_swap: bool | AutoSwap | None = None,
     ) -> SessionReceipt | None:
         """POST an automatic top-up when ``required_cumulative`` exceeds the deposit."""
         self._policy.check(challenge.request)
@@ -578,6 +582,7 @@ class SessionMethod:
                     url=url,
                     send=send,
                     authorization=authorization,
+                    auto_swap=auto_swap,
                 )
             next_deposit = known + additional
             if next_deposit == channel.deposit:
@@ -605,6 +610,7 @@ class SessionMethod:
         send: Send,
         authorization: str | None = None,
         on_challenge: Callable[[Challenge], None] | None = None,
+        auto_swap: bool | AutoSwap | None = None,
     ) -> SessionReceipt | None:
         """POST a top-up credential for ``channel`` and return the receipt, when present."""
         if channel.uncertain_top_up:
@@ -632,6 +638,7 @@ class SessionMethod:
                     channel_id=channel.channel_id,
                     descriptor=channel.descriptor,
                     additional_deposit_raw=str(additional_deposit),
+                    auto_swap=auto_swap,
                 ),
                 create_session_credential=self.create_session_credential,
                 send=send,

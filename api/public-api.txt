@@ -993,9 +993,9 @@ module mpp.methods.tempo.session.client
         def client_method(self) -> ClientMethod
         async def create_credential(self, params: CredentialParams) -> str
         async def create_session_credential(self, challenge: Challenge, context: SessionContext | None = None) -> str
-        async def post_top_up(self, *, challenge: Challenge, channel: ChannelEntry, additional_deposit: int, url: str | httpx.URL, send: Send, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None) -> SessionReceipt | None
+        async def post_top_up(self, *, challenge: Challenge, channel: ChannelEntry, additional_deposit: int, url: str | httpx.URL, send: Send, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None, auto_swap: bool | AutoSwap | None = None) -> SessionReceipt | None
         async def resolve(self, challenge: Challenge) -> ChallengeContext
-        async def top_up_channel_if_needed(self, *, challenge: Challenge, channel: ChannelEntry, deposit: int, required_cumulative: int, url: str | httpx.URL, send: Send, authorization: str | None = None) -> SessionReceipt | None
+        async def top_up_channel_if_needed(self, *, challenge: Challenge, channel: ChannelEntry, deposit: int, required_cumulative: int, url: str | httpx.URL, send: Send, authorization: str | None = None, auto_swap: bool | AutoSwap | None = None) -> SessionReceipt | None
     class SessionSnapshot
         @dataclass(frozen=True, slots=True)
         field kw_only accepted_cumulative: int
