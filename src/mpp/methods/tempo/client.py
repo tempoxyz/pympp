@@ -1394,7 +1394,8 @@ def _tempo_method(
             its first supported mode.
         http_client: httpx client for the payer's RPC calls, owned by the
             caller. Configure headers on it, such as a Tempo API key in
-            ``tempo-api-key`` for the hosted RPC (https://api.tempo.xyz/rpc).
+            ``tempo-api-key`` for the hosted RPC (https://api.tempo.xyz/rpc), and a
+            timeout of at least 30 seconds for push-mode broadcasts.
 
     Returns:
         A configured TempoMethod instance.
@@ -1529,8 +1530,10 @@ def charge(
 
     ``http_client`` carries every RPC call the payer makes, as mppx's
     ``getClient`` does. The caller owns it. Set a Tempo API key on it for
-    the hosted RPC: ``httpx.AsyncClient(headers={"tempo-api-key": key})``
-    with ``rpc_url="https://api.tempo.xyz/rpc"``.
+    the hosted RPC: ``httpx.AsyncClient(headers={"tempo-api-key": key}, timeout=30)``
+    with ``rpc_url="https://api.tempo.xyz/rpc"``. Give it a timeout of at least
+    30 seconds: push mode waits on ``eth_sendRawTransactionSync`` for the receipt,
+    and httpx's 5 second default can end a payment in ``PaymentOutcomeUnknownError``.
 
     Example:
         from mpp.client import Mpp
