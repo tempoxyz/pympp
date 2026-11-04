@@ -1235,6 +1235,7 @@ def insufficient_balance_for_charge(
 
 
 _Conflict = Literal["conflict"]
+_Capacity = Literal["capacity"]
 
 
 def _plan_keyed_deduction(
@@ -1325,9 +1326,10 @@ def _plan_credit(
     amount: int,
     expires_at: int,
     idempotency_key: str,
+    max_markers: int,
     now: int,
     units: int,
-) -> StoreChange[CreditResult | _Conflict | None]:
+) -> StoreChange[CreditResult | _Conflict | _Capacity | None]:
     if current is None:
         return StoreChange("noop", None)
     markers = _live_markers(current, now)
@@ -1345,6 +1347,10 @@ def _plan_credit(
         return StoreChange(
             "noop", CreditResult("declined", current, replayed=True, reason=recorded.outcome)
         )
+    # Only credit markers count: keyed charges add markers without a cap, and counting them
+    # would let a busy channel's charges block its refunds.
+    if sum(1 for key in markers if key.startswith("credit:")) >= max_markers:
+        return StoreChange("noop", "capacity")
     reason = _credit_decline_reason(current, amount, now)
     marker = IdempotencyMarker(
         amount=amount,
@@ -1372,6 +1378,7 @@ async def credit_channel(
     amount: int,
     *,
     idempotency_key: str,
+    max_markers: int = 1024,
     retention: int | None = None,
     units: int = 0,
 ) -> CreditResult:
@@ -1380,11 +1387,13 @@ async def credit_channel(
     Declined when the channel is closing or finalized, or when it would take ``spent`` below
     zero or below what settled, or may still settle, on-chain (a close captures
     ``max(spent, settled)``). The first outcome for a key is final. ``units`` charge
-    operations are taken back from the channel's ``units``.
+    operations are taken back from the channel's ``units``. A new key is refused while the
+    channel holds ``max_markers`` live credit markers; recorded keys still replay.
 
     Raises:
         ChannelNotFoundError: When the channel does not exist.
         IdempotencyKeyConflictError: When the key was recorded with other terms.
+        RuntimeError: When ``max_markers`` live credit markers leave no room for a new key.
     """
     assert_idempotency_options(idempotency_key=idempotency_key, retention=retention)
     if not isinstance(idempotency_key, str):  # pyright: ignore[reportUnnecessaryIsInstance]
@@ -1393,6 +1402,8 @@ async def credit_channel(
         raise ValueError("Credit amount must be positive.")
     if isinstance(units, bool) or units < 0:
         raise ValueError("`units` must be a non-negative integer.")
+    if isinstance(max_markers, bool) or max_markers < 1:
+        raise ValueError("`max_markers` must be a positive integer.")
     now = _now_ms()
     expires_at = now + (retention if retention is not None else DEFAULT_IDEMPOTENCY_RETENTION)
     try:
@@ -1404,6 +1415,7 @@ async def credit_channel(
                 amount=amount,
                 expires_at=expires_at,
                 idempotency_key=idempotency_key,
+                max_markers=max_markers,
                 now=now,
                 units=units,
             ),
@@ -1412,6 +1424,8 @@ async def credit_channel(
         return CreditResult("unknown", error=error)
     if result is None:
         raise ChannelNotFoundError("channel not found")
+    if result == "capacity":
+        raise RuntimeError("Credit idempotency marker capacity reached; reconcile manually")
     if result == "conflict":
         raise IdempotencyKeyConflictError(idempotency_key=idempotency_key, operation="credit")
     return result

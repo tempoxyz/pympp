@@ -692,6 +692,32 @@ class TestClose:
             with pytest.raises(ValueError, match="mismatched payment receipt"):
                 await manager.close()
 
+    async def test_close_accepts_credited_final_spend(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        # A credit after the last receipt lowers the final spend below what was acknowledged.
+        server = FakeSessionServer(suggested_deposit="1000")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if action_of(request) == "close":
+                credential = Credential.from_authorization(request.headers["authorization"])
+                headers = receipt_header(
+                    channel_id=credential.payload["channelId"],
+                    challenge_id=credential.challenge.id,
+                    accepted=int(credential.payload["cumulativeAmount"]),
+                    spent=1,
+                    tx_hash=TX_HASH,
+                )
+                return httpx.Response(204, headers=headers)
+            return server.handler(request)
+
+        async with manager_for(handler) as manager:
+            await manager.fetch(URL)
+            assert manager.spent > 1
+            receipt = await manager.close()
+            assert receipt is not None and receipt.spent == "1"
+            assert manager.spent == 1
+
 
 async def test_manager_for_other_account_opens_its_own_channel(
     fake_chain: dict[str, list[Any]],

@@ -1147,7 +1147,7 @@ module mpp.methods.tempo.session.server
         field store: Store
         field per_day: int = 5
     async def charge(store: Any, channel_id: str, amount: int, *, idempotency_key: str | None = None, retention: int | None = None) -> ChannelState
-    async def credit(store: Any, channel_id: str, amount: int, *, idempotency_key: str, retention: int | None = None, units: int = 0) -> CreditResult
+    async def credit(store: Any, channel_id: str, amount: int, *, idempotency_key: str, max_markers: int = 1024, retention: int | None = None, units: int = 0) -> CreditResult
     def deserialize_snapshot(value: str) -> SessionSnapshot
     def resolve_settleable_voucher(state: ChannelState) -> SignedVoucher | None
     def resolve_settlement_schedule(schedule: SettlementSchedule | None, decimals: int) -> ResolvedSettlementSchedule | None
