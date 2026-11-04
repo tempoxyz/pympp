@@ -764,10 +764,11 @@ module mpp.methods.tempo.client
         field kw_only allowed_chain_ids: Sequence[int] | None = None
         field kw_only auto_swap: AutoSwap | None = None
         field kw_only mode: ChargeMode | None = None
+        field kw_only http_client: httpx.AsyncClient | None = None
         def can_handle_challenge(self, challenge: Challenge) -> bool
         async def create_credential(self, challenge: Challenge) -> Credential
         def transaction_hash(self, credential: Credential) -> str | None
-    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None) -> ClientMethod
+    def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None, http_client: httpx.AsyncClient | None = None) -> ClientMethod
 
 module mpp.methods.tempo.fee_payer_envelope
     FEE_PAYER_ENVELOPE_TYPE_ID = 120

@@ -8523,3 +8523,46 @@ async def test_mcp_verify_or_challenge_rejects_fixed_attribution():
             server.charge(amount="1.00", splits=request["methodDetails"]["splits"]),
             tool="paid-tool",
         )
+
+
+class TestChargeHttpClient:
+    """The payer's RPC calls go through a caller-supplied httpx client."""
+
+    @pytest.mark.asyncio
+    async def test_charge_sends_rpc_through_http_client(self) -> None:
+        seen: list[tuple[str, str | None]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            seen.append((body["method"], request.headers.get("tempo-api-key")))
+            result = {
+                "eth_chainId": hex(TESTNET_CHAIN_ID),
+                "eth_gasPrice": "0x1",
+                "eth_estimateGas": hex(100_000),
+                "eth_call": hex(10**12),
+            }[body["method"]]
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), headers={"tempo-api-key": "test-key"}
+        ) as http:
+            method = _tempo_method(
+                account=TempoAccount.from_key(TEST_PRIVATE_KEY),
+                rpc_url="https://api.tempo.xyz/rpc/testnet",
+                http_client=http,
+            )
+            challenge = Challenge(
+                id="http-client",
+                method="tempo",
+                intent="charge",
+                request={
+                    "amount": "1000",
+                    "currency": PATH_USD,
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                    "methodDetails": {"chainId": TESTNET_CHAIN_ID},
+                },
+            )
+            await method.create_credential(challenge)
+
+        assert {"eth_chainId", "eth_gasPrice"} <= {name for name, _ in seen}
+        assert all(key == "test-key" for _, key in seen)
