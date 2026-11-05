@@ -471,6 +471,16 @@ def _rpc_error_msg(result: dict[str, Any]) -> str:
 # JSON-RPC ``execution reverted`` (EIP-1474); other execution errors say "revert".
 _EXECUTION_ERROR_CODES = frozenset({3})
 
+
+class _HostedSponsoredSimulation(dict[str, Any]):
+    """A hosted fee payer's sponsored ``eth_call``, where running out of gas alone passes.
+
+    The hosted signature covers the client's gas limit, so it cannot be padded
+    for the sponsored ``eth_call``'s extra gas; the sender simulation already
+    checked that limit (see ``_fee_payer.sender_simulation_request``).
+    """
+
+
 _SimulationRequest = dict[str, Any] | Callable[[], dict[str, Any]]
 """An ``eth_call`` request, or a callable that builds one once earlier simulations passed."""
 
@@ -2739,37 +2749,33 @@ class ChargeIntent:
         """Build the ``eth_call`` requests that check a locally co-signed 0x76 tx.
 
         Like mppx's ``preflightSponsorship``, the calls are simulated twice:
-        first from the sender with no fee fields, so the sender's fee balance is
-        irrelevant, then as the final sponsored transaction with its concrete
-        fee payer, fee token and fee payer signature. Tempo nodes recover the
-        fee payer of an ``eth_call`` only from that signature and otherwise
-        bill the sender, so the second request is built lazily: the fee payer
-        signs its simulation-only copy (with
-        ``_fee_payer.SPONSORED_SIMULATION_GAS_BUFFER`` more gas) only once the
-        sender simulation passed. The sender's signature is never sent, and
-        every public Tempo RPC serves ``eth_call`` (``tempo_simulateV1`` is refused).
+        first from the sender at the broadcast gas limit with no fee fields, so
+        the sender's fee balance is irrelevant and a gas limit too low for the
+        mined transaction is refused, then as the final sponsored transaction
+        with its concrete fee payer, fee token and fee payer signature. Tempo
+        nodes recover the fee payer of an ``eth_call`` only from that signature
+        and otherwise bill the sender, so the second request is built lazily:
+        the fee payer signs its simulation-only copy (with up to
+        ``_fee_payer.SPONSORED_SIMULATION_GAS_BUFFER`` more gas, within the
+        sponsor policy) only once the sender simulation passed. The sender's
+        signature is never sent, and every public Tempo RPC serves ``eth_call``
+        (``tempo_simulateV1`` is refused).
         """
         fee_payer = self.fee_payer
         if fee_payer is None:
             raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
 
+        policy = get_policy(tx.chain_id)
+
         def sponsored() -> dict[str, Any]:
-            return _fee_payer.local_sponsored_simulation_request(tx, sender, fee_payer)
+            return _fee_payer.local_sponsored_simulation_request(tx, sender, fee_payer, policy)
 
         return [self._sender_simulation_request(tx, sender), sponsored]
 
     @staticmethod
     def _sender_simulation_request(tx: Any, sender: str) -> dict[str, Any]:
-        """Return the ``eth_call`` request executing ``tx``'s calls as the sender, without fees."""
-        calls = [
-            {
-                "to": "0x" + bytes(c.to).hex(),
-                "value": hex(c.value),
-                "data": "0x" + c.data.hex(),
-            }
-            for c in tx.calls
-        ]
-        return {"type": "0x76", "from": sender, "calls": calls}
+        """The ``eth_call`` executing ``tx`` as the sender at its gas, without fees."""
+        return _fee_payer.sender_simulation_request(tx, sender)
 
     async def _fill_hosted_fee_payer(
         self, client: Any, raw_tx: str, request: ChargeRequest
@@ -2844,9 +2850,11 @@ class ChargeIntent:
             decoded, fee_token=fee_token, key_authorization=key_authorization
         )
         # The hosted signature covers the client's gas, so it is simulated as
-        # signed; without it the node would bill the sender's fee token.
-        simulation = _fee_payer.sponsored_simulation_request(
-            sponsored, sender, sponsor, fee_payer_signature
+        # signed (without it the node would bill the sender's fee token), and
+        # running out of gas alone passes: the sender simulation above checked
+        # that gas, and a sponsored eth_call needs more gas than mining does.
+        simulation = _HostedSponsoredSimulation(
+            _fee_payer.sponsored_simulation_request(sponsored, sender, sponsor, fee_payer_signature)
         )
         max_fee = sponsored.gas_limit * sponsored.max_fee_per_gas
         return cosigned, [simulation], sponsor, max_fee
@@ -2860,9 +2868,14 @@ class ChargeIntent:
         earlier one passed, so a local fee payer signs nothing for a
         transaction whose sender simulation fails. Fails closed: a transport
         error or an unreadable reply is an internal error; an execution error
-        is a verification failure.
+        (a revert or running out of gas) is a verification failure. Only a
+        hosted sponsored request (``_HostedSponsoredSimulation``) that fails
+        solely by running out of gas passes, matched by message (see
+        ``_fee_payer.is_out_of_gas_error``); its fee-balance and revert errors
+        stay fatal.
         """
         for entry in simulate_payload:
+            hosted = isinstance(entry, _HostedSponsoredSimulation)
             request = entry() if callable(entry) else entry
             try:
                 response = await client.post(
@@ -2891,7 +2904,10 @@ class ChargeIntent:
             error = result.get("error")
             code = error.get("code") if is_dict(error) else None
             message = _rpc_error_msg(result)
-            if code in _EXECUTION_ERROR_CODES or "revert" in message.lower():
+            out_of_gas = _fee_payer.is_out_of_gas_error(message)
+            if hosted and out_of_gas:
+                continue
+            if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:
                 raise VerificationError(
                     f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
                 )

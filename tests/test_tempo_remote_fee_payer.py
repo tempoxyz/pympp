@@ -131,6 +131,7 @@ class FakeNetwork:
         self.fill_result: Any = None
         self.fill_error: dict[str, Any] | None = None
         self.revert_simulation: int | None = None
+        self.simulation_errors: dict[int, dict[str, Any]] = {}
         self.key_authorization: Any = None
 
     def fill(self, params: dict[str, Any]) -> Any:
@@ -166,6 +167,8 @@ class FakeNetwork:
             self.simulations.append(body["params"][0])
             if self.revert_simulation == len(self.simulations):
                 reply["error"] = {"code": 3, "message": "execution reverted"}
+            elif len(self.simulations) in self.simulation_errors:
+                reply["error"] = self.simulation_errors[len(self.simulations)]
             else:
                 reply["result"] = "0x"
         elif method == "eth_sendRawTransactionSync":
@@ -274,7 +277,9 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
         }
     ]
     sender_simulation, sponsored_simulation = network.simulations
-    assert "feePayer" not in sender_simulation and "gas" not in sender_simulation
+    # The sender simulation checks the broadcast gas, with no fee fields.
+    assert "feePayer" not in sender_simulation and "maxFeePerGas" not in sender_simulation
+    assert sender_simulation["gas"] == hex(100_000)
     assert sponsored_simulation["feePayer"] == SPONSOR
     assert sponsored_simulation["feeToken"] == PATH_USD
     # The node bills the fee payer it recovers from feePayerSignature (and the
@@ -296,6 +301,61 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
         b"\x78" + rlp.encode([*client_fields[:10], fields[10], client_fields[11], fields[12]])
     )
     assert Account._recover_hash(payload, vrs=(v, r, s)) == SPONSOR
+
+
+_OUT_OF_GAS = {
+    "code": -32003,
+    "message": "out of gas: gas exhausted during precompiled contract execution: 100000",
+}
+
+
+async def test_hosted_sponsored_simulation_out_of_gas_alone_passes() -> None:
+    """The hosted signature binds the client's gas, which a sponsored eth_call can exceed.
+
+    The sender simulation already passed at that gas, so out of gas alone is tolerated.
+    """
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[2] = _OUT_OF_GAS
+
+    receipt = await _settle(network, raw_tx)
+
+    assert receipt.status == "success"
+    assert len(network.broadcasts) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {
+            "code": -32003,
+            "message": "insufficient fee token balance: required 10000, but only have 0",
+        },
+        {"code": 3, "message": "execution reverted"},
+    ],
+)
+async def test_hosted_sponsored_simulation_other_errors_still_refuse(
+    error: dict[str, Any],
+) -> None:
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[2] = error
+
+    with pytest.raises((VerificationError, InternalPaymentError)):
+        await _settle(network, raw_tx)
+    assert not network.broadcasts
+
+
+async def test_hosted_sender_simulation_out_of_gas_refuses() -> None:
+    """A gas limit too low for the mined tx fails the gas-bounded sender simulation."""
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[1] = _OUT_OF_GAS
+
+    with pytest.raises(VerificationError, match="out of gas"):
+        await _settle(network, raw_tx)
+    assert network.methods == ["eth_call"]
+    assert not network.broadcasts
 
 
 def _simulated_fee_payer(simulation: dict[str, Any], client_fields: list[Any]) -> str:

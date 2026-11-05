@@ -4129,7 +4129,18 @@ class TestCosignAsFeePayer:
         sender = TempoAccount.from_key(TEST_PRIVATE_KEY).address
         assert sender_request["type"] == "0x76"
         assert sender_request["from"].lower() == sender.lower()
-        assert set(sender_request) == {"type", "from", "calls"}
+        # The sender simulation is the gas-bounded check: the broadcast gas, no fees.
+        assert not {
+            "maxFeePerGas",
+            "maxPriorityFeePerGas",
+            "feeToken",
+            "feePayer",
+            "feePayerSignature",
+        } & set(sender_request)
+        assert (
+            int(sponsored["gas"], 16)
+            == int(sender_request["gas"], 16) + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
+        )
         assert sponsored["from"].lower() == sender.lower()
         assert sponsored["feeToken"].lower() == currency.lower()
         assert intent.fee_payer is not None
@@ -5053,6 +5064,59 @@ class TestCosignAsFeePayer:
         methods = [json.loads(r.read().decode())["method"] for r in requests]
         assert methods == ["eth_call"]
         assert "eth_sendRawTransactionSync" not in methods
+
+    # A gas limit too low for the mined tx fails the sender simulation, which runs
+    # at the exact broadcast gas: the sponsored simulation's padding cannot hide it.
+    @pytest.mark.asyncio
+    async def test_verify_local_fee_payer_low_gas_does_not_broadcast(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+
+        intent = self._make_intent()
+        raw_tx = self._build_client_tx(
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=future,
+        )
+        # Tempo v1.18.1's reply to an eth_call whose gas runs out.
+        httpx_mock.add_response(
+            url="https://rpc.test",
+            json={
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32003,
+                    "message": "out of gas: gas exhausted during precompiled contract execution",
+                },
+                "id": 1,
+            },
+        )
+
+        with pytest.raises(VerificationError, match="out of gas"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000000",
+                    "currency": currency,
+                    "recipient": recipient,
+                    "methodDetails": {"feePayer": True, "chainId": TESTNET_CHAIN_ID},
+                },
+            )
+
+        [request] = httpx_mock.get_requests()
+        body = json.loads(request.read().decode())
+        assert body["method"] == "eth_call"
+        [sender_simulation, _] = body["params"]
+        assert "feePayerSignature" not in sender_simulation
+        assert "maxFeePerGas" not in sender_simulation
+        assert sender_simulation["gas"].startswith("0x")
 
     @pytest.mark.asyncio
     async def test_verify_local_fee_payer_rechecks_validity_after_simulation(

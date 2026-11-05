@@ -811,27 +811,36 @@ async def send_credential_transaction(
 ) -> dict[str, Any]:
     """Broadcast a client-signed management transaction and wait for its receipt.
 
-    With `fee_payer`, the calls are simulated as the sender, then the 0x78
-    envelope is co-signed, simulated with `eth_call` as the sponsored
-    transaction and checked for remaining validity before broadcast.
+    With `fee_payer`, the transaction is simulated as the sender at its gas
+    limit without fees, then the 0x78 envelope is co-signed, simulated with
+    `eth_call` as the sponsored transaction (a fee payer signed copy with up to
+    `SPONSORED_SIMULATION_GAS_BUFFER` more gas, within the sponsor policy) and
+    checked for remaining validity before broadcast.
     """
     import httpx
 
     from mpp.methods.tempo import _fee_payer
+    from mpp.methods.tempo.fee_payer_policy import get_policy
 
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
     try:
         raw = transaction.raw
         if fee_payer is not None:
-            # Like mppx FeePayer.preflightSponsorship: execute the calls as the
-            # sender (no fee fields) before co-signing, then the completed
+            # Like mppx FeePayer.preflightSponsorship: execute the transaction
+            # as the sender at its broadcast gas limit (no fee fields, so no
+            # fee-token balance check) before co-signing, which refuses a gas
+            # limit too low for the mined transaction; then the completed
             # envelope with its fee payer, fee token and a fee payer signature
             # (signed only now, after the sender simulation passed), since
             # Tempo nodes bill the sender of an eth_call that lacks one.
+            decoded, _, _, key_authorization = _fee_payer.decode_sponsored_envelope(raw)
             await _simulate_call(
                 rpc_url,
-                {"from": transaction.sender, "calls": _rpc_calls(transaction.calls)},
+                _fee_payer.sender_simulation_request(
+                    _fee_payer.envelope_transaction(decoded, key_authorization=key_authorization),
+                    transaction.sender,
+                ),
                 http,
             )
             raw, cosigned, sender = _cosign(
@@ -844,7 +853,9 @@ async def send_credential_transaction(
             )
             await _simulate_call(
                 rpc_url,
-                _fee_payer.local_sponsored_simulation_request(cosigned, sender, fee_payer),
+                _fee_payer.local_sponsored_simulation_request(
+                    cosigned, sender, fee_payer, get_policy(chain_id, fee_payer_policy)
+                ),
                 http,
             )
             if transaction.valid_before is not None:

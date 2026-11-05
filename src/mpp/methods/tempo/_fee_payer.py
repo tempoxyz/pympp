@@ -261,8 +261,11 @@ Tempo's sponsored ``eth_call`` charges more gas than the same transaction uses
 when mined (about 6,000 for a session top-up on v1.18.1: mined 63,645 of a
 67,894 gas limit, simulation needed 69,645), and the fee payer signature binds
 the gas limit, so simulating at the signed limit would refuse transactions that
-succeed onchain. The broadcast transaction keeps its gas. Hosted signatures
-cover the client's gas and are simulated as signed. Matches mppx
+succeed onchain. The broadcast transaction keeps its gas, and the sender
+simulation (:func:`sender_simulation_request`) checks that gas itself. The
+padded copy is clamped to the fee payer policy (:func:`sponsored_simulation_gas`).
+Hosted signatures cover the client's gas and are simulated as signed, where
+running out of gas alone is tolerated. Matches mppx
 ``sponsoredSimulationGasBuffer``.
 """
 
@@ -299,6 +302,34 @@ def sponsored_simulation_request(
     must therefore sign this exact request's fields. The sender's signature is
     never sent.
     """
+    request = _simulation_request(tx, sender)
+    request.update(
+        {
+            "maxFeePerGas": hex(tx.max_fee_per_gas),
+            "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
+            "feeToken": "0x" + bytes(tx.fee_token).hex(),
+            # The node rejects ``feePayer: true`` in eth_call; name the sponsor.
+            "feePayer": fee_payer,
+            "feePayerSignature": fee_payer_signature,
+        }
+    )
+    return request
+
+
+def sender_simulation_request(tx: Any, sender: str) -> dict[str, Any]:
+    """The transaction's calls as an ``eth_call`` from the sender, at its gas limit, without fees.
+
+    The gas-bounded check of a sponsored transaction: it carries the broadcast
+    gas limit and every field that sets intrinsic gas (nonce key, nonce,
+    validity window, key authorization), so a gas limit too low for the mined
+    transaction fails here. It has no fee fields, fee token or fee payer, so
+    the node charges nobody and checks no fee-token balance (verified on
+    Tempo mainnet v1.18.1). Neither signature is sent.
+    """
+    return _simulation_request(tx, sender)
+
+
+def _simulation_request(tx: Any, sender: str) -> dict[str, Any]:
     request: dict[str, Any] = {
         "type": "0x76",
         "from": sender,
@@ -310,12 +341,6 @@ def sponsored_simulation_request(
         "nonce": hex(tx.nonce),
         "nonceKey": hex(tx.nonce_key),
         "gas": hex(tx.gas_limit),
-        "maxFeePerGas": hex(tx.max_fee_per_gas),
-        "maxPriorityFeePerGas": hex(tx.max_priority_fee_per_gas),
-        "feeToken": "0x" + bytes(tx.fee_token).hex(),
-        # The node rejects ``feePayer: true`` in eth_call; name the sponsor.
-        "feePayer": fee_payer,
-        "feePayerSignature": fee_payer_signature,
     }
     if tx.valid_before is not None:
         request["validBefore"] = hex(tx.valid_before)
@@ -327,23 +352,44 @@ def sponsored_simulation_request(
     return request
 
 
+def sponsored_simulation_gas(gas_limit: int, max_fee_per_gas: int, policy: Policy) -> int:
+    """The gas a local fee payer signs into its simulation-only copy.
+
+    ``gas_limit`` plus :data:`SPONSORED_SIMULATION_GAS_BUFFER`, clamped so the
+    copy stays within ``policy``'s ``max_gas`` and ``max_total_fee``: the fee
+    payer never signs anything its policy would refuse. Never below
+    ``gas_limit``, which the policy already allowed.
+    """
+    gas = min(gas_limit + SPONSORED_SIMULATION_GAS_BUFFER, policy.max_gas)
+    if max_fee_per_gas > 0:
+        gas = min(gas, policy.max_total_fee // max_fee_per_gas)
+    return max(gas, gas_limit)
+
+
 def local_sponsored_simulation_request(
-    cosigned: Any, sender: str, fee_payer: TempoAccount
+    cosigned: Any, sender: str, fee_payer: TempoAccount, policy: Policy
 ) -> dict[str, Any]:
     """Sign a simulation-only copy of a locally co-signed transaction, as an ``eth_call``.
 
     Like mppx ``signFeePayerSimulation`` in ``preflightSponsorship``, the fee
     payer signs the same payload its broadcast co-signature covers (the
-    transaction with its fee token and sender), but with
-    :data:`SPONSORED_SIMULATION_GAS_BUFFER` more gas. ``cosigned`` and the
-    broadcast transaction are unchanged. Call it only after the sender
-    simulation passed, so a reverting transaction is never signed for.
+    transaction with its fee token and sender), but with the gas
+    :func:`sponsored_simulation_gas` allows under ``policy`` (the policy the
+    broadcast transaction passed). The copy is checked against that policy
+    before signing and is never broadcast; ``cosigned`` and the broadcast
+    transaction are unchanged. Call it only after
+    :func:`sender_simulation_request` passed, which checks the broadcast gas
+    limit itself, so a reverting or underfunded-gas transaction is never
+    signed for.
     """
     from pytempo.models import as_address  # pyright: ignore[reportMissingTypeStubs]
 
+    gas = sponsored_simulation_gas(cosigned.gas_limit, cosigned.max_fee_per_gas, policy)
+    if gas > policy.max_gas or gas * cosigned.max_fee_per_gas > policy.max_total_fee:
+        raise VerificationError("Invalid transaction: total fee budget exceeds sponsor policy")
     simulated = attrs.evolve(
         cosigned,
-        gas_limit=cosigned.gas_limit + SPONSORED_SIMULATION_GAS_BUFFER,
+        gas_limit=gas,
         sender_address=as_address(sender),
         fee_payer_signature=None,
     )
@@ -358,6 +404,18 @@ def local_sponsored_simulation_request(
         fee_payer.address,
         fee_payer_signature_rpc(signature.v, signature.r, signature.s),
     )
+
+
+def is_out_of_gas_error(message: str) -> bool:
+    """Whether an ``eth_call`` error message says the call ran out of gas.
+
+    Tempo nodes answer out of gas with code -32003 ("out of gas: ..."), the
+    same code as "insufficient fee token balance", and a limit below intrinsic
+    gas with -32000 ("intrinsic gas too low"), so the message is the only
+    reliable signal.
+    """
+    lowered = message.lower()
+    return "out of gas" in lowered or "intrinsic gas too low" in lowered
 
 
 def _int(b: bytes) -> int:

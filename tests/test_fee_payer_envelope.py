@@ -1,6 +1,8 @@
 """Tests for fee payer envelope encoding/decoding (0x78 wire format)."""
 
 import time
+from typing import Any
+from unittest.mock import patch
 
 import attrs
 import pytest
@@ -8,6 +10,7 @@ import rlp
 from pytempo import Call, TempoTransaction
 from pytempo.models import Signature
 
+from mpp.errors import VerificationError
 from mpp.methods.tempo.fee_payer_envelope import (
     decode_fee_payer_envelope,
     encode_fee_payer_envelope,
@@ -447,7 +450,11 @@ class TestKeyAuthorizationRoundtrip:
         assert isinstance(sender_call, dict) and callable(build_sponsored)
         sponsored = build_sponsored()
         assert sender_call["from"].lower() == sponsored["from"].lower() == root.address.lower()
-        assert "keyAuthorization" not in sender_call
+        # The sender simulation carries every intrinsic-gas field at the broadcast gas,
+        # and no fee fields.
+        assert sender_call["keyAuthorization"] == sponsored["keyAuthorization"]
+        assert sender_call["gas"] == hex(signed.gas_limit)
+        assert not {"maxFeePerGas", "feeToken", "feePayer", "feePayerSignature"} & set(sender_call)
         assert sponsored["keyAuthorization"]["keyId"] == access.address.lower()
         assert sponsored["keyAuthorization"]["signature"]["type"] == "secp256k1"
 
@@ -848,3 +855,84 @@ def test_sponsored_key_authorization_preserves_call_and_spending_restrictions(pe
     assert rpc["isAdmin"] is True
     assert rpc["account"] == RECIPIENT.lower()
     assert rpc["witness"] == "0x" + "11" * 32
+
+
+class TestSponsoredSimulationGas:
+    """The local fee payer's simulation-only copy stays within its sponsor policy."""
+
+    @staticmethod
+    def _policy(**overrides: int) -> Any:
+        from dataclasses import replace
+
+        from mpp.methods.tempo.fee_payer_policy import DEFAULT_POLICY
+
+        return replace(DEFAULT_POLICY, **overrides)
+
+    def test_pads_by_the_buffer_within_the_policy(self) -> None:
+        from mpp.methods.tempo._fee_payer import (
+            SPONSORED_SIMULATION_GAS_BUFFER,
+            sponsored_simulation_gas,
+        )
+
+        assert sponsored_simulation_gas(100_000, 1, self._policy()) == (
+            100_000 + SPONSORED_SIMULATION_GAS_BUFFER
+        )
+
+    def test_clamps_to_max_gas(self) -> None:
+        from mpp.methods.tempo._fee_payer import sponsored_simulation_gas
+
+        assert sponsored_simulation_gas(100_000, 1, self._policy(max_gas=103_000)) == 103_000
+
+    def test_clamps_to_max_total_fee(self) -> None:
+        from mpp.methods.tempo._fee_payer import sponsored_simulation_gas
+
+        policy = self._policy(max_total_fee=104_000 * 7 + 3)
+        assert sponsored_simulation_gas(100_000, 7, policy) == 104_000
+
+    def test_never_below_the_signed_gas(self) -> None:
+        from mpp.methods.tempo._fee_payer import sponsored_simulation_gas
+
+        assert sponsored_simulation_gas(100_000, 1, self._policy(max_gas=100_000)) == 100_000
+
+    def test_signed_copy_respects_the_policy_edge(self) -> None:
+        from eth_account import Account
+
+        from mpp.methods.tempo import TempoAccount
+        from mpp.methods.tempo._fee_payer import local_sponsored_simulation_request
+        from mpp.methods.tempo.intents import ChargeIntent
+
+        signed = _make_signed_tx(valid_before=int(time.time()) + 300)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        intent = ChargeIntent(rpc_url="https://rpc.test", fee_payer=fee_payer)
+        raw, _ = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+        cosigned = TempoTransaction.decode(bytes.fromhex(raw[2:]))
+        sender = TempoAccount.from_key(TEST_PRIVATE_KEY).address
+
+        # max_fee_per_gas is 1, so max_total_fee caps the gas as well.
+        request = local_sponsored_simulation_request(
+            cosigned, sender, fee_payer, self._policy(max_total_fee=102_500)
+        )
+
+        assert request["gas"] == hex(102_500)
+        assert cosigned.gas_limit == 100_000
+        signature = request["feePayerSignature"]
+        simulated = attrs.evolve(cosigned, gas_limit=102_500, fee_payer_signature=None)
+        recovered = Account._recover_hash(
+            simulated.get_signing_hash(for_fee_payer=True),
+            vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
+        )
+        assert recovered == fee_payer.address
+
+    def test_refuses_to_sign_outside_the_policy(self) -> None:
+        from mpp.methods.tempo import TempoAccount
+        from mpp.methods.tempo._fee_payer import local_sponsored_simulation_request
+
+        cosigned = attrs.evolve(_make_signed_tx(), gas_limit=100_000)
+        fee_payer = TempoAccount.from_key("0x" + "ab" * 32)
+        with patch.object(TempoTransaction, "sign") as sign:
+            with pytest.raises(VerificationError, match="sponsor policy"):
+                local_sponsored_simulation_request(
+                    cosigned, fee_payer.address, fee_payer, self._policy(max_gas=90_000)
+                )
+            sign.assert_not_called()
