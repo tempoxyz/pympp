@@ -2812,9 +2812,8 @@ class ChargeIntent:
 
         rpc_url = self._get_rpc_url()
         transaction = _fee_payer.envelope_transaction(decoded, key_authorization=key_authorization)
-        await self._simulate_before_broadcast(
-            client, [self._sender_simulation_request(transaction, sender)], rpc_url
-        )
+        sender_request = self._sender_simulation_request(transaction, sender)
+        await self._simulate_before_broadcast(client, [sender_request], rpc_url)
 
         try:
             headers = await remote.resolve_headers()
@@ -2855,13 +2854,16 @@ class ChargeIntent:
         )
         # The hosted signature covers the client's gas, so it is simulated as
         # signed (without it the node would bill the sender's fee token), and
-        # running out of gas alone passes: the sender simulation above checked
-        # that gas, and a sponsored eth_call needs more gas than mining does.
+        # running out of gas alone passes: a sponsored eth_call needs more gas
+        # than mining does, and the sender simulation, which runs first in the
+        # payload, checks the broadcast gas. The payload repeats it so every
+        # pre-broadcast simulation (including the one after a sponsor-budget
+        # wait) rechecks that gas before tolerating out of gas.
         simulation = _UnpaddedSponsoredSimulation(
             _fee_payer.sponsored_simulation_request(sponsored, sender, sponsor, fee_payer_signature)
         )
         max_fee = sponsored.gas_limit * sponsored.max_fee_per_gas
-        return cosigned, [simulation], sponsor, max_fee
+        return cosigned, [sender_request, simulation], sponsor, max_fee
 
     async def _simulate_before_broadcast(
         self, client: Any, simulate_payload: list[_SimulationRequest], rpc_url: str
