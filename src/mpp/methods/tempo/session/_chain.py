@@ -862,7 +862,7 @@ async def send_credential_transaction(
                 # broadcast gas, so running out of gas alone passes then.
                 padded = int(sponsored["gas"], 16)
                 full = cosigned.gas_limit + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
-                if padded >= full or not _fee_payer.is_out_of_gas_error(str(error)):
+                if padded >= full or not _fee_payer.is_out_of_gas_error(error):
                     raise
             if transaction.valid_before is not None:
                 _fee_payer.assert_remaining_validity(transaction.valid_before)

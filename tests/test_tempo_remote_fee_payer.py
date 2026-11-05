@@ -332,6 +332,8 @@ async def test_hosted_sponsored_simulation_out_of_gas_alone_passes() -> None:
             "message": "insufficient fee token balance: required 10000, but only have 0",
         },
         {"code": 3, "message": "execution reverted"},
+        {"code": 3, "message": "execution reverted: out of gas"},
+        {**_OUT_OF_GAS, "data": "0x08c379a0"},
     ],
 )
 async def test_hosted_sponsored_simulation_other_errors_still_refuse(

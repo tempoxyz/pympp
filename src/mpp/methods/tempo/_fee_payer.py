@@ -406,16 +406,55 @@ def local_sponsored_simulation_request(
     )
 
 
-def is_out_of_gas_error(message: str) -> bool:
-    """Whether an ``eth_call`` error message says the call ran out of gas.
+_OUT_OF_GAS_MESSAGE = re.compile(r"^(?:out of gas(?::|$)|intrinsic gas too low(?::|$))", re.I)
 
-    Tempo nodes answer out of gas with code -32003 ("out of gas: ..."), the
-    same code as "insufficient fee token balance", and a limit below intrinsic
-    gas with -32000 ("intrinsic gas too low"), so the message is the only
-    reliable signal.
+# JSON-RPC ``execution reverted`` (EIP-1474).
+_EXECUTION_REVERTED_CODE = 3
+
+
+def is_out_of_gas_error(error: object) -> bool:
+    """Whether a simulation failed only because it ran out of gas.
+
+    ``error`` is a JSON-RPC error object (or its message string) or an
+    exception whose ``__cause__`` chain leads to an
+    :class:`~mpp.methods.tempo._rpc.RpcError`. Tempo nodes report out of gas as
+    "out of gas: ..." (code -32003, shared with "insufficient fee token
+    balance") or "intrinsic gas too low" (code -32000), so this reads the
+    node's own message rather than the code. Only the terminal node error
+    counts: the innermost JSON-RPC error in the chain, or the innermost
+    exception message when none carries one. Wrapper messages are ignored, the
+    match is anchored to the start of the node's message, and an error with
+    revert data or code 3 (execution reverted) is never gas exhaustion, so a
+    revert reason or wrapper text that merely mentions gas cannot hide another
+    failure. Matches mppx's ``isOutOfGasError``.
     """
-    lowered = message.lower()
-    return "out of gas" in lowered or "intrinsic gas too low" in lowered
+    node_error: object = None
+    fallback: str | None = None
+    current: object = error
+    for _ in range(10):
+        if current is None:
+            break
+        if isinstance(current, BaseException):
+            response = getattr(current, "response", None)
+            if is_dict(response) and "error" in response:
+                node_error = response["error"]
+            fallback = str(current)
+            current = current.__cause__
+        else:
+            node_error = current
+            break
+    if node_error is None:
+        node_error = fallback
+    if is_dict(node_error):
+        data = node_error.get("data")
+        if data and data != "0x":
+            return False
+        if node_error.get("code") == _EXECUTION_REVERTED_CODE:
+            return False
+        node_error = node_error.get("message")
+    if not isinstance(node_error, str):
+        return False
+    return _OUT_OF_GAS_MESSAGE.match(node_error.strip()) is not None
 
 
 def _int(b: bytes) -> int:

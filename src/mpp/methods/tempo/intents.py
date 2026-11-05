@@ -2875,7 +2875,8 @@ class ChargeIntent:
         (a revert or running out of gas) is a verification failure. Only a
         sponsored request without the full gas buffer
         (``_UnpaddedSponsoredSimulation``: hosted, or local clamped by the
-        sponsor policy) that fails solely by running out of gas passes, matched by message (see
+        sponsor policy) that fails solely by running out of gas passes, matched by the node's
+        message (see
         ``_fee_payer.is_out_of_gas_error``); its fee-balance and revert errors
         stay fatal.
         """
@@ -2909,7 +2910,7 @@ class ChargeIntent:
             error = result.get("error")
             code = error.get("code") if is_dict(error) else None
             message = _rpc_error_msg(result)
-            out_of_gas = _fee_payer.is_out_of_gas_error(message)
+            out_of_gas = _fee_payer.is_out_of_gas_error(error)
             if unpadded and out_of_gas:
                 continue
             if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:

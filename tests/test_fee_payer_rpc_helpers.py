@@ -127,3 +127,73 @@ def test_fee_payer_signature_rpc_renders_parity(recovery_id: int, y_parity: str)
 def test_fee_payer_signature_rpc_rejects_an_invalid_parity() -> None:
     with pytest.raises(ValueError, match="parity"):
         fp.fee_payer_signature_rpc(2, 1, 2)
+
+
+_NODE_OUT_OF_GAS = {
+    "code": -32003,
+    "message": "out of gas: gas exhausted during precompiled contract execution: 40960",
+}
+_NODE_INTRINSIC = {"code": -32000, "message": "intrinsic gas too low"}
+_NODE_INSUFFICIENT = {
+    "code": -32003,
+    "message": "insufficient fee token balance: required 10000, but only have 0",
+}
+
+
+def _rpc_error(error: object) -> Exception:
+    from mpp.methods.tempo._rpc import RpcError
+
+    return RpcError({"jsonrpc": "2.0", "id": 1, "error": error})
+
+
+def _wrapped(message: str, cause: BaseException) -> Exception:
+    try:
+        raise RuntimeError(message) from cause
+    except RuntimeError as wrapper:
+        return wrapper
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_NODE_OUT_OF_GAS, id="node-out-of-gas"),
+        pytest.param(_NODE_INTRINSIC, id="node-intrinsic"),
+        pytest.param({**_NODE_OUT_OF_GAS, "data": "0x"}, id="empty-data"),
+        pytest.param("out of gas", id="bare-message"),
+        pytest.param(_rpc_error(_NODE_OUT_OF_GAS), id="rpc-error"),
+        pytest.param(
+            _wrapped("Execution reverted.", _rpc_error(_NODE_INTRINSIC)), id="wrapped-intrinsic"
+        ),
+        pytest.param(
+            _wrapped("simulation failed", _rpc_error(_NODE_OUT_OF_GAS)), id="wrapped-out-of-gas"
+        ),
+    ],
+)
+def test_is_out_of_gas_error_matches_node_gas_exhaustion(error: object) -> None:
+    """The replies Tempo mainnet v1.18.1 gives, with no data field."""
+    assert fp.is_out_of_gas_error(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(_NODE_INSUFFICIENT, id="insufficient-balance"),
+        pytest.param({"code": 3, "message": "execution reverted: out of gas"}, id="code-3"),
+        pytest.param({"code": 3, "message": "out of gas"}, id="code-3-anchored"),
+        pytest.param(
+            {"code": -32000, "message": "execution reverted: out of gas"}, id="revert-message"
+        ),
+        pytest.param({**_NODE_OUT_OF_GAS, "data": "0x08c379a0"}, id="revert-data"),
+        pytest.param({"code": -32003, "message": "out of gasoline"}, id="unanchored-word"),
+        pytest.param(
+            _wrapped("out of gas while simulating", _rpc_error(_NODE_INSUFFICIENT)),
+            id="wrapper-mentions-out-of-gas",
+        ),
+        pytest.param(RuntimeError("RPC error: out of gas"), id="prefixed-message"),
+        pytest.param(None, id="none"),
+        pytest.param({"code": -32003}, id="no-message"),
+    ],
+)
+def test_is_out_of_gas_error_ignores_gas_keywords_outside_the_node_message(error: object) -> None:
+    """A revert or a wrapper that mentions gas must not pass as gas exhaustion."""
+    assert not fp.is_out_of_gas_error(error)
