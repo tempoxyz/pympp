@@ -36,8 +36,10 @@ class ChannelEntry:
         chain_id: Chain ID used for channel ID and voucher domain separation.
         opened: Whether the client considers the channel reusable for new vouchers.
         uncertain_top_up: Blocks new deposits until an uncertain top-up is reconciled.
-        origin: HTTP origin a session manager bound the channel to; None on legacy or
-            standalone method entries.
+        origin: HTTP origin the channel is bound to: the origin of the request that opened
+            it, or the session manager's origin. None only for legacy entries or channels a
+            low-level call opened without an origin. A ``ChannelStore`` must persist it: an
+            entry read back without its origin is not reused ("origin mismatch").
     """
 
     channel_id: str
@@ -59,7 +61,9 @@ class ChannelStore(Protocol):
     """Store of reusable payer session channels keyed by payment scope.
 
     Methods may be sync or async. Callers sharing a backend across processes
-    must coordinate funding and writes externally.
+    must coordinate funding and writes externally. ``get`` must return every field
+    ``set`` stored, including ``ChannelEntry.origin``: clients reuse a channel only for
+    the origin it is bound to.
     """
 
     def get(self, key: str) -> ChannelEntry | None | Awaitable[ChannelEntry | None]:

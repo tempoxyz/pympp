@@ -400,6 +400,9 @@ class SessionMethod:
 
         ``origin`` is the HTTP origin the credential is for (the configured ``origin`` when
         omitted): a stored channel is used only when it is bound to exactly that origin.
+        Channels opened through an HTTP request are bound to that request's origin, so closing
+        or topping one up here needs ``origin=`` (or a configured ``origin``); without it the
+        call raises "Session channel origin mismatch", as mppx's ``createCredential`` does.
         """
         from mpp.runtime import CredentialParams
 
