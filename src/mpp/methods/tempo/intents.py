@@ -472,12 +472,13 @@ def _rpc_error_msg(result: dict[str, Any]) -> str:
 _EXECUTION_ERROR_CODES = frozenset({3})
 
 
-class _HostedSponsoredSimulation(dict[str, Any]):
-    """A hosted fee payer's sponsored ``eth_call``, where running out of gas alone passes.
+class _UnpaddedSponsoredSimulation(dict[str, Any]):
+    """A sponsored ``eth_call`` without the full gas buffer: running out of gas alone passes.
 
-    The hosted signature covers the client's gas limit, so it cannot be padded
-    for the sponsored ``eth_call``'s extra gas; the sender simulation already
-    checked that limit (see ``_fee_payer.sender_simulation_request``).
+    A hosted signature covers the client's gas limit, and a local fee payer's
+    padding can be clamped by its sponsor policy, so the request may lack gas
+    for the sponsored ``eth_call``'s extra charge; the sender simulation already
+    checked the broadcast limit (see ``_fee_payer.sender_simulation_request``).
     """
 
 
@@ -2768,7 +2769,10 @@ class ChargeIntent:
         policy = get_policy(tx.chain_id)
 
         def sponsored() -> dict[str, Any]:
-            return _fee_payer.local_sponsored_simulation_request(tx, sender, fee_payer, policy)
+            request = _fee_payer.local_sponsored_simulation_request(tx, sender, fee_payer, policy)
+            if int(request["gas"], 16) < tx.gas_limit + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER:
+                return _UnpaddedSponsoredSimulation(request)
+            return request
 
         return [self._sender_simulation_request(tx, sender), sponsored]
 
@@ -2853,7 +2857,7 @@ class ChargeIntent:
         # signed (without it the node would bill the sender's fee token), and
         # running out of gas alone passes: the sender simulation above checked
         # that gas, and a sponsored eth_call needs more gas than mining does.
-        simulation = _HostedSponsoredSimulation(
+        simulation = _UnpaddedSponsoredSimulation(
             _fee_payer.sponsored_simulation_request(sponsored, sender, sponsor, fee_payer_signature)
         )
         max_fee = sponsored.gas_limit * sponsored.max_fee_per_gas
@@ -2869,14 +2873,15 @@ class ChargeIntent:
         transaction whose sender simulation fails. Fails closed: a transport
         error or an unreadable reply is an internal error; an execution error
         (a revert or running out of gas) is a verification failure. Only a
-        hosted sponsored request (``_HostedSponsoredSimulation``) that fails
-        solely by running out of gas passes, matched by message (see
+        sponsored request without the full gas buffer
+        (``_UnpaddedSponsoredSimulation``: hosted, or local clamped by the
+        sponsor policy) that fails solely by running out of gas passes, matched by message (see
         ``_fee_payer.is_out_of_gas_error``); its fee-balance and revert errors
         stay fatal.
         """
         for entry in simulate_payload:
-            hosted = isinstance(entry, _HostedSponsoredSimulation)
             request = entry() if callable(entry) else entry
+            unpadded = isinstance(request, _UnpaddedSponsoredSimulation)
             try:
                 response = await client.post(
                     rpc_url,
@@ -2905,7 +2910,7 @@ class ChargeIntent:
             code = error.get("code") if is_dict(error) else None
             message = _rpc_error_msg(result)
             out_of_gas = _fee_payer.is_out_of_gas_error(message)
-            if hosted and out_of_gas:
+            if unpadded and out_of_gas:
                 continue
             if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:
                 raise VerificationError(

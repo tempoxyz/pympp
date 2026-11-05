@@ -851,13 +851,19 @@ async def send_credential_transaction(
                 allowed_fee_tokens=allowed_fee_tokens or [expected_currency],
                 challenge_expires=challenge_expires,
             )
-            await _simulate_call(
-                rpc_url,
-                _fee_payer.local_sponsored_simulation_request(
-                    cosigned, sender, fee_payer, get_policy(chain_id, fee_payer_policy)
-                ),
-                http,
+            sponsored = _fee_payer.local_sponsored_simulation_request(
+                cosigned, sender, fee_payer, get_policy(chain_id, fee_payer_policy)
             )
+            try:
+                await _simulate_call(rpc_url, sponsored, http)
+            except VerificationFailedError as error:
+                # Padding clamped by the sponsor policy may lack the sponsored
+                # eth_call's extra gas; the sender simulation checked the
+                # broadcast gas, so running out of gas alone passes then.
+                padded = int(sponsored["gas"], 16)
+                full = cosigned.gas_limit + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
+                if padded >= full or not _fee_payer.is_out_of_gas_error(str(error)):
+                    raise
             if transaction.valid_before is not None:
                 _fee_payer.assert_remaining_validity(transaction.valid_before)
         if fee_payer is not None:

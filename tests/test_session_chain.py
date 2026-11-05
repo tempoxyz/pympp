@@ -945,6 +945,41 @@ class TestBroadcastTopUp:
         )
         assert recovered == SPONSOR.address
 
+    @pytest.mark.parametrize("clamped", [True, False])
+    async def test_sponsored_out_of_gas_passes_only_when_policy_clamps_the_padding(
+        self, rpc: FakeRpc, clamped: bool
+    ) -> None:
+        """The sender simulation checks the broadcast gas; a clamped sponsored copy may lack
+        the sponsored eth_call's extra gas, so out of gas alone passes only then."""
+        from mpp.methods.tempo import _fee_payer
+
+        raw, descriptor, channel_id = await self._setup(rpc, fee_payer=True)
+        rpc.states[channel_id] = (0, DEPOSIT + 500, 0)
+        client_gas = int.from_bytes(rlp_fields(raw)[3], "big")
+        policy = {"max_gas": client_gas + 1_000} if clamped else None
+        sponsored: list[dict[str, Any]] = []
+
+        def call(params: list[Any]) -> str:
+            if "feePayerSignature" in params[0]:
+                sponsored.append(params[0])
+                raise RpcError("out of gas: gas exhausted during precompiled contract execution")
+            return rpc._call(params)
+
+        rpc.overrides["eth_call"] = call
+        if clamped:
+            await self._broadcast(
+                rpc, raw, descriptor, channel_id, fee_payer=SPONSOR, fee_payer_policy=policy
+            )
+            assert sponsored[0]["gas"] == hex(client_gas + 1_000)
+            assert len(rpc.sent) == 1
+        else:
+            with pytest.raises(VerificationFailedError, match="out of gas"):
+                await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+            assert sponsored[0]["gas"] == hex(
+                client_gas + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
+            )
+            assert not rpc.sent
+
     async def test_failed_sender_simulation_signs_nothing_for_simulation(
         self, rpc: FakeRpc, monkeypatch: pytest.MonkeyPatch
     ) -> None:

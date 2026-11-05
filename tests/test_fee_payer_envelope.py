@@ -936,3 +936,21 @@ class TestSponsoredSimulationGas:
                     cosigned, fee_payer.address, fee_payer, self._policy(max_gas=90_000)
                 )
             sign.assert_not_called()
+
+    @pytest.mark.parametrize("clamped", [True, False])
+    def test_charge_marks_a_clamped_copy_out_of_gas_tolerant(self, clamped: bool) -> None:
+        from mpp.methods.tempo import TempoAccount, intents
+        from mpp.methods.tempo.intents import ChargeIntent, _UnpaddedSponsoredSimulation
+
+        signed = _make_signed_tx(valid_before=int(time.time()) + 300)
+        envelope_hex = "0x" + encode_fee_payer_envelope(signed).hex()
+        intent = ChargeIntent(
+            rpc_url="https://rpc.test", fee_payer=TempoAccount.from_key("0x" + "ab" * 32)
+        )
+        policy = self._policy(max_gas=101_000) if clamped else self._policy()
+        with patch.object(intents, "get_policy", lambda *_: policy):
+            _, payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
+            build_sponsored = payload[1]
+            assert callable(build_sponsored)
+            request = build_sponsored()
+        assert isinstance(request, _UnpaddedSponsoredSimulation) is clamped
