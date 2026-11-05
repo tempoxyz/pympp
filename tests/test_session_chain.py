@@ -886,6 +886,115 @@ class TestBroadcastTopUp:
         assert result.new_deposit == DEPOSIT + 500
         assert rpc.sent[0].startswith("0x76")
 
+    async def test_sponsored_top_up_simulates_with_the_sponsor_signature(
+        self, rpc: FakeRpc, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tempo nodes bill the sender of a sponsored eth_call without feePayerSignature.
+
+        The sponsor signs a simulation-only copy with SPONSORED_SIMULATION_GAS_BUFFER
+        more gas (the sponsored eth_call charges more than the mined top-up uses),
+        only after the sender simulation passed; the broadcast keeps its gas.
+        """
+        import attrs
+        from eth_account import Account
+
+        from mpp.methods.tempo import _fee_payer
+
+        raw, descriptor, channel_id = await self._setup(rpc, fee_payer=True)
+        rpc.states[channel_id] = (0, DEPOSIT + 500, 0)
+        events: list[str] = []
+
+        def call(params: list[Any]) -> str:
+            if "calls" in params[0]:
+                kind = "sponsored" if "feePayer" in params[0] else "sender"
+                events.append("simulate:" + kind)
+            return rpc._call(params)
+
+        real_cosign = chain._cosign
+        real_sign = _fee_payer.local_sponsored_simulation_request
+
+        def cosign(*args: Any, **kwargs: Any) -> Any:
+            events.append("complete")
+            return real_cosign(*args, **kwargs)
+
+        def sign(*args: Any) -> dict[str, Any]:
+            events.append("sign")
+            return real_sign(*args)
+
+        rpc.overrides["eth_call"] = call
+        monkeypatch.setattr(chain, "_cosign", cosign)
+        monkeypatch.setattr(_fee_payer, "local_sponsored_simulation_request", sign)
+
+        await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+
+        # Validation co-signs once to check the policy; nothing is simulated with it.
+        assert events == ["complete", "simulate:sender", "complete", "sign", "simulate:sponsored"]
+        client_gas = int.from_bytes(rlp_fields(raw)[3], "big")
+        broadcast = TempoTransaction.decode(bytes.fromhex(rpc.sent[0][2:]))
+        assert broadcast.gas_limit == client_gas
+        assert broadcast.recover_fee_payer() == SPONSOR.address
+        sponsored = [p[0] for p in rpc.methods("eth_call") if "feePayer" in p[0]][0]
+        assert "signature" not in sponsored
+        buffered = client_gas + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
+        assert sponsored["gas"] == hex(buffered)
+        signature = sponsored["feePayerSignature"]
+        simulated = attrs.evolve(broadcast, gas_limit=buffered, fee_payer_signature=None)
+        recovered = Account._recover_hash(
+            simulated.get_signing_hash(for_fee_payer=True),
+            vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
+        )
+        assert recovered == SPONSOR.address
+
+    @pytest.mark.parametrize("clamped", [True, False])
+    async def test_sponsored_out_of_gas_passes_only_when_policy_clamps_the_padding(
+        self, rpc: FakeRpc, clamped: bool
+    ) -> None:
+        """The sender simulation checks the broadcast gas; a clamped sponsored copy may lack
+        the sponsored eth_call's extra gas, so out of gas alone passes only then."""
+        from mpp.methods.tempo import _fee_payer
+
+        raw, descriptor, channel_id = await self._setup(rpc, fee_payer=True)
+        rpc.states[channel_id] = (0, DEPOSIT + 500, 0)
+        client_gas = int.from_bytes(rlp_fields(raw)[3], "big")
+        policy = {"max_gas": client_gas + 1_000} if clamped else None
+        sponsored: list[dict[str, Any]] = []
+
+        def call(params: list[Any]) -> str:
+            if "feePayerSignature" in params[0]:
+                sponsored.append(params[0])
+                raise RpcError("out of gas: gas exhausted during precompiled contract execution")
+            return rpc._call(params)
+
+        rpc.overrides["eth_call"] = call
+        if clamped:
+            await self._broadcast(
+                rpc, raw, descriptor, channel_id, fee_payer=SPONSOR, fee_payer_policy=policy
+            )
+            assert sponsored[0]["gas"] == hex(client_gas + 1_000)
+            assert len(rpc.sent) == 1
+        else:
+            with pytest.raises(VerificationFailedError, match="out of gas"):
+                await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+            assert sponsored[0]["gas"] == hex(
+                client_gas + _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER
+            )
+            assert not rpc.sent
+
+    async def test_failed_sender_simulation_signs_nothing_for_simulation(
+        self, rpc: FakeRpc, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mpp.methods.tempo import _fee_payer
+
+        raw, descriptor, channel_id = await self._setup(rpc, fee_payer=True)
+        signed: list[Any] = []
+        monkeypatch.setattr(
+            _fee_payer, "local_sponsored_simulation_request", lambda *args: signed.append(args)
+        )
+        rpc.overrides["eth_call"] = fail("execution reverted: insufficient balance")
+        with pytest.raises(VerificationFailedError, match="insufficient balance"):
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        assert not signed and not rpc.sent
+
     async def test_reads_back_at_an_integer_receipt_block(self, rpc: FakeRpc) -> None:
         raw, descriptor, channel_id = await self._setup(rpc)
         rpc.states[channel_id] = (0, DEPOSIT + 500, 0)

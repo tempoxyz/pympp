@@ -131,6 +131,7 @@ class FakeNetwork:
         self.fill_result: Any = None
         self.fill_error: dict[str, Any] | None = None
         self.revert_simulation: int | None = None
+        self.simulation_errors: dict[int, dict[str, Any]] = {}
         self.key_authorization: Any = None
 
     def fill(self, params: dict[str, Any]) -> Any:
@@ -166,6 +167,8 @@ class FakeNetwork:
             self.simulations.append(body["params"][0])
             if self.revert_simulation == len(self.simulations):
                 reply["error"] = {"code": 3, "message": "execution reverted"}
+            elif len(self.simulations) in self.simulation_errors:
+                reply["error"] = self.simulation_errors[len(self.simulations)]
             else:
                 reply["result"] = "0x"
         elif method == "eth_sendRawTransactionSync":
@@ -253,6 +256,7 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
         "eth_call",
         "eth_fillTransaction",
         "eth_call",
+        "eth_call",
         "eth_sendRawTransactionSync",
     ]
     [fill] = network.fill_requests
@@ -273,10 +277,21 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
             "validBefore": hex(int.from_bytes(client_fields[8], "big")),
         }
     ]
-    sender_simulation, sponsored_simulation = network.simulations
-    assert "feePayer" not in sender_simulation and "gas" not in sender_simulation
+    sender_simulation, repeated_sender_simulation, sponsored_simulation = network.simulations
+    # The pre-broadcast payload repeats the sender simulation before the
+    # out-of-gas tolerant sponsored one, so every rerun rechecks the gas.
+    assert repeated_sender_simulation == sender_simulation
+    # The sender simulation checks the broadcast gas, with no fee fields.
+    assert "feePayer" not in sender_simulation and "maxFeePerGas" not in sender_simulation
+    assert sender_simulation["gas"] == hex(100_000)
     assert sponsored_simulation["feePayer"] == SPONSOR
     assert sponsored_simulation["feeToken"] == PATH_USD
+    # The node bills the fee payer it recovers from feePayerSignature (and the
+    # sender without one), so the hosted signature is simulated as signed, at
+    # the client's gas. The sender's own signature is never sent.
+    assert "signature" not in sponsored_simulation
+    assert sponsored_simulation["gas"] == hex(100_000)
+    assert _simulated_fee_payer(sponsored_simulation, client_fields) == SPONSOR
 
     [broadcast] = network.broadcasts
     fields = rlp.decode(bytes.fromhex(broadcast[4:]))
@@ -290,6 +305,122 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
         b"\x78" + rlp.encode([*client_fields[:10], fields[10], client_fields[11], fields[12]])
     )
     assert Account._recover_hash(payload, vrs=(v, r, s)) == SPONSOR
+
+
+_OUT_OF_GAS = {
+    "code": -32003,
+    "message": "out of gas: gas exhausted during precompiled contract execution: 100000",
+}
+
+
+async def test_hosted_sponsored_simulation_out_of_gas_alone_passes() -> None:
+    """The hosted signature binds the client's gas, which a sponsored eth_call can exceed.
+
+    The sender simulation already passed at that gas, so out of gas alone is tolerated.
+    """
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[3] = _OUT_OF_GAS
+
+    receipt = await _settle(network, raw_tx)
+
+    assert receipt.status == "success"
+    assert len(network.broadcasts) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {
+            "code": -32003,
+            "message": "insufficient fee token balance: required 10000, but only have 0",
+        },
+        {"code": 3, "message": "execution reverted"},
+        {"code": 3, "message": "execution reverted: out of gas"},
+        {**_OUT_OF_GAS, "data": "0x08c379a0"},
+    ],
+)
+async def test_hosted_sponsored_simulation_other_errors_still_refuse(
+    error: dict[str, Any],
+) -> None:
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[3] = error
+
+    with pytest.raises((VerificationError, InternalPaymentError)):
+        await _settle(network, raw_tx)
+    assert not network.broadcasts
+
+
+async def test_hosted_sender_simulation_out_of_gas_refuses() -> None:
+    """A gas limit too low for the mined tx fails the gas-bounded sender simulation."""
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[1] = _OUT_OF_GAS
+
+    with pytest.raises(VerificationError, match="out of gas"):
+        await _settle(network, raw_tx)
+    assert network.methods == ["eth_call"]
+    assert not network.broadcasts
+
+
+async def test_hosted_pre_broadcast_simulation_rechecks_the_sender_gas() -> None:
+    """The out-of-gas tolerant sponsored simulation always runs after a sender gas check.
+
+    The pre-broadcast payload (also rerun after a sponsor-budget wait) repeats the
+    sender simulation, so a gas limit that became too low is refused, not tolerated.
+    """
+    raw_tx, sender = _envelope()
+    network = FakeNetwork(sender=sender)
+    network.simulation_errors[2] = _OUT_OF_GAS
+    network.simulation_errors[3] = _OUT_OF_GAS
+
+    with pytest.raises(VerificationError, match="out of gas"):
+        await _settle(network, raw_tx)
+    assert len(network.simulations) == 2
+    assert not network.broadcasts
+
+
+def _simulated_fee_payer(simulation: dict[str, Any], client_fields: list[Any]) -> str:
+    """Recover the account a simulation's feePayerSignature signs the client's envelope for."""
+    signature = simulation["feePayerSignature"]
+    fee_token = bytes.fromhex(simulation["feeToken"][2:])
+    payload = keccak(
+        b"\x78" + rlp.encode([*client_fields[:10], fee_token, client_fields[11], client_fields[12]])
+    )
+    return Account._recover_hash(
+        payload,
+        vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
+    )
+
+
+@pytest.mark.parametrize("y_parity", [0, 1])
+async def test_hosted_signature_reaches_the_simulation_for_either_parity(y_parity: int) -> None:
+    """A hosted yParity of `0x0` is falsy but valid, and must still reach the simulation."""
+    # Vary validBefore until the sponsor's signature has the wanted parity.
+    for offset in range(64):
+        raw_tx, sender = _envelope(valid_before=int(time.time()) + 300 + offset)
+        client_fields = rlp.decode(bytes.fromhex(raw_tx[4:]))
+        network = FakeNetwork(sender=sender)
+        reply = network.fill(json.loads(json.dumps(_fill_params(raw_tx, sender))))
+        if reply["tx"]["feePayerSignature"]["yParity"] == hex(y_parity):
+            break
+    else:
+        pytest.fail("no signature with the wanted parity")
+
+    receipt = await _settle(network, raw_tx)
+
+    assert receipt.status == "success"
+    *_, sponsored_simulation = network.simulations
+    assert sponsored_simulation["feePayerSignature"]["yParity"] == hex(y_parity)
+    assert _simulated_fee_payer(sponsored_simulation, client_fields) == SPONSOR
+
+
+def _fill_params(raw_tx: str, sender: str) -> dict[str, Any]:
+    from mpp.methods.tempo._fee_payer import decode_sponsored_envelope, hosted_fee_payer_request
+
+    decoded, _, _, key_authorization = decode_sponsored_envelope(raw_tx)
+    return hosted_fee_payer_request(decoded, sender, key_authorization)
 
 
 async def test_hosted_fee_payer_carries_a_key_authorization() -> None:
@@ -313,7 +444,7 @@ async def test_hosted_fee_payer_carries_a_key_authorization() -> None:
     expected = key_authorization_rpc(client_fields[13])
     [fill] = network.fill_requests
     assert json.loads(fill.content)["params"][0]["keyAuthorization"] == expected
-    _, sponsored_simulation = network.simulations
+    *_, sponsored_simulation = network.simulations
     assert sponsored_simulation["keyAuthorization"] == expected
     assert sponsored_simulation["feePayer"] == SPONSOR
     [broadcast] = network.broadcasts
@@ -371,12 +502,12 @@ async def test_hosted_fee_payer_signature_over_mutated_fields_names_another_spon
     raw_tx, sender = _envelope()
     network = FakeNetwork(sender=sender)
     network.fill_result = lambda params: FakeNetwork(sender=sender).fill({**params, "gas": "0x1"})
-    network.revert_simulation = 2
+    network.revert_simulation = 3
 
     with pytest.raises(VerificationError, match="pre-broadcast simulation"):
         await _settle(network, raw_tx)
 
-    assert network.simulations[1]["feePayer"] != SPONSOR
+    assert network.simulations[2]["feePayer"] != SPONSOR
     assert network.broadcasts == []
 
 
@@ -469,12 +600,12 @@ async def test_hosted_fee_payer_is_not_asked_to_sponsor_reverting_calls() -> Non
 async def test_hosted_sponsorship_is_not_broadcast_when_final_simulation_reverts() -> None:
     raw_tx, sender = _envelope()
     network = FakeNetwork(sender=sender)
-    network.revert_simulation = 2
+    network.revert_simulation = 3
 
     with pytest.raises(VerificationError, match="pre-broadcast simulation"):
         await _settle(network, raw_tx)
 
-    assert network.methods == ["eth_call", "eth_fillTransaction", "eth_call"]
+    assert network.methods == ["eth_call", "eth_fillTransaction", "eth_call", "eth_call"]
 
 
 async def test_challenge_fee_payer_url_is_ignored() -> None:
