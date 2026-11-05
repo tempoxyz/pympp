@@ -254,18 +254,21 @@ def key_authorization_rpc(payload: object) -> dict[str, Any]:
     return rpc
 
 
-SPONSORED_SIMULATION_GAS_BUFFER = 10_000
+SPONSORED_SIMULATION_GAS_BUFFER = 6_000
 """Extra gas a local fee payer signs into its simulation-only transaction.
 
-Tempo's sponsored ``eth_call`` charges more gas than the same transaction uses
-when mined (about 6,000 for a session top-up on v1.18.1: mined 63,645 of a
-67,894 gas limit, simulation needed 69,645), and the fee payer signature binds
-the gas limit, so simulating at the signed limit would refuse transactions that
-succeed onchain. The broadcast transaction keeps its gas, and the sender
-simulation (:func:`sender_simulation_request`) checks that gas itself. The
-padded copy is clamped to the fee payer policy (:func:`sponsored_simulation_gas`).
-Hosted signatures cover the client's gas and are simulated as signed, where
-running out of gas alone is tolerated. Matches mppx
+Tempo's ``eth_call`` skips fee collection, so the fee token's storage slots that
+block execution warms before the transaction stay cold: a sponsored simulation
+needs exactly 6,000 more gas than the mined transaction when its calls touch the
+fee token, and none otherwise. The remaining risk is a gas limit up to 6,000 short
+on calls that don't touch the fee token, which passes simulation and reverts
+onchain; a node fix that warms those slots in ``eth_call`` would remove the buffer.
+
+The fee payer signature binds the gas limit, so the broadcast transaction keeps its
+gas and the sender simulation (:func:`sender_simulation_request`) checks that gas
+itself. The padded copy is clamped to the fee payer policy
+(:func:`sponsored_simulation_gas`). Hosted signatures cover the client's gas and
+are simulated as signed, where running out of gas alone is tolerated. Matches mppx
 ``sponsoredSimulationGasBuffer``.
 """
 

@@ -4907,11 +4907,11 @@ class TestCosignAsFeePayer:
 
         # The broadcast tx keeps the client's gas; only the simulation copy is raised.
         assert broadcast.gas_limit == 67_894
-        assert _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER == 10_000
-        assert sponsored["gas"] == hex(67_894 + 10_000)
+        assert _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER == 6_000
+        assert sponsored["gas"] == hex(67_894 + 6_000)
         assert "signature" not in sponsored
         signature = sponsored["feePayerSignature"]
-        simulated = attrs.evolve(broadcast, gas_limit=67_894 + 10_000, fee_payer_signature=None)
+        simulated = attrs.evolve(broadcast, gas_limit=67_894 + 6_000, fee_payer_signature=None)
         recovered = Account._recover_hash(
             simulated.get_signing_hash(for_fee_payer=True),
             vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
