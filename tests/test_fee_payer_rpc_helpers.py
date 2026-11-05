@@ -109,3 +109,21 @@ def test_key_authorization_rpc_renders_optional_fields() -> None:
     assert rpc["isAdmin"] is True
     assert rpc["account"] == "0x" + ADDR.hex()
     assert rpc["chainId"] == "0x539" and rpc["expiry"] == "0x10"
+
+
+@pytest.mark.parametrize(
+    ("recovery_id", "y_parity"), [(0, "0x0"), (1, "0x1"), (27, "0x0"), (28, "0x1")]
+)
+def test_fee_payer_signature_rpc_renders_parity(recovery_id: int, y_parity: str) -> None:
+    """A yParity of 0 renders as `0x0`, as ox `Signature.toRpc` does."""
+    rendered = fp.fee_payer_signature_rpc(recovery_id, 1, 2)
+    assert rendered == {
+        "r": "0x" + "00" * 31 + "01",
+        "s": "0x" + "00" * 31 + "02",
+        "yParity": y_parity,
+    }
+
+
+def test_fee_payer_signature_rpc_rejects_an_invalid_parity() -> None:
+    with pytest.raises(ValueError, match="parity"):
+        fp.fee_payer_signature_rpc(2, 1, 2)

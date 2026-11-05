@@ -277,6 +277,12 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
     assert "feePayer" not in sender_simulation and "gas" not in sender_simulation
     assert sponsored_simulation["feePayer"] == SPONSOR
     assert sponsored_simulation["feeToken"] == PATH_USD
+    # The node bills the fee payer it recovers from feePayerSignature (and the
+    # sender without one), so the hosted signature is simulated as signed, at
+    # the client's gas. The sender's own signature is never sent.
+    assert "signature" not in sponsored_simulation
+    assert sponsored_simulation["gas"] == hex(100_000)
+    assert _simulated_fee_payer(sponsored_simulation, client_fields) == SPONSOR
 
     [broadcast] = network.broadcasts
     fields = rlp.decode(bytes.fromhex(broadcast[4:]))
@@ -290,6 +296,48 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
         b"\x78" + rlp.encode([*client_fields[:10], fields[10], client_fields[11], fields[12]])
     )
     assert Account._recover_hash(payload, vrs=(v, r, s)) == SPONSOR
+
+
+def _simulated_fee_payer(simulation: dict[str, Any], client_fields: list[Any]) -> str:
+    """Recover the account a simulation's feePayerSignature signs the client's envelope for."""
+    signature = simulation["feePayerSignature"]
+    fee_token = bytes.fromhex(simulation["feeToken"][2:])
+    payload = keccak(
+        b"\x78" + rlp.encode([*client_fields[:10], fee_token, client_fields[11], client_fields[12]])
+    )
+    return Account._recover_hash(
+        payload,
+        vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
+    )
+
+
+@pytest.mark.parametrize("y_parity", [0, 1])
+async def test_hosted_signature_reaches_the_simulation_for_either_parity(y_parity: int) -> None:
+    """A hosted yParity of `0x0` is falsy but valid, and must still reach the simulation."""
+    # Vary validBefore until the sponsor's signature has the wanted parity.
+    for offset in range(64):
+        raw_tx, sender = _envelope(valid_before=int(time.time()) + 300 + offset)
+        client_fields = rlp.decode(bytes.fromhex(raw_tx[4:]))
+        network = FakeNetwork(sender=sender)
+        reply = network.fill(json.loads(json.dumps(_fill_params(raw_tx, sender))))
+        if reply["tx"]["feePayerSignature"]["yParity"] == hex(y_parity):
+            break
+    else:
+        pytest.fail("no signature with the wanted parity")
+
+    receipt = await _settle(network, raw_tx)
+
+    assert receipt.status == "success"
+    _, sponsored_simulation = network.simulations
+    assert sponsored_simulation["feePayerSignature"]["yParity"] == hex(y_parity)
+    assert _simulated_fee_payer(sponsored_simulation, client_fields) == SPONSOR
+
+
+def _fill_params(raw_tx: str, sender: str) -> dict[str, Any]:
+    from mpp.methods.tempo._fee_payer import decode_sponsored_envelope, hosted_fee_payer_request
+
+    decoded, _, _, key_authorization = decode_sponsored_envelope(raw_tx)
+    return hosted_fee_payer_request(decoded, sender, key_authorization)
 
 
 async def test_hosted_fee_payer_carries_a_key_authorization() -> None:

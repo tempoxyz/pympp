@@ -811,8 +811,9 @@ async def send_credential_transaction(
 ) -> dict[str, Any]:
     """Broadcast a client-signed management transaction and wait for its receipt.
 
-    With `fee_payer`, the 0x78 envelope is co-signed, simulated with
-    `tempo_simulateV1` and checked for remaining validity before broadcast.
+    With `fee_payer`, the calls are simulated as the sender, then the 0x78
+    envelope is co-signed, simulated with `eth_call` as the sponsored
+    transaction and checked for remaining validity before broadcast.
     """
     import httpx
 
@@ -825,7 +826,9 @@ async def send_credential_transaction(
         if fee_payer is not None:
             # Like mppx FeePayer.preflightSponsorship: execute the calls as the
             # sender (no fee fields) before co-signing, then the completed
-            # envelope with its fee payer and fee token.
+            # envelope with its fee payer, fee token and a fee payer signature
+            # (signed only now, after the sender simulation passed), since
+            # Tempo nodes bill the sender of an eth_call that lacks one.
             await _simulate_call(
                 rpc_url,
                 {"from": transaction.sender, "calls": _rpc_calls(transaction.calls)},
@@ -841,7 +844,7 @@ async def send_credential_transaction(
             )
             await _simulate_call(
                 rpc_url,
-                _fee_payer.sponsored_simulation_request(cosigned, sender, fee_payer.address),
+                _fee_payer.local_sponsored_simulation_request(cosigned, sender, fee_payer),
                 http,
             )
             if transaction.valid_before is not None:

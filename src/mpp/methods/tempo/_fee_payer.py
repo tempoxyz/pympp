@@ -254,12 +254,50 @@ def key_authorization_rpc(payload: object) -> dict[str, Any]:
     return rpc
 
 
-def sponsored_simulation_request(tx: Any, sender: str, fee_payer: str) -> dict[str, Any]:
-    """The co-signed transaction as an ``eth_call`` request, without either signature.
+SPONSORED_SIMULATION_GAS_BUFFER = 10_000
+"""Extra gas a local fee payer signs into its simulation-only transaction.
+
+Tempo's sponsored ``eth_call`` charges more gas than the same transaction uses
+when mined (about 6,000 for a session top-up on v1.18.1: mined 63,645 of a
+67,894 gas limit, simulation needed 69,645), and the fee payer signature binds
+the gas limit, so simulating at the signed limit would refuse transactions that
+succeed onchain. The broadcast transaction keeps its gas. Hosted signatures
+cover the client's gas and are simulated as signed. Matches mppx
+``sponsoredSimulationGasBuffer``.
+"""
+
+
+def fee_payer_signature_rpc(y_parity: int, r: int, s: int) -> dict[str, str]:
+    """Render a fee payer signature as JSON-RPC, as ox ``Signature.toRpc``.
+
+    ``yParity`` is ``0x0`` or ``0x1``; a recovery id of 27 or 28 is normalized.
+    """
+    parity = y_parity - 27 if y_parity in (27, 28) else y_parity
+    if parity not in (0, 1):
+        raise ValueError("invalid fee payer signature parity")
+    return {
+        "r": "0x" + r.to_bytes(32, "big").hex(),
+        "s": "0x" + s.to_bytes(32, "big").hex(),
+        "yParity": hex(parity),
+    }
+
+
+def sponsored_simulation_request(
+    tx: Any, sender: str, fee_payer: str, fee_payer_signature: dict[str, str]
+) -> dict[str, Any]:
+    """The co-signed transaction as an ``eth_call`` request, with its fee payer signature.
 
     Mirrors mppx ``FeePayer.sponsoredSimulationTransaction``: the final
-    transaction with its concrete fee payer and fee token, and its key
-    authorization as viem formats it (ox ``KeyAuthorization.toRpc``).
+    transaction with its concrete fee payer, fee token and fee payer signature,
+    and its key authorization as viem formats it (ox ``KeyAuthorization.toRpc``).
+
+    Tempo nodes (v1.18 and later) check the fee payer's fee-token balance in
+    ``eth_call`` and recover the fee payer only from ``feePayerSignature``: a
+    bare ``feePayer`` address is ignored and the sender is billed, so a sender
+    holding none of the sponsor's fee token fails with "insufficient fee token
+    balance". ``fee_payer_signature`` (see :func:`fee_payer_signature_rpc`)
+    must therefore sign this exact request's fields. The sender's signature is
+    never sent.
     """
     request: dict[str, Any] = {
         "type": "0x76",
@@ -277,6 +315,7 @@ def sponsored_simulation_request(tx: Any, sender: str, fee_payer: str) -> dict[s
         "feeToken": "0x" + bytes(tx.fee_token).hex(),
         # The node rejects ``feePayer: true`` in eth_call; name the sponsor.
         "feePayer": fee_payer,
+        "feePayerSignature": fee_payer_signature,
     }
     if tx.valid_before is not None:
         request["validBefore"] = hex(tx.valid_before)
@@ -286,6 +325,39 @@ def sponsored_simulation_request(tx: Any, sender: str, fee_payer: str) -> dict[s
     if key_authorization is not None:
         request["keyAuthorization"] = key_authorization_rpc(key_authorization.as_rlp_payload())
     return request
+
+
+def local_sponsored_simulation_request(
+    cosigned: Any, sender: str, fee_payer: TempoAccount
+) -> dict[str, Any]:
+    """Sign a simulation-only copy of a locally co-signed transaction, as an ``eth_call``.
+
+    Like mppx ``signFeePayerSimulation`` in ``preflightSponsorship``, the fee
+    payer signs the same payload its broadcast co-signature covers (the
+    transaction with its fee token and sender), but with
+    :data:`SPONSORED_SIMULATION_GAS_BUFFER` more gas. ``cosigned`` and the
+    broadcast transaction are unchanged. Call it only after the sender
+    simulation passed, so a reverting transaction is never signed for.
+    """
+    from pytempo.models import as_address  # pyright: ignore[reportMissingTypeStubs]
+
+    simulated = attrs.evolve(
+        cosigned,
+        gas_limit=cosigned.gas_limit + SPONSORED_SIMULATION_GAS_BUFFER,
+        sender_address=as_address(sender),
+        fee_payer_signature=None,
+    )
+    try:
+        simulated = simulated.sign(fee_payer.private_key, for_fee_payer=True)
+    except Exception as err:
+        raise InternalPaymentError() from err
+    signature = simulated.fee_payer_signature
+    return sponsored_simulation_request(
+        simulated,
+        sender,
+        fee_payer.address,
+        fee_payer_signature_rpc(signature.v, signature.r, signature.s),
+    )
 
 
 def _int(b: bytes) -> int:
@@ -513,7 +585,7 @@ def complete_hosted_fee_payer_envelope(
     *,
     key_authorization: Any = None,
     allowed_fee_tokens: Sequence[str] | None = None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, dict[str, str]]:
     """Apply a hosted fee payer's `eth_fillTransaction` result to a client envelope.
 
     Like mppx `fillHostedFeePayerTransaction`, only the sponsor's
@@ -523,7 +595,10 @@ def complete_hosted_fee_payer_envelope(
     other values cannot change them. The sponsor address is recovered from the
     signature over those fields, for the final simulation.
 
-    Returns `(raw_0x76_hex, sponsor, fee_token)`. Raises `InternalPaymentError`
+    Returns `(raw_0x76_hex, sponsor, fee_token, fee_payer_signature)`, where
+    `fee_payer_signature` is the sponsor's signature in JSON-RPC form for the final
+    simulation: Tempo nodes bill the fee payer of an `eth_call` only when it
+    carries that signature. Raises `InternalPaymentError`
     when the sponsor's answer is unusable.
     """
     from eth_account import Account
@@ -580,7 +655,8 @@ def complete_hosted_fee_payer_envelope(
             sender_signature,
         ]
     )
-    return "0x" + raw.hex(), sponsor, fee_token
+    # A yParity of 0 (`0x0`) is falsy but valid: it was range-checked above.
+    return "0x" + raw.hex(), sponsor, fee_token, fee_payer_signature_rpc(y_parity, r, s)
 
 
 def cosign_fee_payer_envelope(

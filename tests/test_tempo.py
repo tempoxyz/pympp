@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import attrs
 import httpx
 import pytest
 import rlp
@@ -31,6 +32,7 @@ from mpp.methods.tempo import (
     TESTNET_CHAIN_ID,
     USDC,
     TempoAccount,
+    _fee_payer,
     escrow_contract_for_chain,
     fee_tokens_for_chain,
 )
@@ -4110,8 +4112,9 @@ class TestCosignAsFeePayer:
             assert result.startswith("0x76")
 
     # Like mppx, the co-signed tx is simulated with eth_call twice: from the sender
-    # with no fee fields, then as the final sponsored tx naming its fee payer and fee
-    # token. eth_call carries no signatures and `feePayer: true` is refused by the node.
+    # with no fee fields, then as the final sponsored tx naming its fee payer, fee
+    # token and fee payer signature (the node bills the sender without it). The
+    # sender's signature is never sent and `feePayer: true` is refused by the node.
     def test_cosign_returns_simulate_payload_with_sponsor_abi(self) -> None:
         intent = self._make_intent()
         currency = "0x20c0000000000000000000000000000000000000"
@@ -4119,7 +4122,9 @@ class TestCosignAsFeePayer:
         raw_tx = self._build_client_tx(currency=currency)
         _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
         assert payload is not None
-        sender_request, sponsored = payload
+        sender_request, build_sponsored = payload
+        assert isinstance(sender_request, dict) and callable(build_sponsored)
+        sponsored = build_sponsored()
 
         sender = TempoAccount.from_key(TEST_PRIVATE_KEY).address
         assert sender_request["type"] == "0x76"
@@ -4129,10 +4134,11 @@ class TestCosignAsFeePayer:
         assert sponsored["feeToken"].lower() == currency.lower()
         assert intent.fee_payer is not None
         assert sponsored["feePayer"].lower() == intent.fee_payer.address.lower()
-        assert "feePayerSignature" not in sponsored and "signature" not in sponsored
+        assert set(sponsored["feePayerSignature"]) == {"r", "s", "yParity"}
+        assert "signature" not in sponsored
         assert sponsored["nonceKey"].startswith("0x")
         assert sponsored["validBefore"].startswith("0x")
-        for request in payload:
+        for request in (sender_request, sponsored):
             [call] = request["calls"]
             assert call["to"].lower() == currency.lower()
             assert call["data"].startswith("0x")
@@ -4173,7 +4179,8 @@ class TestCosignAsFeePayer:
         cosigned, simulate_payload = intent._cosign_as_fee_payer(raw, PATH_USD, request=request)
 
         assert cosigned.startswith("0x76")
-        for call_request in simulate_payload:
+        for entry in simulate_payload:
+            call_request = entry() if callable(entry) else entry
             assert [c["to"] for c in call_request["calls"]] == [currency, currency]
 
     def test_build_simulate_payload_multi_call_preserves_order(self) -> None:
@@ -4203,7 +4210,12 @@ class TestCosignAsFeePayer:
             valid_after=None,
         )
 
-        for request in intent._build_simulate_payload(tx, "0x" + "11" * 20):
+        sender = "0x" + "11" * 20
+        signature = _fee_payer.fee_payer_signature_rpc(0, 1, 2)
+        sender_request, _ = intent._build_simulate_payload(tx, sender)
+        assert isinstance(sender_request, dict)
+        sponsored = _fee_payer.sponsored_simulation_request(tx, sender, sender, signature)
+        for request in (sender_request, sponsored):
             assert [c["to"] for c in request["calls"]] == [
                 "0x" + "a1" * 20,
                 "0x" + "b2" * 20,
@@ -4815,7 +4827,7 @@ class TestCosignAsFeePayer:
         intent._http_client.post.assert_not_awaited()
         assert not any(key.startswith("mpp:charge-admission:") for key in store._data)
 
-    def _cosign_payload(self, intent: ChargeIntent) -> list[dict[str, Any]]:
+    def _cosign_payload(self, intent: ChargeIntent) -> list[Any]:
         currency = "0x20c0000000000000000000000000000000000000"
         raw_tx = self._build_client_tx(currency=currency)
         _result, payload = intent._cosign_as_fee_payer(raw_tx, currency)
@@ -4857,7 +4869,84 @@ class TestCosignAsFeePayer:
         )
         sent = [call.kwargs["json"] for call in mock_client.post.await_args_list]
         assert [r["method"] for r in sent] == ["eth_call", "eth_call"]
-        assert [r["params"][0] for r in sent] == payload
+        sender_request, build_sponsored = payload
+        assert callable(build_sponsored)
+        # The fee payer's signature is deterministic (RFC 6979), so rebuilding matches.
+        assert [r["params"][0] for r in sent] == [sender_request, build_sponsored()]
+
+    # Since Tempo v1.18, eth_call bills the fee token to the fee payer it recovers from
+    # feePayerSignature, and to the sender without one. The sponsored eth_call also
+    # charges more gas than the mined tx uses, so the local fee payer signs a
+    # simulation-only copy with SPONSORED_SIMULATION_GAS_BUFFER more gas.
+    def test_local_sponsored_simulation_signs_a_gas_buffered_copy(self) -> None:
+        from eth_account import Account
+        from pytempo import TempoTransaction
+
+        intent = self._make_intent()
+        assert intent.fee_payer is not None
+        currency = "0x20c0000000000000000000000000000000000000"
+        cosigned_raw, payload = intent._cosign_as_fee_payer(
+            self._build_client_tx(currency=currency, gas_limit=67_894), currency
+        )
+        broadcast = TempoTransaction.decode(bytes.fromhex(cosigned_raw[2:]))
+        _, build_sponsored = payload
+        assert callable(build_sponsored)
+
+        sponsored = build_sponsored()
+
+        # The broadcast tx keeps the client's gas; only the simulation copy is raised.
+        assert broadcast.gas_limit == 67_894
+        assert _fee_payer.SPONSORED_SIMULATION_GAS_BUFFER == 10_000
+        assert sponsored["gas"] == hex(67_894 + 10_000)
+        assert "signature" not in sponsored
+        signature = sponsored["feePayerSignature"]
+        simulated = attrs.evolve(broadcast, gas_limit=67_894 + 10_000, fee_payer_signature=None)
+        recovered = Account._recover_hash(
+            simulated.get_signing_hash(for_fee_payer=True),
+            vrs=(int(signature["yParity"], 16), int(signature["r"], 16), int(signature["s"], 16)),
+        )
+        assert recovered == intent.fee_payer.address
+        # The broadcast co-signature still covers the broadcast gas.
+        assert broadcast.recover_fee_payer() == intent.fee_payer.address
+
+    # Like mppx's preflightSponsorship: simulate as the sender, sign, then simulate
+    # the sponsored tx, so a reverting tx is never signed for simulation.
+    @pytest.mark.asyncio
+    async def test_simulation_signs_only_after_the_sender_simulation_passes(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        events: list[str] = []
+        real_build = _fee_payer.local_sponsored_simulation_request
+
+        def build(*args: Any) -> dict[str, Any]:
+            events.append("sign")
+            return real_build(*args)
+
+        async def post(url: str, json: dict[str, Any]) -> Any:
+            request = json["params"][0]
+            events.append("simulate:" + ("sponsored" if "feePayer" in request else "sender"))
+            return mock_response(200, {"jsonrpc": "2.0", "result": "0x", "id": 1})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        with patch.object(_fee_payer, "local_sponsored_simulation_request", side_effect=build):
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+
+        assert events == ["simulate:sender", "sign", "simulate:sponsored"]
+
+    @pytest.mark.asyncio
+    async def test_failed_sender_simulation_signs_nothing(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        revert = {"jsonrpc": "2.0", "error": {"code": 3, "message": "execution reverted"}, "id": 1}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response(200, revert))
+
+        with patch.object(_fee_payer, "local_sponsored_simulation_request") as build:
+            with pytest.raises(VerificationError, match="would revert"):
+                await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+            build.assert_not_called()
+        assert mock_client.post.await_count == 1
 
     # The sponsored tx can fail after the sender's calls pass (an unfunded sponsor).
     @pytest.mark.asyncio

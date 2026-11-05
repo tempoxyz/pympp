@@ -443,7 +443,9 @@ class TestKeyAuthorizationRoundtrip:
         assert rlp.encode(fields[13]) == auth.rlp_encode()
         assert signed.sender_signature is not None
         assert fields[14] == signed.sender_signature.to_bytes()
-        sender_call, sponsored = simulate_payload
+        sender_call, build_sponsored = simulate_payload
+        assert isinstance(sender_call, dict) and callable(build_sponsored)
+        sponsored = build_sponsored()
         assert sender_call["from"].lower() == sponsored["from"].lower() == root.address.lower()
         assert "keyAuthorization" not in sender_call
         assert sponsored["keyAuthorization"]["keyId"] == access.address.lower()
@@ -544,7 +546,8 @@ class TestTempoAuthorizationListRoundtrip:
         result, simulate_payload = intent._cosign_as_fee_payer(envelope_hex, CURRENCY)
         assert result.startswith("0x76")
         assert simulate_payload is not None
-        assert [r["type"] for r in simulate_payload] == ["0x76", "0x76"]
+        requests = [r() if callable(r) else r for r in simulate_payload]
+        assert [r["type"] for r in requests] == ["0x76", "0x76"]
 
 
 _P256_PUBLIC_KEY = bytes.fromhex("cc" * 32 + "dd" * 32)

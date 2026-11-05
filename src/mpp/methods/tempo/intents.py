@@ -471,6 +471,9 @@ def _rpc_error_msg(result: dict[str, Any]) -> str:
 # JSON-RPC ``execution reverted`` (EIP-1474); other execution errors say "revert".
 _EXECUTION_ERROR_CODES = frozenset({3})
 
+_SimulationRequest = dict[str, Any] | Callable[[], dict[str, Any]]
+"""An ``eth_call`` request, or a callable that builds one once earlier simulations passed."""
+
 
 def _is_ambiguous_broadcast_error(
     error: Exception | dict[str, Any], *, resubmitted: bool = False
@@ -1959,7 +1962,7 @@ class ChargeIntent:
         raw_tx = payload.signature
 
         # Simulation payload for the locally co-signed tx, if we sponsor it.
-        simulate_payload: list[dict[str, Any]] | None = None
+        simulate_payload: list[_SimulationRequest] | None = None
         # Outcome marker for a locally sponsored submission, keyed on the
         # client-signed envelope so it is stable across retries of a credential.
         broadcast_key: str | None = None
@@ -2697,13 +2700,14 @@ class ChargeIntent:
         *,
         require_remaining_validity: bool = True,
         allow_expired: bool = False,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> tuple[str, list[_SimulationRequest]]:
         """Co-sign a client-signed transaction as fee payer.
 
         Deserializes the client's 0x78 fee payer envelope, optionally validates
         the payment calls against ``request``, sets the fee token, and co-signs.
         Returns ``(raw_0x76_hex, simulate_payload)`` where ``simulate_payload``
-        is the ``tempo_simulateV1`` request for the co-signed tx.
+        holds the ``eth_call`` requests for the co-signed tx (see
+        :meth:`_build_simulate_payload`).
 
         With ``require_remaining_validity=False`` only an already expired
         ``valid_before`` is rejected here; the caller must enforce
@@ -2731,22 +2735,27 @@ class ChargeIntent:
 
         return raw_cosigned, self._build_simulate_payload(cosigned, recovered_address)
 
-    def _build_simulate_payload(
-        self, tx: Any, sender: str, fee_payer: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Build the ``eth_call`` requests that check a co-signed 0x76 tx.
+    def _build_simulate_payload(self, tx: Any, sender: str) -> list[_SimulationRequest]:
+        """Build the ``eth_call`` requests that check a locally co-signed 0x76 tx.
 
         Like mppx's ``preflightSponsorship``, the calls are simulated twice:
         first from the sender with no fee fields, so the sender's fee balance is
         irrelevant, then as the final sponsored transaction with its concrete
-        fee payer and fee token. ``eth_call`` carries neither signature, and
-        every public Tempo RPC serves it (``tempo_simulateV1`` is refused).
+        fee payer, fee token and fee payer signature. Tempo nodes recover the
+        fee payer of an ``eth_call`` only from that signature and otherwise
+        bill the sender, so the second request is built lazily: the fee payer
+        signs its simulation-only copy (with
+        ``_fee_payer.SPONSORED_SIMULATION_GAS_BUFFER`` more gas) only once the
+        sender simulation passed. The sender's signature is never sent, and
+        every public Tempo RPC serves ``eth_call`` (``tempo_simulateV1`` is refused).
         """
+        fee_payer = self.fee_payer
         if fee_payer is None:
-            if self.fee_payer is None:
-                raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
-            fee_payer = self.fee_payer.address
-        sponsored = _fee_payer.sponsored_simulation_request(tx, sender, fee_payer)
+            raise InternalPaymentError() from RuntimeError("No fee payer to simulate")
+
+        def sponsored() -> dict[str, Any]:
+            return _fee_payer.local_sponsored_simulation_request(tx, sender, fee_payer)
+
         return [self._sender_simulation_request(tx, sender), sponsored]
 
     @staticmethod
@@ -2764,7 +2773,7 @@ class ChargeIntent:
 
     async def _fill_hosted_fee_payer(
         self, client: Any, raw_tx: str, request: ChargeRequest
-    ) -> tuple[str, list[dict[str, Any]], str, int]:
+    ) -> tuple[str, list[_SimulationRequest], str, int]:
         """Have the hosted fee payer co-sign a client's 0x78 envelope.
 
         Mirrors mppx's hosted sponsorship (``preflightSponsorship`` around
@@ -2822,29 +2831,39 @@ class ChargeIntent:
                 f"Fee payer signing failed: {_rpc_error_msg(reply)}"
             )
 
-        cosigned, sponsor, fee_token = _fee_payer.complete_hosted_fee_payer_envelope(
-            decoded,
-            sender_signature,
-            reply.get("result"),
-            key_authorization=key_authorization,
-            allowed_fee_tokens=self.allowed_fee_tokens,
+        cosigned, sponsor, fee_token, fee_payer_signature = (
+            _fee_payer.complete_hosted_fee_payer_envelope(
+                decoded,
+                sender_signature,
+                reply.get("result"),
+                key_authorization=key_authorization,
+                allowed_fee_tokens=self.allowed_fee_tokens,
+            )
         )
         sponsored = _fee_payer.envelope_transaction(
             decoded, fee_token=fee_token, key_authorization=key_authorization
         )
-        simulation = self._build_simulate_payload(sponsored, sender, sponsor)[1]
+        # The hosted signature covers the client's gas, so it is simulated as
+        # signed; without it the node would bill the sender's fee token.
+        simulation = _fee_payer.sponsored_simulation_request(
+            sponsored, sender, sponsor, fee_payer_signature
+        )
         max_fee = sponsored.gas_limit * sponsored.max_fee_per_gas
         return cosigned, [simulation], sponsor, max_fee
 
     async def _simulate_before_broadcast(
-        self, client: Any, simulate_payload: list[dict[str, Any]], rpc_url: str
+        self, client: Any, simulate_payload: list[_SimulationRequest], rpc_url: str
     ) -> None:
         """Simulate the co-signed tx with ``eth_call`` and raise if it would fail.
 
-        Fails closed: a transport error or an unreadable reply is an internal
-        error; an execution error is a verification failure.
+        The requests run in order, and a lazy request is built only once every
+        earlier one passed, so a local fee payer signs nothing for a
+        transaction whose sender simulation fails. Fails closed: a transport
+        error or an unreadable reply is an internal error; an execution error
+        is a verification failure.
         """
-        for request in simulate_payload:
+        for entry in simulate_payload:
+            request = entry() if callable(entry) else entry
             try:
                 response = await client.post(
                     rpc_url,

@@ -363,7 +363,7 @@ class TestChargeIntegration:
 
         # Spy on the simulate payload to catch request-shape regressions that
         # mocked-RPC unit tests cannot.
-        captured: list[list[dict[str, Any]]] = []
+        captured: list[list[Any]] = []
         original_build = intent._build_simulate_payload
 
         def _spy(tx, sender):
@@ -383,7 +383,8 @@ class TestChargeIntegration:
 
         # Both eth_call simulations ran against the node and carry the payment call.
         assert captured, "pre-broadcast simulation payload was never built"
-        for request in captured[0]:
+        for entry in captured[0]:
+            request: Any = entry() if callable(entry) else entry
             assert request["calls"][-1]["to"].lower() == currency.lower()
             assert request["calls"][-1]["data"].startswith("0x")
 
