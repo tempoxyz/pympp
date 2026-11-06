@@ -10,7 +10,7 @@ import asyncio
 import math
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -251,6 +251,8 @@ class TempoMethod:
     # Client-side: the token the payer pays an unsponsored transaction's fee in.
     # ``None`` selects it from the charge currency and balances.
     payer_fee_token: str | None = field(default=None, kw_only=True)
+    # Independent payer-owned limits; RPC quotes never override these budgets.
+    payer_fee_policy: Mapping[str, int] | None = field(default=None, kw_only=True)
     # Client-side charge policy. ``max_atomic_amount`` is in base units;
     # ``max_amount`` is in token units and requires ``max_amount_decimals``.
     # Caps are validated at construction and read on every check. ``None``
@@ -301,6 +303,13 @@ class TempoMethod:
     def __post_init__(self) -> None:
         """Validate charge policy at construction."""
         self._amount_caps()
+        if self.payer_fee_policy is not None:
+            self.payer_fee_policy = dict(self.payer_fee_policy)
+            for key, value in self.payer_fee_policy.items():
+                if key not in {"max_fee_per_gas", "max_priority_fee_per_gas", "max_total_fee"}:
+                    raise ValueError(f"Unknown payer fee policy field: {key}")
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"Payer fee policy {key} must be a non-negative integer")
         if self.mode not in (None, "push", "pull"):
             raise ValueError(f"Invalid Tempo charge mode: {self.mode!r}")
         if self.allowed_chain_ids is not None:
@@ -886,6 +895,11 @@ class TempoMethod:
         chain_id = await self._get_chain_id(resolved_rpc)
         gas_price = int(await _rpc_call(resolved_rpc, "eth_gasPrice", [], **self._rpc), 16)
         max_priority_fee_per_gas = gas_price
+        payer_policy = get_policy(chain_id, self.payer_fee_policy)
+        if not awaiting_fee_payer:
+            if gas_price < 0 or gas_price > payer_policy.max_fee_per_gas:
+                raise TransactionError("RPC gas-price quote exceeds payer fee policy")
+            max_priority_fee_per_gas = min(gas_price, payer_policy.max_priority_fee_per_gas)
 
         if expected_chain_id is not None and chain_id != expected_chain_id:
             raise TransactionError(
@@ -1088,6 +1102,9 @@ class TempoMethod:
             # capped at the challenge expiry, so it keeps at least as much validity
             # as the challenge and needs no separate check (mppx#1137).
             _assert_sponsored_challenge_time_left(expires)
+
+        if not awaiting_fee_payer and gas_limit * gas_price > payer_policy.max_total_fee:
+            raise TransactionError("Transaction exceeds payer total-fee budget")
 
         tx = TempoTransaction.create(
             chain_id=chain_id,
@@ -1314,6 +1331,7 @@ def _tempo_method(
     auto_swap: bool | AutoSwap = False,
     mode: ChargeMode | None = None,
     payer_fee_token: str | None = None,
+    payer_fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
@@ -1475,6 +1493,7 @@ def _tempo_method(
         auto_swap=AutoSwap() if auto_swap is True else auto_swap or None,
         mode=mode,
         payer_fee_token=payer_fee_token,
+        payer_fee_policy=payer_fee_policy,
         http_client=http_client,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
@@ -1503,6 +1522,7 @@ def charge(
     auto_swap: bool | AutoSwap = False,
     mode: ChargeMode | None = None,
     fee_token: str | None = None,
+    fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
@@ -1527,6 +1547,13 @@ def charge(
     limits do not cover the default fee token, such as a key limited to OUSD
     paying a USDC.e charge. By default the fee is paid in the charge currency,
     or in a funded supported stablecoin when that currency cannot pay fees.
+
+    ``fee_policy`` overrides payer-owned ``max_fee_per_gas``,
+    ``max_priority_fee_per_gas`` and ``max_total_fee`` ceilings for unsponsored
+    payments. Values use attodollars per gas and attodollars, respectively.
+    Defaults use the chain's conservative sponsorship budgets. Excessive RPC
+    quotes and worst-case total fees are rejected before signing; priority
+    fees are capped. These budgets are separate from the transferred amount.
 
     ``http_client`` carries every RPC call the payer makes, as mppx's
     ``getClient`` does. The caller owns it. Set a Tempo API key on it for
@@ -1561,6 +1588,7 @@ def charge(
             auto_swap=auto_swap,
             mode=mode,
             payer_fee_token=fee_token,
+            payer_fee_policy=fee_policy,
             http_client=http_client,
         )
     )

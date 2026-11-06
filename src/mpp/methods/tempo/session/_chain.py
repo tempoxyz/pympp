@@ -1117,14 +1117,16 @@ async def _build_signed_transaction(
     if chain_id is not None and rpc_chain_id != chain_id:
         raise ValueError(f"Chain ID mismatch: RPC returned {rpc_chain_id}, expected {chain_id}")
     gas_price = int(gas_hex, 16)
-    priority_fee = gas_price
-    if awaiting_fee_payer:
-        # Keep sponsored envelopes inside the server's default policy.
-        priority_fee = min(gas_price, get_policy(rpc_chain_id).max_priority_fee_per_gas)
+    policy = get_policy(rpc_chain_id)
+    if not awaiting_fee_payer and (gas_price < 0 or gas_price > policy.max_fee_per_gas):
+        raise ValueError("RPC gas-price quote exceeds payer fee policy")
+    priority_fee = min(gas_price, policy.max_priority_fee_per_gas)
     valid_before = valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
     gas_limit = await _estimate_gas(
         rpc_url, sender, calls, client, valid_before=valid_before, required=estimate_required
     )
+    if not awaiting_fee_payer and gas_limit * gas_price > policy.max_total_fee:
+        raise ValueError("Transaction exceeds payer total-fee budget")
     tx = TempoTransaction.create(
         chain_id=rpc_chain_id,
         gas_limit=gas_limit,
