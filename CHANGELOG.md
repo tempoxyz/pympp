@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.21.0 (2026-11-06)
+
+### Minor Changes
+
+- Added an `http_client` parameter to the Tempo client `charge()` and `TempoMethod`. Every RPC call the payer makes goes through the given `httpx.AsyncClient`, so it can send a Tempo API key in the `tempo-api-key` header to the hosted RPC (`https://api.tempo.xyz/rpc`), as the server side already allowed. (by @brendanjryan, [#397](https://github.com/tempoxyz/pympp/pull/397))
+- Added OUSD as a third default auto-swap currency (after pathUSD and USDC.e) and introduced a `fallback: bool = True` field on `AutoSwap` that, when set to `False`, restricts swaps exclusively to the currencies listed in `token_in`.
+- Fixed unsponsored Tempo session opens and top-ups signing an auto-swap that bought the transaction fee on top of the deposit, which servers reject. A payer holding less of the channel token than the fee now fails locally with a `TransactionError`. (by @brendanjryan, [#395](https://github.com/tempoxyz/pympp/pull/395))
+- Fixed session top-ups to preserve the `auto_swap` swap policy from `SessionContext` when performing automatic channel top-ups. Added optional `auto_swap: bool | AutoSwap | None = None` parameter to the public `top_up_channel_if_needed` and `post_top_up` methods to allow callers to explicitly pass a swap policy override. (by @brendanjryan, [#396](https://github.com/tempoxyz/pympp/pull/396))
+- Added client-side spending policy options (`currencies`, `expected_recipients`, `max_atomic_amount`, `max_amount`, `max_amount_decimals`) to the `session()` function and `SessionMethod` for Tempo session payments. These new optional parameters allow filtering and rejecting session offers based on currency, recipient, and per-unit amount, while explicit channel closes bypass the policy. (by @brendanjryan, [#393](https://github.com/tempoxyz/pympp/pull/393))
+- Added support for machine-token (MACH) charge payments via a new `_machine_token` module implementing first-party swapper routes. Added `machineTokenEnabled` field to `MethodDetails` and `ChargeInput` schemas, and a `machine_token_enabled` parameter to the `charge()` server function, enabling clients holding MACH to pay through the canonical swapper which atomically settles the charge currency to the recipient. (by @brendanjryan, [#403](https://github.com/tempoxyz/pympp/pull/403))
+
+### Patch Changes
+
+- Removed unused `pyjwt` pin from the `tempo` and `stripe` extras in `pyproject.toml`. (by @brendanjryan, [#400](https://github.com/tempoxyz/pympp/pull/400))
+- Fixed sponsored transaction simulation to include the fee payer signature in `eth_call` requests, as Tempo nodes (v1.18+) recover the fee payer only from `feePayerSignature` and otherwise bill the sender. The sender simulation now runs at the transaction's exact gas limit, without fees, so a gas limit too low for the mined transaction is refused. The local fee payer then signs a simulation-only copy with a small gas buffer, clamped to its sponsor policy, after the sender simulation passes, ensuring a reverting transaction is never signed for. A sponsored simulation without the full gas buffer (a hosted fee payer's, whose signature binds the client's gas, or a local one clamped by the sponsor policy) passes when it fails only by running out of gas. (by @brendanjryan, [#401](https://github.com/tempoxyz/pympp/pull/401))
+- Added a `max_markers` parameter (default 1024) to `credit` and `credit_channel` that caps a channel's live credit idempotency markers, raising `RuntimeError` for a new key at the cap while recorded keys still replay. Fixed the session client to accept a close receipt whose final spend credits lowered, and `SessionManager.spent` now reports that final spend. (by @brendanjryan, [#398](https://github.com/tempoxyz/pympp/pull/398))
+- Added `fee_policy` parameter to `charge()` and `payer_fee_policy` field on `TempoMethod` for client-controlled per-gas, priority, and total-fee ceilings on unsponsored Tempo transactions. Enforced default payer fee budgets in both the charge client and session layer, rejecting excessive RPC gas-price quotes and worst-case total fees before signing.
+- Set the default sender-funded total budget to 0.1 USD to cover the static gas floor at the default per-gas ceiling, and honored operator fee policies for server-funded session transactions.
+- Released settlement reservations after pre-signing fee refusal while keeping charged requests served. Deferred overlapping settlements until the existing reservation resolves or expires, preserving its credit floor. (by @brendanjryan, [#404](https://github.com/tempoxyz/pympp/pull/404))
+
 ## 0.20.0 (2026-11-03)
 
 ### Minor Changes
