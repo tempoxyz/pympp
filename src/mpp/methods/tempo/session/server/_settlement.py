@@ -121,10 +121,10 @@ class SettlementCheckpointError(Exception):
 
 
 class SettlementLeaseError(Exception):
-    """A scheduled settlement could not claim its lease; no transaction was submitted."""
+    """A settlement could not claim its reservation; no transaction was submitted."""
 
     def __init__(self, *, cause: BaseException) -> None:
-        super().__init__("Scheduled settlement lease could not be claimed.")
+        super().__init__("Settlement lease could not be claimed.")
         self.__cause__ = cause
 
 
@@ -378,13 +378,15 @@ async def settle(
             return current
         now = int(time.time() * 1000)
         live = current.pending_settlement
-        if live is not None and live.expires_at <= now:
-            live = None
+        if live is not None and live.expires_at > now:
+            # A single reservation cannot distinguish overlapping transactions.
+            # Leave the in-flight transaction's credit floor intact until it resolves.
+            raise SettlementLeaseError(cause=RuntimeError("settlement already in flight"))
         return replace(
             current,
             pending_settlement=PendingSettlement(
-                amount=keep_greater(live.amount if live else 0, voucher.cumulative_amount),
-                expires_at=max(live.expires_at if live else 0, pending_expires_at),
+                amount=voucher.cumulative_amount,
+                expires_at=pending_expires_at,
             ),
         )
 

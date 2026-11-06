@@ -891,6 +891,50 @@ class TestSettle:
         result = await credit(life.raw, life.channel_id, 100, idempotency_key="after-refusal")
         assert result.status == "credited"
 
+    async def test_overlapping_settle_preserves_inflight_credit_floor(
+        self, life: Lifecycle, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._ready(life)
+        waiting, resume = asyncio.Event(), asyncio.Event()
+        original = chain.wait_for_successful_receipt
+
+        async def paused(*args: Any, **kwargs: Any) -> Any:
+            waiting.set()
+            await resume.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(chain, "wait_for_successful_receipt", paused)
+        first = asyncio.create_task(
+            settlement.settle(
+                life.store,
+                life.channel_id,
+                account=PAYEE,
+                rpc_url=RPC,
+                http_client=life.rpc.client,
+            )
+        )
+        await waiting.wait()
+        try:
+            reserved = (await life.channel()).pending_settlement
+            broadcasts = len(life.rpc.methods("eth_sendRawTransaction"))
+            with pytest.raises(settlement.SettlementLeaseError):
+                await settlement.settle(
+                    life.store,
+                    life.channel_id,
+                    account=PAYEE,
+                    rpc_url=RPC,
+                    http_client=life.rpc.client,
+                    fee_payer_policy={"max_fee_per_gas": 0},
+                )
+            assert (await life.channel()).pending_settlement == reserved
+            assert len(life.rpc.methods("eth_sendRawTransaction")) == broadcasts
+            result = await credit(life.raw, life.channel_id, 100, idempotency_key="while-inflight")
+            assert result.status == "declined"
+        finally:
+            resume.set()
+            await first
+        assert (await life.channel()).settled_on_chain == 300
+
     async def test_settle_batch(self, life: Lifecycle) -> None:
         await self._ready(life)
         hashes = await settlement.settle_batch(
