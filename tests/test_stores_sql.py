@@ -380,3 +380,20 @@ class TestDriver:
         import mpp.stores
 
         assert mpp.stores.SQLStore is SQLStore
+
+
+class TestSQLiteConnection:
+    async def test_refuses_a_connection_with_an_open_transaction(self, tmp_path) -> None:
+        import aiosqlite
+
+        async with aiosqlite.connect(str(tmp_path / "shared.db")) as db:
+            store = SQLStore.sqlite(db)
+            await store.put("k", "v")
+            await db.execute("CREATE TABLE app (id INTEGER)")
+            await db.execute("INSERT INTO app VALUES (1)")
+            with pytest.raises(RuntimeError, match="dedicated connection"):
+                await store.get("k")
+            # The application's pending write is neither committed nor rolled back.
+            assert db.in_transaction
+            await db.rollback()
+            assert await store.get("k") == "v"

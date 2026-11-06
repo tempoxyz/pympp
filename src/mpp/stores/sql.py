@@ -77,6 +77,12 @@ class _SQLiteDriver:
 
     async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]:
         async with self._lock:
+            # The store commits and rolls back the whole connection, so it must not run
+            # inside a transaction the application opened on it.
+            if self._db.in_transaction:
+                raise RuntimeError(
+                    "SQLStore.sqlite needs a dedicated connection: it has an open transaction."
+                )
             try:
                 async with self._db.execute(sql, tuple(params)) as cursor:
                     rows = await cursor.fetchall()
@@ -134,7 +140,11 @@ class SQLStore:
 
     @classmethod
     def sqlite(cls, db: Any, *, table: str = "mppx_store", create_table: bool = True) -> SQLStore:
-        """Store on an ``aiosqlite`` connection; each statement commits on its own."""
+        """Store on a dedicated ``aiosqlite`` connection; each statement commits on its own.
+
+        Don't share the connection with other application work: the store commits and
+        rolls back the connection's transaction, and refuses to run while one is open.
+        """
         return cls(_SQLiteDriver(db), table=table, create_table=create_table)
 
     async def _ensure_table(self) -> None:
