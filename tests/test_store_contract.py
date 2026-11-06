@@ -4,7 +4,8 @@ Modeled on mppx src/Store.test.ts (describe.each over backends). Backend-specifi
 details, such as SQLite schema upgrades or Redis TTL commands, live in each
 backend's own test file; this file pins what every backend must agree on.
 
-Redis runs only when REDIS_URL is set (see tests/test_stores_redis_integration.py).
+Redis runs only when REDIS_URL is set (see tests/test_stores_redis_integration.py), and
+SQLStore on Postgres only when POSTGRES_URL is set (see tests/test_stores_sql.py).
 """
 
 from __future__ import annotations
@@ -20,9 +21,11 @@ from typing import Any
 import pytest
 
 from mpp.store import ExpiringStore, MemoryStore, Store
+from mpp.stores.sql import SQLStore
 from mpp.stores.sqlite import SQLiteStore
 
 REDIS_URL = os.environ.get("REDIS_URL")
+POSTGRES_URL = os.environ.get("POSTGRES_URL")
 
 # Expiry windows are wall-clock time on Redis: keep them wide enough that a slow
 # round trip or scheduler pause can't expire a key before the "still live" checks.
@@ -69,6 +72,16 @@ class FakeClock:
                 pytest.mark.skipif(not REDIS_URL, reason="REDIS_URL not set (no Redis instance)"),
             ],
         ),
+        "sql-sqlite",
+        pytest.param(
+            "sql-postgres",
+            marks=[
+                pytest.mark.postgres,
+                pytest.mark.skipif(
+                    not POSTGRES_URL, reason="POSTGRES_URL not set (no Postgres instance)"
+                ),
+            ],
+        ),
     ]
 )
 async def backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path):
@@ -92,6 +105,36 @@ async def backend(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatc
         result = Backend(name, make_redis, time.time, asyncio.sleep, supports_ttl=True)
         result.cleanups.append(client.aclose)
         result.cleanups.append(delete_keys)
+    elif name.startswith("sql-"):
+        # SQLStore reads the current time from time.time, so the fake clock applies.
+        clock = FakeClock(monkeypatch)
+        table = f"contract_{uuid.uuid4().hex[:8]}"
+        if name == "sql-sqlite":
+            import aiosqlite
+
+            db = await aiosqlite.connect(str(tmp_path / "contract-sql.db"))
+
+            async def make_sql(ttl_seconds: int | None = None) -> Any:
+                assert ttl_seconds is None, "SQLStore has no TTL"
+                return SQLStore.sqlite(db, table=table)
+
+            result = Backend(name, make_sql, clock.now, clock.advance, supports_ttl=False)
+            result.cleanups.append(db.close)
+        else:
+            import asyncpg
+
+            pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=10)
+
+            async def make_pg(ttl_seconds: int | None = None) -> Any:
+                assert ttl_seconds is None, "SQLStore has no TTL"
+                return SQLStore.postgres(pool, table=table)
+
+            async def drop_table() -> None:
+                await pool.execute(f"DROP TABLE IF EXISTS {table}")
+
+            result = Backend(name, make_pg, clock.now, clock.advance, supports_ttl=False)
+            result.cleanups.append(pool.close)
+            result.cleanups.append(drop_table)
     else:
         clock = FakeClock(monkeypatch)
         if name == "memory":

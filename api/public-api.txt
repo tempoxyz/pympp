@@ -1473,6 +1473,24 @@ module mpp.stores.redis
         async def put_if_absent(self, key: str, value: Any) -> bool
         async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
 
+module mpp.stores.sql
+    SQLDialect = typing.Literal['postgres', 'sqlite']
+    class SQLDriver(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        property dialect: SQLDialect
+        async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]
+    class SQLStore
+        def __init__(self, driver: SQLDriver, *, table: str = 'mppx_store', create_table: bool = True) -> None
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        @classmethod def postgres(cls, client: Any, *, table: str = 'mppx_store', create_table: bool = True) -> SQLStore
+        async def purge_expired(self) -> int
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+        @classmethod def sqlite(cls, db: Any, *, table: str = 'mppx_store', create_table: bool = True) -> SQLStore
+
 module mpp.stores.sqlite
     NO_TTL_EXPIRES_AT = 253402300799.0
     class SQLiteStore
