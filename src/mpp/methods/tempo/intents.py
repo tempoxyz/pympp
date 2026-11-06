@@ -30,7 +30,7 @@ from mpp.errors import (
     PaymentExpiredError,
     VerificationError,
 )
-from mpp.methods.tempo import _fee_payer, _sponsored_admission
+from mpp.methods.tempo import _fee_payer, _machine_token, _sponsored_admission
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
@@ -733,10 +733,41 @@ def _calls_funding_currency(
     return request.currency
 
 
+def _match_machine_token_route(
+    calls: list[tuple[str, int, str]], request: ChargeRequest
+) -> _machine_token.Route | None:
+    """Return the exact machine-token route ``calls`` pay, when the charge enables one."""
+    details = request.methodDetails
+    if not details.machineTokenEnabled or details.splits:
+        return None
+    try:
+        amount = int(request.amount)
+    except ValueError:
+        return None
+    return _machine_token.match_route(
+        calls,
+        chain_id=details.chainId,
+        currency=request.currency,
+        amount=amount,
+        recipient=request.recipient,
+    )
+
+
+def _settlement_senders(request: ChargeRequest) -> tuple[str, ...]:
+    """Contracts trusted to send a charge's transfer on behalf of the transaction sender."""
+    if not request.methodDetails.machineTokenEnabled:
+        return ()
+    sender = _machine_token.settlement_sender(request.methodDetails.chainId)
+    return () if sender is None else (sender.lower(),)
+
+
 def _validate_normalized_calls(
     calls: list[tuple[str, int, str]], request: ChargeRequest
 ) -> list[MatchedTransferLog]:
     """Validate calls against the expected transfers and return the payment legs."""
+    machine_route = _match_machine_token_route(calls, request)
+    if machine_route is not None:
+        return [MatchedTransferLog(kind="memo", memo=machine_route.memo)]
     prefix_len = _validate_call_scope(calls)
     if prefix_len == 2:
         approve = _decode_static_call_args(
@@ -802,6 +833,16 @@ def _validate_normalized_calls(
     if len(used_calls) != len(payment_calls):
         raise VerificationError("Invalid transaction: contains unauthorized extra calls")
     return legs
+
+
+def _transfer_payer(
+    from_address: str, receipt: dict[str, Any], settlement_senders: tuple[str, ...]
+) -> str:
+    """The account a transfer debits: the transaction sender funds a settlement contract's."""
+    receipt_from = receipt.get("from")
+    if from_address.lower() in settlement_senders and isinstance(receipt_from, str):
+        return receipt_from.lower()
+    return from_address.lower()
 
 
 def _payment_call_leg(call_data_hex: str) -> MatchedTransferLog:
@@ -1363,6 +1404,9 @@ class ChargeIntent:
         expected_sender: str | None,
         source: str | None,
         validate_sender: ValidateSender | None,
+        *,
+        settlement_senders: tuple[str, ...] = (),
+        transaction_sender: object = None,
     ) -> bool:
         """Whether ``from_address`` is an acceptable transfer sender.
 
@@ -1370,6 +1414,14 @@ class ChargeIntent:
         On a mismatch, an optional ``validate_sender`` callback may authorize it.
         """
         if not expected_sender or from_address.lower() == expected_sender.lower():
+            return True
+        # A settlement contract (the machine-token swapper) sends the transfer on behalf of
+        # the transaction sender, which must then be the expected sender (mppx).
+        if (
+            from_address.lower() in settlement_senders
+            and isinstance(transaction_sender, str)
+            and transaction_sender.lower() == expected_sender.lower()
+        ):
             return True
         if validate_sender is None:
             return False
@@ -1628,6 +1680,7 @@ class ChargeIntent:
             validate_sender=validate_sender,
             challenge_id=challenge_id,
             realm=realm,
+            settlement_senders=_settlement_senders(request),
         )
         if not matched_logs:
             raise VerificationError(
@@ -1680,6 +1733,7 @@ class ChargeIntent:
         expected_sender: str | None = None,
         source: str | None = None,
         validate_sender: ValidateSender | None = None,
+        settlement_senders: tuple[str, ...] = (),
     ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer/TransferWithMemo logs.
 
@@ -1718,11 +1772,20 @@ class ChargeIntent:
                     if log_memo.lower() != expected_memo_hex.lower():
                         continue
                 if not self._sender_authorized(
-                    from_address, expected_sender, source, validate_sender
+                    from_address,
+                    expected_sender,
+                    source,
+                    validate_sender,
+                    settlement_senders=settlement_senders,
+                    transaction_sender=receipt.get("from"),
                 ):
                     continue
                 memo_matches.append(
-                    MatchedTransferLog(kind="memo", memo=log_memo, sender=from_address.lower())
+                    MatchedTransferLog(
+                        kind="memo",
+                        memo=log_memo,
+                        sender=_transfer_payer(from_address, receipt, settlement_senders),
+                    )
                 )
             elif event_topic == TRANSFER_TOPIC:
                 if memo is not None:
@@ -1731,10 +1794,18 @@ class ChargeIntent:
                 if len(data) >= 66:
                     log_amount = int(data, 16)
                     if log_amount == amount and self._sender_authorized(
-                        from_address, expected_sender, source, validate_sender
+                        from_address,
+                        expected_sender,
+                        source,
+                        validate_sender,
+                        settlement_senders=settlement_senders,
+                        transaction_sender=receipt.get("from"),
                     ):
                         transfer_matches.append(
-                            MatchedTransferLog(kind="transfer", sender=from_address.lower())
+                            MatchedTransferLog(
+                                kind="transfer",
+                                sender=_transfer_payer(from_address, receipt, settlement_senders),
+                            )
                         )
 
         return memo_matches + transfer_matches
@@ -1748,6 +1819,7 @@ class ChargeIntent:
         validate_sender: ValidateSender | None = None,
         challenge_id: str | None = None,
         realm: str | None = None,
+        settlement_senders: tuple[str, ...] = (),
     ) -> list[MatchedTransferLog]:
         """Check if receipt contains matching Transfer or TransferWithMemo logs.
 
@@ -1788,6 +1860,7 @@ class ChargeIntent:
                 expected_sender,
                 source,
                 validate_sender,
+                settlement_senders,
             )
             # Prefer legs bound to this challenge over interchangeable logs,
             # e.g. an equal transfer for another challenge in the same batch.
@@ -1891,7 +1964,12 @@ class ChargeIntent:
                         log_amount == transfer.amount
                         and memo_topic.lower() == expected_hex.lower()
                         and self._sender_authorized(
-                            from_addr, expected_sender, source, validate_sender
+                            from_addr,
+                            expected_sender,
+                            source,
+                            validate_sender,
+                            settlement_senders=settlement_senders,
+                            transaction_sender=receipt.get("from"),
                         )
                     ):
                         used_logs.add(log_idx)
@@ -1899,7 +1977,7 @@ class ChargeIntent:
                             MatchedTransferLog(
                                 kind="memo",
                                 memo=memo_topic,
-                                sender=from_addr.lower(),
+                                sender=_transfer_payer(from_addr, receipt, settlement_senders),
                             )
                         )
                         found = True
@@ -1913,12 +1991,19 @@ class ChargeIntent:
                             continue
                         log_amount = int(data[2:66], 16)
                         if log_amount == transfer.amount and self._sender_authorized(
-                            from_addr, expected_sender, source, validate_sender
+                            from_addr,
+                            expected_sender,
+                            source,
+                            validate_sender,
+                            settlement_senders=settlement_senders,
+                            transaction_sender=receipt.get("from"),
                         ):
                             used_logs.add(log_idx)
                             all_matches.append(
                                 MatchedTransferLog(
-                                    kind="memo", memo=topics[3], sender=from_addr.lower()
+                                    kind="memo",
+                                    memo=topics[3],
+                                    sender=_transfer_payer(from_addr, receipt, settlement_senders),
                                 )
                             )
                             found = True
@@ -1928,11 +2013,19 @@ class ChargeIntent:
                             continue
                         log_amount = int(data, 16)
                         if log_amount == transfer.amount and self._sender_authorized(
-                            from_addr, expected_sender, source, validate_sender
+                            from_addr,
+                            expected_sender,
+                            source,
+                            validate_sender,
+                            settlement_senders=settlement_senders,
+                            transaction_sender=receipt.get("from"),
                         ):
                             used_logs.add(log_idx)
                             all_matches.append(
-                                MatchedTransferLog(kind="transfer", sender=from_addr.lower())
+                                MatchedTransferLog(
+                                    kind="transfer",
+                                    sender=_transfer_payer(from_addr, receipt, settlement_senders),
+                                )
                             )
                             found = True
                             break

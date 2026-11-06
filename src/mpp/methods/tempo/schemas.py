@@ -70,6 +70,7 @@ class MethodDetails(BaseModel):
 
     chainId: int = 4217
     feePayer: bool = False
+    machineTokenEnabled: bool | None = None
     splits: list[Split] | None = None
     supportedModes: Annotated[list[ChargeMode], Field(min_length=1)] | None = None
 
@@ -119,7 +120,8 @@ class ChargeInput(BaseModel):
 
     ``amount`` is a decimal string converted to base units with ``decimals``;
     ``splits`` are already in base units. ``chain_id``, ``fee_payer``,
-    ``splits`` and ``supported_modes`` serialize under ``methodDetails``;
+    ``machine_token_enabled``, ``splits`` and ``supported_modes`` serialize under
+    ``methodDetails``;
     ``extra`` is string metadata embedded in the request. Servers with a fee
     payer sponsor routes that leave ``fee_payer`` unset; ``False`` opts a route out.
     """
@@ -132,6 +134,7 @@ class ChargeInput(BaseModel):
     decimals: int = 6
     chain_id: int | None = Field(default=None, alias="chainId")
     fee_payer: bool | None = Field(default=None, alias="feePayer")
+    machine_token_enabled: bool | None = Field(default=None, alias="machineTokenEnabled")
     splits: list[Split] | None = None
     external_id: str | None = Field(default=None, alias="externalId")
     extra: dict[str, str] | None = None
@@ -150,6 +153,16 @@ class ChargeInput(BaseModel):
                 raise ValueError("Invalid splits")
         if any(is_fixed_attribution_memo(split.memo) for split in self.splits or ()):
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
+        if self.machine_token_enabled:
+            from mpp.methods.tempo import _machine_token
+
+            if self.chain_id is not None and not _machine_token.is_supported(self.chain_id):
+                raise ValueError(f"Machine tokens are not supported on chainId {self.chain_id}.")
+            if self.currency.lower() == _machine_token.MACH.lower():
+                raise ValueError(
+                    "MACH cannot be advertised as a charge currency. Advertise the settlement "
+                    "currency with machine_token_enabled=True."
+                )
         return self
 
     @model_serializer
@@ -159,6 +172,8 @@ class ChargeInput(BaseModel):
             details["splits"] = [split.model_dump(exclude_none=True) for split in self.splits]
         if self.fee_payer:
             details["feePayer"] = True
+        if self.machine_token_enabled:
+            details["machineTokenEnabled"] = True
         if self.chain_id is not None:
             details["chainId"] = self.chain_id
         if self.supported_modes is not None:
