@@ -33,7 +33,11 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
-from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
+from mpp.methods.tempo.fee_payer_policy import (
+    MIN_REMAINING_VALIDITY_SECONDS,
+    _get_payer_policy,
+    get_policy,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -895,7 +899,7 @@ class TempoMethod:
         chain_id = await self._get_chain_id(resolved_rpc)
         gas_price = int(await _rpc_call(resolved_rpc, "eth_gasPrice", [], **self._rpc), 16)
         max_priority_fee_per_gas = gas_price
-        payer_policy = get_policy(chain_id, self.payer_fee_policy)
+        payer_policy = _get_payer_policy(chain_id, self.payer_fee_policy)
         if not awaiting_fee_payer:
             if gas_price < 0 or gas_price > payer_policy.max_fee_per_gas:
                 raise TransactionError("RPC gas-price quote exceeds payer fee policy")
@@ -1551,8 +1555,9 @@ def charge(
     ``fee_policy`` overrides payer-owned ``max_fee_per_gas``,
     ``max_priority_fee_per_gas`` and ``max_total_fee`` ceilings for unsponsored
     payments. Values use attodollars per gas and attodollars, respectively.
-    Defaults use the chain's conservative sponsorship budgets. Excessive RPC
-    quotes and worst-case total fees are rejected before signing; priority
+    Defaults use the chain's per-gas sponsorship ceilings and a 0.1 USD total
+    budget covering the static gas floor. Excessive RPC quotes and worst-case
+    total fees are rejected before signing; priority
     fees are capped. These budgets are separate from the transferred amount.
 
     ``http_client`` carries every RPC call the payer makes, as mppx's

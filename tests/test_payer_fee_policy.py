@@ -57,13 +57,56 @@ async def test_charge_refuses_fees_before_signing(quote, policy, error):
 
 
 @pytest.mark.asyncio
-async def test_charge_caps_priority_and_accepts_exact_total_budget():
+@pytest.mark.parametrize("fee_payer", [None, ACCOUNT])
+@pytest.mark.parametrize("allow", [False, True])
+async def test_server_funded_session_calls_honor_operator_policy(fee_payer, allow):
+    quote = 200_000_000_000
+
+    async def rpc(_url, name, _params, _client):
+        return hex(CHAIN_ID) if name == "eth_chainId" else hex(quote)
+
+    policy = {
+        "max_fee_per_gas": quote if allow else quote - 1,
+        "max_priority_fee_per_gas": 20_000_000_000,
+        "max_total_fee": quote * 100_000,
+    }
+    with (
+        patch.object(chain, "_rpc", side_effect=rpc),
+        patch.object(chain, "_estimate_gas", new=AsyncMock(return_value=100_000)),
+        patch.object(chain, "send_raw_transaction", new=AsyncMock(return_value="0xhash")) as send,
+    ):
+        call = chain._send_precompile_transaction(
+            account=ACCOUNT,
+            rpc_url="http://localhost",
+            escrow=RECIPIENT,
+            data="0x",
+            label="settle",
+            fee_payer=fee_payer,
+            fee_payer_policy=policy,
+            fee_token=PATH_USD,
+            candidate_fee_tokens=None,
+            valid_before=None,
+            client=None,
+        )
+        if allow:
+            assert await call == "0xhash"
+            raw = send.call_args.args[1]
+            fields = rlp.decode(bytes.fromhex(raw[2:])[1:])
+            assert int.from_bytes(fields[1], "big") == policy["max_priority_fee_per_gas"]
+            assert int.from_bytes(fields[2], "big") == quote
+        else:
+            with pytest.raises(ValueError, match="gas-price"):
+                await call
+            send.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, {"max_total_fee": 100_000_000_000_000_000}])
+async def test_charge_caps_priority_and_accepts_exact_total_budget(policy):
     quote = get_policy(CHAIN_ID).max_fee_per_gas
     # Client retains its conservative static gas floor.
     gas = 1_000_000
-    method = TempoMethod(
-        account=ACCOUNT, chain_id=CHAIN_ID, payer_fee_policy={"max_total_fee": gas * quote}
-    )
+    method = TempoMethod(account=ACCOUNT, chain_id=CHAIN_ID, payer_fee_policy=policy)
 
     async def rpc(_url, name, _params, **kwargs):
         return hex(CHAIN_ID) if name == "eth_chainId" else hex(quote)
@@ -82,7 +125,7 @@ async def test_charge_caps_priority_and_accepts_exact_total_budget():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "quote,gas,error", [(10**20, 100_000, "gas-price"), (100_000_000_000, 1_000_000, "total-fee")]
+    "quote,gas,error", [(10**20, 100_000, "gas-price"), (100_000_000_000, 1_000_001, "total-fee")]
 )
 async def test_session_transactions_apply_default_payer_budget(quote, gas, error):
     async def rpc(_url, name, _params, _client):

@@ -1101,12 +1101,13 @@ async def _build_signed_transaction(
     valid_after: int | None,
     client: httpx.AsyncClient | None,
     estimate_required: bool = False,
+    payer_fee_policy: Mapping[str, int] | None = None,
 ) -> tuple[Any, int]:
     """Build and sender-sign an expiring-nonce Tempo transaction; returns (tx, chain_id)."""
     # pytempo ships no type information.
     from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
 
-    from mpp.methods.tempo.fee_payer_policy import get_policy
+    from mpp.methods.tempo.fee_payer_policy import _get_payer_policy, get_policy
 
     sender = root_account or account.address
     chain_hex, gas_hex = await asyncio.gather(
@@ -1117,7 +1118,11 @@ async def _build_signed_transaction(
     if chain_id is not None and rpc_chain_id != chain_id:
         raise ValueError(f"Chain ID mismatch: RPC returned {rpc_chain_id}, expected {chain_id}")
     gas_price = int(gas_hex, 16)
-    policy = get_policy(rpc_chain_id)
+    policy = (
+        get_policy(rpc_chain_id)
+        if awaiting_fee_payer
+        else _get_payer_policy(rpc_chain_id, payer_fee_policy)
+    )
     if not awaiting_fee_payer and (gas_price < 0 or gas_price > policy.max_fee_per_gas):
         raise ValueError("RPC gas-price quote exceeds payer fee policy")
     priority_fee = min(gas_price, policy.max_priority_fee_per_gas)
@@ -1127,6 +1132,8 @@ async def _build_signed_transaction(
     )
     if not awaiting_fee_payer and gas_limit * gas_price > policy.max_total_fee:
         raise ValueError("Transaction exceeds payer total-fee budget")
+    if not awaiting_fee_payer and gas_limit > policy.max_gas:
+        raise ValueError("Transaction exceeds payer gas budget")
     tx = TempoTransaction.create(
         chain_id=rpc_chain_id,
         gas_limit=gas_limit,
@@ -1321,6 +1328,7 @@ async def _send_precompile_transaction(
         client=client,
         # Like viem, a call whose gas estimate fails (it would revert) is never sent.
         estimate_required=True,
+        payer_fee_policy=fee_payer_policy,
     )
     if sponsored:
         assert fee_payer is not None

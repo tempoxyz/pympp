@@ -58,3 +58,11 @@ def get_policy(chain_id: int, overrides: Mapping[str, int] | None = None) -> Pol
             "max_validity_window_seconds", base.max_validity_window_seconds
         ),
     )
+
+
+def _get_payer_policy(  # pyright: ignore[reportUnusedFunction]  # used by charge and session builders
+    chain_id: int, overrides: Mapping[str, int] | None = None
+) -> Policy:
+    # Sender-funded builders reserve up to one million gas even for a small
+    # transfer. Permit that floor at the default per-gas ceiling (0.1 USD).
+    return get_policy(chain_id, {"max_total_fee": 100_000_000_000_000_000, **(overrides or {})})
