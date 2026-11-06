@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, cast
 from mpp import Challenge, Credential
 from mpp._typing import is_dict, is_list
 from mpp.errors import PaymentExpiredError, PaymentOutcomeUnknownError
+from mpp.methods.tempo import _machine_token
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -423,6 +424,45 @@ class TempoMethod:
                 continue
         raise TransactionError("Charges require a funded supported stablecoin for transaction fees")
 
+    async def _find_machine_token_route(
+        self,
+        *,
+        account: str,
+        amount: int,
+        currency: str,
+        recipient: str,
+        memo: str | None,
+        rpc_url: str,
+    ) -> _machine_token.Route | None:
+        """Return the machine-token route when ``account`` holds enough MACH and it simulates.
+
+        As mppx's ``findRoute``, the route is optional: any failure falls back to the
+        direct payment.
+        """
+        try:
+            route = _machine_token.get_route(
+                chain_id=await self._get_chain_id(rpc_url),
+                currency=currency,
+                amount=amount,
+                recipient=recipient,
+                memo=memo,
+            )
+            if route is None:
+                return None
+            token = route.calls[0][0]
+            if await _tip20_balance(rpc_url, token, account, **self._rpc) < amount:
+                return None
+            batch = [{"to": to, "value": "0x0", "data": data} for to, data in route.calls]
+            await _rpc_call(
+                rpc_url,
+                "eth_estimateGas",
+                [{"from": account, "calls": batch}, "latest"],
+                **self._rpc,
+            )
+        except Exception:
+            return None
+        return route
+
     async def _find_swap_calls(
         self,
         *,
@@ -726,6 +766,8 @@ class TempoMethod:
             expires=(
                 _push_transaction_expiry(challenge.expires) if mode == "push" else challenge.expires
             ),
+            machine_token_enabled=is_dict(method_details)
+            and method_details.get("machineTokenEnabled") is True,
         )
 
         if mode == "push":
@@ -814,6 +856,7 @@ class TempoMethod:
         awaiting_fee_payer: bool = False,
         splits: list[dict[str, Any]] | None = None,
         expires: str | None = None,
+        machine_token_enabled: bool = False,
     ) -> tuple[str, int]:
         """Build a client-signed Tempo transaction.
 
@@ -838,6 +881,8 @@ class TempoMethod:
             expected_chain_id: If set, verify the RPC reports this chain ID.
             awaiting_fee_payer: If True, build for fee payer sponsorship.
             expires: Challenge expiry (ISO 8601). Caps ``valid_before``.
+            machine_token_enabled: The challenge enables machine-token payments: a payer
+                holding enough MACH pays through the first-party swapper instead.
 
         Returns:
             Tuple of (raw signed transaction hex, chain ID).
@@ -886,7 +931,24 @@ class TempoMethod:
         swapping = False
         swap_calls: list[tuple[str, str]] = []
         swap_spent: dict[str, int] = {}
-        if self.auto_swap is not None:
+        # As mppx, try the machine-token route before any other funding.
+        machine_route = (
+            await self._find_machine_token_route(
+                account=sender,
+                amount=int(amount),
+                currency=currency,
+                recipient=recipient,
+                memo=memo,
+                rpc_url=resolved_rpc,
+            )
+            if machine_token_enabled and not splits
+            else None
+        )
+        if machine_route is not None:
+            calls_tuple = tuple(
+                Call.create(to=to, value=0, data=data) for to, data in machine_route.calls
+            )
+        elif self.auto_swap is not None:
             swap_calls, swap_spent = await self._find_swap_calls(
                 account=sender, amount_out=int(amount), token_out=currency, rpc_url=resolved_rpc
             )
@@ -961,7 +1023,7 @@ class TempoMethod:
                 // ATTODOLLARS_PER_MICRODOLLAR,
             )
 
-        gas_limit = await estimate_gas_limit(calls_tuple, swapping)
+        gas_limit = await estimate_gas_limit(calls_tuple, swapping or machine_route is not None)
 
         fee_token: str | None = None
         if not awaiting_fee_payer and self.payer_fee_token is not None:
@@ -1025,7 +1087,11 @@ class TempoMethod:
             fee_token = currency
             # A swapping payer may not hold the currency before the swap, so
             # it pays fees in a funded supported stablecoin.
-            if swapping or currency.lower() in (MACH.lower(), OUSD.lower()):
+            if (
+                swapping
+                or machine_route is not None
+                or currency.lower() in (MACH.lower(), OUSD.lower())
+            ):
                 required_balance = fee_requirement(gas_limit)
                 try:
                     fee_token = await self._resolve_supported_fee_token(
