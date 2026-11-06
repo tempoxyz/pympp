@@ -3,9 +3,9 @@
 Values live as text in one table (``mppx_store`` by default, created on first use) with
 an ``expires`` column for temporary claims. Every write is a single statement, so it
 needs no interactive transactions, only ``ON CONFLICT`` and ``RETURNING`` (Postgres,
-SQLite 3.35+). The table has the layout of mppx's ``Store.sql()``, but ``expires`` holds Unix
-seconds rather than milliseconds and values are stored as given, so do not share a table
-with an mppx server.
+SQLite 3.35+). The table has the layout of mppx's ``Store.sql()``, with ``expires`` in
+milliseconds since the Unix epoch, but values are stored as given rather than in mppx's
+JSON envelopes, so give a pympp server its own table rather than sharing one with mppx.
 
 Use :meth:`SQLStore.postgres` with an ``asyncpg`` pool (``pip install pympp[postgres]``),
 :meth:`SQLStore.sqlite` with an ``aiosqlite`` connection (``pip install pympp[sqlite]``),
@@ -77,9 +77,14 @@ class _SQLiteDriver:
 
     async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]:
         async with self._lock:
-            async with self._db.execute(sql, tuple(params)) as cursor:
-                rows = await cursor.fetchall()
-            await self._db.commit()
+            try:
+                async with self._db.execute(sql, tuple(params)) as cursor:
+                    rows = await cursor.fetchall()
+                await self._db.commit()
+            except BaseException:
+                # sqlite3 opened a transaction before a write: never leave it holding locks.
+                await self._db.rollback()
+                raise
             return rows
 
 
@@ -90,7 +95,8 @@ class SQLStore:
     Keys written by ``put``, ``put_if_absent`` and ``compare_and_set`` never expire;
     ``put_if_absent_until`` claims expire at their deadline, after which ``get`` reports
     them missing and the next claim replaces them in the same statement. Expired rows stay
-    in the table until a later write to the same key replaces them.
+    in the table until a write to the same key replaces them or :meth:`purge_expired`
+    deletes them.
 
     Args:
         driver: Runs the statements; see :meth:`postgres` and :meth:`sqlite`.
@@ -163,10 +169,23 @@ class SQLStore:
             sql = re.sub(r"\?", lambda _: f"${next(counter)}", sql)
         return await self._driver.query(sql, params)
 
+    async def purge_expired(self) -> int:
+        """Delete rows whose expiry has passed and return how many were removed.
+
+        Replay keys are rarely written twice, so expired claims are not replaced in place;
+        call this periodically (for example from a background task) to bound the table.
+        Rows without an expiry and live claims are never touched.
+        """
+        rows = await self._query(
+            f"DELETE FROM {self._table} WHERE expires IS NOT NULL AND expires <= ? RETURNING key",
+            [_now_ms()],
+        )
+        return len(rows)
+
     async def get(self, key: str) -> Any | None:
         rows = await self._query(
             f"SELECT value FROM {self._table} WHERE key = ? AND (expires IS NULL OR expires > ?)",
-            [key, time.time()],
+            [key, _now_ms()],
         )
         return rows[0][0] if rows else None
 
@@ -188,11 +207,12 @@ class SQLStore:
         """Atomic insert expiring at *expires_at*, replacing only an expired row."""
         _validate_expiry(expires_at)
         # The claim's own deadline may have passed while the statement ran.
-        return await self._claim(key, value, expires_at) and expires_at > time.time()
+        claimed = await self._claim(key, value, expires_at * 1000)
+        return claimed and expires_at > time.time()
 
     async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
         """Atomic conditional write: one statement keyed on the current live value."""
-        now = time.time()
+        now = _now_ms()
         if expected is None:
             if value is None:
                 return await self.get(key) is None
@@ -217,6 +237,11 @@ class SQLStore:
             f"INSERT INTO {self._table} AS existing (key, value, expires) VALUES (?, ?, ?) "
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires = excluded.expires "
             "WHERE existing.expires IS NOT NULL AND existing.expires <= ? RETURNING key",
-            [key, value, expires_at, time.time()],
+            [key, value, expires_at, _now_ms()],
         )
         return len(rows) > 0
+
+
+def _now_ms() -> float:
+    """The current time in milliseconds since the Unix epoch, the unit of ``expires``."""
+    return time.time() * 1000

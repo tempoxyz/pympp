@@ -1485,6 +1485,7 @@ module mpp.stores.sql
         async def delete(self, key: str) -> None
         async def get(self, key: str) -> Any | None
         @classmethod def postgres(cls, client: Any, *, table: str = 'mppx_store', create_table: bool = True) -> SQLStore
+        async def purge_expired(self) -> int
         async def put(self, key: str, value: Any) -> None
         async def put_if_absent(self, key: str, value: Any) -> bool
         async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool

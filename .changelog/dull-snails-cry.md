@@ -1,5 +1,5 @@
 ---
-pympp: minor
+pympp: patch
 ---
 
-Added `SQLStore`, a new atomic key-value store backend backed by SQL databases (Postgres and SQLite). Added `postgres` optional dependency using `asyncpg`, and exposed `SQLStore` and `SQLDriver` via `mpp.stores`.
+Added `SQLStore`, an atomic key-value store on Postgres or SQLite that keeps values in one `mppx_store` table (`expires` in milliseconds) and makes every write a single statement, as mppx's `Store.sql()` does, with `SQLStore.purge_expired()` to delete expired claims. Added the `postgres` extra (`asyncpg`) and exported `SQLStore` and `SQLDriver` from `mpp.stores`.

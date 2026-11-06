@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import time
 import uuid
 from collections.abc import Sequence
@@ -232,6 +233,32 @@ class TestExpiringClaim:
         assert await store.get("claim") == str(results.index(True))
 
 
+class TestPurgeExpired:
+    async def test_deletes_only_expired_claims(self, store: SQLStore, clock: Clock) -> None:
+        await store.put("permanent", "1")
+        assert await store.put_if_absent("forever", "2")
+        assert await store.put_if_absent_until("short", "3", time.time() + 10)
+        assert await store.put_if_absent_until("live", "4", time.time() + 100)
+        assert await store.purge_expired() == 0
+        clock.advance(11)
+        assert await store.purge_expired() == 1
+        assert await store.get("permanent") == "1"
+        assert await store.get("forever") == "2"
+        assert await store.get("live") == "4"
+        assert await store.purge_expired() == 0
+
+    async def test_stores_expiry_in_milliseconds(self, database) -> None:
+        make, _ = database
+        store = make()
+        deadline = time.time() + 60
+        assert await store.put_if_absent_until("claim", "v", deadline)
+        rows = await store._query(  # pyright: ignore[reportPrivateUsage]
+            f"SELECT expires FROM {store._table} WHERE key = ?",  # pyright: ignore[reportPrivateUsage]
+            ["claim"],
+        )
+        assert rows[0][0] == pytest.approx(deadline * 1000)
+
+
 class TestTable:
     @pytest.mark.parametrize(
         "table", ["", "1abc", "store; DROP TABLE x", "a.b.c", "a-b", "a.", "my table"]
@@ -335,6 +362,19 @@ class TestDriver:
             "INSERT INTO s.t AS existing (key, value, expires) VALUES ($1, $2, $3)"
         )
         assert args[:3] == ["k", "v", None]
+
+    async def test_sqlite_rolls_back_a_failed_statement(self) -> None:
+        import aiosqlite
+
+        async with aiosqlite.connect(":memory:") as db:
+            store = SQLStore.sqlite(db)
+            await store.put("k", "v")
+            with pytest.raises(sqlite3.IntegrityError):
+                await store._driver.query(  # pyright: ignore[reportPrivateUsage]
+                    "INSERT INTO mppx_store (key, value) VALUES (?, NULL)", ["x"]
+                )
+            assert not db.in_transaction
+            assert await store.get("k") == "v"
 
     def test_lazy_export(self) -> None:
         import mpp.stores
