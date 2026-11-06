@@ -171,6 +171,21 @@ class TestCompareAndSet:
         assert results.count(True) == 1
         assert await store.get("k") == str(results.index(True))
 
+    async def test_concurrent_writes_from_stores_sharing_a_connection(self, database) -> None:
+        make, _ = database
+        first, second = make(), make()
+        await first.get("warm")
+        results = await asyncio.gather(
+            *(
+                (first if i % 2 else second).compare_and_set(f"k{i}", None, str(i))
+                for i in range(50)
+            ),
+            *((first if i % 2 else second).put(f"p{i}", str(i)) for i in range(50)),
+        )
+        assert all(r in (True, None) for r in results)
+        assert [await first.get(f"k{i}") for i in range(50)] == [str(i) for i in range(50)]
+        assert [await second.get(f"p{i}") for i in range(50)] == [str(i) for i in range(50)]
+
 
 class TestExpiringClaim:
     async def test_refused_before_expiry_reused_after(self, store: SQLStore, clock: Clock) -> None:

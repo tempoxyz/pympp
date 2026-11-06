@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+import weakref
 from collections.abc import Sequence
 from typing import Any, Literal, Protocol
 
@@ -58,17 +59,28 @@ class _PostgresDriver:
         return await self._client.fetch(sql, *params)
 
 
+# One lock per aiosqlite connection, shared by every store on it: a statement started
+# between a write's cursor close and its commit makes that commit fail with "SQL statements
+# in progress" although the write already happened.
+_SQLITE_LOCKS: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
 class _SQLiteDriver:
     dialect: SQLDialect = "sqlite"
 
     def __init__(self, db: Any) -> None:
         self._db = db
+        try:
+            self._lock = _SQLITE_LOCKS.setdefault(db, asyncio.Lock())
+        except TypeError:  # not weak-referenceable: lock this driver's own statements
+            self._lock = asyncio.Lock()
 
     async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]:
-        async with self._db.execute(sql, tuple(params)) as cursor:
-            rows = await cursor.fetchall()
-        await self._db.commit()
-        return rows
+        async with self._lock:
+            async with self._db.execute(sql, tuple(params)) as cursor:
+                rows = await cursor.fetchall()
+            await self._db.commit()
+            return rows
 
 
 class SQLStore:
