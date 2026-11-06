@@ -26,6 +26,7 @@ from tests.test_session_e2e_localnet import (
     _calls,  # pyright: ignore[reportPrivateUsage]
     _new_account,  # pyright: ignore[reportPrivateUsage]
     _serve,  # pyright: ignore[reportPrivateUsage]
+    _trusted,  # pyright: ignore[reportPrivateUsage]
 )
 from tests.test_tempo_integration import _wait_for_receipt  # pyright: ignore[reportPrivateUsage]
 
@@ -76,7 +77,11 @@ async def test_open_and_top_up_swap_into_the_session_currency(
         rpc_url, chain_id, currency, payee, suggested_deposit="0.0001", fee_payer=sponsor
     ) as server:
         async with tempo_client.session_manager(
-            account=payer, max_deposit="1", rpc_url=rpc_url, auto_swap=AUTO_SWAP
+            account=payer,
+            max_deposit="1",
+            rpc_url=rpc_url,
+            auto_swap=AUTO_SWAP,
+            trusted_tempo_realms=_trusted(server.url),
         ) as manager:
             await _calls(manager, server.url, 5)
             channel_id = manager.channel_id
