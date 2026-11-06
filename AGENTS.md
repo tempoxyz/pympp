@@ -48,7 +48,7 @@ Without services, `integration`, `redis` and `x402_localnet` tests skip. CI's in
   ```
 
 - Commits and pull request titles use Conventional Commits (`feat: ...`, `fix: ...`); the release workflow reads them.
-- Protocol changes run the mpp-tools conformance suite with the `python` adapter (`conformance.yml`).
+- mpp-tools' daily SDK Conformance Monitor runs the cross-SDK conformance suite against `main` with the `python` adapter and opens a `conformance-failure` issue in tempoxyz/mpp-tools when it fails; this repository's CI does not run it. Protocol changes add or update vectors there.
 
 ## Releases
 
