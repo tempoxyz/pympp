@@ -301,7 +301,7 @@ def is_execution_revert(error: BaseException) -> bool:
 
 def is_retryable_settlement_failure(error: BaseException) -> bool:
     """Whether a settlement failed on a transport or RPC outage that a later one can retry."""
-    if isinstance(error, SettlementLeaseError):
+    if isinstance(error, (SettlementLeaseError, chain.FeePolicyError)):
         return True
     if isinstance(error, httpx.HTTPStatusError):
         status = error.response.status_code
@@ -437,7 +437,9 @@ async def settle(
         )
         receipt = await chain.wait_for_successful_receipt(rpc_url, tx_hash, client=http_client)
     except Exception as error:
-        if is_execution_revert(error) or isinstance(error, VerificationFailedError):
+        if is_execution_revert(error) or isinstance(
+            error, (VerificationFailedError, chain.FeePolicyError)
+        ):
             await release()
         raise
     settled_event = chain.get_channel_event(receipt, "Settled", channel_id)

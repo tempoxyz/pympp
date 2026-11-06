@@ -49,6 +49,11 @@ STABLECOIN_DEX = "0xdec0000000000000000000000000000000000000"
 _APPROVE_SELECTOR = bytes.fromhex("095ea7b3")
 _SWAP_EXACT_AMOUNT_OUT_SELECTOR = bytes.fromhex("f0122b75")
 
+
+class FeePolicyError(ValueError):
+    """A session transaction was refused before signing or broadcasting."""
+
+
 TransactionLabel = Literal["open", "topUp"]
 
 
@@ -1124,16 +1129,16 @@ async def _build_signed_transaction(
         else _get_payer_policy(rpc_chain_id, payer_fee_policy)
     )
     if not awaiting_fee_payer and (gas_price < 0 or gas_price > policy.max_fee_per_gas):
-        raise ValueError("RPC gas-price quote exceeds payer fee policy")
+        raise FeePolicyError("RPC gas-price quote exceeds payer fee policy")
     priority_fee = min(gas_price, policy.max_priority_fee_per_gas)
     valid_before = valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
     gas_limit = await _estimate_gas(
         rpc_url, sender, calls, client, valid_before=valid_before, required=estimate_required
     )
     if not awaiting_fee_payer and gas_limit * gas_price > policy.max_total_fee:
-        raise ValueError("Transaction exceeds payer total-fee budget")
+        raise FeePolicyError("Transaction exceeds payer total-fee budget")
     if not awaiting_fee_payer and gas_limit > policy.max_gas:
-        raise ValueError("Transaction exceeds payer gas budget")
+        raise FeePolicyError("Transaction exceeds payer gas budget")
     tx = TempoTransaction.create(
         chain_id=rpc_chain_id,
         gas_limit=gas_limit,
