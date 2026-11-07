@@ -189,7 +189,7 @@ module mpp.errors
         title = 'Payment Outcome Unknown'
         type = 'https://paymentauth.org/problems/payment-outcome-unknown'
     class ZoneSettlementPendingError(mpp.errors.PaymentError, RuntimeError)
-        def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int) -> None
+        def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None) -> None
         title = 'Zone Settlement Pending'
         type = 'https://paymentauth.org/problems/zone-settlement-pending'
     class NoMethodFoundError(mpp.errors.PaymentError, ValueError)

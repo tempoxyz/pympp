@@ -281,6 +281,7 @@ class Zone:
             raise ValueError(f"Invalid Zone ID: {self.zone_id!r}")
         if self.chain_id is not None:
             _assert_zone_chain(self.zone_id, self.chain_id)
+            _assert_zone_parent_chain(self.parent_chain_id, self.chain_id)
 
 
 def _assert_zone_chain(zone_id: int | None, chain_id: int) -> None:
@@ -292,6 +293,20 @@ def _assert_zone_chain(zone_id: int | None, chain_id: int) -> None:
     if derived != zone_id:
         raise ValueError(
             f"zone.zone_id {zone_id} does not match Zone {derived} of the Zone chain {chain_id}."
+        )
+
+
+def _assert_zone_parent_chain(parent_chain_id: int | None, chain_id: int) -> None:
+    """Reject a ``parent_chain_id`` other than the parent its Zone chain ID derives.
+
+    Selection trusts an explicit parent chain over the derived one, so a
+    contradicting one would withdraw for a Zone on another chain.
+    """
+    derived = _zones.parent_chain_id_from_chain_id(chain_id)
+    if parent_chain_id is not None and derived is not None and derived != parent_chain_id:
+        raise ValueError(
+            f"zone.parent_chain_id {parent_chain_id} does not match parent chain {derived} "
+            f"of the Zone chain {chain_id}."
         )
 
 
@@ -1343,13 +1358,16 @@ class TempoMethod:
             zone_id = (
                 zone.zone_id if zone.zone_id is not None else _zones.id_from_chain_id(zone_chain_id)
             )
-            parent_chain_id = (
-                zone.parent_chain_id
-                if zone.parent_chain_id is not None
-                else _zones.parent_chain_id_from_chain_id(zone_chain_id)
-            )
         except Exception:
             return None
+        # An explicit parent chain that contradicts the Zone chain's own is a
+        # misconfiguration, refused before anything is withdrawn.
+        _assert_zone_parent_chain(zone.parent_chain_id, zone_chain_id)
+        parent_chain_id = (
+            zone.parent_chain_id
+            if zone.parent_chain_id is not None
+            else _zones.parent_chain_id_from_chain_id(zone_chain_id)
+        )
         if chain_id is None or parent_chain_id != chain_id:
             return None
         if not _zones.is_accepted(details.get("zones"), zone_id):
@@ -1420,7 +1438,10 @@ class TempoMethod:
             )
         except Exception as cause:
             raise ZoneSettlementPendingError(
-                challenge_id=challenge.id, sender_tag=sender_tag, zone_id=zone_id
+                challenge_id=challenge.id,
+                sender_tag=sender_tag,
+                zone_id=zone_id,
+                challenge=challenge,
             ) from cause
         # Forget the withdrawal only when a caller takes the credential: with every
         # caller gone, a retry must find it settled rather than withdraw again.
@@ -2131,8 +2152,9 @@ def charge(
     ``zone`` pays from a Zone balance instead of the account's Tempo balance when
     a challenge accepts that Zone (``methodDetails.zones``); see :class:`Zone`.
     If the withdrawal does not settle in time, it raises
-    :class:`~mpp.errors.ZoneSettlementPendingError`, and retrying the same
-    challenge with the same method resumes the withdrawal instead of paying again.
+    :class:`~mpp.errors.ZoneSettlementPendingError`; passing its ``challenge`` to
+    the same method's ``create_credential`` resumes the withdrawal instead of
+    paying again, while a new request's fresh challenge would withdraw again.
 
     Example:
         from mpp.client import Mpp

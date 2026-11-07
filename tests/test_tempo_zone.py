@@ -534,6 +534,25 @@ class TestClientZoneSelection:
         with pytest.raises(ValueError, match="does not match Zone 3"):
             used_zone(zone_id=4)
 
+    def test_rejects_a_parent_chain_id_that_contradicts_the_zone_chain(self) -> None:
+        with pytest.raises(ValueError, match="does not match parent chain 42431"):
+            used_zone(parent_chain_id=4_217)
+        assert used_zone(parent_chain_id=MODERATO).parent_chain_id == MODERATO
+
+    @pytest.mark.asyncio
+    async def test_refuses_a_contradicting_parent_chain_id_read_from_the_zone(self) -> None:
+        calls: list[str] = []
+        zone = Zone(
+            rpc_url="https://zone.test",
+            parent_chain_id=MODERATO,
+            http_client=rpc_client(lambda method, params: hex(421_700_003), calls),
+        )
+        method = payer_method(zone)
+        # A mainnet Zone chain named as a Moderato Zone: refused, not withdrawn or paid on Tempo.
+        with pytest.raises(ValueError, match="does not match parent chain 4217"):
+            await method.create_credential(await zone_challenge([3]))
+        assert calls == ["eth_chainId"]
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("zone_chain_id", "request_options", "method_options"),
@@ -745,12 +764,13 @@ class TestClientZonePayment:
             ZONE_ID,
         )
         assert isinstance(pending.__cause__, TimeoutError)
+        assert pending.challenge is issued
 
         assert l1_calls.count("eth_getLogs") == 1
 
         # The retry finds the same withdrawal settled instead of paying again.
         settled = True
-        credential = await method.create_credential(issued)
+        credential = await method.create_credential(pending.challenge)
         assert len(sent) == 1
         assert credential.payload == {
             "hash": SETTLEMENT_HASH,

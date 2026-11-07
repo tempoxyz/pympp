@@ -112,13 +112,19 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
     """A client withdrew from a Zone to pay a challenge, but the withdrawal did not
     settle on Tempo before the client stopped waiting.
 
-    The withdrawal cannot be undone and may still settle. Retry the same
-    challenge with the same Tempo charge client method to resume waiting without
-    withdrawing again, or find the settlement by ``sender_tag`` on the Zone's
-    portal. The error that ended the wait is its ``__cause__``.
+    The withdrawal cannot be undone and may still settle. Retry with
+    ``challenge``: passing it to the same Tempo charge client method's
+    ``create_credential`` resumes waiting without withdrawing again. A new
+    request gets a newly issued challenge, and paying that one withdraws again.
+    The settlement can also be found by ``sender_tag`` on the Zone's portal.
+    The error that ended the wait is its ``__cause__``.
     """
 
-    def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int) -> None:
+    def __init__(
+        self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None
+    ) -> None:
+        self.challenge = challenge
+        """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
         self.challenge_id = challenge_id
         """ID of the challenge the withdrawal pays."""
         self.sender_tag = sender_tag
@@ -127,7 +133,8 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
         """ID of the Zone the withdrawal left."""
         super().__init__(
             f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} has not "
-            "settled on Tempo yet. Retry the challenge to resume waiting instead of paying again."
+            "settled on Tempo yet. Retry with this error's challenge to resume waiting "
+            "instead of paying again."
         )
 
 
