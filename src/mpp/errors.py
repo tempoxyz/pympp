@@ -108,6 +108,63 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         )
 
 
+class ZoneSettlementPendingError(PaymentError, RuntimeError):
+    """A client withdrew from a Zone to pay a challenge, but the withdrawal did not
+    settle on Tempo before the client stopped waiting.
+
+    The withdrawal cannot be undone and may still settle. Retry with
+    ``challenge``: passing it to the same Tempo charge client method's
+    ``create_credential`` resumes waiting without withdrawing again. A new
+    request gets a newly issued challenge, and paying that one withdraws again.
+    The settlement can also be found by ``sender_tag`` on the Zone's portal.
+    The error that ended the wait is its ``__cause__``.
+    """
+
+    def __init__(
+        self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None
+    ) -> None:
+        self.challenge = challenge
+        """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
+        self.challenge_id = challenge_id
+        """ID of the challenge the withdrawal pays."""
+        self.sender_tag = sender_tag
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it."""
+        self.zone_id = zone_id
+        """ID of the Zone the withdrawal left."""
+        super().__init__(
+            f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} has not "
+            "settled on Tempo yet. Retry with this error's challenge to resume waiting "
+            "instead of paying again."
+        )
+
+
+class ZoneWithdrawalBouncedError(PaymentError, RuntimeError):
+    """A client withdrew from a Zone to pay a challenge, but the withdrawal bounced.
+
+    The portal processed the withdrawal on Tempo, but its callback failed, so it
+    returned the amount to the payer's Zone balance instead of paying the
+    recipient. The withdrawal fees are spent. Nothing was paid, so no credential
+    was sent; paying the challenge again withdraws again.
+    """
+
+    def __init__(
+        self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None
+    ) -> None:
+        self.challenge = challenge
+        """The Challenge (``mpp.Challenge``) the withdrawal tried to pay."""
+        self.challenge_id = challenge_id
+        """ID of the challenge the withdrawal tried to pay."""
+        self.sender_tag = sender_tag
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it."""
+        self.zone_id = zone_id
+        """ID of the Zone the withdrawal left."""
+        super().__init__(
+            f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} bounced: "
+            "the amount returned to the payer's Zone balance and nothing was paid. "
+            "Paying again withdraws again."
+        )
+
+
 class NoMethodFoundError(PaymentError, ValueError):
     """No configured client method can pay any offered challenge.
 

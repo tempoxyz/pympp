@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from eth_abi.abi import decode
 from eth_abi.exceptions import DecodingError
+from pydantic import ValidationError
 
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_PAID_RETRY_TIMEOUT, DEFAULT_TIMEOUT
@@ -43,6 +44,7 @@ from mpp.methods.tempo.schemas import (
     ProofCredentialPayload,
     Split,
     TransactionCredentialPayload,
+    ZoneCredentialPayload,
 )
 from mpp.store import CompareAndSetStore, ExpiringStore, MemoryStore, Store
 
@@ -1036,11 +1038,19 @@ class ChargeIntent:
             payload = TransactionCredentialPayload.model_validate(payload_data)
         elif payload_data["type"] == "proof":
             payload = ProofCredentialPayload.model_validate(payload_data)
+        elif payload_data["type"] == "zone":
+            # As mppx: a malformed zone payload (such as an invalid Zone ID) fails
+            # verification rather than surfacing a schema error.
+            try:
+                payload = ZoneCredentialPayload.model_validate(payload_data)
+            except ValidationError as exc:
+                raise VerificationError("Invalid zone credential payload") from exc
         else:
             raise VerificationError(f"Invalid credential type: {payload_data['type']}")
 
         # As mppx tempo/server/Charge.ts: zero-amount charges are paid only with
-        # proofs, and supportedModes limits hash (push) and transaction (pull) payloads.
+        # proofs, and supportedModes limits hash and zone (push) and transaction (pull)
+        # payloads.
         try:
             is_zero_amount = int(req.amount) == 0
         except ValueError:
@@ -1058,6 +1068,8 @@ class ChargeIntent:
         if modes is not None:
             if isinstance(payload, HashCredentialPayload) and "push" not in modes:
                 raise VerificationError("Hash credentials are not supported for this challenge.")
+            if isinstance(payload, ZoneCredentialPayload) and "push" not in modes:
+                raise VerificationError("Zone credentials are not supported for this challenge.")
             if isinstance(payload, TransactionCredentialPayload) and "pull" not in modes:
                 raise VerificationError(
                     "Transaction credentials are not supported for this challenge."
@@ -1072,8 +1084,9 @@ class ChargeIntent:
     ) -> Validation:
         """Validate a charge credential without consuming or broadcasting it.
 
-        Push-mode credentials are verified against the chain without
-        consuming the transaction hash's replay key; pull-mode transactions
+        Push-mode credentials, including settled Zone withdrawals, are
+        verified against the chain without consuming their replay key;
+        pull-mode transactions
         are decoded and checked against the request without being broadcast;
         zero-amount proofs are checked against their source without being
         claimed.
@@ -1104,6 +1117,22 @@ class ChargeIntent:
                 intent=self.name,
                 request=dict(request),
                 payer=await self._validate_proof(credential, payload, req),
+            )
+
+        if isinstance(payload, ZoneCredentialPayload):
+            await self._ensure_zone_withdrawal_unused(payload)
+            await self._validate_zone(
+                payload,
+                req,
+                challenge_id=credential.challenge.id,
+                realm=credential.challenge.realm,
+            )
+            return Validation(
+                credential=credential,
+                details={"mode": "push"},
+                intent=self.name,
+                request=dict(request),
+                payer=None,
             )
 
         if isinstance(payload, HashCredentialPayload):
@@ -1177,6 +1206,22 @@ class ChargeIntent:
             payer = await self._validate_proof(credential, payload, req)
             await self._claim_proof(credential.challenge.id, credential.challenge.expires)
             return replace(Receipt.success(credential.challenge.id), payer=payer)
+
+        if isinstance(payload, ZoneCredentialPayload):
+            # As a hash: claim the withdrawal first so concurrent duplicates fail fast.
+            store_key = await self._reserve_zone_withdrawal(payload)
+            try:
+                tx_hash = await self._validate_zone(
+                    payload,
+                    req,
+                    challenge_id=credential.challenge.id,
+                    realm=credential.challenge.realm,
+                )
+            except (Exception, asyncio.CancelledError):
+                if store_key is not None and self._store is not None:
+                    await self._store.delete(store_key)
+                raise
+            return Receipt.success(tx_hash)
 
         if isinstance(payload, HashCredentialPayload):
             store_key = await self._reserve_hash(payload.hash)
@@ -1269,6 +1314,94 @@ class ChargeIntent:
     @staticmethod
     def _hash_store_key(tx_hash: str) -> str:
         return f"mpp:charge:{tx_hash.lower()}"
+
+    @staticmethod
+    def _zone_withdrawal_store_key(payload: ZoneCredentialPayload) -> str:
+        """Key a Zone withdrawal by its portal and sender tag, which identify it on Tempo."""
+        from mpp.methods.tempo._zone import portal_address
+
+        portal = portal_address(payload.zoneId).lower()
+        return f"mpp:charge:zone:{portal}:{payload.senderTag.lower()}"
+
+    async def _reserve_zone_withdrawal(self, payload: ZoneCredentialPayload) -> str | None:
+        if self._store is None:
+            return None
+        store_key = self._zone_withdrawal_store_key(payload)
+        if not await self._store.put_if_absent(store_key, payload.hash.lower()):
+            raise CredentialReplayedError("Zone withdrawal has already been used")
+        return store_key
+
+    async def _ensure_zone_withdrawal_unused(self, payload: ZoneCredentialPayload) -> None:
+        if (
+            self._store is not None
+            and await self._store.get(self._zone_withdrawal_store_key(payload)) is not None
+        ):
+            raise CredentialReplayedError("Zone withdrawal has already been used")
+
+    async def _validate_zone(
+        self,
+        payload: ZoneCredentialPayload,
+        request: ChargeRequest,
+        challenge_id: str,
+        realm: str,
+    ) -> str:
+        """Verify a Zone withdrawal that settled on Tempo and return the settlement hash.
+
+        The portal's ``WithdrawalProcessed`` event must show the withdrawal
+        settled, and the withdrawal in the ``processWithdrawals`` calldata must pay
+        the request's amount of its currency to its recipient, with no callback,
+        under a memo bound to this challenge (the event carries no memo).
+        """
+        from mpp.methods.tempo import _zone
+
+        details = request.methodDetails
+        if not _zone.is_accepted(details.zones, payload.zoneId):
+            raise VerificationError("Zone is not accepted for this challenge.")
+        if details.splits:
+            raise VerificationError("Zone credentials do not support split payments.")
+
+        portal = _zone.portal_address(payload.zoneId)
+        await self._assert_rpc_chain_id(details.chainId)
+        client = await self._get_client()
+        receipt = await self._fetch_transaction_receipt(client, payload.hash)
+        if receipt.get("status") != "0x1":
+            raise VerificationError("Payment verification failed: settlement transaction reverted.")
+        logs = receipt.get("logs")
+        event = _zone.find_processed_event(
+            logs if is_list(logs) else [], portal=portal, sender_tag=payload.senderTag
+        )
+        if event is None:
+            raise VerificationError("Payment verification failed: Zone withdrawal not settled.")
+        if not event.callback_success:
+            raise VerificationError("Payment verification failed: Zone withdrawal bounced.")
+
+        try:
+            transaction = await _rpc_call(
+                self._get_rpc_url(), "eth_getTransactionByHash", [payload.hash], client=client
+            )
+        except Exception as error:
+            raise InternalPaymentError() from error
+        calls = _rpc_transaction_calls(transaction) if is_dict(transaction) else None
+        withdrawal = _zone.find_withdrawal(
+            ((to, data) for to, _, data in calls or ()),
+            portal=portal,
+            sender_tag=payload.senderTag,
+        )
+        if (
+            withdrawal is None
+            or withdrawal.gas_limit != 0
+            or withdrawal.to != request.recipient.lower()
+            or withdrawal.token != request.currency.lower()
+            or str(withdrawal.amount) != request.amount
+        ):
+            raise VerificationError("Payment verification failed: Zone withdrawal not found.")
+        self._assert_challenge_bound_memo(
+            [MatchedTransferLog(kind="memo", memo=withdrawal.memo)],
+            challenge_id=challenge_id,
+            realm=realm,
+        )
+        tx_hash = receipt.get("transactionHash")
+        return tx_hash if isinstance(tx_hash, str) else payload.hash
 
     def _proof_store(self) -> Store | None:
         """The store proofs are claimed in: only one configured explicitly (as mppx).

@@ -2297,10 +2297,14 @@ async def test_native_evm_authorization_is_not_replaced_after_402(fresh_id):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wildcard", [False, True])
-async def test_cancelled_credential_observer_preserves_completed_push(wildcard):
+@pytest.mark.parametrize("payload_type", ["hash", "zone"])
+async def test_cancelled_credential_observer_preserves_completed_push(wildcard, payload_type):
     challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1000"})
     tx_hash = "0x" + "ab" * 32
-    credential = make_credential(payload={"type": "hash", "hash": tx_hash}, challenge_id="test-id")
+    payload = {"type": payload_type, "hash": tx_hash}
+    if payload_type == "zone":
+        payload |= {"senderTag": "0x" + "cd" * 32, "zoneId": 3}
+    credential = make_credential(payload=payload, challenge_id="test-id")
     method = MockMethod()
     method.create_credential.return_value = credential
     inner = MockTransport(
