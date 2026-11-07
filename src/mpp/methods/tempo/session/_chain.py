@@ -771,9 +771,11 @@ async def _simulate_call(
 ) -> None:
     """Run ``request`` with ``eth_call``; a node error fails verification.
 
-    With ``phase`` (a sponsorship preflight), the failure is a
-    :class:`~mpp.errors.PaymentSimulationError` naming it, with the same message.
-    Transport errors propagate unwrapped.
+    With ``phase`` (a sponsorship preflight), an execution failure (a revert or
+    running out of gas) is a :class:`~mpp.errors.PaymentSimulationError` naming
+    it, with the same message. Any other node error stays the untagged
+    verification failure, with the tagged error as its cause, as the charge
+    preflight does. Transport errors propagate unwrapped.
     """
     try:
         await _rpc(rpc_url, "eth_call", [request, "latest"], client)
@@ -781,14 +783,24 @@ async def _simulate_call(
         if phase is None:
             raise VerificationFailedError(f"{error}") from error
         from mpp.methods.tempo import _fee_payer
+        from mpp.methods.tempo._rpc import RpcError
 
-        raise PaymentSimulationError(
+        simulation = PaymentSimulationError(
             f"Payment verification failed: {error}.",
             phase=phase,
             sender=request.get("from"),
             fee_payer=request.get("feePayer") if phase == "sponsored" else None,
             payment_token=_fee_payer.simulation_payment_token(request),
-        ) from error
+        )
+        node_error = error.response.get("error") if isinstance(error, RpcError) else None
+        code = node_error.get("code") if is_dict(node_error) else None
+        message = node_error.get("message") if is_dict(node_error) else None
+        if not isinstance(message, str):
+            message = str(error)
+        if code == 3 or "revert" in message.lower() or _fee_payer.is_out_of_gas_error(error):
+            raise simulation from error
+        simulation.__cause__ = error
+        raise VerificationFailedError(f"{error}") from simulation
 
 
 def _rpc_calls(calls: Sequence[tuple[str, int, bytes]]) -> list[dict[str, str]]:

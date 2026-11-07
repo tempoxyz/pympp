@@ -857,6 +857,21 @@ class TestBroadcastOpen:
         assert isinstance(error.__cause__, NodeRpcError)
         assert not rpc.sent
 
+    async def test_non_execution_preflight_error_keeps_the_untagged_error(
+        self, rpc: FakeRpc
+    ) -> None:
+        raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
+        rpc.overrides["eth_call"] = fail("rate limited")
+        with pytest.raises(VerificationFailedError, match="rate limited") as raised:
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        error = raised.value
+        assert not isinstance(error, PaymentSimulationError)
+        simulation = error.__cause__
+        assert isinstance(simulation, PaymentSimulationError)
+        assert simulation.phase == "sender"
+        assert isinstance(simulation.__cause__, NodeRpcError)
+        assert not rpc.sent
+
     async def test_preflight_transport_error_is_not_tagged(self, rpc: FakeRpc) -> None:
         raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
 
