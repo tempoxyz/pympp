@@ -7,19 +7,25 @@ charge challenges; :class:`TempoMethod` implements its credential creation.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
 from mpp import Challenge, Credential
 from mpp._typing import is_dict, is_list
-from mpp.errors import PaymentExpiredError, PaymentOutcomeUnknownError
+from mpp.errors import (
+    PaymentExpiredError,
+    PaymentOutcomeUnknownError,
+    ZoneSettlementPendingError,
+)
 from mpp.methods.tempo import _machine_token
+from mpp.methods.tempo import _zone as _zones
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
@@ -228,6 +234,81 @@ async def _find_auto_swap_calls(
 # ──────────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True, kw_only=True)
+class Zone:
+    """Pays charges from a Zone balance when a challenge accepts that Zone.
+
+    The client withdraws the charge amount from the Zone to the recipient with
+    a challenge-bound memo, waits for the withdrawal to settle on Tempo, and
+    sends a ``zone`` credential naming the settlement transaction. Challenges
+    that do not accept the Zone, and split payments, are paid on Tempo as usual.
+
+    Attributes:
+        rpc_url: RPC endpoint of the Zone chain.
+        account: Account that holds the Zone balance and signs the withdrawal.
+            Defaults to the charge account (and its ``root_account``).
+        chain_id: Zone chain ID. Read from ``rpc_url`` when omitted.
+        zone_id: Zone ID. Derived from the Zone chain ID when omitted.
+        parent_chain_id: Tempo chain the Zone settles on. Derived from the
+            Zone chain ID when omitted; a Zone ID is only unique per parent
+            chain, so the client pays from the Zone only on this chain.
+        settlement_timeout: Seconds to wait for the withdrawal to settle on
+            Tempo (default: 60). The wait also ends at the challenge expiry.
+        http_client: httpx client every Zone RPC call goes through, owned by
+            the caller. Set the Zone's ``X-Authorization-Token`` header on it.
+    """
+
+    rpc_url: str
+    account: TempoAccount | None = None
+    chain_id: int | None = None
+    zone_id: int | None = None
+    parent_chain_id: int | None = None
+    settlement_timeout: float | None = None
+    http_client: httpx.AsyncClient | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        """Reject options that would fail only after an irreversible withdrawal."""
+        timeout = self.settlement_timeout
+        if timeout is not None and (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))  # pyright: ignore[reportUnnecessaryIsInstance]
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise ValueError("zone.settlement_timeout must be a finite, non-negative number.")
+        if self.zone_id is not None and not _zones.is_id(self.zone_id):
+            raise ValueError(f"Invalid Zone ID: {self.zone_id!r}")
+        if self.chain_id is not None:
+            _assert_zone_chain(self.zone_id, self.chain_id)
+
+
+def _assert_zone_chain(zone_id: int | None, chain_id: int) -> None:
+    """Reject a ``zone_id`` that names another Zone than the one its chain ID derives."""
+    # Only chain IDs that follow a known Zone scheme name their Zone.
+    if zone_id is None or _zones.parent_chain_id_from_chain_id(chain_id) is None:
+        return
+    derived = _zones.id_from_chain_id(chain_id)
+    if derived != zone_id:
+        raise ValueError(
+            f"zone.zone_id {zone_id} does not match Zone {derived} of the Zone chain {chain_id}."
+        )
+
+
+# Seconds the client allows for sending a Zone withdrawal before it waits for settlement.
+_ZONE_SUBMISSION_MARGIN = 15.0
+# Seconds to look for a withdrawal's receipt on the Zone after its send response fails.
+_ZONE_RECEIPT_RECOVERY_TIMEOUT = 15.0
+# Gas added to the Zone's estimate for the signature, as the Tempo transfer path does.
+_ZONE_GAS_MARGIN = 5_000
+
+
+@dataclass
+class _ZoneSend:
+    """Whether a Zone withdrawal may have reached the Zone, so retrying could pay twice."""
+
+    sent: bool = False
+
+
 @dataclass
 class TempoMethod:
     """Tempo payment method implementation.
@@ -278,6 +359,14 @@ class TempoMethod:
     # caller. Set default headers on it, such as a Tempo API key in
     # ``tempo-api-key``. None opens a client per call.
     http_client: httpx.AsyncClient | None = field(default=None, kw_only=True, repr=False)
+    # Pays from this Zone's balance when a challenge accepts it (``methodDetails.zones``).
+    zone: Zone | None = field(default=None, kw_only=True)
+    # Zone withdrawals by challenge, kept after a failed wait so a retry resumes
+    # waiting instead of withdrawing again.
+    _zone_withdrawals: dict[str, asyncio.Task[str]] = field(
+        default_factory=dict[str, asyncio.Task[str]], init=False, repr=False
+    )
+    _zone_chain_id: int | None = field(default=None, init=False, repr=False)
     _cached_chain_ids: dict[str, int] = field(
         default_factory=dict[str, int], init=False, repr=False
     )
@@ -736,6 +825,11 @@ class TempoMethod:
                 source=proof_source(source_address, expected_chain_id),
             )
 
+        if self.zone is not None:
+            zone_id = await self._zone_payment(challenge, expected_chain_id)
+            if zone_id is not None:
+                return await self._create_zone_credential(challenge, zone_id)
+
         mode = self._resolve_mode(method_details)
         use_fee_payer = (
             mode == "pull" and method_details.get("feePayer", False)
@@ -822,7 +916,7 @@ class TempoMethod:
         from mpp.methods.tempo import _rlp as rlp
 
         payload = credential.payload
-        if payload.get("type") == "hash":
+        if payload.get("type") in ("hash", "zone"):
             tx_hash = payload.get("hash")
             return tx_hash if isinstance(tx_hash, str) else None
         raw_tx = payload.get("signature")
@@ -1205,6 +1299,245 @@ class TempoMethod:
 
         return "0x" + signed_tx.encode().hex(), chain_id
 
+    async def _get_zone_chain_id(self, zone: Zone) -> int:
+        """Return the Zone's chain ID: configured, or read once from its RPC."""
+        if zone.chain_id is not None:
+            return zone.chain_id
+        if self._zone_chain_id is None:
+            kwargs = {} if zone.http_client is None else {"client": zone.http_client}
+            chain_id = int(await _rpc_call(zone.rpc_url, "eth_chainId", [], **kwargs), 16)
+            _assert_zone_chain(zone.zone_id, chain_id)
+            self._zone_chain_id = chain_id
+        return self._zone_chain_id
+
+    async def _zone_payment(self, challenge: Challenge, chain_id: int | None) -> int | None:
+        """Return the Zone ID to pay a challenge from, or ``None`` to pay on Tempo.
+
+        As mppx, a Zone pays a positive push charge without splits on the Zone's
+        parent chain when the challenge accepts it and the withdrawal can settle
+        before the challenge expires (or is already under way).
+        """
+        zone = self.zone
+        details = challenge.request.get("methodDetails")
+        if zone is None or not is_dict(details) or details.get("zones") is None:
+            return None
+        modes = details.get("supportedModes")
+        supported = modes if is_list(modes) else ["pull", "push"]
+        if "push" not in supported or self.mode not in (None, "push") or details.get("splits"):
+            return None
+        zone_chain_id = await self._get_zone_chain_id(zone)
+        zone_id = (
+            zone.zone_id if zone.zone_id is not None else _zones.id_from_chain_id(zone_chain_id)
+        )
+        parent_chain_id = (
+            zone.parent_chain_id
+            if zone.parent_chain_id is not None
+            else _zones.parent_chain_id_from_chain_id(zone_chain_id)
+        )
+        if chain_id is None or parent_chain_id != chain_id:
+            return None
+        if not _zones.is_accepted(details.get("zones"), zone_id):
+            return None
+        # A withdrawal can't be undone, so start one only when it can settle before
+        # the challenge expires; an expired challenge would invite another payment.
+        if _zone_withdrawal_key(challenge) not in self._zone_withdrawals and not (
+            _zone_settles_before_expiry(challenge.expires, zone.settlement_timeout)
+        ):
+            return None
+        return zone_id
+
+    async def _create_zone_credential(self, challenge: Challenge, zone_id: int) -> Credential:
+        """Pay a challenge from the Zone and return a ``zone`` credential.
+
+        Requests a withdrawal to the recipient with the challenge-bound memo,
+        then waits for the portal to settle it on Tempo. Concurrent and later
+        calls for one challenge share the withdrawal, so a retry after a failed
+        wait resumes it instead of paying again.
+
+        Raises:
+            ZoneSettlementPendingError: If the withdrawal did not settle in time.
+        """
+        assert self.zone is not None
+        zone = self.zone
+        request = challenge.request
+        key = _zone_withdrawal_key(challenge)
+        task = self._zone_withdrawals.get(key)
+        if task is None:
+            state = _ZoneSend()
+            new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
+            self._zone_withdrawals[key] = new_task
+
+            def finished(done: asyncio.Task[str]) -> None:
+                # Only a failure before the transaction was sent is safe to retry.
+                # After that, the withdrawal may have gone through, so retries of
+                # this challenge keep failing.
+                if done.cancelled() or (done.exception() is not None and not state.sent):
+                    if self._zone_withdrawals.get(key) is done:
+                        del self._zone_withdrawals[key]
+
+            new_task.add_done_callback(finished)
+            task = new_task
+        sender_tag = await asyncio.shield(task)
+
+        try:
+            tx_hash = await _zones.wait_for_settlement(
+                self._rpc_url_for(request),
+                portal=_zones.portal_address(zone_id),
+                sender_tag=sender_tag,
+                to=request["recipient"],
+                timeout=_zone_settlement_timeout(challenge.expires, zone.settlement_timeout),
+                **self._rpc,
+            )
+        except Exception as cause:
+            raise ZoneSettlementPendingError(
+                challenge_id=challenge.id, sender_tag=sender_tag, zone_id=zone_id
+            ) from cause
+        if self._zone_withdrawals.get(key) is task:
+            del self._zone_withdrawals[key]
+        return Credential(
+            challenge=challenge.to_echo(),
+            payload={"hash": tx_hash, "senderTag": sender_tag, "type": "zone", "zoneId": zone_id},
+        )
+
+    async def _request_zone_withdrawal(self, challenge: Challenge, state: _ZoneSend) -> str:
+        """Withdraw the challenge amount from the Zone to its recipient and return the sender tag.
+
+        The withdrawal carries the challenge-bound memo. Its bounce refunds the
+        payer, not the payee's Zone address.
+        """
+        # pytempo ships no type information.
+        from eth_abi.abi import decode, encode
+        from eth_hash.auto import keccak
+        from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
+
+        from mpp.methods.tempo.intents import APPROVE_SELECTOR
+
+        assert self.zone is not None
+        zone = self.zone
+        account = zone.account or self.account
+        if account is None:
+            raise ValueError("Zone payments require an account.")
+        root_account = self.root_account if zone.account is None else None
+        sender = root_account or account.address
+        request = challenge.request
+        amount = int(request["amount"])
+        currency = request["currency"]
+        recipient = request["recipient"]
+        memo = encode_attribution(
+            challenge_id=challenge.id, server_id=challenge.realm, client_id=self.client_id
+        )
+        rpc_url = zone.rpc_url
+        rpc: dict[str, Any] = {} if zone.http_client is None else {"client": zone.http_client}
+        chain_id = await self._get_zone_chain_id(zone)
+
+        # The outbox pulls the amount plus its withdrawal fee.
+        fee_data = "0x" + _zones.CALCULATE_WITHDRAWAL_FEE_SELECTOR + _abi_words(0)
+        fee = int(
+            await _rpc_call(
+                rpc_url, "eth_call", [{"to": _zones.ZONE_OUTBOX, "data": fee_data}, "latest"], **rpc
+            ),
+            16,
+        )
+        approve = "0x" + APPROVE_SELECTOR + _abi_words(_zones.ZONE_OUTBOX, amount + fee)
+        withdrawal = (
+            "0x"
+            + _zones.REQUEST_WITHDRAWAL_SELECTOR
+            + encode(
+                ["address", "address", "uint128", "bytes32", "uint64", "address", "bytes", "bytes"],
+                [currency, recipient, amount, bytes.fromhex(memo[2:]), 0, sender, b"", b""],
+            ).hex()
+        )
+        calls = ((currency, approve), (_zones.ZONE_OUTBOX, withdrawal))
+        gas_limit = (
+            int(
+                await _rpc_call(
+                    rpc_url,
+                    "eth_estimateGas",
+                    [
+                        {
+                            "from": sender,
+                            "calls": [
+                                {"to": to, "value": "0x0", "data": data} for to, data in calls
+                            ],
+                        },
+                        "latest",
+                    ],
+                    **rpc,
+                ),
+                16,
+            )
+            + _ZONE_GAS_MARGIN
+        )
+        gas_price = int(await _rpc_call(rpc_url, "eth_gasPrice", [], **rpc), 16)
+        policy = _get_payer_policy(chain_id, self.payer_fee_policy)
+        if gas_price < 0 or gas_price > policy.max_fee_per_gas:
+            raise TransactionError("RPC gas-price quote exceeds payer fee policy")
+        if gas_limit * gas_price > policy.max_total_fee:
+            raise TransactionError("Transaction exceeds payer total-fee budget")
+        tx = TempoTransaction.create(
+            chain_id=chain_id,
+            gas_limit=gas_limit,
+            max_fee_per_gas=gas_price,
+            max_priority_fee_per_gas=min(gas_price, policy.max_priority_fee_per_gas),
+            nonce=0,
+            nonce_key=EXPIRING_NONCE_KEY,
+            valid_before=_expiring_valid_before(challenge.expires),
+            calls=tuple(Call.create(to=to, value=0, data=data) for to, data in calls),
+        )
+        # Sign first: a failure until here sent nothing, so the challenge may be retried.
+        if root_account:
+            from pytempo import sign_tx_access_key  # pyright: ignore[reportMissingTypeStubs]
+
+            signed_tx = sign_tx_access_key(tx, account.private_key, root_account)
+        else:
+            signed_tx = tx.sign(account.private_key)
+        raw_tx = "0x" + signed_tx.encode().hex()
+        # The signed transaction fixes its hash, so a lost send response can still be
+        # recovered from the Zone.
+        tx_hash = "0x" + keccak(bytes.fromhex(raw_tx[2:])).hex()
+        state.sent = True
+        try:
+            receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx], **rpc)
+        except Exception as cause:
+            receipt = await _recover_zone_receipt(rpc_url, tx_hash, rpc)
+            if receipt is None:
+                raise TransactionError(
+                    f"Zone withdrawal outcome is unknown: transaction {tx_hash} may have been "
+                    "sent. Retrying this challenge does not withdraw again."
+                ) from cause
+        if not is_dict(receipt):
+            raise TransactionError(f"Zone withdrawal transaction {tx_hash} returned no receipt.")
+        receipt_hash = receipt.get("transactionHash")
+        receipt_hash = receipt_hash if isinstance(receipt_hash, str) else tx_hash
+        # A reverted withdrawal moved nothing, so the challenge may be retried.
+        if receipt.get("status") == "0x0":
+            state.sent = False
+            raise TransactionError(f"Zone withdrawal transaction {receipt_hash} reverted.")
+        logs = receipt.get("logs")
+        for log in logs if is_list(logs) else []:
+            topics = log.get("topics") if is_dict(log) else None
+            data = log.get("data") if is_dict(log) else None
+            if (
+                not is_list(topics)
+                or len(topics) != 3
+                or not isinstance(topics[0], str)
+                or topics[0].lower() != _zones.WITHDRAWAL_REQUESTED_TOPIC
+                or not isinstance(topics[2], str)
+                or not isinstance(data, str)
+                or str(log.get("address", "")).lower() != _zones.ZONE_OUTBOX
+            ):
+                continue
+            try:
+                fields = decode(list(_zones.REQUESTED_DATA_TYPES), bytes.fromhex(data[2:]))
+            except Exception:
+                continue
+            return _zones.sender_tag(
+                sender="0x" + topics[2][-40:],
+                transaction_hash=receipt_hash,
+                fallback_nonce=int(fields[6]),
+            )
+        raise TransactionError("Zone withdrawal request did not emit WithdrawalRequested.")
+
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call.
 
@@ -1229,6 +1562,70 @@ class TempoMethod:
         if not all(c in "0123456789abcdefABCDEF" for c in memo_clean):
             raise ValueError("memo must be hex-encoded")
         return f"0x{selector}{to_padded}{amount_padded}{memo_clean.lower()}"
+
+
+def _zone_withdrawal_key(challenge: Challenge) -> str:
+    """Key a Zone withdrawal by its whole Challenge, so another realm's or request's
+    challenge with the same ID never matches."""
+    return json.dumps(
+        [
+            challenge.id,
+            challenge.realm,
+            challenge.method,
+            challenge.intent,
+            challenge.request,
+            challenge.expires,
+            challenge.digest,
+            challenge.description,
+            challenge.opaque,
+        ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _zone_settles_before_expiry(expires: str | None, settlement_timeout: float | None) -> bool:
+    """Whether a Zone withdrawal can be sent and waited on before ``expires``."""
+    if not expires:
+        return True
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
+    return remaining > timeout + _ZONE_SUBMISSION_MARGIN
+
+
+def _zone_settlement_timeout(expires: str | None, settlement_timeout: float | None) -> float:
+    """Seconds to wait for settlement: ``settlement_timeout``, cut short at ``expires``."""
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    if not expires:
+        return timeout
+    remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
+    return max(0.0, min(timeout, remaining))
+
+
+def _parse_expires(expires: str) -> datetime:
+    parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+async def _recover_zone_receipt(
+    rpc_url: str, tx_hash: str, rpc: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Look for a Zone withdrawal's receipt after its send response failed."""
+    deadline = time.monotonic() + _ZONE_RECEIPT_RECOVERY_TIMEOUT
+    while True:
+        try:
+            receipt = await _rpc_call(rpc_url, "eth_getTransactionReceipt", [tx_hash], **rpc)
+        except Exception:
+            receipt = None
+        if is_dict(receipt):
+            return receipt
+        if time.monotonic() + _zones.POLLING_INTERVAL > deadline:
+            return None
+        await asyncio.sleep(_zones.POLLING_INTERVAL)
 
 
 def _check_recipient_addresses(request: dict[str, Any]) -> None:
@@ -1403,6 +1800,7 @@ def _tempo_method(
     payer_fee_token: str | None = None,
     payer_fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    zone: Zone | None = None,
 ) -> TempoMethod:
     """Resolve and validate Tempo charge configuration shared by clients and servers.
 
@@ -1565,6 +1963,7 @@ def _tempo_method(
         payer_fee_token=payer_fee_token,
         payer_fee_policy=payer_fee_policy,
         http_client=http_client,
+        zone=zone,
     )
     if (max_atomic_amount is not None or max_amount is not None) and not currency_explicit:
         raise ValueError(_CAPS_REQUIRE_CURRENCY_PIN)
@@ -1594,6 +1993,7 @@ def charge(
     fee_token: str | None = None,
     fee_policy: Mapping[str, int] | None = None,
     http_client: httpx.AsyncClient | None = None,
+    zone: Zone | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo charge challenges.
 
@@ -1633,6 +2033,12 @@ def charge(
     30 seconds: push mode waits on ``eth_sendRawTransactionSync`` for the receipt,
     and httpx's 5 second default can end a payment in ``PaymentOutcomeUnknownError``.
 
+    ``zone`` pays from a Zone balance instead of the account's Tempo balance when
+    a challenge accepts that Zone (``methodDetails.zones``); see :class:`Zone`.
+    If the withdrawal does not settle in time, it raises
+    :class:`~mpp.errors.ZoneSettlementPendingError`, and retrying the same
+    challenge with the same method resumes the withdrawal instead of paying again.
+
     Example:
         from mpp.client import Mpp
         from mpp.methods.tempo import TempoAccount
@@ -1661,6 +2067,7 @@ def charge(
             payer_fee_token=fee_token,
             payer_fee_policy=fee_policy,
             http_client=http_client,
+            zone=zone,
         )
     )
 

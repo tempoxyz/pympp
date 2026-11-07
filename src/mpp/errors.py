@@ -108,6 +108,29 @@ class PaymentOutcomeUnknownError(PaymentError, RuntimeError):
         )
 
 
+class ZoneSettlementPendingError(PaymentError, RuntimeError):
+    """A client withdrew from a Zone to pay a challenge, but the withdrawal did not
+    settle on Tempo before the client stopped waiting.
+
+    The withdrawal cannot be undone and may still settle. Retry the same
+    challenge with the same Tempo charge client method to resume waiting without
+    withdrawing again, or find the settlement by ``sender_tag`` on the Zone's
+    portal. The error that ended the wait is its ``__cause__``.
+    """
+
+    def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int) -> None:
+        self.challenge_id = challenge_id
+        """ID of the challenge the withdrawal pays."""
+        self.sender_tag = sender_tag
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it."""
+        self.zone_id = zone_id
+        """ID of the Zone the withdrawal left."""
+        super().__init__(
+            f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} has not "
+            "settled on Tempo yet. Retry the challenge to resume waiting instead of paying again."
+        )
+
+
 class NoMethodFoundError(PaymentError, ValueError):
     """No configured client method can pay any offered challenge.
 

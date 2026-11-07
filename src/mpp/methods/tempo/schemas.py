@@ -5,7 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_serializer, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    RootModel,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
@@ -65,6 +74,21 @@ def reject_fixed_attribution_memos(request: Mapping[str, Any]) -> None:
             raise ValueError(FIXED_ATTRIBUTION_MEMO_ERROR)
 
 
+def _zone_id(zone_id: int) -> int:
+    from mpp.methods.tempo._zone import is_id
+
+    if not is_id(zone_id):
+        raise ValueError("Invalid Zone ID")
+    return zone_id
+
+
+ZoneId = Annotated[StrictInt, AfterValidator(_zone_id)]
+"""A Zone ID: a positive integer below ``2**32``."""
+
+Zones = Literal[True] | Annotated[list[ZoneId], Field(min_length=1)]
+"""Zones a charge accepts withdrawals from: Zone IDs, or ``True`` for any Zone."""
+
+
 class MethodDetails(BaseModel):
     """Method-specific details for Tempo charge requests."""
 
@@ -73,6 +97,7 @@ class MethodDetails(BaseModel):
     machineTokenEnabled: bool | None = None
     splits: list[Split] | None = None
     supportedModes: Annotated[list[ChargeMode], Field(min_length=1)] | None = None
+    zones: Zones | None = None
 
 
 class ChargeRequest(BaseModel):
@@ -112,7 +137,25 @@ class ProofCredentialPayload(BaseModel):
     signature: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]+$")]
 
 
-CredentialPayload = HashCredentialPayload | TransactionCredentialPayload | ProofCredentialPayload
+class ZoneCredentialPayload(BaseModel):
+    """Credential payload for a charge paid by a Zone withdrawal settled on Tempo.
+
+    ``hash`` is the Tempo transaction that settled the withdrawal, ``senderTag``
+    identifies the withdrawal in it, and ``zoneId`` names the Zone it left.
+    """
+
+    type: Literal["zone"]
+    hash: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]{64}$")]
+    senderTag: Annotated[str, Field(pattern=r"^0x[a-fA-F0-9]{64}$")]
+    zoneId: ZoneId
+
+
+CredentialPayload = (
+    HashCredentialPayload
+    | TransactionCredentialPayload
+    | ProofCredentialPayload
+    | ZoneCredentialPayload
+)
 
 
 class ChargeInput(BaseModel):
@@ -121,7 +164,8 @@ class ChargeInput(BaseModel):
     ``amount`` is a decimal string converted to base units with ``decimals``;
     ``splits`` are already in base units. ``chain_id``, ``fee_payer``,
     ``machine_token_enabled``, ``splits`` and ``supported_modes`` serialize under
-    ``methodDetails``;
+    ``methodDetails``, as does ``zones`` (the Zone IDs whose withdrawals may pay
+    the charge, or ``True`` for any Zone on the charge's chain);
     ``extra`` is string metadata embedded in the request. Servers with a fee
     payer sponsor routes that leave ``fee_payer`` unset; ``False`` opts a route out.
     """
@@ -141,6 +185,7 @@ class ChargeInput(BaseModel):
     supported_modes: Annotated[list[ChargeMode], Field(min_length=1)] | None = Field(
         default=None, alias="supportedModes"
     )
+    zones: Zones | None = None
 
     @model_validator(mode="after")
     def _check(self) -> ChargeInput:
@@ -178,6 +223,8 @@ class ChargeInput(BaseModel):
             details["chainId"] = self.chain_id
         if self.supported_modes is not None:
             details["supportedModes"] = list(self.supported_modes)
+        if self.zones is not None:
+            details["zones"] = True if self.zones is True else list(self.zones)
         wire: dict[str, Any] = {
             "amount": str(parse_units(self.amount, self.decimals)),
             "currency": self.currency,
@@ -194,7 +241,7 @@ class ChargeInput(BaseModel):
 
 class ChargePayload(RootModel[Annotated[CredentialPayload, Field(discriminator="type")]]):
     """Charge credential payload: a pushed transaction ``hash``, a signed ``transaction``,
-    or, for a zero-amount charge, a ``proof`` signature."""
+    a settled ``zone`` withdrawal, or, for a zero-amount charge, a ``proof`` signature."""
 
 
 charge: Method[ChargeInput, ChargePayload] = Method(

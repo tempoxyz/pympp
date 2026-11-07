@@ -66,12 +66,14 @@ def charge(
     on_payment_success: PaymentSuccessHandler | None = None,
     supported_modes: Sequence[ChargeMode] | None = None,
     machine_token_enabled: bool = False,
+    zones: Sequence[int] | Literal[True] | None = None,
 ) -> list[ServerMethod]:
     """Create Tempo charge server methods, one per accepted currency in offer order.
 
     Routes take ``amount`` (decimal string), and optionally ``currency``,
     ``recipient``, ``chain_id``, ``fee_payer`` (``False`` stops sponsoring the
-    client's fees), ``splits`` (base units), ``external_id`` and ``supported_modes``.
+    client's fees), ``splits`` (base units), ``external_id``, ``supported_modes``
+    and ``zones``.
     A route naming a ``currency`` offers only that one.
 
     Args:
@@ -115,6 +117,12 @@ def charge(
             holding MACH pay through the canonical first-party swapper, which settles the
             charge currency to the recipient in the same transaction. Routes may override it
             with ``machine_token_enabled``.
+        zones: Zones whose withdrawals may pay a charge, advertised in
+            ``methodDetails.zones``: Zone IDs, or ``True`` for any Zone on the
+            charge's chain. A payer withdraws from its Zone to the recipient with a
+            challenge-bound memo and sends a ``zone`` credential naming the Tempo
+            transaction that settled it. Zone payments are push payments without
+            splits. ``None`` accepts none.
     """
     if supported_modes is not None:
         if isinstance(supported_modes, str) or not supported_modes:
@@ -122,6 +130,14 @@ def charge(
         for mode in supported_modes:
             if mode not in ("push", "pull"):
                 raise ValueError(f"Invalid Tempo charge mode: {mode!r}")
+    if zones is not None and zones is not True:
+        from mpp.methods.tempo._zone import is_id
+
+        if isinstance(zones, (str, bytes, bool)) or not zones:
+            raise ValueError("zones must be True or a non-empty sequence of Zone IDs")
+        for zone_id in zones:
+            if not is_id(zone_id):
+                raise ValueError(f"Invalid Zone ID: {zone_id!r}")
     local_fee_payer, _ = resolve_fee_payer(fee_payer)
     config = _tempo_method(
         fee_payer=local_fee_payer,
@@ -161,6 +177,8 @@ def charge(
             input.setdefault("supported_modes", list(supported_modes))
         if machine_token_enabled:
             input.setdefault("machine_token_enabled", True)
+        if zones is not None:
+            input.setdefault("zones", True if zones is True else list(zones))
         # Local simulation cannot authorize access keys: keep sponsorship opt-in.
         if fee_payer is None:
             input.pop("fee_payer", None)
