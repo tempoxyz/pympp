@@ -83,7 +83,7 @@ def _zone_id(zone_id: int) -> int:
 
 
 ZoneId = Annotated[StrictInt, AfterValidator(_zone_id)]
-"""A Zone ID: a positive integer below ``2**32``."""
+"""A Zone ID: a positive integer below the Zone chain IDs (``421700000``)."""
 
 Zones = Literal[True] | Annotated[list[ZoneId], Field(min_length=1)]
 """Zones a charge accepts withdrawals from: Zone IDs, or ``True`` for any Zone."""

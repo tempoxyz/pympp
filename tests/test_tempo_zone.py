@@ -223,7 +223,16 @@ class TestZoneHelpers:
         assert zone_lib.portal_address(3) == "0x5ad0000000000000000000000000000000000003"
         assert zone_lib.portal_address(2**32 - 1) == "0x5ad00000000000000000000000000000ffffffff"
         assert zone_lib.portal_address(6) == "0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"
-        assert zone_lib.portal_address(1_424_310_009).endswith("0000000009")
+
+    def test_portal_address_maps_only_the_literal_zone_id(self) -> None:
+        # A Zone chain ID names no Zone here: its portal is not that Zone's.
+        portal = zone_lib.portal_address(3)
+        for chain_id in (421_700_003, 1_424_310_003, 4_217_000_003):
+            assert zone_lib.portal_address(chain_id) != portal
+            assert zone_lib.portal_address(chain_id) == "0x5ad000000000000000000000" + (
+                f"{chain_id:016x}"
+            )
+        assert zone_lib.portal_address(zone_lib.id_from_chain_id(421_700_003)) == portal
 
     def test_sender_tag(self) -> None:
         # keccak256(encodePacked(['address', 'bytes32', 'uint64'], ...)) computed with viem.
@@ -232,10 +241,16 @@ class TestZoneHelpers:
             == "0x788fcff52bc1aca0be1c1ea444c37d65c3ace8da9b825356ab590beccac6a973"
         )
 
-    @pytest.mark.parametrize("zone_id", [0, -1, 1.5, 2**32, True, "3"])
+    @pytest.mark.parametrize(
+        "zone_id", [0, -1, 1.5, 2**32, 421_700_000, 421_700_003, 1_424_310_003, True, "3"]
+    )
     def test_is_id_rejects(self, zone_id: Any) -> None:
         assert not zone_lib.is_id(zone_id)
         assert not zone_lib.is_accepted(True, zone_id)
+
+    def test_is_id_accepts_ids_below_the_zone_chain_ids(self) -> None:
+        assert zone_lib.is_id(1)
+        assert zone_lib.is_id(421_699_999)
 
     def test_is_accepted(self) -> None:
         assert zone_lib.is_accepted([3, 7], 7)
@@ -407,7 +422,7 @@ class TestServerZoneCredentials:
             await server.broadcast_credential(zone_credential(issued, TAG_A, zone_id=4))
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("zone_id", [0, -1, 1.5, 2**32])
+    @pytest.mark.parametrize("zone_id", [0, -1, 1.5, 2**32, 421_700_003])
     async def test_rejects_invalid_zone_ids(self, zone_id: Any) -> None:
         rpc_methods: list[str] = []
         server = setup(zones=[ZONE_ID], rpc_methods=rpc_methods)
@@ -417,7 +432,7 @@ class TestServerZoneCredentials:
         assert "eth_getTransactionReceipt" not in rpc_methods
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("zone_id", [0, 2**32])
+    @pytest.mark.parametrize("zone_id", [0, 2**32, 421_700_003])
     async def test_intent_verify_rejects_invalid_zone_ids_as_verification_errors(
         self, zone_id: Any
     ) -> None:
@@ -443,7 +458,7 @@ class TestServerZoneCredentials:
         with pytest.raises(VerificationError, match="do not support split payments"):
             await server.broadcast_credential(zone_credential(issued, TAG_A))
 
-    @pytest.mark.parametrize("zones", [[], [0], ["3"], "3", False])
+    @pytest.mark.parametrize("zones", [[], [0], [421_700_003], ["3"], "3", False])
     def test_rejects_invalid_zones_option(self, zones: Any) -> None:
         with pytest.raises(ValueError):
             tempo_server.charge(recipient=MERCHANT, currencies=[CURRENCY], zones=zones)
@@ -517,7 +532,9 @@ class TestClientZoneSelection:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "zones", [[3, "x"], [3, 0], [3, True], [3, 3.0], [], False, "3"], ids=repr
+        "zones",
+        [[3, "x"], [3, 0], [3, 421_700_003], [3, True], [3, 3.0], [], False, "3"],
+        ids=repr,
     )
     async def test_refuses_malformed_zones_before_withdrawing(self, zones: Any) -> None:
         # Servers reject the whole request, so a valid member doesn't make it payable.
@@ -1201,12 +1218,6 @@ class TestClientZoneCancelledAfterSettlement:
 
 class TestZoneCoverage:
     """Edge cases of the Zone helpers."""
-
-    def test_portal_address_accepts_zone_chain_ids(self) -> None:
-        portal = zone_lib.portal_address(3)
-        assert zone_lib.portal_address(4_217_000_003) == portal
-        assert zone_lib.portal_address(421_700_003) == portal
-        assert zone_lib.portal_address(1_424_310_003) == portal
 
     def test_find_processed_event_skips_malformed_logs(self) -> None:
         good = processed_log(sender_tag=TAG_A)

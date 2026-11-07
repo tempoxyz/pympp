@@ -63,12 +63,9 @@ REQUESTED_DATA_TYPES = (
 )
 """Types of the non-indexed ``WithdrawalRequested`` fields, in log data order."""
 
-# Zone chain ID schemes (viem/tempo ``Addresses.zonePortal`` and ox ``ZoneId``).
-_MAINNET_ZONE_CHAIN_ID_BASE = 421_700_000
-_TESTNET_ZONE_CHAIN_ID_BASE = 1_424_310_000
-_LEGACY_ZONE_CHAIN_ID_BASE = 4_217_000_000
-_LEGACY_ZONE_CHAIN_ID_LIMIT = 4_218_000_000
-_ZONE_CHAIN_ID_LIMIT = 2**31
+# Zone IDs from here up read as Zone chain IDs in viem/tempo's ``Addresses.zonePortal``,
+# which maps them to another Zone's portal, so they are not valid Zone IDs (as mppx).
+_MAX_ZONE_ID_EXCLUSIVE = 421_700_000
 # Zones whose portals predate the deterministic address scheme.
 _LEGACY_PORTALS = {
     6: "0x7069DeC4E64Fd07334A0933eDe836C17259c9B23",
@@ -118,8 +115,16 @@ class Settlement:
 
 
 def is_id(zone_id: object) -> bool:
-    """Return whether a value is a valid Zone ID: a positive 32-bit integer."""
-    return isinstance(zone_id, int) and not isinstance(zone_id, bool) and 0 < zone_id < 2**32
+    """Return whether a value is a valid Zone ID: a positive integer below the Zone chain IDs.
+
+    Values from ``421700000`` up are Zone chain IDs, which name another Zone;
+    convert one with :func:`id_from_chain_id`.
+    """
+    return (
+        isinstance(zone_id, int)
+        and not isinstance(zone_id, bool)
+        and 0 < zone_id < _MAX_ZONE_ID_EXCLUSIVE
+    )
 
 
 def is_accepted(zones: object, zone_id: object) -> bool:
@@ -180,13 +185,13 @@ def parse_request(request: object) -> ChargeRequest:
 
 
 def portal_address(zone_id: int) -> str:
-    """Return the Tempo portal address of a Zone, as viem/tempo's ``Addresses.zonePortal``."""
-    if _LEGACY_ZONE_CHAIN_ID_BASE <= zone_id < _LEGACY_ZONE_CHAIN_ID_LIMIT:
-        zone_id -= _LEGACY_ZONE_CHAIN_ID_BASE
-    elif _TESTNET_ZONE_CHAIN_ID_BASE <= zone_id < _ZONE_CHAIN_ID_LIMIT:
-        zone_id -= _TESTNET_ZONE_CHAIN_ID_BASE
-    elif _MAINNET_ZONE_CHAIN_ID_BASE <= zone_id < _TESTNET_ZONE_CHAIN_ID_BASE:
-        zone_id -= _MAINNET_ZONE_CHAIN_ID_BASE
+    """Return the Tempo portal address of the Zone with exactly this Zone ID.
+
+    Unlike viem/tempo's ``Addresses.zonePortal``, a Zone chain ID is not
+    normalized to its Zone: the portal is always the literal ID's, so a
+    credential's ``zoneId`` is checked against the portal of the Zone it names.
+    Convert a Zone chain ID with :func:`id_from_chain_id` first.
+    """
     legacy = _LEGACY_PORTALS.get(zone_id)
     if legacy is not None:
         return legacy
