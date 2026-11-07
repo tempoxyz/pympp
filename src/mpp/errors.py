@@ -329,6 +329,42 @@ class PaymentSimulationError(VerificationError):
         self.fee_payer = fee_payer
         self.payment_token = payment_token
 
+    def __reduce__(self) -> tuple[Any, ...]:
+        # BaseException rebuilds from self.args alone, which lacks the keyword-only phase.
+        return (
+            _rebuild_payment_simulation_error,
+            (
+                type(self),
+                str(self),
+                self.phase,
+                self.sender,
+                self.fee_payer,
+                self.payment_token,
+                self.details,
+            ),
+            self.__dict__,
+        )
+
+
+def _rebuild_payment_simulation_error(
+    cls: type[PaymentSimulationError],
+    message: str,
+    phase: Literal["sender", "sponsored"],
+    sender: str | None,
+    fee_payer: str | None,
+    payment_token: str | None,
+    details: dict[str, Any] | None,
+) -> PaymentSimulationError:
+    """Rebuild a pickled or copied PaymentSimulationError."""
+    return cls(
+        message,
+        phase=phase,
+        sender=sender,
+        fee_payer=fee_payer,
+        payment_token=payment_token,
+        details=details,
+    )
+
 
 class CredentialReplayedError(VerificationError):
     """The payment behind a credential is already used or bound elsewhere.
