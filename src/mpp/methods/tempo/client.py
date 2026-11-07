@@ -1455,6 +1455,7 @@ class TempoMethod:
                 sender_tag=sender_tag,
                 to=request["recipient"],
                 timeout=_zone_settlement_timeout(challenge.expires, zone.settlement_timeout),
+                first_scan_limit=_zone_time_left(challenge.expires),
                 **self._rpc,
             )
         except Exception as cause:
@@ -1725,6 +1726,13 @@ def _zone_settlement_timeout(expires: str | None, settlement_timeout: float | No
         return timeout
     remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
     return max(0.0, min(timeout, remaining))
+
+
+def _zone_time_left(expires: str | None) -> float | None:
+    """Seconds left before ``expires`` (0 once it passed), or ``None`` without one."""
+    if not expires:
+        return None
+    return max(0.0, (_parse_expires(expires) - datetime.now(UTC)).total_seconds())
 
 
 def _zone_valid_before(expires: str | None, settlement_timeout: float | None) -> int:

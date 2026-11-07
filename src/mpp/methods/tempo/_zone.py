@@ -333,15 +333,18 @@ async def wait_for_settlement(
     sender_tag: str,
     to: str | None = None,
     timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
+    first_scan_limit: float | None = None,
     client: Any | None = None,
 ) -> Settlement:
     """Wait until a portal emits ``WithdrawalProcessed`` for a sender tag on Tempo.
 
     Searches the last ``LOOKBACK_BLOCKS`` blocks once, then the blocks added
     since every ``POLLING_INTERVAL`` seconds, for up to ``timeout`` seconds.
-    Every RPC request gets only what is left of ``timeout``, so a slow RPC
-    cannot stretch the wait past it. A ``timeout`` of 0 still checks once, with
-    that search bounded by ``FIRST_SCAN_TIMEOUT`` seconds instead.
+    The first search may take ``FIRST_SCAN_TIMEOUT`` seconds even when
+    ``timeout`` is shorter (0 included), so a withdrawal that already settled
+    is always found, but never more than ``first_scan_limit`` seconds, such as
+    the time left before the Challenge expires. Later requests get only what is
+    left of ``timeout``, so a slow RPC cannot stretch the wait past it.
 
     Returns:
         The Tempo transaction that processed the withdrawal, with the event's
@@ -349,13 +352,18 @@ async def wait_for_settlement(
         payer's Zone balance and paid nothing.
 
     Raises:
-        ValueError: If ``timeout`` is not a finite, non-negative number.
+        ValueError: If ``timeout`` or ``first_scan_limit`` is not a finite,
+            non-negative number.
         TimeoutError: If the withdrawal did not settle in time.
     """
     from mpp.methods.tempo._rpc import _rpc_call
 
     if not math.isfinite(timeout) or timeout < 0:
         raise ValueError("Zone settlement timeout must be a finite, non-negative number.")
+    if first_scan_limit is not None and (
+        not math.isfinite(first_scan_limit) or first_scan_limit < 0
+    ):
+        raise ValueError("Zone first scan limit must be a finite, non-negative number.")
     topics: list[str | None] = [
         WITHDRAWAL_PROCESSED_TOPIC,
         None if to is None else "0x" + to.removeprefix("0x").lower().zfill(64),
@@ -364,11 +372,13 @@ async def wait_for_settlement(
 
     started = time.monotonic()
     deadline = started + timeout
-    # A positive timeout bounds every request, the first search included: callers
-    # cap it at the Challenge's expiry, and a settlement found later would only
-    # yield an expired credential. With none, the search still runs once so a
-    # withdrawal that already settled is found; FIRST_SCAN_TIMEOUT bounds a stalled RPC.
-    first_scan_deadline = deadline if timeout > 0 else started + FIRST_SCAN_TIMEOUT
+    # The first search gets at least FIRST_SCAN_TIMEOUT, so a short timeout still
+    # finds a withdrawal that already settled, but stops at first_scan_limit
+    # (the Challenge's expiry): a settlement found later yields an expired credential.
+    first_scan_timeout = max(timeout, FIRST_SCAN_TIMEOUT)
+    if first_scan_limit is not None:
+        first_scan_timeout = min(first_scan_timeout, first_scan_limit)
+    first_scan_deadline = started + first_scan_timeout
     first_scan = True
 
     def timed_out() -> TimeoutError:

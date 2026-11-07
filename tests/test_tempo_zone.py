@@ -1129,9 +1129,26 @@ class TestWaitForSettlement:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("slow", ["eth_blockNumber", "eth_getLogs"])
-    async def test_a_slow_first_search_ends_at_the_timeout(self, slow: str) -> None:
-        # A positive timeout bounds the first search too (FIRST_SCAN_TIMEOUT is 10s),
-        # so a slow RPC cannot carry the wait past the Challenge's expiry.
+    @pytest.mark.parametrize(
+        ("timeout", "first_scan", "limit", "ends"),
+        [
+            (0.2, 0.6, None, 0.6),  # a short timeout still gets FIRST_SCAN_TIMEOUT
+            (0.2, 0.6, 0.3, 0.3),  # but never past the Challenge's expiry
+            (0.6, 0.1, None, 0.6),  # a longer timeout bounds the first search
+        ],
+    )
+    async def test_a_slow_first_search_ends_at_its_bound(
+        self,
+        slow: str,
+        timeout: float,
+        first_scan: float,
+        limit: float | None,
+        ends: float,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The first search ends at min(max(timeout, FIRST_SCAN_TIMEOUT), first_scan_limit).
+        monkeypatch.setattr(zone_lib, "FIRST_SCAN_TIMEOUT", first_scan)
+
         async def handle(method: str, params: list[Any]) -> dict[str, Any]:
             if method == slow:
                 await asyncio.sleep(30)
@@ -1143,10 +1160,32 @@ class TestWaitForSettlement:
                 "https://tempo.test",
                 portal=PORTAL,
                 sender_tag=TAG_A,
-                timeout=0.2,
+                timeout=timeout,
+                first_scan_limit=limit,
                 client=zone_rpc_client(handle),
             )
-        assert asyncio.get_running_loop().time() - started < 1
+        elapsed = asyncio.get_running_loop().time() - started
+        assert ends - 0.05 <= elapsed < ends + 0.5
+
+    @pytest.mark.asyncio
+    async def test_a_short_timeout_finds_a_settlement_behind_a_slow_rpc(self) -> None:
+        # Each request takes longer than the whole timeout, yet the first search
+        # finds a withdrawal that already settled.
+        async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+            await asyncio.sleep(1)
+            if method == "eth_blockNumber":
+                return {"result": "0x20"}
+            return {"result": [processed_log(sender_tag=TAG_A)]}
+
+        settlement = await zone_lib.wait_for_settlement(
+            "https://tempo.test",
+            portal=PORTAL,
+            sender_tag=TAG_A,
+            timeout=0.2,
+            first_scan_limit=30,
+            client=zone_rpc_client(handle),
+        )
+        assert settlement == zone_lib.Settlement(SETTLEMENT_HASH, callback_success=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("settled", [True, False])
@@ -1264,6 +1303,10 @@ class TestZoneCoverage:
         with pytest.raises(ValueError, match="finite, non-negative"):
             await zone_lib.wait_for_settlement(
                 "https://tempo.test", portal=PORTAL, sender_tag=TAG_A, timeout=timeout
+            )
+        with pytest.raises(ValueError, match="finite, non-negative"):
+            await zone_lib.wait_for_settlement(
+                "https://tempo.test", portal=PORTAL, sender_tag=TAG_A, first_scan_limit=timeout
             )
 
     @pytest.mark.asyncio
@@ -1554,6 +1597,58 @@ class TestClientZoneCoverage:
         # No credential was sent, and the other offer was not paid.
         assert len(requests) == 1
         assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_short_settlement_timeout_still_finds_a_settled_withdrawal(self) -> None:
+        # The Tempo RPC answers in 1s, far beyond the 0.2s settlement timeout.
+        async def tempo_l1(method: str, params: list[Any]) -> dict[str, Any]:
+            if method == "eth_chainId":
+                return {"result": hex(MODERATO)}
+            await asyncio.sleep(1)
+            if method == "eth_blockNumber":
+                return {"result": "0x20"}
+            tag = params[0]["topics"][2]
+            return {"result": [processed_log(sender_tag=tag)]}
+
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()),
+            settlement_timeout=0.2,
+        )
+        method = payer_method(zone, zone_rpc_client(tempo_l1))
+        issued = await zone_challenge([3])
+        credential = await method._create_zone_credential(issued, ZONE_ID)  # pyright: ignore[reportPrivateUsage]
+        assert credential.payload["hash"] == SETTLEMENT_HASH
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_settlement_search_stops_at_the_challenge_expiry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The withdrawal may be sent this close to expiry only because the test says so.
+        monkeypatch.setattr(
+            tempo_client,
+            "_zone_valid_before",
+            lambda *_: tempo_client._expiring_valid_before(None),  # pyright: ignore[reportPrivateUsage]
+        )
+
+        async def tempo_l1(method: str, params: list[Any]) -> dict[str, Any]:
+            if method == "eth_chainId":
+                return {"result": hex(MODERATO)}
+            await asyncio.sleep(30)
+            raise AssertionError("unreachable")
+
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()),
+            settlement_timeout=0.2,
+        )
+        method = payer_method(zone, zone_rpc_client(tempo_l1))
+        issued = await zone_challenge([3], expires_in=timedelta(seconds=2))
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(ZoneSettlementPendingError):
+            await method._create_zone_credential(issued, ZONE_ID)  # pyright: ignore[reportPrivateUsage]
+        # It ends at the expiry (at most 2s away), not at FIRST_SCAN_TIMEOUT (10s).
+        assert asyncio.get_running_loop().time() - started < 3
 
     @pytest.mark.asyncio
     async def test_concurrent_payments_of_a_challenge_share_one_withdrawal(self) -> None:
