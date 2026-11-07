@@ -20,6 +20,7 @@ from mpp.errors import (
     PaymentOutcomeUnknownError,
     VerificationError,
     ZoneSettlementPendingError,
+    ZoneWithdrawalBouncedError,
 )
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import _zone as zone_lib
@@ -1110,7 +1111,7 @@ class TestWaitForSettlement:
             client=rpc_client(handle, calls),
         )
         if settled:
-            assert await wait == SETTLEMENT_HASH
+            assert await wait == zone_lib.Settlement(SETTLEMENT_HASH, callback_success=True)
         else:
             with pytest.raises(TimeoutError, match="did not settle"):
                 await wait
@@ -1231,6 +1232,39 @@ class TestZoneCoverage:
             )
 
     @pytest.mark.asyncio
+    async def test_wait_for_settlement_reports_a_bounced_withdrawal(self) -> None:
+        def handle(method: str, params: list[Any]) -> Any:
+            if method == "eth_blockNumber":
+                return "0x20"
+            return [processed_log(sender_tag=TAG_A, callback_success=False)]
+
+        settlement = await zone_lib.wait_for_settlement(
+            "https://tempo.test",
+            portal=PORTAL,
+            sender_tag=TAG_A,
+            timeout=0,
+            client=rpc_client(handle),
+        )
+        assert settlement == zone_lib.Settlement(SETTLEMENT_HASH, callback_success=False)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_settlement_skips_logs_it_cannot_decode(self) -> None:
+        def handle(method: str, params: list[Any]) -> Any:
+            if method == "eth_blockNumber":
+                return "0x20"
+            log = processed_log(sender_tag=TAG_A)
+            return [{**log, "data": "0x1234"}, {**log, "data": None}]
+
+        with pytest.raises(TimeoutError, match="did not settle"):
+            await zone_lib.wait_for_settlement(
+                "https://tempo.test",
+                portal=PORTAL,
+                sender_tag=TAG_A,
+                timeout=0,
+                client=rpc_client(handle),
+            )
+
+    @pytest.mark.asyncio
     async def test_wait_for_settlement_stops_when_the_deadline_passed_during_a_poll(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1287,14 +1321,15 @@ def scripted_zone(calls: list[str], **answers: Any) -> Zone:
     )
 
 
-def settled_l1() -> httpx.AsyncClient:
+def settled_l1(callback_success: Callable[[], bool] = lambda: True) -> httpx.AsyncClient:
     def tempo_l1(method: str, params: list[Any]) -> Any:
         if method == "eth_chainId":
             return hex(MODERATO)
         if method == "eth_blockNumber":
             return "0x20"
         if method == "eth_getLogs":
-            return [processed_log(sender_tag=params[0]["topics"][2])]
+            tag = params[0]["topics"][2]
+            return [processed_log(sender_tag=tag, callback_success=callback_success())]
         raise AssertionError(method)
 
     return rpc_client(tempo_l1)
@@ -1408,6 +1443,68 @@ class TestClientZoneCoverage:
         method = payer_method(zone)
         with pytest.raises(tempo_client.TransactionError, match="returned no receipt"):
             await method.create_credential(await zone_challenge([3]))
+
+    @pytest.mark.asyncio
+    async def test_a_bounced_withdrawal_raises_and_paying_again_withdraws_again(self) -> None:
+        # The server rejects a credential for a bounced withdrawal, so none is built;
+        # the withdrawal is forgotten, and paying the challenge again withdraws again.
+        calls: list[str] = []
+        outcomes = iter([False, True])
+        method = payer_method(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()),
+            settled_l1(lambda: next(outcomes)),
+        )
+        issued = await zone_challenge([3])
+        bounced = await error_of(method.create_credential(issued))
+        assert isinstance(bounced, ZoneWithdrawalBouncedError)
+        assert isinstance(bounced, PaymentError)
+        assert bounced.challenge is issued
+        assert (bounced.challenge_id, bounced.zone_id) == (issued.id, 3)
+        assert bounced.sender_tag == zone_lib.sender_tag(PAYER.address, "0x" + "cd" * 32, 9)
+        assert "bounced" in str(bounced)
+        assert not method._zone_withdrawals  # pyright: ignore[reportPrivateUsage]
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+        credential = await method.create_credential(issued)
+        assert credential.payload["hash"] == SETTLEMENT_HASH
+        assert calls.count("eth_sendRawTransactionSync") == 2
+
+    @pytest.mark.asyncio
+    async def test_the_transport_raises_a_bounced_withdrawal_without_paying_another_offer(
+        self,
+    ) -> None:
+        from mpp.client.transport import PaymentTransport
+
+        calls: list[str] = []
+        method = payer_method(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()),
+            settled_l1(lambda: False),
+        )
+        zone_offer = await zone_challenge([3])
+        tempo_offer = await zone_challenge([3])
+        details = {k: v for k, v in tempo_offer.request["methodDetails"].items() if k != "zones"}
+        tempo_offer = replace(
+            tempo_offer, request={**tempo_offer.request, "methodDetails": details}
+        )
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            headers = [
+                ("WWW-Authenticate", offer.to_www_authenticate(REALM))
+                for offer in (zone_offer, tempo_offer)
+            ]
+            return httpx.Response(402, headers=headers)
+
+        transport = PaymentTransport(
+            [tempo_client._client_method(method)], inner=httpx.MockTransport(respond)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(ZoneWithdrawalBouncedError):
+                await client.get(f"https://{REALM}/paid")
+        # No credential was sent, and the other offer was not paid.
+        assert len(requests) == 1
+        assert calls.count("eth_sendRawTransactionSync") == 1
 
     @pytest.mark.asyncio
     async def test_concurrent_payments_of_a_challenge_share_one_withdrawal(self) -> None:

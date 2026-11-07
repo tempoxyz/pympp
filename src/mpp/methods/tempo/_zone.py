@@ -105,6 +105,18 @@ class ProcessedEvent:
     callback_success: bool
 
 
+@dataclass(frozen=True, slots=True)
+class Settlement:
+    """The Tempo transaction that processed a withdrawal, and whether its callback succeeded.
+
+    A withdrawal whose callback failed bounced: the portal returned the amount
+    to the payer's Zone balance instead of paying the recipient.
+    """
+
+    transaction_hash: str
+    callback_success: bool
+
+
 def is_id(zone_id: object) -> bool:
     """Return whether a value is a valid Zone ID: a positive 32-bit integer."""
     return isinstance(zone_id, int) and not isinstance(zone_id, bool) and 0 < zone_id < 2**32
@@ -317,7 +329,7 @@ async def wait_for_settlement(
     to: str | None = None,
     timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
     client: Any | None = None,
-) -> str:
+) -> Settlement:
     """Wait until a portal emits ``WithdrawalProcessed`` for a sender tag on Tempo.
 
     Searches the last ``LOOKBACK_BLOCKS`` blocks once, then the blocks added
@@ -326,7 +338,9 @@ async def wait_for_settlement(
     ``timeout`` of 0 checks once.
 
     Returns:
-        The hash of the Tempo transaction that settled the withdrawal.
+        The Tempo transaction that processed the withdrawal, with the event's
+        ``callbackSuccess``: when it is false, the withdrawal bounced back to the
+        payer's Zone balance and paid nothing.
 
     Raises:
         ValueError: If ``timeout`` is not a finite, non-negative number.
@@ -388,11 +402,25 @@ async def wait_for_settlement(
             )
             for log in logs if is_list(logs) else []:
                 tx_hash = log.get("transactionHash") if is_dict(log) else None
-                if isinstance(tx_hash, str):
-                    return tx_hash
+                callback_success = _callback_success(log.get("data")) if is_dict(log) else None
+                if isinstance(tx_hash, str) and callback_success is not None:
+                    return Settlement(tx_hash, callback_success)
             from_block = latest + 1
         first_scan = False
         if time.monotonic() + POLLING_INTERVAL > deadline:
             raise timed_out()
         await asyncio.sleep(POLLING_INTERVAL)
         latest = await block_number()
+
+
+def _callback_success(data: object) -> bool | None:
+    """Decode ``callbackSuccess`` from a ``WithdrawalProcessed`` log's data, or ``None``."""
+    from eth_abi.abi import decode
+
+    if not isinstance(data, str):
+        return None
+    try:
+        _, _, callback_success = decode(["address", "uint128", "bool"], _bytes(data))
+    except Exception:
+        return None
+    return bool(callback_success)

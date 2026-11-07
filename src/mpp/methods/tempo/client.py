@@ -23,6 +23,7 @@ from mpp.errors import (
     PaymentExpiredError,
     PaymentOutcomeUnknownError,
     ZoneSettlementPendingError,
+    ZoneWithdrawalBouncedError,
 )
 from mpp.methods.tempo import _machine_token
 from mpp.methods.tempo import _zone as _zones
@@ -1405,6 +1406,8 @@ class TempoMethod:
 
         Raises:
             ZoneSettlementPendingError: If the withdrawal did not settle in time.
+            ZoneWithdrawalBouncedError: If the withdrawal settled but bounced back
+                to the payer's Zone balance.
         """
         assert self.zone is not None
         zone = self.zone
@@ -1436,7 +1439,7 @@ class TempoMethod:
         sender_tag = await asyncio.shield(task)
 
         try:
-            tx_hash = await _zones.wait_for_settlement(
+            settlement = await _zones.wait_for_settlement(
                 self._rpc_url_for(request),
                 portal=_zones.portal_address(zone_id),
                 sender_tag=sender_tag,
@@ -1451,14 +1454,31 @@ class TempoMethod:
                 zone_id=zone_id,
                 challenge=challenge,
             ) from cause
+        entry = self._zone_withdrawals.get(key)
+        if not settlement.callback_success:
+            # The withdrawal bounced back to the payer's Zone balance and paid
+            # nothing, so forget it: paying again withdraws again (mpp-rs
+            # ``ZoneWithdrawalBounced``). The server would reject its credential.
+            if entry is not None and entry[0] is task:
+                del self._zone_withdrawals[key]
+            raise ZoneWithdrawalBouncedError(
+                challenge_id=challenge.id,
+                sender_tag=sender_tag,
+                zone_id=zone_id,
+                challenge=challenge,
+            )
         # Forget the withdrawal only when a caller takes the credential: with every
         # caller gone, a retry must find it settled rather than withdraw again.
-        entry = self._zone_withdrawals.get(key)
         if entry is not None and entry[0] is task and wanted():
             del self._zone_withdrawals[key]
         return Credential(
             challenge=challenge.to_echo(),
-            payload={"hash": tx_hash, "senderTag": sender_tag, "type": "zone", "zoneId": zone_id},
+            payload={
+                "hash": settlement.transaction_hash,
+                "senderTag": sender_tag,
+                "type": "zone",
+                "zoneId": zone_id,
+            },
         )
 
     async def _request_zone_withdrawal(self, challenge: Challenge, state: _ZoneSend) -> str:

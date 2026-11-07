@@ -192,6 +192,10 @@ module mpp.errors
         def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None) -> None
         title = 'Zone Settlement Pending'
         type = 'https://paymentauth.org/problems/zone-settlement-pending'
+    class ZoneWithdrawalBouncedError(mpp.errors.PaymentError, RuntimeError)
+        def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None) -> None
+        title = 'Zone Withdrawal Bounced'
+        type = 'https://paymentauth.org/problems/zone-withdrawal-bounced'
     class NoMethodFoundError(mpp.errors.PaymentError, ValueError)
         def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = (), *, message: str | None = None) -> None
         title = 'No Method Found'
