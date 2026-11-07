@@ -17,8 +17,14 @@ import pytest
 from eth_abi.abi import decode, encode
 from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
 
-from mpp.errors import BadRequestError, VerificationError, VerificationFailedError
+from mpp.errors import (
+    BadRequestError,
+    PaymentSimulationError,
+    VerificationError,
+    VerificationFailedError,
+)
 from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo._rpc import RpcError as NodeRpcError
 from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
@@ -817,6 +823,78 @@ class TestBroadcastOpen:
         with pytest.raises(VerificationFailedError, match="insufficient balance"):
             await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
         assert not rpc.sent
+
+    async def test_failed_sender_preflight_is_tagged(self, rpc: FakeRpc) -> None:
+        raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
+        rpc.overrides["eth_call"] = fail("execution reverted: insufficient balance")
+        with pytest.raises(PaymentSimulationError, match="insufficient balance") as raised:
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        error = raised.value
+        assert error.phase == "sender"
+        assert error.sender == PAYER.address
+        assert error.fee_payer is None
+        # The escrow open is not a single TIP-20 transfer.
+        assert error.payment_token is None
+        assert isinstance(error.__cause__, NodeRpcError)
+        assert str(error) == f"Payment verification failed: {error.__cause__}."
+        assert not rpc.sent
+
+    async def test_failed_sponsored_preflight_is_tagged(self, rpc: FakeRpc) -> None:
+        raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
+
+        def call(params: list[Any]) -> Any:
+            if "feePayerSignature" in params[0]:
+                raise RpcError("execution reverted: insufficient fee token balance")
+            return rpc._call(params)
+
+        rpc.overrides["eth_call"] = call
+        with pytest.raises(PaymentSimulationError, match="insufficient fee token") as raised:
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        error = raised.value
+        assert error.phase == "sponsored"
+        assert error.sender == PAYER.address
+        assert error.fee_payer == SPONSOR.address
+        assert isinstance(error.__cause__, NodeRpcError)
+        assert not rpc.sent
+
+    async def test_non_execution_preflight_error_keeps_the_untagged_error(
+        self, rpc: FakeRpc
+    ) -> None:
+        raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
+        rpc.overrides["eth_call"] = fail("rate limited")
+        with pytest.raises(VerificationFailedError, match="rate limited") as raised:
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        error = raised.value
+        assert not isinstance(error, PaymentSimulationError)
+        simulation = error.__cause__
+        assert isinstance(simulation, PaymentSimulationError)
+        assert simulation.phase == "sender"
+        assert isinstance(simulation.__cause__, NodeRpcError)
+        assert not rpc.sent
+
+    async def test_preflight_transport_error_is_not_tagged(self, rpc: FakeRpc) -> None:
+        raw, descriptor, channel_id = await build_open(rpc, fee_payer=True)
+
+        def call(params: list[Any]) -> Any:
+            raise httpx.ConnectError("connection refused")
+
+        rpc.overrides["eth_call"] = call
+        with pytest.raises(httpx.ConnectError):
+            await self._broadcast(rpc, raw, descriptor, channel_id, fee_payer=SPONSOR)
+        assert not rpc.sent
+
+    async def test_payment_token_is_set_only_for_a_single_transfer(self) -> None:
+        from mpp.methods.tempo import _fee_payer
+
+        transfer = {"to": CURRENCY, "value": "0x0", "data": "0xa9059cbb" + "00" * 64}
+        with_memo = {**transfer, "data": "0x95777d59" + "00" * 96}
+        other = {**transfer, "data": "0x095ea7b3" + "00" * 64}
+        token = _fee_payer.simulation_payment_token
+        assert token({"calls": [transfer]}) == CURRENCY
+        assert token({"calls": [with_memo]}) == CURRENCY
+        assert token({"calls": [other]}) is None
+        assert token({"calls": [transfer, transfer]}) is None
+        assert token({}) is None
 
     async def test_reverted_open_names_the_transaction(self, rpc: FakeRpc) -> None:
         raw, descriptor, channel_id = await build_open(rpc)

@@ -69,6 +69,7 @@ module mpp
     PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
     PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
     PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    PaymentSimulationError -> mpp.errors.PaymentSimulationError
     class Receipt
         @dataclass(frozen=True, slots=True)
         field status: Literal['success']
@@ -244,6 +245,14 @@ module mpp.errors
         type = 'https://paymentauth.org/problems/payment-action-required'
     class VerificationError(mpp.errors.VerificationFailedError)
         def __init__(self, message: str = 'Payment verification failed.', *, details: dict[str, Any] | None = None) -> None
+        title = 'Verification Failed'
+        type = 'https://paymentauth.org/problems/verification-failed'
+    class PaymentSimulationError(mpp.errors.VerificationError)
+        phase: Literal['sender', 'sponsored']
+        sender: str | None
+        fee_payer: str | None
+        payment_token: str | None
+        def __init__(self, message: str = 'Payment verification failed.', *, phase: Literal['sender', 'sponsored'], sender: str | None = None, fee_payer: str | None = None, payment_token: str | None = None, details: dict[str, Any] | None = None) -> None
         title = 'Verification Failed'
         type = 'https://paymentauth.org/problems/verification-failed'
     class CredentialReplayedError(mpp.errors.VerificationError)
@@ -1251,6 +1260,7 @@ module mpp.server
     PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
     PaymentRequired -> mpp.server.http.PaymentRequired
     PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    PaymentSimulationError -> mpp.errors.PaymentSimulationError
     PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
     PaymentVerified -> mpp.server.http.PaymentVerified
     Request -> mpp.server.http.Request
