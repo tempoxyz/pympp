@@ -254,6 +254,7 @@ class Zone:
             chain, so the client pays from the Zone only on this chain.
         settlement_timeout: Seconds to wait for the withdrawal to settle on
             Tempo (default: 60). The wait also ends at the challenge expiry.
+            Tempo is always checked once, so 0 checks without waiting.
         http_client: httpx client every Zone RPC call goes through, owned by
             the caller. Set the Zone's ``X-Authorization-Token`` header on it.
     """
@@ -1470,6 +1471,13 @@ class TempoMethod:
             ),
             16,
         )
+        # The fee is spent in the charge currency too, so the client's amount caps
+        # bound the whole withdrawal, not just the amount the challenge names.
+        max_atomic, max_token = self._amount_caps()
+        if max_atomic is not None and amount + fee > max_atomic:
+            raise ValueError("Zone withdrawal amount plus its fee exceeds max_atomic_amount.")
+        if max_token is not None and amount + fee > max_token:
+            raise ValueError("Zone withdrawal amount plus its fee exceeds max_amount.")
         approve = "0x" + APPROVE_SELECTOR + _abi_words(_zones.ZONE_OUTBOX, amount + fee)
         withdrawal = (
             "0x"
@@ -1506,6 +1514,12 @@ class TempoMethod:
             raise TransactionError("RPC gas-price quote exceeds payer fee policy")
         if gas_limit * gas_price > policy.max_total_fee:
             raise TransactionError("Transaction exceeds payer total-fee budget")
+        valid_before = _zone_valid_before(challenge.expires, zone.settlement_timeout)
+        if valid_before <= time.time():
+            raise TransactionError(
+                "Challenge expires too soon for a Zone withdrawal to settle; "
+                "request a new challenge"
+            )
         tx = TempoTransaction.create(
             chain_id=chain_id,
             gas_limit=gas_limit,
@@ -1513,7 +1527,7 @@ class TempoMethod:
             max_priority_fee_per_gas=min(gas_price, policy.max_priority_fee_per_gas),
             nonce=0,
             nonce_key=EXPIRING_NONCE_KEY,
-            valid_before=_expiring_valid_before(challenge.expires),
+            valid_before=valid_before,
             calls=tuple(Call.create(to=to, value=0, data=data) for to, data in calls),
         )
         # Sign first: a failure until here sent nothing, so the challenge may be retried.
@@ -1649,6 +1663,23 @@ def _zone_settlement_timeout(expires: str | None, settlement_timeout: float | No
         return timeout
     remaining = (_parse_expires(expires) - datetime.now(UTC)).total_seconds()
     return max(0.0, min(timeout, remaining))
+
+
+def _zone_valid_before(expires: str | None, settlement_timeout: float | None) -> int:
+    """Return a Zone withdrawal's ``valid_before``: late enough to settle and pay.
+
+    A withdrawal included after ``expires`` minus the settlement timeout and
+    submission margin could settle too late for its credential, so the
+    transaction stops being valid then.
+    """
+    if not expires:
+        return _expiring_valid_before(None)
+    timeout = (
+        _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
+    )
+    cutoff = _parse_expires(expires) - timedelta(seconds=timeout + _ZONE_SUBMISSION_MARGIN)
+    # _expiring_valid_before adds one second to the supplied expiry.
+    return _expiring_valid_before((cutoff - timedelta(seconds=1)).isoformat())
 
 
 def _parse_expires(expires: str) -> datetime:

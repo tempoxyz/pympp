@@ -26,6 +26,9 @@ LOOKBACK_BLOCKS = 7_200
 POLLING_INTERVAL = 0.5
 """Seconds between polls for a settled Zone withdrawal."""
 
+FIRST_SCAN_TIMEOUT = 10.0
+"""Seconds the first search for a settled Zone withdrawal may take, whatever the timeout."""
+
 ZONE_OUTBOX = "0x1c00000000000000000000000000000000000002"
 """The ZoneOutbox predeploy on every Zone, which takes withdrawal requests."""
 
@@ -268,6 +271,8 @@ async def wait_for_settlement(
 
     Searches the last ``LOOKBACK_BLOCKS`` blocks once, then the blocks added
     since every ``POLLING_INTERVAL`` seconds, for up to ``timeout`` seconds.
+    The first search always runs, for up to ``FIRST_SCAN_TIMEOUT`` seconds, so a
+    ``timeout`` of 0 checks once.
 
     Returns:
         The hash of the Tempo transaction that settled the withdrawal.
@@ -286,7 +291,12 @@ async def wait_for_settlement(
         sender_tag.lower(),
     ]
 
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    # The first search may outlast a short timeout, so a withdrawal that already
+    # settled is found even with none; FIRST_SCAN_TIMEOUT still bounds a stalled RPC.
+    first_scan_deadline = max(deadline, started + FIRST_SCAN_TIMEOUT)
+    first_scan = True
 
     def timed_out() -> TimeoutError:
         return TimeoutError(
@@ -295,8 +305,8 @@ async def wait_for_settlement(
 
     async def call(method: str, params: list[Any]) -> Any:
         # Each request gets only what is left of the budget, so a slow RPC
-        # cannot stretch the wait past ``timeout``.
-        remaining = deadline - time.monotonic()
+        # cannot stretch the wait past ``timeout`` (or the first search's bound).
+        remaining = (first_scan_deadline if first_scan else deadline) - time.monotonic()
         if remaining <= 0:
             raise timed_out()
         try:
@@ -330,6 +340,7 @@ async def wait_for_settlement(
                 if isinstance(tx_hash, str):
                     return tx_hash
             from_block = latest + 1
+        first_scan = False
         if time.monotonic() + POLLING_INTERVAL > deadline:
             raise timed_out()
         await asyncio.sleep(POLLING_INTERVAL)
