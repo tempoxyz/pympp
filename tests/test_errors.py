@@ -351,3 +351,38 @@ class TestServerErrorMapping:
         assert issubclass(VerificationError, VerificationFailedError)
         assert issubclass(CredentialReplayedError, VerificationError)
         assert not issubclass(InternalPaymentError, VerificationFailedError)
+
+
+def test_payment_simulation_error_round_trips_through_pickle_and_copy() -> None:
+    import copy
+    import pickle
+
+    from mpp.errors import PaymentSimulationError
+
+    cause = RuntimeError("insufficient fee token balance")
+    error = PaymentSimulationError(
+        "Payment verification failed: insufficient fee token balance.",
+        phase="sponsored",
+        sender="0x00000000000000000000000000000000000000a1",
+        fee_payer="0x00000000000000000000000000000000000000f1",
+        payment_token="0x20c0000000000000000000000000000000000001",
+        details={"reason": "simulation"},
+    )
+    error.__cause__ = cause
+
+    for restored in (pickle.loads(pickle.dumps(error)), copy.copy(error)):
+        assert type(restored) is PaymentSimulationError
+        assert str(restored) == str(error)
+        assert (
+            restored.phase,
+            restored.sender,
+            restored.fee_payer,
+            restored.payment_token,
+            restored.details,
+        ) == (
+            "sponsored",
+            "0x00000000000000000000000000000000000000a1",
+            "0x00000000000000000000000000000000000000f1",
+            "0x20c0000000000000000000000000000000000001",
+            {"reason": "simulation"},
+        )

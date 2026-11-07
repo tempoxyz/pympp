@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._typing import is_dict, is_list
-from mpp.errors import BadRequestError, VerificationFailedError
+from mpp.errors import BadRequestError, PaymentSimulationError, VerificationFailedError
 from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
 from mpp.methods.tempo.session._protocol import (
@@ -763,12 +763,44 @@ def validate_top_up_credential_transaction(
 
 
 async def _simulate_call(
-    rpc_url: str, request: dict[str, Any], client: httpx.AsyncClient | None
+    rpc_url: str,
+    request: dict[str, Any],
+    client: httpx.AsyncClient | None,
+    *,
+    phase: Literal["sender", "sponsored"] | None = None,
 ) -> None:
+    """Run ``request`` with ``eth_call``; a node error fails verification.
+
+    With ``phase`` (a sponsorship preflight), an execution failure (a revert or
+    running out of gas) is a :class:`~mpp.errors.PaymentSimulationError` naming
+    it, with the same message. Any other node error stays the untagged
+    verification failure, with the tagged error as its cause, as the charge
+    preflight does. Transport errors propagate unwrapped.
+    """
     try:
         await _rpc(rpc_url, "eth_call", [request, "latest"], client)
     except RuntimeError as error:
-        raise VerificationFailedError(f"{error}") from error
+        if phase is None:
+            raise VerificationFailedError(f"{error}") from error
+        from mpp.methods.tempo import _fee_payer
+        from mpp.methods.tempo._rpc import RpcError
+
+        simulation = PaymentSimulationError(
+            f"Payment verification failed: {error}.",
+            phase=phase,
+            sender=request.get("from"),
+            fee_payer=request.get("feePayer") if phase == "sponsored" else None,
+            payment_token=_fee_payer.simulation_payment_token(request),
+        )
+        node_error = error.response.get("error") if isinstance(error, RpcError) else None
+        code = node_error.get("code") if is_dict(node_error) else None
+        message = node_error.get("message") if is_dict(node_error) else None
+        if not isinstance(message, str):
+            message = str(error)
+        if code == 3 or "revert" in message.lower() or _fee_payer.is_out_of_gas_error(error):
+            raise simulation from error
+        simulation.__cause__ = error
+        raise VerificationFailedError(f"{error}") from simulation
 
 
 def _rpc_calls(calls: Sequence[tuple[str, int, bytes]]) -> list[dict[str, str]]:
@@ -847,6 +879,7 @@ async def send_credential_transaction(
                     transaction.sender,
                 ),
                 http,
+                phase="sender",
             )
             raw, cosigned, sender = _cosign(
                 transaction,
@@ -860,7 +893,7 @@ async def send_credential_transaction(
                 cosigned, sender, fee_payer, get_policy(chain_id, fee_payer_policy)
             )
             try:
-                await _simulate_call(rpc_url, sponsored, http)
+                await _simulate_call(rpc_url, sponsored, http, phase="sponsored")
             except VerificationFailedError as error:
                 # Padding clamped by the sponsor policy may lack the sponsored
                 # eth_call's extra gas; the sender simulation checked the

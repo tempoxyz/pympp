@@ -21,6 +21,7 @@ from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
     PaymentExpiredError,
+    PaymentSimulationError,
     VerificationError,
 )
 from mpp.methods.tempo import (
@@ -39,7 +40,7 @@ from mpp.methods.tempo import (
 from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._attribution import encode as encode_attribution
 from mpp.methods.tempo._defaults import CHAIN_RPC_URLS
-from mpp.methods.tempo._rpc import _tip20_balance
+from mpp.methods.tempo._rpc import RpcError, _tip20_balance
 from mpp.methods.tempo.client import (
     EXPIRING_NONCE_KEY,
     EXPIRING_NONCE_VALID_BEFORE_SECS,
@@ -4981,6 +4982,114 @@ class TestCosignAsFeePayer:
 
         with pytest.raises(VerificationError, match="would revert"):
             await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+
+    # Like mppx's PaymentSimulationError: a failed simulation names its phase, sender,
+    # fee payer (sponsored only) and payment token, with the node's error as its cause.
+    @pytest.mark.asyncio
+    async def test_failed_sender_simulation_is_tagged(self) -> None:
+        from eth_account import Account
+
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        node_error = {"code": 3, "message": "execution reverted"}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            return_value=mock_response(200, {"jsonrpc": "2.0", "error": node_error, "id": 1})
+        )
+
+        with pytest.raises(PaymentSimulationError, match="would revert") as raised:
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        error = raised.value
+        assert isinstance(error, VerificationError)
+        assert error.phase == "sender"
+        assert error.sender == Account.from_key(TEST_PRIVATE_KEY).address
+        assert error.fee_payer is None
+        assert error.payment_token == "0x20c0000000000000000000000000000000000000"
+        assert isinstance(error.__cause__, RpcError)
+        assert error.__cause__.response["error"] == node_error
+        # The problem type and message are unchanged.
+        assert error.to_problem_details()["type"] == VerificationError.type
+        assert str(error) == (
+            "Sponsored transaction would revert in pre-broadcast simulation: execution reverted"
+        )
+
+    @pytest.mark.asyncio
+    async def test_failed_sponsored_simulation_is_tagged(self) -> None:
+        from eth_account import Account
+        from pytempo import Call
+
+        intent = self._make_intent()
+        assert intent.fee_payer is not None
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        transfer = self._encode_transfer_data(recipient, 1)
+        calls = (
+            Call.create(to=currency, value=0, data=transfer),
+            Call.create(to=currency, value=0, data=transfer),
+        )
+        _raw, payload = intent._cosign_as_fee_payer(
+            self._build_client_tx(currency=currency, calls=calls), currency
+        )
+        node_error = {"code": 3, "message": "execution reverted"}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0x", "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "error": node_error, "id": 1}),
+            ]
+        )
+
+        with pytest.raises(PaymentSimulationError, match="would revert") as raised:
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        error = raised.value
+        assert error.phase == "sponsored"
+        assert error.sender == Account.from_key(TEST_PRIVATE_KEY).address
+        assert error.fee_payer == intent.fee_payer.address
+        # Not a single transfer call, so no payment token.
+        assert error.payment_token is None
+        assert isinstance(error.__cause__, RpcError)
+        assert error.__cause__.response["error"] == node_error
+
+    # A node error other than an execution failure, such as the sponsor's
+    # insufficient fee token balance, stays internal but carries the tag as its cause.
+    @pytest.mark.asyncio
+    async def test_failed_sponsored_simulation_non_execution_error_is_tagged_cause(
+        self,
+    ) -> None:
+        intent = self._make_intent()
+        assert intent.fee_payer is not None
+        payload = self._cosign_payload(intent)
+        node_error = {"code": -32003, "message": "insufficient fee token balance"}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0x", "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "error": node_error, "id": 1}),
+            ]
+        )
+
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        assert not isinstance(raised.value, PaymentSimulationError)
+        simulation = raised.value.__cause__
+        assert isinstance(simulation, PaymentSimulationError)
+        assert simulation.phase == "sponsored"
+        assert simulation.fee_payer == intent.fee_payer.address
+        assert isinstance(simulation.__cause__, RpcError)
+        assert simulation.__cause__.response["error"] == node_error
+
+    # A transport failure never reached the node, so it is not a simulation failure.
+    @pytest.mark.asyncio
+    async def test_simulation_transport_error_is_not_tagged(self) -> None:
+        intent = self._make_intent()
+        payload = self._cosign_payload(intent)
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        assert not isinstance(raised.value, PaymentSimulationError)
+        assert isinstance(internal_cause(raised.value), httpx.ConnectError)
 
     # An RPC that refuses the call (not an execution failure) fails closed as internal.
     @pytest.mark.asyncio
