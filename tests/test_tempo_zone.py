@@ -1104,7 +1104,8 @@ class TestWaitForSettlement:
     async def test_bounds_slow_rpc_calls(
         self, slow: str, polls: int, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A stalled first search is bounded by FIRST_SCAN_TIMEOUT, a later one by the timeout.
+        # With no timeout a stalled first search is bounded by FIRST_SCAN_TIMEOUT,
+        # otherwise every search by the timeout.
         monkeypatch.setattr(zone_lib, "FIRST_SCAN_TIMEOUT", 0.1)
         monkeypatch.setattr(zone_lib, "POLLING_INTERVAL", 0.01)
         seen = {"eth_blockNumber": 0, "eth_getLogs": 0}
@@ -1125,6 +1126,27 @@ class TestWaitForSettlement:
                 client=zone_rpc_client(handle),
             )
         assert asyncio.get_running_loop().time() - started < 5
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("slow", ["eth_blockNumber", "eth_getLogs"])
+    async def test_a_slow_first_search_ends_at_the_timeout(self, slow: str) -> None:
+        # A positive timeout bounds the first search too (FIRST_SCAN_TIMEOUT is 10s),
+        # so a slow RPC cannot carry the wait past the Challenge's expiry.
+        async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+            if method == slow:
+                await asyncio.sleep(30)
+            return {"result": "0x20" if method == "eth_blockNumber" else []}
+
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError, match="did not settle"):
+            await zone_lib.wait_for_settlement(
+                "https://tempo.test",
+                portal=PORTAL,
+                sender_tag=TAG_A,
+                timeout=0.2,
+                client=zone_rpc_client(handle),
+            )
+        assert asyncio.get_running_loop().time() - started < 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("settled", [True, False])

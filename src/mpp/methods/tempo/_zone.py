@@ -339,8 +339,9 @@ async def wait_for_settlement(
 
     Searches the last ``LOOKBACK_BLOCKS`` blocks once, then the blocks added
     since every ``POLLING_INTERVAL`` seconds, for up to ``timeout`` seconds.
-    The first search always runs, for up to ``FIRST_SCAN_TIMEOUT`` seconds, so a
-    ``timeout`` of 0 checks once.
+    Every RPC request gets only what is left of ``timeout``, so a slow RPC
+    cannot stretch the wait past it. A ``timeout`` of 0 still checks once, with
+    that search bounded by ``FIRST_SCAN_TIMEOUT`` seconds instead.
 
     Returns:
         The Tempo transaction that processed the withdrawal, with the event's
@@ -363,9 +364,11 @@ async def wait_for_settlement(
 
     started = time.monotonic()
     deadline = started + timeout
-    # The first search may outlast a short timeout, so a withdrawal that already
-    # settled is found even with none; FIRST_SCAN_TIMEOUT still bounds a stalled RPC.
-    first_scan_deadline = max(deadline, started + FIRST_SCAN_TIMEOUT)
+    # A positive timeout bounds every request, the first search included: callers
+    # cap it at the Challenge's expiry, and a settlement found later would only
+    # yield an expired credential. With none, the search still runs once so a
+    # withdrawal that already settled is found; FIRST_SCAN_TIMEOUT bounds a stalled RPC.
+    first_scan_deadline = deadline if timeout > 0 else started + FIRST_SCAN_TIMEOUT
     first_scan = True
 
     def timed_out() -> TimeoutError:
