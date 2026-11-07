@@ -1347,12 +1347,13 @@ class TempoMethod:
         details = challenge.request.get("methodDetails")
         if zone is None or not is_dict(details) or details.get("zones") is None:
             return None
-        # Parsed as servers parse it: a malformed list fails the whole request,
-        # so it is refused here rather than read leniently and withdrawn for.
-        accepted = _zones.parse_accepted(details.get("zones"))
-        modes = details.get("supportedModes")
-        supported = modes if is_list(modes) else ["pull", "push"]
-        if "push" not in supported or self.mode not in (None, "push") or details.get("splits"):
+        # Parsed with the server's schema: a malformed field (such as an unknown
+        # mode) fails the whole request there, so it is refused here rather than
+        # read leniently and withdrawn for.
+        parsed = _zones.parse_request(challenge.request).methodDetails
+        accepted = parsed.zones
+        supported = parsed.supportedModes or ["pull", "push"]
+        if "push" not in supported or self.mode not in (None, "push") or parsed.splits:
             return None
         # Nothing is withdrawn yet, so a Zone that can't be resolved (its RPC is
         # down, or its chain names no Zone) leaves the challenge to Tempo.

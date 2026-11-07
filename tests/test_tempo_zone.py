@@ -529,6 +529,32 @@ class TestClientZoneSelection:
             await method.create_credential(malformed)
         assert calls == []
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("modes", [["push", "bogus"], [], "push", ["push", 1], None], ids=repr)
+    async def test_refuses_malformed_supported_modes_before_withdrawing(self, modes: Any) -> None:
+        # ChargeIntent permits only push and pull, so an unknown mode fails the whole
+        # request there, even beside push: nothing is withdrawn for it.
+        calls: list[str] = []
+        method = payer_method(used_zone(calls=calls))
+        issued = await zone_challenge([3])
+        details = {**issued.request["methodDetails"], "supportedModes": modes}
+        if modes is None:
+            details["supportedModes"] = {"push": True}
+        malformed = replace(issued, request={**issued.request, "methodDetails": details})
+        with pytest.raises(ValueError, match="methodDetails.supportedModes is malformed"):
+            await method.create_credential(malformed)
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_refuses_a_malformed_charge_request_before_withdrawing(self) -> None:
+        calls: list[str] = []
+        method = payer_method(used_zone(calls=calls))
+        issued = await zone_challenge([3])
+        malformed = replace(issued, request={**issued.request, "externalId": 5})
+        with pytest.raises(ValueError, match="externalId is malformed"):
+            await method.create_credential(malformed)
+        assert calls == []
+
     def test_parses_zones_as_servers_do(self) -> None:
         assert zone_lib.parse_accepted(True) is True
         assert zone_lib.parse_accepted([3, 7]) == [3, 7]

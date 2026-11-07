@@ -13,9 +13,12 @@ import math
 import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from mpp._typing import is_dict, is_list
+
+if TYPE_CHECKING:
+    from mpp.methods.tempo.schemas import ChargeRequest
 
 DEFAULT_SETTLEMENT_TIMEOUT = 60.0
 """Default seconds a payer waits for a Zone withdrawal to settle on Tempo."""
@@ -135,6 +138,33 @@ def parse_accepted(zones: object) -> Accepted:
         raise ValueError(
             "Invalid methodDetails.zones: expected true or a non-empty list of Zone IDs."
         ) from None
+
+
+def parse_request(request: object) -> ChargeRequest:
+    """Parse a Zone-payable challenge's charge request as servers do.
+
+    Uses the server's own ``ChargeRequest`` schema, so a client withdraws only
+    for a request a server's ``ChargeIntent`` would accept: a malformed field,
+    such as an unknown mode in ``methodDetails.supportedModes``, fails the
+    whole request there.
+
+    Raises:
+        ValueError: If the request is malformed, as a server would reject it.
+    """
+    from pydantic import ValidationError
+
+    from mpp.methods.tempo.schemas import ChargeRequest as Schema
+
+    try:
+        return Schema.model_validate(request)
+    except ValidationError as error:
+        location = error.errors()[0]["loc"]
+        if location[:2] == ("methodDetails", "zones"):
+            raise ValueError(
+                "Invalid methodDetails.zones: expected true or a non-empty list of Zone IDs."
+            ) from None
+        field = ".".join(str(part) for part in location if not isinstance(part, int))
+        raise ValueError(f"Invalid charge request: {field} is malformed.") from None
 
 
 def portal_address(zone_id: int) -> str:
