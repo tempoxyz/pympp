@@ -3010,20 +3010,25 @@ class ChargeIntent:
             out_of_gas = _fee_payer.is_out_of_gas_error(error)
             if unpadded and out_of_gas:
                 continue
-            if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:
-                # Tag the failing phase like mppx, so callers can tell a payer's
-                # failure from a sponsor's without matching node messages.
-                sponsored = "feePayerSignature" in request
-                raise PaymentSimulationError(
-                    f"Sponsored transaction would revert in pre-broadcast simulation: {message}",
-                    phase="sponsored" if sponsored else "sender",
-                    sender=request.get("from"),
-                    fee_payer=request.get("feePayer") if sponsored else None,
-                    payment_token=_fee_payer.simulation_payment_token(request),
-                ) from RpcError(result)
-            raise InternalPaymentError() from RuntimeError(
-                f"Pre-broadcast simulation failed: {message}"
+            # Tag every node rejection with its phase like mppx, so callers can tell a
+            # payer's failure from a sponsor's without matching node messages.
+            sponsored = "feePayerSignature" in request
+            execution = code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas
+            simulation = PaymentSimulationError(
+                f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
+                if execution
+                else f"Pre-broadcast simulation failed: {message}",
+                phase="sponsored" if sponsored else "sender",
+                sender=request.get("from"),
+                fee_payer=request.get("feePayer") if sponsored else None,
+                payment_token=_fee_payer.simulation_payment_token(request),
             )
+            if execution:
+                raise simulation from RpcError(result)
+            # Other node errors (such as an insufficient fee token balance) stay an
+            # internal error, as in mppx, with the tagged simulation as its cause.
+            simulation.__cause__ = RpcError(result)
+            raise InternalPaymentError() from simulation
 
     def _validate_calls(self, calls: tuple[Any, ...], request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""

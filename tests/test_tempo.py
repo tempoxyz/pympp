@@ -5050,6 +5050,34 @@ class TestCosignAsFeePayer:
         assert isinstance(error.__cause__, RpcError)
         assert error.__cause__.response["error"] == node_error
 
+    # A node error other than an execution failure, such as the sponsor's
+    # insufficient fee token balance, stays internal but carries the tag as its cause.
+    @pytest.mark.asyncio
+    async def test_failed_sponsored_simulation_non_execution_error_is_tagged_cause(
+        self,
+    ) -> None:
+        intent = self._make_intent()
+        assert intent.fee_payer is not None
+        payload = self._cosign_payload(intent)
+        node_error = {"code": -32003, "message": "insufficient fee token balance"}
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=[
+                mock_response(200, {"jsonrpc": "2.0", "result": "0x", "id": 1}),
+                mock_response(200, {"jsonrpc": "2.0", "error": node_error, "id": 1}),
+            ]
+        )
+
+        with pytest.raises(InternalPaymentError) as raised:
+            await intent._simulate_before_broadcast(mock_client, payload, "https://rpc.test")
+        assert not isinstance(raised.value, PaymentSimulationError)
+        simulation = raised.value.__cause__
+        assert isinstance(simulation, PaymentSimulationError)
+        assert simulation.phase == "sponsored"
+        assert simulation.fee_payer == intent.fee_payer.address
+        assert isinstance(simulation.__cause__, RpcError)
+        assert simulation.__cause__.response["error"] == node_error
+
     # A transport failure never reached the node, so it is not a simulation failure.
     @pytest.mark.asyncio
     async def test_simulation_transport_error_is_not_tagged(self) -> None:
