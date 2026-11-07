@@ -657,6 +657,22 @@ class TestClientZoneSelection:
         assert calls == ["eth_chainId"]
         assert "l1:" in str(error)
 
+    @pytest.mark.asyncio
+    async def test_refuses_a_tempo_rpc_on_another_chain_before_withdrawing(self) -> None:
+        zone_calls: list[str] = []
+        l1_calls: list[str] = []
+        l1 = rpc_client(
+            lambda method, params: hex(4_217) if method == "eth_chainId" else None, l1_calls
+        )
+        method = payer_method(scripted_zone(zone_calls), l1, rpc_url="https://tempo.test")
+        # chain_id pins Moderato, but the rpc_url serves mainnet: the Zone path
+        # rejects the mismatch as the Tempo path does, before any withdrawal.
+        with pytest.raises(tempo_client.TransactionError, match="Chain ID mismatch"):
+            await method.create_credential(await zone_challenge([3]))
+        assert l1_calls == ["eth_chainId"]
+        assert "eth_sendRawTransactionSync" not in zone_calls
+        assert "eth_sendRawTransaction" not in zone_calls
+
 
 REVERTED_RECEIPT = {"status": "0x0", "transactionHash": "0x" + "22" * 32, "logs": []}
 

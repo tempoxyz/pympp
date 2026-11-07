@@ -285,6 +285,15 @@ class Zone:
             _assert_zone_parent_chain(self.parent_chain_id, self.chain_id)
 
 
+def _assert_rpc_chain_id(chain_id: int, expected_chain_id: int | None) -> None:
+    """Reject a Tempo RPC that serves another chain than the client's policy pins."""
+    if expected_chain_id is not None and chain_id != expected_chain_id:
+        raise TransactionError(
+            f"Chain ID mismatch: RPC returned {chain_id}, "
+            f"expected {expected_chain_id} from client policy"
+        )
+
+
 def _assert_zone_chain(zone_id: int | None, chain_id: int) -> None:
     """Reject a ``zone_id`` that names another Zone than the one its chain ID derives."""
     # Only chain IDs that follow a known Zone scheme name their Zone.
@@ -853,6 +862,11 @@ class TempoMethod:
         if self.zone is not None:
             zone_id = await self._zone_payment(challenge, expected_chain_id)
             if zone_id is not None:
+                # The settlement is read from this Tempo RPC, so confirm it serves the
+                # pinned chain before withdrawing, as the Tempo path does before signing.
+                _assert_rpc_chain_id(
+                    await self._get_chain_id(self._rpc_url_for(request)), expected_chain_id
+                )
                 return await self._create_zone_credential(
                     challenge, zone_id, wanted=wanted, on_submission=on_submission
                 )
@@ -1088,11 +1102,7 @@ class TempoMethod:
                 raise TransactionError("RPC gas-price quote exceeds payer fee policy")
             max_priority_fee_per_gas = min(gas_price, payer_policy.max_priority_fee_per_gas)
 
-        if expected_chain_id is not None and chain_id != expected_chain_id:
-            raise TransactionError(
-                f"Chain ID mismatch: RPC returned {chain_id}, "
-                f"expected {expected_chain_id} from client policy"
-            )
+        _assert_rpc_chain_id(chain_id, expected_chain_id)
 
         if awaiting_fee_payer:
             # Keep sponsored envelopes inside the server's default policy.
