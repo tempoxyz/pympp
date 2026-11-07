@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 _BASE_URI = "https://paymentauth.org/problems"
 
@@ -283,6 +283,51 @@ class VerificationError(VerificationFailedError):
     ) -> None:
         PaymentError.__init__(self, message)
         self.details = details
+
+
+class PaymentSimulationError(VerificationError):
+    """A sponsored transaction failed its pre-broadcast ``eth_call`` simulation.
+
+    Raised by the Tempo fee payer preflight (mppx's ``preflightSponsorship``)
+    when the node rejects a simulation, with the node's error as
+    ``__cause__``. ``phase`` names the simulation that failed: ``"sender"``
+    runs the sender's calls before sponsorship, ``"sponsored"`` the final
+    envelope billed to ``fee_payer``. Callers can use these fields to tell a
+    payer's insufficient balance from a sponsor's without matching node
+    messages. Transport failures are not wrapped.
+
+    It is a :class:`VerificationError` with the same message and problem type,
+    so HTTP responses are unchanged.
+    """
+
+    type = VerificationFailedError.type
+    title = VerificationFailedError.title
+
+    phase: Literal["sender", "sponsored"]
+    """The simulation that failed."""
+    sender: str | None
+    """Sender of the simulated transaction."""
+    fee_payer: str | None
+    """Fee payer the sponsored simulation billed; set only in the ``sponsored`` phase."""
+    payment_token: str | None
+    """TIP-20 token of a single ``transfer`` or ``transferWithMemo`` call, when the
+    transaction is one."""
+
+    def __init__(
+        self,
+        message: str = "Payment verification failed.",
+        *,
+        phase: Literal["sender", "sponsored"],
+        sender: str | None = None,
+        fee_payer: str | None = None,
+        payment_token: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, details=details)
+        self.phase = phase
+        self.sender = sender
+        self.fee_payer = fee_payer
+        self.payment_token = payment_token
 
 
 class CredentialReplayedError(VerificationError):

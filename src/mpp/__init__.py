@@ -41,6 +41,7 @@ from mpp.errors import (
     PaymentMethodUnsupportedError,
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
+    PaymentSimulationError,
     VerificationFailedError,
 )
 from mpp.events import (
@@ -599,6 +600,7 @@ __all__ = [
     "PaymentMethodUnsupportedError",
     "PaymentOutcomeUnknownError",
     "PaymentRequiredError",
+    "PaymentSimulationError",
     "Receipt",
     "Store",
     "VerificationFailedError",

@@ -28,12 +28,13 @@ from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
     PaymentExpiredError,
+    PaymentSimulationError,
     VerificationError,
 )
 from mpp.methods.tempo import _fee_payer, _machine_token, _sponsored_admission
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
-from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
+from mpp.methods.tempo._rpc import RpcError, _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.remote_fee_payer import RemoteFeePayer
 from mpp.methods.tempo.schemas import (
@@ -2967,7 +2968,8 @@ class ChargeIntent:
         earlier one passed, so a local fee payer signs nothing for a
         transaction whose sender simulation fails. Fails closed: a transport
         error or an unreadable reply is an internal error; an execution error
-        (a revert or running out of gas) is a verification failure. Only a
+        (a revert or running out of gas) is a :class:`~mpp.errors.PaymentSimulationError`
+        naming the failing phase, with the node's error as its cause. Only a
         sponsored request without the full gas buffer
         (``_UnpaddedSponsoredSimulation``: hosted, or local clamped by the
         sponsor policy) that fails solely by running out of gas passes, matched by the node's
@@ -3009,9 +3011,16 @@ class ChargeIntent:
             if unpadded and out_of_gas:
                 continue
             if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:
-                raise VerificationError(
-                    f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
-                )
+                # Tag the failing phase like mppx, so callers can tell a payer's
+                # failure from a sponsor's without matching node messages.
+                sponsored = "feePayerSignature" in request
+                raise PaymentSimulationError(
+                    f"Sponsored transaction would revert in pre-broadcast simulation: {message}",
+                    phase="sponsored" if sponsored else "sender",
+                    sender=request.get("from"),
+                    fee_payer=request.get("feePayer") if sponsored else None,
+                    payment_token=_fee_payer.simulation_payment_token(request),
+                ) from RpcError(result)
             raise InternalPaymentError() from RuntimeError(
                 f"Pre-broadcast simulation failed: {message}"
             )
