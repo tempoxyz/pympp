@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Literal
 
@@ -513,6 +513,37 @@ class TestClientZoneSelection:
         method = payer_method(used_zone(1_424_310_004))
         error = await error_of(method.create_credential(await zone_challenge([3])))
         assert "zone used" not in str(error)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "zones", [[3, "x"], [3, 0], [3, True], [3, 3.0], [], False, "3"], ids=repr
+    )
+    async def test_refuses_malformed_zones_before_withdrawing(self, zones: Any) -> None:
+        # Servers reject the whole request, so a valid member doesn't make it payable.
+        calls: list[str] = []
+        method = payer_method(used_zone(calls=calls))
+        issued = await zone_challenge([3])
+        details = {**issued.request["methodDetails"], "zones": zones}
+        malformed = replace(issued, request={**issued.request, "methodDetails": details})
+        with pytest.raises(ValueError, match="Invalid methodDetails.zones"):
+            await method.create_credential(malformed)
+        assert calls == []
+
+    def test_parses_zones_as_servers_do(self) -> None:
+        assert zone_lib.parse_accepted(True) is True
+        assert zone_lib.parse_accepted([3, 7]) == [3, 7]
+        with pytest.raises(ValueError, match="Invalid methodDetails.zones"):
+            zone_lib.parse_accepted([3, -1])
+
+    @pytest.mark.asyncio
+    async def test_refuses_a_challenge_without_an_expiry_before_withdrawing(self) -> None:
+        # Servers reject charge credentials without an expiry, so nothing is withdrawn.
+        calls: list[str] = []
+        method = payer_method(used_zone(calls=calls))
+        issued = replace(await zone_challenge([3]), expires=None)
+        with pytest.raises(ValueError, match="no expiry"):
+            await method.create_credential(issued)
+        assert calls == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("expires_in", [30, 65])
@@ -1261,7 +1292,7 @@ class TestClientZoneCoverage:
         assert zone.zone_id == 3
 
     def test_settlement_timing_without_an_expiry(self) -> None:
-        assert tempo_client._zone_settles_before_expiry(None, 60)  # pyright: ignore[reportPrivateUsage]
+        assert not tempo_client._zone_settles_before_expiry(None, 60)  # pyright: ignore[reportPrivateUsage]
         timeout = tempo_client._zone_settlement_timeout  # pyright: ignore[reportPrivateUsage]
         assert timeout(None, None) == zone_lib.DEFAULT_SETTLEMENT_TIMEOUT
         assert timeout(None, 5) == 5
@@ -1269,7 +1300,6 @@ class TestClientZoneCoverage:
     @pytest.mark.asyncio
     async def test_reads_the_zone_chain_id_once(self) -> None:
         calls: list[str] = []
-        from dataclasses import replace
 
         zone = replace(scripted_zone(calls), chain_id=None)
         method = payer_method(zone)
@@ -1279,7 +1309,6 @@ class TestClientZoneCoverage:
 
     @pytest.mark.asyncio
     async def test_pays_on_tempo_when_the_challenge_names_no_zones(self) -> None:
-        from dataclasses import replace
 
         method = payer_method(used_zone())
         issued = await zone_challenge([3])

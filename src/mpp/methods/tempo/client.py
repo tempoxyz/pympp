@@ -1347,6 +1347,9 @@ class TempoMethod:
         details = challenge.request.get("methodDetails")
         if zone is None or not is_dict(details) or details.get("zones") is None:
             return None
+        # Parsed as servers parse it: a malformed list fails the whole request,
+        # so it is refused here rather than read leniently and withdrawn for.
+        accepted = _zones.parse_accepted(details.get("zones"))
         modes = details.get("supportedModes")
         supported = modes if is_list(modes) else ["pull", "push"]
         if "push" not in supported or self.mode not in (None, "push") or details.get("splits"):
@@ -1370,8 +1373,12 @@ class TempoMethod:
         )
         if chain_id is None or parent_chain_id != chain_id:
             return None
-        if not _zones.is_accepted(details.get("zones"), zone_id):
+        if not _zones.is_accepted(accepted, zone_id):
             return None
+        # Servers reject charge credentials for a challenge without an expiry, and a
+        # withdrawal can't be undone, so refuse one before anything is withdrawn.
+        if not challenge.expires:
+            raise ValueError("Challenge has no expiry, so it can't be paid from a Zone.")
         # A withdrawal can't be undone, so start one only when it can settle before
         # the challenge expires; an expired challenge would invite another payment.
         if _zone_withdrawal_key(challenge) not in self._zone_withdrawals and not (
@@ -1665,9 +1672,12 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
 
 
 def _zone_settles_before_expiry(expires: str | None, settlement_timeout: float | None) -> bool:
-    """Whether a Zone withdrawal can be sent and waited on before ``expires``."""
+    """Whether a Zone withdrawal can be sent and waited on before ``expires``.
+
+    A challenge without an expiry never qualifies: servers reject its credentials.
+    """
     if not expires:
-        return True
+        return False
     timeout = (
         _zones.DEFAULT_SETTLEMENT_TIMEOUT if settlement_timeout is None else settlement_timeout
     )

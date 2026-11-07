@@ -116,6 +116,27 @@ def is_accepted(zones: object, zone_id: object) -> bool:
     return is_list(zones) and any(is_id(accepted) and accepted == zone_id for accepted in zones)
 
 
+def parse_accepted(zones: object) -> Accepted:
+    """Parse a challenge's ``methodDetails.zones`` as servers do.
+
+    Uses the charge request schema, so a client accepts exactly the ``zones``
+    a server's ``ChargeIntent`` would: ``True``, or a non-empty list of Zone IDs.
+
+    Raises:
+        ValueError: If ``zones`` is malformed, as a server would reject the request.
+    """
+    from pydantic import TypeAdapter, ValidationError
+
+    from mpp.methods.tempo.schemas import Zones
+
+    try:
+        return TypeAdapter(Zones).validate_python(zones)
+    except ValidationError:
+        raise ValueError(
+            "Invalid methodDetails.zones: expected true or a non-empty list of Zone IDs."
+        ) from None
+
+
 def portal_address(zone_id: int) -> str:
     """Return the Tempo portal address of a Zone, as viem/tempo's ``Addresses.zonePortal``."""
     if _LEGACY_ZONE_CHAIN_ID_BASE <= zone_id < _LEGACY_ZONE_CHAIN_ID_LIMIT:
