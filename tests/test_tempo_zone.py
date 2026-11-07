@@ -17,6 +17,7 @@ from mpp import Challenge, Credential
 from mpp.errors import (
     CredentialReplayedError,
     PaymentError,
+    PaymentOutcomeUnknownError,
     VerificationError,
     ZoneSettlementPendingError,
 )
@@ -726,7 +727,7 @@ class TestClientZonePayment:
         zone = Zone(
             rpc_url="https://zone.test",
             chain_id=1_424_310_003,
-            settlement_timeout=0,
+            settlement_timeout=0.2,
             http_client=rpc_client(zone_rpc),
         )
         method = payer_method(zone, rpc_client(tempo_l1))
@@ -762,3 +763,240 @@ class TestClientZonePayment:
     def test_charge_accepts_a_zone(self) -> None:
         method = tempo_client.charge(account=PAYER, zone=used_zone())
         assert method is not None
+
+
+def zone_rpc_client(handle: Callable[[str, list[Any]], Any]) -> httpx.AsyncClient:
+    """An httpx client whose async `handle` returns a JSON-RPC response body or raises."""
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        reply = await handle(body["method"], body["params"])
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], **reply})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+
+def preparing_zone(calls: list[str], send: Callable[[], Any]) -> Zone:
+    """A Zone that prepares a withdrawal, then answers its send with `send()`."""
+
+    async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+        calls.append(method)
+        if method == "eth_call":
+            return {"result": "0x" + "00" * 32}
+        if method == "eth_sendRawTransactionSync":
+            return await send()
+        return {"result": "0x1"}
+
+    return Zone(
+        rpc_url="https://zone.test", chain_id=1_424_310_003, http_client=zone_rpc_client(handle)
+    )
+
+
+class TestClientZoneCancellation:
+    @pytest.mark.asyncio
+    async def test_does_not_withdraw_when_every_caller_cancelled_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        preparing = asyncio.Event()
+        release = asyncio.Event()
+        get_zone_chain_id = tempo_client.TempoMethod._get_zone_chain_id
+
+        async def slow_chain_id(self: Any, zone: Zone) -> int:
+            if not release.is_set():
+                preparing.set()
+                await release.wait()
+            return await get_zone_chain_id(self, zone)
+
+        monkeypatch.setattr(tempo_client.TempoMethod, "_get_zone_chain_id", slow_chain_id)
+
+        async def send() -> dict[str, Any]:
+            return {"error": {"code": -32000, "message": "insufficient funds"}}
+
+        method = payer_method(preparing_zone(calls, send))
+        issued = await zone_challenge([3])
+        caller = asyncio.ensure_future(method.create_credential(issued))
+        await preparing.wait()
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        release.set()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert "eth_sendRawTransactionSync" not in calls
+        # The cancelled withdrawal sent nothing, so a later call may pay.
+        with pytest.raises(tempo_client.TransactionError, match="submission failed"):
+            await method.create_credential(issued)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_reports_an_unknown_outcome_when_cancelled_after_submission(self) -> None:
+        from eth_hash.auto import keccak
+
+        calls: list[str] = []
+        sending = asyncio.Event()
+        sent: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            sending.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        zone = preparing_zone(calls, send)
+        method = payer_method(zone)
+        original = method._request_zone_withdrawal  # pyright: ignore[reportPrivateUsage]
+
+        async def recording(challenge: Challenge, state: Any) -> str:
+            report = state.on_submission
+            state.on_submission = lambda raw: (sent.append(raw), report(raw))
+            return await original(challenge, state)
+
+        method._request_zone_withdrawal = recording  # pyright: ignore[reportPrivateUsage]
+        issued = await zone_challenge([3])
+        caller = asyncio.ensure_future(method.create_credential(issued))
+        await sending.wait()
+        caller.cancel()
+        error = await error_of(caller)
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert error.transaction_hash == "0x" + keccak(bytes.fromhex(sent[0][2:])).hex()
+
+
+class TestClientZoneSubmissionFailures:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx.ConnectError("refused"),
+            httpx.PoolTimeout("pool"),
+            {"error": {"code": -32000, "message": "insufficient funds for gas"}},
+        ],
+        ids=["connect", "pool", "rpc-insufficient-funds"],
+    )
+    async def test_retries_a_withdrawal_the_zone_never_took(self, failure: Any) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+
+        method = payer_method(preparing_zone(calls, send))
+        issued = await zone_challenge([3])
+        for _ in range(2):
+            with pytest.raises(tempo_client.TransactionError, match="submission failed"):
+                await method.create_credential(issued)
+        assert calls.count("eth_sendRawTransactionSync") == 2
+        assert "eth_getTransactionReceipt" not in calls
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            httpx.ReadTimeout("slow"),
+            {"error": {"code": 4, "message": "transaction pooled, not confirmed"}},
+        ],
+        ids=["read-timeout", "rpc-sync-timeout"],
+    )
+    async def test_does_not_withdraw_again_after_an_ambiguous_failure(
+        self, failure: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(tempo_client, "_ZONE_RECEIPT_RECOVERY_TIMEOUT", 0.0)
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            if isinstance(failure, Exception):
+                raise failure
+            return failure
+
+        method = payer_method(preparing_zone(calls, send))
+        issued = await zone_challenge([3])
+        for _ in range(2):
+            with pytest.raises(tempo_client.TransactionError, match="outcome is unknown"):
+                await method.create_credential(issued)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+
+class TestWaitForSettlement:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("slow", ["eth_blockNumber", "eth_getLogs"])
+    async def test_bounds_slow_rpc_calls_by_the_timeout(self, slow: str) -> None:
+        async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+            if method == slow:
+                await asyncio.sleep(30)
+            return {"result": "0x20" if method == "eth_blockNumber" else []}
+
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError, match="did not settle"):
+            await zone_lib.wait_for_settlement(
+                "https://tempo.test",
+                portal=PORTAL,
+                sender_tag=TAG_A,
+                timeout=0.1,
+                client=zone_rpc_client(handle),
+            )
+        assert asyncio.get_running_loop().time() - started < 5
+
+
+class TestClientZoneResolution:
+    @pytest.mark.asyncio
+    async def test_pays_on_tempo_when_the_zone_rpc_is_unreachable(self) -> None:
+        def unreachable(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("zone down")
+
+        zone = Zone(
+            rpc_url="https://zone.test",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(unreachable)),
+        )
+        method = payer_method(zone)
+        error = await error_of(method.create_credential(await zone_challenge([3])))
+        assert "l1:" in str(error)
+
+
+class TestClientZoneCancelledAfterSettlement:
+    @pytest.mark.asyncio
+    async def test_a_retry_resumes_a_settled_withdrawal_no_caller_received(self) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settling = asyncio.Event()
+        release = asyncio.Event()
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])]
+            raise AssertionError(method)
+
+        l1 = rpc_client(tempo_l1)
+        original_post = l1.post
+
+        async def slow_post(*args: Any, **kwargs: Any) -> httpx.Response:
+            if kwargs["json"]["method"] == "eth_getLogs":
+                settling.set()
+                await release.wait()
+            return await original_post(*args, **kwargs)
+
+        l1.post = slow_post  # type: ignore[method-assign]
+        method = payer_method(preparing_zone(calls, send), l1)
+        issued = await zone_challenge([3])
+        caller = asyncio.ensure_future(method.create_credential(issued))
+        await settling.wait()
+        caller.cancel()
+        assert isinstance(await error_of(caller), PaymentOutcomeUnknownError)
+        release.set()
+        for _ in range(50):
+            await asyncio.sleep(0)
+        credential = await method.create_credential(issued)
+        assert credential.payload["type"] == "zone"
+        assert calls.count("eth_sendRawTransactionSync") == 1

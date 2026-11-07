@@ -304,9 +304,17 @@ _ZONE_GAS_MARGIN = 5_000
 
 @dataclass
 class _ZoneSend:
-    """Whether a Zone withdrawal may have reached the Zone, so retrying could pay twice."""
+    """Whether a Zone withdrawal may have reached the Zone, so retrying could pay twice.
+
+    ``wanted`` and ``on_submission`` are the push path's cancellation tracking:
+    the withdrawal is not sent once every caller is gone, and its signed
+    transaction is reported before it is sent.
+    """
 
     sent: bool = False
+    raw_tx: str | None = None
+    wanted: Callable[[], bool] = lambda: True
+    on_submission: Callable[[str], None] | None = None
 
 
 @dataclass
@@ -363,8 +371,8 @@ class TempoMethod:
     zone: Zone | None = field(default=None, kw_only=True)
     # Zone withdrawals by challenge, kept after a failed wait so a retry resumes
     # waiting instead of withdrawing again.
-    _zone_withdrawals: dict[str, asyncio.Task[str]] = field(
-        default_factory=dict[str, asyncio.Task[str]], init=False, repr=False
+    _zone_withdrawals: dict[str, tuple[asyncio.Task[str], _ZoneSend]] = field(
+        default_factory=dict[str, tuple[asyncio.Task[str], _ZoneSend]], init=False, repr=False
     )
     _zone_chain_id: int | None = field(default=None, init=False, repr=False)
     _cached_chain_ids: dict[str, int] = field(
@@ -828,7 +836,9 @@ class TempoMethod:
         if self.zone is not None:
             zone_id = await self._zone_payment(challenge, expected_chain_id)
             if zone_id is not None:
-                return await self._create_zone_credential(challenge, zone_id)
+                return await self._create_zone_credential(
+                    challenge, zone_id, wanted=wanted, on_submission=on_submission
+                )
 
         mode = self._resolve_mode(method_details)
         use_fee_payer = (
@@ -1325,15 +1335,20 @@ class TempoMethod:
         supported = modes if is_list(modes) else ["pull", "push"]
         if "push" not in supported or self.mode not in (None, "push") or details.get("splits"):
             return None
-        zone_chain_id = await self._get_zone_chain_id(zone)
-        zone_id = (
-            zone.zone_id if zone.zone_id is not None else _zones.id_from_chain_id(zone_chain_id)
-        )
-        parent_chain_id = (
-            zone.parent_chain_id
-            if zone.parent_chain_id is not None
-            else _zones.parent_chain_id_from_chain_id(zone_chain_id)
-        )
+        # Nothing is withdrawn yet, so a Zone that can't be resolved (its RPC is
+        # down, or its chain names no Zone) leaves the challenge to Tempo.
+        try:
+            zone_chain_id = await self._get_zone_chain_id(zone)
+            zone_id = (
+                zone.zone_id if zone.zone_id is not None else _zones.id_from_chain_id(zone_chain_id)
+            )
+            parent_chain_id = (
+                zone.parent_chain_id
+                if zone.parent_chain_id is not None
+                else _zones.parent_chain_id_from_chain_id(zone_chain_id)
+            )
+        except Exception:
+            return None
         if chain_id is None or parent_chain_id != chain_id:
             return None
         if not _zones.is_accepted(details.get("zones"), zone_id):
@@ -1346,7 +1361,14 @@ class TempoMethod:
             return None
         return zone_id
 
-    async def _create_zone_credential(self, challenge: Challenge, zone_id: int) -> Credential:
+    async def _create_zone_credential(
+        self,
+        challenge: Challenge,
+        zone_id: int,
+        *,
+        wanted: Callable[[], bool] = lambda: True,
+        on_submission: Callable[[str], None] | None = None,
+    ) -> Credential:
         """Pay a challenge from the Zone and return a ``zone`` credential.
 
         Requests a withdrawal to the recipient with the challenge-bound memo,
@@ -1361,22 +1383,29 @@ class TempoMethod:
         zone = self.zone
         request = challenge.request
         key = _zone_withdrawal_key(challenge)
-        task = self._zone_withdrawals.get(key)
-        if task is None:
-            state = _ZoneSend()
+        existing = self._zone_withdrawals.get(key)
+        if existing is None:
+            state = _ZoneSend(wanted=wanted, on_submission=on_submission)
             new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
-            self._zone_withdrawals[key] = new_task
+            self._zone_withdrawals[key] = (new_task, state)
 
             def finished(done: asyncio.Task[str]) -> None:
                 # Only a failure before the transaction was sent is safe to retry.
                 # After that, the withdrawal may have gone through, so retries of
                 # this challenge keep failing.
                 if done.cancelled() or (done.exception() is not None and not state.sent):
-                    if self._zone_withdrawals.get(key) is done:
+                    entry = self._zone_withdrawals.get(key)
+                    if entry is not None and entry[0] is done:
                         del self._zone_withdrawals[key]
 
             new_task.add_done_callback(finished)
             task = new_task
+        else:
+            task, state = existing
+            # A retry resuming a sent withdrawal reports it, so cancelling the
+            # retry's wait still names the transaction that paid.
+            if state.raw_tx is not None and on_submission is not None:
+                on_submission(state.raw_tx)
         sender_tag = await asyncio.shield(task)
 
         try:
@@ -1392,7 +1421,10 @@ class TempoMethod:
             raise ZoneSettlementPendingError(
                 challenge_id=challenge.id, sender_tag=sender_tag, zone_id=zone_id
             ) from cause
-        if self._zone_withdrawals.get(key) is task:
+        # Forget the withdrawal only when a caller takes the credential: with every
+        # caller gone, a retry must find it settled rather than withdraw again.
+        entry = self._zone_withdrawals.get(key)
+        if entry is not None and entry[0] is task and wanted():
             del self._zone_withdrawals[key]
         return Credential(
             challenge=challenge.to_echo(),
@@ -1495,10 +1527,23 @@ class TempoMethod:
         # The signed transaction fixes its hash, so a lost send response can still be
         # recovered from the Zone.
         tx_hash = "0x" + keccak(bytes.fromhex(raw_tx[2:])).hex()
+        # Every caller was cancelled while the withdrawal was prepared: sending
+        # it now would pay with no one left to receive the credential.
+        if not state.wanted():
+            raise asyncio.CancelledError("Zone withdrawal cancelled before submission")
         state.sent = True
+        state.raw_tx = raw_tx
+        if state.on_submission is not None:
+            state.on_submission(raw_tx)
         try:
             receipt = await _rpc_call(rpc_url, "eth_sendRawTransactionSync", [raw_tx], **rpc)
         except Exception as cause:
+            # A failure that cannot have reached the Zone moved nothing, so the
+            # challenge may be retried.
+            if _zone_submission_failed(cause):
+                state.sent = False
+                state.raw_tx = None
+                raise TransactionError(f"Zone withdrawal submission failed: {cause}") from cause
             receipt = await _recover_zone_receipt(rpc_url, tx_hash, rpc)
             if receipt is None:
                 raise TransactionError(
@@ -1609,6 +1654,25 @@ def _zone_settlement_timeout(expires: str | None, settlement_timeout: float | No
 def _parse_expires(expires: str) -> datetime:
     parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _zone_submission_failed(error: Exception) -> bool:
+    """Whether a Zone withdrawal's send failed definitively, before it could pay.
+
+    Classified as the push broadcast does: a definitive JSON-RPC error, or a
+    transport failure before the request was sent (connect, pool). Anything
+    else may have reached the Zone.
+    """
+    import httpx
+
+    from mpp.methods.tempo._rpc import RpcError
+    from mpp.methods.tempo.intents import _is_ambiguous_broadcast_error
+
+    if isinstance(error, RpcError):
+        return not _is_ambiguous_broadcast_error(error.response, resubmitted=True)
+    if isinstance(error, httpx.HTTPError):
+        return not _is_ambiguous_broadcast_error(error)
+    return False
 
 
 async def _recover_zone_receipt(

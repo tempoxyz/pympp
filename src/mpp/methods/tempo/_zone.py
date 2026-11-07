@@ -286,17 +286,35 @@ async def wait_for_settlement(
         sender_tag.lower(),
     ]
 
+    deadline = time.monotonic() + timeout
+
+    def timed_out() -> TimeoutError:
+        return TimeoutError(
+            f"Zone withdrawal {sender_tag} did not settle on Tempo within {timeout}s."
+        )
+
+    async def call(method: str, params: list[Any]) -> Any:
+        # Each request gets only what is left of the budget, so a slow RPC
+        # cannot stretch the wait past ``timeout``.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise timed_out()
+        try:
+            return await asyncio.wait_for(
+                _rpc_call(rpc_url, method, params, client=client), remaining
+            )
+        except TimeoutError as error:
+            raise timed_out() from error
+
     async def block_number() -> int:
-        return int(await _rpc_call(rpc_url, "eth_blockNumber", [], client=client), 16)
+        return int(await call("eth_blockNumber", []), 16)
 
     latest = await block_number()
     # Scan the lookback window once, then only blocks added since the previous poll.
     from_block = max(latest - LOOKBACK_BLOCKS, 0)
-    deadline = time.monotonic() + timeout
     while True:
         if from_block <= latest:
-            logs = await _rpc_call(
-                rpc_url,
+            logs = await call(
                 "eth_getLogs",
                 [
                     {
@@ -306,7 +324,6 @@ async def wait_for_settlement(
                         "toBlock": hex(latest),
                     }
                 ],
-                client=client,
             )
             for log in logs if is_list(logs) else []:
                 tx_hash = log.get("transactionHash") if is_dict(log) else None
@@ -314,8 +331,6 @@ async def wait_for_settlement(
                     return tx_hash
             from_block = latest + 1
         if time.monotonic() + POLLING_INTERVAL > deadline:
-            raise TimeoutError(
-                f"Zone withdrawal {sender_tag} did not settle on Tempo within {timeout}s."
-            )
+            raise timed_out()
         await asyncio.sleep(POLLING_INTERVAL)
         latest = await block_number()
