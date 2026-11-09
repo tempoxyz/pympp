@@ -709,6 +709,7 @@ module mpp.methods.tempo
     def escrow_contract_for_chain(chain_id: int) -> str
     def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]
     def parse_pkh_source(source: str) -> PkhSource | None
+    def rpc_url_for_chain(chain_id: int) -> str
 
 module mpp.methods.tempo.account
     class TempoAccount
@@ -1437,13 +1438,13 @@ module mpp.server.mpp
         def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None
     class Mpp
         def __init__(self, methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]], *, realm: str | None = None, secret_key: str | None = None, store: Store | None = None, requires_auth: bool = False, unique_challenges: bool = True, select_offers: SelectOffers | None = None) -> None
-        async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Receipt
+        async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, http_request: Request | None = None, **method_options: Any) -> Receipt
         def compose(self, *entries: tuple[Any, Mapping[str, Any]]) -> ComposedHandler
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
         def on_challenge_created(self, handler: EventHandler) -> Unsubscribe
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_success(self, handler: EventHandler) -> Unsubscribe
-        async def validate_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Validation
+        async def validate_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, http_request: Request | None = None, **method_options: Any) -> Validation
 
 module mpp.server.verify
     DEFAULT_EXPIRES_MINUTES = 5

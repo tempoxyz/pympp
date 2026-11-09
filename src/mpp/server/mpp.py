@@ -33,6 +33,7 @@ from mpp.events import (
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
+from mpp.server.http import Request
 from mpp.server.method import (
     SETTLING_METHOD,
     RequestContext,
@@ -347,6 +348,7 @@ class Mpp:
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
         method_options: Mapping[str, Any] | None = None,
+        http_request: Request | None = None,
     ) -> tuple[Credential, ServerMethod, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         credential = self._parse_credential(value)
@@ -379,6 +381,8 @@ class Mpp:
             raise PaymentExpiredError(echo.expires) from error
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
+        if http_request is not None and not _route_scope_matches(http_request, echoed_request):
+            raise InvalidChallengeError(echo.id, "credential route does not match")
 
         echoed = _comparable(echoed_request)
         if request is None:
@@ -474,6 +478,7 @@ class Mpp:
         request: dict[str, Any] | None = None,
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
+        http_request: Request | None = None,
         **method_options: Any,
     ) -> Validation:
         """Validate a bound credential without consuming payment state.
@@ -505,6 +510,10 @@ class Mpp:
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
             body: Expected request body for the challenge's digest binding.
+            http_request: If provided, also require the challenge's signed route
+                scope (HTTP method, route, path and query) to be this request's,
+                as an HTTP route handler does, so a credential issued for one
+                route cannot be spent on another.
 
         Returns:
             The intent's validation record for the accepted credential.
@@ -526,6 +535,7 @@ class Mpp:
             meta=meta,
             body=body,
             method_options=method_options,
+            http_request=http_request,
         )
         if method.validate is None:
             raise VerificationFailedError(
@@ -546,6 +556,7 @@ class Mpp:
         request: dict[str, Any] | None = None,
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
+        http_request: Request | None = None,
         **method_options: Any,
     ) -> Receipt:
         """Revalidate and perform a bound credential's terminal operation.
@@ -574,6 +585,10 @@ class Mpp:
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
             body: Expected request body for the challenge's digest binding.
+            http_request: If provided, also require the challenge's signed route
+                scope (HTTP method, route, path and query) to be this request's,
+                as an HTTP route handler does, so a credential issued for one
+                route cannot be spent on another.
 
         Returns:
             The settlement receipt from the intent's terminal operation.
@@ -592,6 +607,7 @@ class Mpp:
                 meta=meta,
                 body=body,
                 method_options=method_options,
+                http_request=http_request,
             )
         except Exception as error:
             echo = parsed.challenge
@@ -667,6 +683,19 @@ def _binding_matches(
         return dict(method.stable_binding(expected)) == dict(method.stable_binding(echoed))
     except Exception:
         return False
+
+
+def _route_scope_matches(http_request: Request, echoed: Mapping[str, Any]) -> bool:
+    """Whether an echoed request's signed route scope names this HTTP request.
+
+    Route issuance binds ``Request.scope()`` as the wire ``_mppx_scope``, with any
+    application scope under its ``custom`` key, which this does not compare.
+    """
+    scope = echoed.get("_mppx_scope")
+    if not is_mapping(scope):
+        return False
+    engine = {key: value for key, value in scope.items() if key != "custom"}
+    return engine == http_request.scope()
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:

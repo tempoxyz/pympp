@@ -224,6 +224,30 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
 
 
+def _signed_transaction(raw_tx: str) -> tuple[list[Any], bytes, bytes] | None:
+    """Decode a hex signed Tempo transaction, or None when it is not one."""
+    try:
+        raw = bytes.fromhex(_strip_0x(raw_tx))
+    except ValueError:
+        return None
+    return _decode_signed_transaction(raw)
+
+
+def _pull_transaction_hash(raw_tx: str) -> str | None:
+    """The hash the chain records for an unsponsored signed 0x76 transaction, else None."""
+    if _strip_0x(raw_tx)[:2] != "76" or _signed_transaction(raw_tx) is None:
+        return None
+    return _raw_transaction_hash(_canonical_raw_transaction(raw_tx)).lower()
+
+
+def _sender_recovered(raw_tx: str) -> bool:
+    """Whether a signed transaction's sender signature is a 65-byte secp256k1 signature,
+    the one kind recovered before broadcast. Keychain, multisig, P256 and WebAuthn
+    signatures name their account, which the chain authenticates at settlement."""
+    decoded = _signed_transaction(raw_tx)
+    return decoded is not None and len(decoded[1]) == 65
+
+
 def _decode_signed_transaction(raw: bytes) -> tuple[list[Any], bytes, bytes] | None:
     """Decode a 0x76 or 0x78 Tempo transaction into its fields, sender signature and the hash
     the sender signed, or None when it is malformed.
@@ -1090,6 +1114,20 @@ class ChargeIntent:
             differ) and whose ``details`` carry the settlement ``mode`` and,
             in pull mode, the serialized transaction.
 
+            ``details`` also carries:
+
+            - ``payer_verified``: whether ``payer`` is authenticated already, by
+              a recovered secp256k1 sender signature, a zero-amount proof or a
+              confirmed transfer. ``False`` for a pull-mode transaction signed
+              with a keychain, multisig, P256 or WebAuthn key: it only names its
+              account, which the chain authenticates at broadcast.
+            - ``transaction_hash`` (push and pull): the hash the chain records,
+              the same in both modes, so one transfer has one key. ``None`` for a
+              pull-mode transaction a fee payer co-signs, whose final hash is
+              known only once it is broadcast.
+            - ``valid_before`` (pull): the transaction's ``valid_before``
+              Unix timestamp, or ``None`` when it has none.
+
         Raises:
             VerificationError: If the credential is invalid.
             InternalPaymentError: If the credential cannot be checked, e.g.
@@ -1101,7 +1139,7 @@ class ChargeIntent:
             await self._ensure_proof_unused(credential.challenge.id)
             return Validation(
                 credential=credential,
-                details={"mode": "proof"},
+                details={"mode": "proof", "payer_verified": True},
                 intent=self.name,
                 request=dict(request),
                 payer=await self._validate_proof(credential, payload, req),
@@ -1117,7 +1155,11 @@ class ChargeIntent:
                 source=credential.source,
             )
             payer = receipt.payer
-            details: dict[str, Any] = {"mode": "push"}
+            details: dict[str, Any] = {
+                "mode": "push",
+                "payer_verified": payer is not None,
+                "transaction_hash": payload.hash.lower(),
+            }
         else:
             legs = self._validate_transaction_payload(payload.signature, req, strict=True)
             if legs is not None:
@@ -1129,7 +1171,13 @@ class ChargeIntent:
             payer = self._transaction_payer(
                 payload.signature, credential.source, req.methodDetails.chainId
             )
-            details = {"mode": "pull", "serialized_transaction": payload.signature}
+            details = {
+                "mode": "pull",
+                "payer_verified": payer is not None and _sender_recovered(payload.signature),
+                "serialized_transaction": payload.signature,
+                "transaction_hash": _pull_transaction_hash(payload.signature),
+                "valid_before": _transaction_valid_before(payload.signature),
+            }
 
         return Validation(
             credential=credential,

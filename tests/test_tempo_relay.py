@@ -374,7 +374,7 @@ async def test_charge_validation_does_not_consume_hash() -> None:
             },
         )
 
-    assert result.details == {"mode": "push"}
+    assert result.details == {"mode": "push", "payer_verified": False, "transaction_hash": "0xabc"}
     assert await store.get("mpp:charge:0xabc") is None
 
 
@@ -422,7 +422,10 @@ async def test_charge_validation_uses_python_field_names() -> None:
 
     assert result.details == {
         "mode": "pull",
+        "payer_verified": False,
         "serialized_transaction": "0x1234",
+        "transaction_hash": None,
+        "valid_before": None,
     }
 
 
