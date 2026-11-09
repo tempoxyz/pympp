@@ -344,6 +344,13 @@ class _ZoneSend:
     tx_hash: str | None = None
     wanted: Callable[[], bool] = lambda: True
     on_submission: Callable[[str], None] | None = None
+    # The Challenge the withdrawal pays and the Zone it leaves, so a newly issued
+    # Challenge for the same request resumes it instead of withdrawing again.
+    challenge: Challenge | None = None
+    zone_id: int | None = None
+    # Set once a caller gave up on it (settlement wait timed out, or the send's
+    # outcome is unknown): the withdrawal may still pay.
+    stalled: bool = False
     # First Tempo block its settlement search covered, so later searches start there.
     search_from: int | None = None
 
@@ -865,6 +872,14 @@ class TempoMethod:
             )
 
         if self.zone is not None:
+            # A withdrawal for the same request that a caller gave up on may still
+            # pay: resume it with its own Challenge rather than withdraw again for
+            # this newly issued one.
+            stalled = self._stalled_zone_withdrawal(challenge)
+            if stalled is not None:
+                return await self._create_zone_credential(
+                    stalled[0], stalled[1], wanted=wanted, on_submission=on_submission
+                )
             zone_id = await self._zone_payment(challenge, expected_chain_id)
             if zone_id is not None:
                 # The settlement is read from this Tempo RPC, so confirm it serves the
@@ -1404,6 +1419,23 @@ class TempoMethod:
             return None
         return zone_id
 
+    def _stalled_zone_withdrawal(self, challenge: Challenge) -> tuple[Challenge, int] | None:
+        """Return the Challenge and Zone of a stalled withdrawal for the same request.
+
+        A retry of a request whose withdrawal did not settle in time gets a newly
+        issued Challenge; paying it would withdraw a second time.
+        """
+        request_key = _zone_request_key(challenge)
+        for _, state in self._zone_withdrawals.values():
+            if (
+                state.stalled
+                and state.challenge is not None
+                and state.zone_id is not None
+                and _zone_request_key(state.challenge) == request_key
+            ):
+                return state.challenge, state.zone_id
+        return None
+
     async def _create_zone_credential(
         self,
         challenge: Challenge,
@@ -1430,7 +1462,9 @@ class TempoMethod:
         key = _zone_withdrawal_key(challenge)
         existing = self._zone_withdrawals.get(key)
         if existing is None:
-            state = _ZoneSend(wanted=wanted, on_submission=on_submission)
+            state = _ZoneSend(
+                wanted=wanted, on_submission=on_submission, challenge=challenge, zone_id=zone_id
+            )
             new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
             self._zone_withdrawals[key] = (new_task, state)
 
@@ -1441,6 +1475,7 @@ class TempoMethod:
                 if not (done.cancelled() or done.exception() is not None):
                     return
                 if state.sent:
+                    state.stalled = True
                     return
                 entry = self._zone_withdrawals.get(key)
                 if entry is not None and entry[0] is done:
@@ -1481,6 +1516,7 @@ class TempoMethod:
                 **self._rpc,
             )
         except Exception as cause:
+            state.stalled = True
             raise ZoneSettlementPendingError(
                 challenge_id=challenge.id,
                 sender_tag=sender_tag,
@@ -1754,6 +1790,15 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
 def _zone_challenge_expired(expires: str | None) -> bool:
     """Whether a Challenge with an expiry has reached it."""
     return _zone_time_left(expires) == 0
+
+
+def _zone_request_key(challenge: Challenge) -> str:
+    """Key what a Challenge asks to be paid for, leaving out what each issuance varies."""
+    return json.dumps(
+        [challenge.realm, challenge.method, challenge.intent, challenge.request, challenge.digest],
+        sort_keys=True,
+        default=str,
+    )
 
 
 def _zone_settles_before_expiry(expires: str | None, settlement_timeout: float | None) -> bool:
