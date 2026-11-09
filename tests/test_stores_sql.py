@@ -247,6 +247,37 @@ class TestPurgeExpired:
         assert await store.get("live") == "4"
         assert await store.purge_expired() == 0
 
+    async def test_expiring_claims_purge_expired_rows_periodically(
+        self, store: SQLStore, clock: Clock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mpp.stores.sql as sql
+
+        monotonic = [1000.0]
+        monkeypatch.setattr(sql.time, "monotonic", lambda: monotonic[0])
+        assert await store.put_if_absent_until("old", "1", time.time() + 10)
+        clock.advance(11)
+        # Within the interval of the first claim's purge: the expired row stays.
+        assert await store.put_if_absent_until("new", "2", time.time() + 100)
+        assert await store.purge_expired() == 1
+        assert await store.put_if_absent_until("old2", "3", time.time() + 10)
+        clock.advance(11)
+        monotonic[0] += sql._PURGE_INTERVAL_SECONDS  # pyright: ignore[reportPrivateUsage]
+        assert await store.put_if_absent_until("newer", "4", time.time() + 100)
+        assert await store.purge_expired() == 0
+        assert await store.get("new") == "2"
+        assert await store.get("newer") == "4"
+
+    async def test_purge_errors_do_not_change_the_claim(self) -> None:
+        class FailingPurge(FakeDriver):
+            async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]:
+                await super().query(sql, params)
+                if sql.startswith("DELETE"):
+                    raise RuntimeError("purge failed")
+                return [("k",)]
+
+        store = SQLStore(FailingPurge(), create_table=False)
+        assert await store.put_if_absent_until("k", "v", time.time() + 60) is True
+
     async def test_stores_expiry_in_milliseconds(self, database) -> None:
         make, _ = database
         store = make()
@@ -266,6 +297,15 @@ class TestTable:
     def test_rejects_invalid_table_names(self, table: str) -> None:
         with pytest.raises(ValueError, match="Invalid SQL store table name"):
             SQLStore.sqlite(object(), table=table)
+
+    async def test_reserved_word_table_names_work(self, tmp_path) -> None:
+        import aiosqlite
+
+        async with aiosqlite.connect(str(tmp_path / "reserved.db")) as db:
+            store = SQLStore.sqlite(db, table="select")
+            assert await store.put_if_absent("k", "v")
+            assert await store.get("k") == "v"
+            assert await store.purge_expired() == 0
 
     async def test_custom_schema_qualified_table(self, database) -> None:
         make, _ = database
@@ -318,7 +358,7 @@ class TestDriver:
         await asyncio.gather(store.get("a"), store.get("b"), store.put("c", "v"))
         creates = [sql for sql, _ in driver.statements if sql.startswith("CREATE")]
         assert creates == [
-            "CREATE TABLE IF NOT EXISTS mppx_store "
+            'CREATE TABLE IF NOT EXISTS "mppx_store" '
             "(key TEXT PRIMARY KEY, value TEXT NOT NULL, expires DOUBLE PRECISION)"
         ]
 
@@ -359,7 +399,7 @@ class TestDriver:
         assert await store.put_if_absent("k", "v") is True
         sql, *args = calls[0]
         assert sql.startswith(
-            "INSERT INTO s.t AS existing (key, value, expires) VALUES ($1, $2, $3)"
+            'INSERT INTO "s"."t" AS existing (key, value, expires) VALUES ($1, $2, $3)'
         )
         assert args[:3] == ["k", "v", None]
 

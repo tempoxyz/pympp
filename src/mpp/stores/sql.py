@@ -35,6 +35,14 @@ SQLDialect = Literal["postgres", "sqlite"]
 
 _TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?")
 
+_PURGE_INTERVAL_SECONDS = 60.0
+"""Least time between the automatic purges of expired rows that expiring claims trigger."""
+
+
+def _quote_table(table: str) -> str:
+    """Quote each part of a validated table name, so reserved words such as select work."""
+    return ".".join(f'"{part}"' for part in table.split("."))
+
 
 class SQLDriver(Protocol):
     """Runs one statement with positional parameters and returns its rows."""
@@ -100,9 +108,9 @@ class SQLStore:
     Implements :class:`~mpp.store.ExpiringStore` and :class:`~mpp.store.CompareAndSetStore`.
     Keys written by ``put``, ``put_if_absent`` and ``compare_and_set`` never expire;
     ``put_if_absent_until`` claims expire at their deadline, after which ``get`` reports
-    them missing and the next claim replaces them in the same statement. Expired rows stay
-    in the table until a write to the same key replaces them or :meth:`purge_expired`
-    deletes them.
+    them missing and the next claim replaces them in the same statement. Expiring claims
+    also purge expired rows, at most once a minute per store, so the table stays bounded
+    although replay keys are rarely written twice; :meth:`purge_expired` purges on demand.
 
     Args:
         driver: Runs the statements; see :meth:`postgres` and :meth:`sqlite`.
@@ -125,8 +133,10 @@ class SQLStore:
             raise ValueError(f'Invalid SQL store table name: "{table}".')
         self._driver = driver
         self._table = table
+        self._quoted = _quote_table(table)
         self._ready = not create_table
         self._lock = asyncio.Lock()
+        self._purged_at: float | None = None
 
     @classmethod
     def postgres(
@@ -155,7 +165,7 @@ class SQLStore:
                 return
             try:
                 await self._driver.query(
-                    f"CREATE TABLE IF NOT EXISTS {self._table} "
+                    f"CREATE TABLE IF NOT EXISTS {self._quoted} "
                     "(key TEXT PRIMARY KEY, value TEXT NOT NULL, expires DOUBLE PRECISION)",
                     [],
                 )
@@ -163,7 +173,7 @@ class SQLStore:
                 # Concurrent CREATE TABLE IF NOT EXISTS from other processes can fail on
                 # Postgres (duplicate catalog row) although the table now exists: probe it.
                 try:
-                    await self._driver.query(f"SELECT 1 FROM {self._table} WHERE 1 = 0", [])
+                    await self._driver.query(f"SELECT 1 FROM {self._quoted} WHERE 1 = 0", [])
                 except Exception:
                     pass
                 else:
@@ -187,27 +197,27 @@ class SQLStore:
         Rows without an expiry and live claims are never touched.
         """
         rows = await self._query(
-            f"DELETE FROM {self._table} WHERE expires IS NOT NULL AND expires <= ? RETURNING key",
+            f"DELETE FROM {self._quoted} WHERE expires IS NOT NULL AND expires <= ? RETURNING key",
             [_now_ms()],
         )
         return len(rows)
 
     async def get(self, key: str) -> Any | None:
         rows = await self._query(
-            f"SELECT value FROM {self._table} WHERE key = ? AND (expires IS NULL OR expires > ?)",
+            f"SELECT value FROM {self._quoted} WHERE key = ? AND (expires IS NULL OR expires > ?)",
             [key, _now_ms()],
         )
         return rows[0][0] if rows else None
 
     async def put(self, key: str, value: Any) -> None:
         await self._query(
-            f"INSERT INTO {self._table} (key, value, expires) VALUES (?, ?, NULL) "
+            f"INSERT INTO {self._quoted} (key, value, expires) VALUES (?, ?, NULL) "
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires = NULL",
             [key, value],
         )
 
     async def delete(self, key: str) -> None:
-        await self._query(f"DELETE FROM {self._table} WHERE key = ?", [key])
+        await self._query(f"DELETE FROM {self._quoted} WHERE key = ?", [key])
 
     async def put_if_absent(self, key: str, value: Any) -> bool:
         """Atomic insert of a claim that never expires, replacing only an expired row."""
@@ -218,7 +228,22 @@ class SQLStore:
         _validate_expiry(expires_at)
         # The claim's own deadline may have passed while the statement ran.
         claimed = await self._claim(key, value, expires_at * 1000)
+        await self._purge_periodically()
         return claimed and expires_at > time.time()
+
+    async def _purge_periodically(self) -> None:
+        # Replay keys (one per challenge or transaction) are never claimed again, so
+        # without this their expired rows would stay forever.
+        now = time.monotonic()
+        if self._purged_at is not None and now - self._purged_at < _PURGE_INTERVAL_SECONDS:
+            return
+        self._purged_at = now
+        try:
+            await self.purge_expired()
+        except Exception:
+            # The claim already succeeded or failed on its own; a purge error must not
+            # change its result, and the next interval retries.
+            pass
 
     async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
         """Atomic conditional write: one statement keyed on the current live value."""
@@ -229,13 +254,13 @@ class SQLStore:
             return await self._claim(key, value, None)
         if value is None:
             rows = await self._query(
-                f"DELETE FROM {self._table} WHERE key = ? AND value = ? "
+                f"DELETE FROM {self._quoted} WHERE key = ? AND value = ? "
                 "AND (expires IS NULL OR expires > ?) RETURNING key",
                 [key, expected, now],
             )
         else:
             rows = await self._query(
-                f"UPDATE {self._table} SET value = ? WHERE key = ? AND value = ? "
+                f"UPDATE {self._quoted} SET value = ? WHERE key = ? AND value = ? "
                 "AND (expires IS NULL OR expires > ?) RETURNING key",
                 [value, key, expected, now],
             )
@@ -244,7 +269,7 @@ class SQLStore:
     async def _claim(self, key: str, value: Any, expires_at: float | None) -> bool:
         # One statement: insert the row, or replace one whose expiry has passed.
         rows = await self._query(
-            f"INSERT INTO {self._table} AS existing (key, value, expires) VALUES (?, ?, ?) "
+            f"INSERT INTO {self._quoted} AS existing (key, value, expires) VALUES (?, ?, ?) "
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value, expires = excluded.expires "
             "WHERE existing.expires IS NOT NULL AND existing.expires <= ? RETURNING key",
             [key, value, expires_at, _now_ms()],
