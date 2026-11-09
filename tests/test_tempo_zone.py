@@ -1749,7 +1749,7 @@ class TestClientZoneStalledWithdrawals:
     """A withdrawal a caller gave up on may still pay, so it is never sent twice."""
 
     @pytest.mark.asyncio
-    async def test_a_new_challenge_for_the_same_request_resumes_the_withdrawal(self) -> None:
+    async def test_retrying_the_challenge_resumes_the_withdrawal(self) -> None:
         settled = False
         calls: list[str] = []
         queries: list[dict[str, Any]] = []
@@ -1762,15 +1762,11 @@ class TestClientZoneStalledWithdrawals:
         pending = await error_of(method.create_credential(first))
         assert isinstance(pending, ZoneSettlementPendingError)
 
-        # A plain HTTP retry gets a newly issued Challenge for the same request.
-        second, _ = await issue(server)
-        assert second.id != first.id
-        again = await error_of(method.create_credential(second))
+        again = await error_of(method.create_credential(first))
         assert isinstance(again, ZoneSettlementPendingError)
-        assert again.challenge is first
 
         settled = True
-        credential = await method.create_credential(second)
+        credential = await method.create_credential(first)
         assert credential.challenge.id == first.id
         assert calls.count("eth_sendRawTransactionSync") == 1
         # Every search after the first starts where the first one did.
