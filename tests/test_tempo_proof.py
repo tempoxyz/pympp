@@ -219,7 +219,7 @@ class TestProofVerification:
         receipt = await intent.broadcast(credential, _request())
 
         assert validation.payer == ROOT.address.lower()
-        assert validation.details == {"mode": "proof"}
+        assert validation.details == {"mode": "proof", "payer_verified": True}
         assert receipt.reference == CHALLENGE_ID
         assert receipt.payer == ROOT.address.lower()
 

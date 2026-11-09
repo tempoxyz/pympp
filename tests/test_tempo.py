@@ -8668,6 +8668,40 @@ class TestTransactionCredentialPayer:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("kind", KINDS)
+    async def test_validate_reports_settlement_details(self, kind: str) -> None:
+        from mpp.methods.tempo.intents import _canonical_raw_transaction, _raw_transaction_hash
+
+        raw_tx, _ = self._signed(kind)
+
+        validation = await ChargeIntent(rpc_url="https://rpc.test").validate(
+            self._credential(raw_tx, None), self._request()
+        )
+
+        details = validation.details
+        # Only a 65-byte secp256k1 sender signature authenticates the payer before broadcast.
+        assert details["payer_verified"] is (
+            kind in ("secp256k1", "key_authorization", "sponsored", "envelope")
+        )
+        if kind in ("envelope", "keychain_envelope"):
+            # The fee payer has not signed yet, so the final hash is unknown.
+            assert details["transaction_hash"] is None
+        else:
+            expected = _raw_transaction_hash(_canonical_raw_transaction(raw_tx)).lower()
+            assert details["transaction_hash"] == expected
+        assert details["valid_before"] is None
+
+    @pytest.mark.asyncio
+    async def test_validate_reports_valid_before(self) -> None:
+        raw_tx = "0x" + self._tx(valid_before=1_900_000_000).sign(TEST_PRIVATE_KEY).encode().hex()
+
+        validation = await ChargeIntent(rpc_url="https://rpc.test").validate(
+            self._credential(raw_tx, None), self._request()
+        )
+
+        assert validation.details["valid_before"] == 1_900_000_000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", KINDS)
     @pytest.mark.parametrize(
         ("source", "error"),
         [

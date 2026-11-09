@@ -152,6 +152,29 @@ async def test_mpp_exposes_bound_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate_credential", "broadcast_credential"])
+async def test_http_request_binds_route_scope(operation: str) -> None:
+    from mpp.server.http import Request
+
+    route = Request(method="GET", url="https://api.example.com/tools/a?x=1")
+    scope = {**route.scope(), "custom": "application"}
+    credential = _bound({"amount": "1000", "_mppx_scope": scope})
+    run = getattr(_server(), operation)
+
+    await run(credential, http_request=route)
+
+    for other in (
+        Request(method="POST", url="https://api.example.com/tools/a?x=1"),
+        Request(method="GET", url="https://api.example.com/tools/b?x=1"),
+        Request(method="GET", url="https://api.example.com/tools/a?x=2"),
+    ):
+        with pytest.raises(InvalidChallengeError, match="credential route does not match"):
+            await run(credential, http_request=other)
+    with pytest.raises(InvalidChallengeError, match="credential route does not match"):
+        await run(_bound({"amount": "1000"}), http_request=route)
+
+
+@pytest.mark.asyncio
 async def test_bound_broadcast_emits_success_but_validation_is_advisory() -> None:
     intent = VerifiableCharge()
     server = _server(intent)
