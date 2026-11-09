@@ -121,6 +121,10 @@ class ServerMethod:
         x402: Lets x402 `exact` clients pay this method's offers.
         use_store: Adopts the `Mpp(store=...)` replay store when the method was
             configured without one of its own.
+        has_store: Reports whether the method has a replay store, its own or one adopted
+            through `use_store`. `Mpp` raises at construction in production or on a
+            multi-instance platform when it returns `False`, rather than let the method
+            fall back to an in-memory store.
         credential_options: Keyword options `Mpp.validate_credential` and
             `Mpp.broadcast_credential` accept for this method; others are rejected.
         needs_request_body: Set when `resolve_request` reads `RequestContext.input.body`,
@@ -153,6 +157,7 @@ class ServerMethod:
     defaults: Mapping[str, Any] | None = None
     x402: X402Intent | None = None
     use_store: Callable[[Store], None] | None = None
+    has_store: Callable[[], bool] | None = None
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None

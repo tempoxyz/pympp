@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_v
 
 from mpp import Credential, Receipt
 from mpp._did import parse_pkh_source
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_list, is_mapping
 from mpp._validation import Validation
 from mpp.errors import (
@@ -110,8 +111,17 @@ class _ClaimCache(MemoryStore):
         self._data.pop(key, None)
 
 
-def _fallback_store() -> _ClaimCache:
-    """Create the in-memory claim store used when no store is configured."""
+def _fallback_store(option: str = "evm.charge(store=...) or Mpp(store=...)") -> _ClaimCache:
+    """Create the in-memory claim store used when no store is configured.
+
+    Args:
+        option: Where the caller passes a store, named in the production error.
+
+    Raises:
+        RuntimeError: If the runtime looks like production (see
+            :func:`mpp._replay_store.production_runtime`).
+    """
+    check_fallback_allowed("evm.charge", option)
     global _warned_fallback_store
     if not _warned_fallback_store:
         _warned_fallback_store = True

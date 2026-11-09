@@ -101,8 +101,16 @@ _warned_fallback_store = False
 
 
 def _fallback_store() -> Store:
-    """The in-memory channel store used without a configured one, warning once per process."""
+    """The in-memory channel store used without a configured one, warning once per process.
+
+    Raises:
+        RuntimeError: If the runtime looks like production (see
+            :func:`mpp._replay_store.production_runtime`).
+    """
+    from mpp._replay_store import check_fallback_allowed
     from mpp.store import MemoryStore
+
+    check_fallback_allowed("tempo.session", "tempo.session(store=...) or Mpp(store=...)")
 
     global _warned_fallback_store
     if not _warned_fallback_store:
@@ -236,7 +244,8 @@ def session(
         store: Channel store. Use a :class:`~mpp.store.CompareAndSetStore` (MemoryStore,
             RedisStore, SQLiteStore) shared by every instance, so channel updates are
             linearizable; defaults to the ``Mpp(store=...)`` store, or else a per-process
-            in-memory store.
+            in-memory store, which raises in production or on a multi-instance platform.
+            Pass ``MemoryStore()`` to accept instance-local channel state there.
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
@@ -605,6 +614,7 @@ def session(
         defaults=defaults,
         respond=respond,
         use_store=use_store,
+        has_store=lambda: bool(channel_stores),
         stable_binding=_reusable_binding if reusable_challenges else _snapshot_free_binding,
         preflight=preflight if bootstrap else None,
         # Accounting and respond classify a POST as content by its body (mppx: request.body
