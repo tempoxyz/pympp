@@ -256,6 +256,7 @@ def _read_usage(raw: Any, day: str) -> dict[str, Any]:
                     "day": stored,
                     "open": int(usage.get("open", 0)),
                     "topUp": int(usage.get("topUp", 0)),
+                    **({"transactions": usage["transactions"]} if "transactions" in usage else {}),
                 }
     return {"day": day, "open": 0, "topUp": 0}
 
@@ -333,9 +334,11 @@ async def limit_fee_payer(
     fee_payer: _FeePayer | None,
     limit: SponsorshipLimit | None,
     payload: SessionCredentialPayload,
-) -> tuple[_FeePayer | None, Callable[[], Awaitable[None]] | None]:
+) -> tuple[_FeePayer | None, Callable[[bool], Awaitable[None]] | None]:
     """The fee payer when the credential's open or top-up may be sponsored, else None, and a
-    callback that gives the reserved slot back when the sponsored broadcast fails.
+    callback that finishes the reservation, retaining it if signing authority was exposed.
+
+    Concurrent attempts share one slot; it is released only if all finish unexposed.
 
     None once its verified payer used the day's sponsored transactions, or when no signature
     proves a payer: the transaction is then broadcast as the payer signed it, paying its own
@@ -350,18 +353,55 @@ async def limit_fee_payer(
         return None, None
     action: Literal["open", "topUp"] = "open" if isinstance(payload, OpenPayload) else "topUp"
     now = datetime.now(UTC)
-    allowed = await reserve(
-        limit.store,
-        action=action,
-        chain_id=chain_id,
-        payer=payer,
-        per_day=limit.per_day,
-        now=now,
-    )
-    if not allowed:
+    from mpp.methods.tempo.session._channel import expiring_nonce_hash
+
+    transaction_id = action + ":" + expiring_nonce_hash(payload.transaction, payer)
+    key = _usage_key(chain_id, payer)
+    day = _day(now)
+
+    def take(usage: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        transactions = dict(usage.get("transactions", {}))
+        entry = transactions.get(transaction_id)
+        if entry is None and usage[action] >= limit.per_day:
+            return None, False
+        transactions[transaction_id] = {
+            "pending": (entry["pending"] if entry else 0) + 1,
+            "exposed": entry["exposed"] if entry else False,
+        }
+        return {
+            **usage,
+            action: usage[action] + (0 if entry else 1),
+            "transactions": transactions,
+        }, True
+
+    if not await _update_usage(limit.store, key, day, take):
         return None, None
 
-    async def undo() -> None:
-        await release(limit.store, action=action, chain_id=chain_id, payer=payer, now=now)
+    finished = False
 
-    return fee_payer, undo
+    async def finish(exposed: bool = False) -> None:
+        nonlocal finished
+        if finished:
+            return
+
+        def complete(usage: dict[str, Any]) -> tuple[dict[str, Any] | None, None]:
+            if usage["day"] != day:
+                return None, None
+            transactions = dict(usage.get("transactions", {}))
+            entry = transactions.get(transaction_id)
+            if entry is None:
+                return None, None
+            pending = max(0, entry["pending"] - 1)
+            retained = entry["exposed"] or exposed
+            if pending or retained:
+                transactions[transaction_id] = {"pending": pending, "exposed": retained}
+                count = usage[action]
+            else:
+                del transactions[transaction_id]
+                count = max(0, usage[action] - 1)
+            return {**usage, action: count, "transactions": transactions}, None
+
+        await _update_usage(limit.store, key, day, complete)
+        finished = True
+
+    return fee_payer, finish
