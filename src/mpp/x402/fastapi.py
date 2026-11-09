@@ -35,6 +35,7 @@ except ImportError as error:  # pragma: no cover
         f'{error}. Install the "x402" extra to use this module: pip install "pympp[x402]"'
     ) from error
 
+from mpp._replay_store import check_fallback_allowed
 from mpp.server.decorator import get_request_url
 from mpp.server.http import Request, Response
 from mpp.store import Store
@@ -65,8 +66,16 @@ def payment_middleware(
         paywall_config: Optional x402 paywall configuration.
         paywall_provider: Optional x402 paywall provider.
         store: Store claiming MPP authorizations before settlement, shared by every
-            worker and replica. Defaults to an in-process store.
+            worker and replica. Defaults to an in-process store whose claims expire
+            with their authorization; without one, this raises in production or on a
+            multi-instance platform.
+
+    Raises:
+        RuntimeError: If no store is passed and the runtime looks like production
+            (see :func:`mpp._replay_store.production_runtime`).
     """
+    if store is None:
+        check_fallback_allowed("payment_middleware", "payment_middleware(store=...)")
     negotiator = Negotiator(
         routes,
         server,

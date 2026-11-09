@@ -383,3 +383,13 @@ async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() ->
 def test_default_store_expires_claims() -> None:
     server = x402ResourceServer(Facilitator())  # type: ignore[arg-type]
     assert isinstance(Negotiator(ROUTES, server, secret_key=SECRET_KEY).store, _ClaimCache)
+
+
+def test_payment_middleware_names_its_store_option_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VERCEL", "1")
+    server = x402ResourceServer(Facilitator())  # type: ignore[arg-type]
+    match = r"payment_middleware has no store.*payment_middleware\(store=\.\.\.\)"
+    with pytest.raises(RuntimeError, match=match):
+        payment_middleware(ROUTES, server, secret_key=SECRET_KEY)
