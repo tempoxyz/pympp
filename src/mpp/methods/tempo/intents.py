@@ -189,11 +189,14 @@ def _raw_transaction_hash(raw_tx: str) -> str:
 
 def _canonical_signature(signature: bytes) -> bytes:
     """Encode secp256k1 recovery IDs as 27/28, including inside keychain signatures."""
+    # Iterative: a client controls the nesting depth of keychain wrappers.
+    prefixes: list[bytes] = []
+    while len(signature) > 21 and signature[0] in (0x03, 0x04):
+        prefixes.append(signature[:21])
+        signature = signature[21:]
     if len(signature) == 65 and signature[64] in (0, 1):
-        return signature[:64] + bytes([signature[64] + 27])
-    if len(signature) > 21 and signature[0] in (0x03, 0x04):
-        return signature[:21] + _canonical_signature(signature[21:])
-    return signature
+        signature = signature[:64] + bytes([signature[64] + 27])
+    return b"".join(prefixes) + signature
 
 
 def _canonical_raw_transaction(raw_tx: str) -> str:

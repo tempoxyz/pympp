@@ -8697,6 +8697,14 @@ class TestTransactionCredentialPayer:
         assert _pull_transaction_hash(raw_tx) is None
         assert _sender_recovered(raw_tx) is False
 
+    def test_canonical_signature_survives_deep_keychain_nesting(self) -> None:
+        from mpp.methods.tempo.intents import _canonical_signature
+
+        wrapper = bytes([0x03]) + bytes(20)
+        deep = wrapper * 5000 + bytes(64) + bytes([1])
+
+        assert _canonical_signature(deep) == wrapper * 5000 + bytes(64) + bytes([28])
+
     @pytest.mark.asyncio
     async def test_validate_reports_valid_before(self) -> None:
         raw_tx = "0x" + self._tx(valid_before=1_900_000_000).sign(TEST_PRIVATE_KEY).encode().hex()
