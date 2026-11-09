@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.22.0 (2026-11-09)
+
+### Minor Changes
+
+- Made `Mpp`, Tempo and EVM charges, `tempo.session` and x402 `payment_middleware` raise `RuntimeError` at startup in production (`MPP_ENV=production`, or platforms such as AWS Lambda, Fly or Vercel) when they would fall back to an in-memory replay store; pass a shared store such as `RedisStore` or `SQLStore` with `store=` or `Mpp(store=...)`, or an explicit `MemoryStore()` to keep instance-local protection, as mppx does. Made EVM claims in an explicitly passed `MemoryStore` expire after the authorization's `validBefore`. (by @brendanjryan, [#413](https://github.com/tempoxyz/pympp/pull/413))
+- Added `rpc_url_for_chain` as a new public function in `mpp.methods.tempo`. Added an optional `http_request` parameter to `Mpp.validate_credential` and `Mpp.broadcast_credential` to enforce route scope binding, and enriched `ChargeIntent` settlement details with `payer_verified`, `transaction_hash`, and `valid_before` fields. (by @brendanjryan, [#414](https://github.com/tempoxyz/pympp/pull/414))
+
+### Patch Changes
+
+- Added `SQLStore`, an atomic key-value store on Postgres or SQLite with single-statement writes, as mppx's `Store.sql()` does. Added the `postgres` extra (`asyncpg`). (by @brendanjryan, [#405](https://github.com/tempoxyz/pympp/pull/405))
+- Relay validation now reported the payload's settlement details instead of an empty `details` dict. Deeply nested keychain signatures no longer overflowed the stack in `_canonical_signature`. (by @brendanjryan, [#415](https://github.com/tempoxyz/pympp/pull/415))
+- Fixed sponsorship slot tracking to reserve daily capacity before the signed simulation is sent to the RPC, since a signed simulation can be reconstructed and broadcast outside the client. Replaced the `_SendTracker` wrapping approach with a dedicated `before_sponsor_exposure` callback parameter on `send_credential_transaction` and `broadcast_top_up_transaction`. (by @brendanjryan, [#409](https://github.com/tempoxyz/pympp/pull/409))
+
 ## 0.21.0 (2026-11-09)
 
 ### Minor Changes
