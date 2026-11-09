@@ -2,4 +2,4 @@
 pympp: minor
 ---
 
-Made `Mpp` detect missing replay stores at construction time. Introduced a `_replay_store` module with `production_runtime()` and `check_fallback_allowed()` helpers that raise `RuntimeError` in production or multi-instance environments (AWS Lambda, Fly, Vercel, etc.) when a method would fall back to an in-memory store, matching the safety behavior of mppx.
+Made `Mpp`, Tempo and EVM charges, `tempo.session` and x402 `payment_middleware` raise `RuntimeError` at startup in production (`MPP_ENV=production`, or platforms such as AWS Lambda, Fly or Vercel) when they would fall back to an in-memory replay store; pass a shared store such as `RedisStore` or `SQLStore` with `store=` or `Mpp(store=...)`, or an explicit `MemoryStore()` to keep instance-local protection, as mppx does. Made EVM claims in an explicitly passed `MemoryStore` expire after the authorization's `validBefore`.
