@@ -829,8 +829,8 @@ async def simulate_credential_transaction(
 sponsored_sends: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "sponsored_sends", default=None
 )
-"""When set, collects each fee-payer co-signed transaction handed to the node for broadcast,
-so a caller can tell a sponsored transaction that may have landed from one never sent."""
+"""When set, collects transactions whose sponsor signatures may have reached the node,
+including signed simulations that can be reconstructed and broadcast outside this client."""
 
 
 async def send_credential_transaction(
@@ -845,6 +845,7 @@ async def send_credential_transaction(
     allowed_fee_tokens: Sequence[str] | None = None,
     challenge_expires: str | None = None,
     client: httpx.AsyncClient | None = None,
+    before_sponsor_exposure: Callable[[], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Broadcast a client-signed management transaction and wait for its receipt.
 
@@ -892,6 +893,13 @@ async def send_credential_transaction(
             sponsored = _fee_payer.local_sponsored_simulation_request(
                 cosigned, sender, fee_payer, get_policy(chain_id, fee_payer_policy)
             )
+            if before_sponsor_exposure is not None:
+                await before_sponsor_exposure()
+            # The RPC can combine this signature with the payer's envelope and broadcast.
+            # A simulation error therefore does not prove that sponsorship was unused.
+            sends = sponsored_sends.get()
+            if sends is not None:
+                sends.append(raw)
             try:
                 await _simulate_call(rpc_url, sponsored, http, phase="sponsored")
             except VerificationFailedError as error:
@@ -904,10 +912,6 @@ async def send_credential_transaction(
                     raise
             if transaction.valid_before is not None:
                 _fee_payer.assert_remaining_validity(transaction.valid_before)
-        if fee_payer is not None:
-            sends = sponsored_sends.get()
-            if sends is not None:
-                sends.append(raw)
         tx_hash = await send_raw_transaction(rpc_url, raw, client=http)
         try:
             return await wait_for_successful_receipt(rpc_url, tx_hash, client=http)
@@ -1041,6 +1045,7 @@ async def broadcast_top_up_transaction(
     allowed_fee_tokens: Sequence[str] | None = None,
     challenge_expires: str | None = None,
     client: httpx.AsyncClient | None = None,
+    before_sponsor_exposure: Callable[[], Awaitable[None]] | None = None,
 ) -> BroadcastTopUpResult:
     """Validate, broadcast and verify a client-signed `topUp` transaction."""
     validated = validate_top_up_credential_transaction(
@@ -1067,6 +1072,7 @@ async def broadcast_top_up_transaction(
         allowed_fee_tokens=allowed_fee_tokens,
         challenge_expires=challenge_expires,
         client=client,
+        before_sponsor_exposure=before_sponsor_exposure,
     )
     topped_up = get_channel_event(receipt, "TopUp", expected_channel_id, escrow=escrow_contract)
     validate_top_up_receipt(

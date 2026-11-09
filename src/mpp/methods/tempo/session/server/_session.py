@@ -560,8 +560,8 @@ def session(
         try:
             receipt = await broadcast_credential_payload(verify_context)
         except BaseException:
-            # A sponsored transaction never handed to the node does not count against the
-            # payer's daily limit; one that was sent may have landed, so it keeps its slot.
+            # Signed simulations expose usable sponsor authority too. Keep daily capacity
+            # once a signature may have reached the node, even if no broadcast was observed.
             if release_sponsorship is not None and not sends:
                 with contextlib.suppress(Exception):
                     await release_sponsorship()

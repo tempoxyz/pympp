@@ -1986,21 +1986,51 @@ async def test_invalid_top_up_does_not_consume_sponsorship(life: Lifecycle, monk
     assert not budget_store._data
 
 
-@pytest.mark.parametrize("params", [None, [], [None], ["other"], ["raw"]])
-@pytest.mark.parametrize("cancelled", [False, True])
-async def test_rejected_send_reservation_preserves_unrelated_daily_attempts(params, cancelled):
-    async def reject():
-        if cancelled:
-            raise asyncio.CancelledError()
-        raise VerificationFailedError("allowance exhausted")
+@pytest.mark.parametrize("failure", ["rpc_error", "transport_error"])
+async def test_sponsored_simulation_reserves_before_exposure(life: Lifecycle, failure):
+    from mpp.methods.tempo.session.server import SessionSponsorshipLimit
+    from tests.test_session_chain import RpcError
 
-    tracker = verification._SendTracker(None, before_send=reject)
-    sends = ["prior", "raw"]
-    token = chain.sponsored_sends.set(sends)
-    try:
-        with pytest.raises(asyncio.CancelledError if cancelled else VerificationFailedError):
-            await tracker.post(RPC, json={"method": "eth_sendRawTransaction", "params": params})
-    finally:
-        chain.sponsored_sends.reset(token)
-    assert not tracker.attempted
-    assert sends == (["prior"] if params == ["raw"] else ["prior", "raw"])
+    await life.open(100)
+    budget = MemoryStore()
+    limit = SessionSponsorshipLimit(per_payer=1, store=budget)
+    exposed = []
+
+    def simulate(params):
+        if params[0].get("feePayerSignature"):
+            assert budget._data
+            exposed.append(params[0])
+            if failure == "transport_error":
+                raise httpx.ReadError("response lost")
+            raise RpcError("execution reverted")
+        return life.rpc._call(params)
+
+    life.rpc.overrides["eth_call"] = simulate
+    for additional in [500, 501]:
+        payload = await life.top_up_payload(additional)
+        transaction = await chain.build_top_up_transaction(
+            PAYER,
+            life.descriptor,
+            additional,
+            rpc_url=RPC,
+            fee_payer=True,
+            client=life.rpc.client,
+        )
+        payload = payload.model_copy(update={"transaction": transaction})
+        context = life.context(
+            payload,
+            fee_payer=SPONSOR,
+            top_up_sponsorship_limit=limit,
+            fee_payer_policy={"max_gas": 145_000},
+        )
+        sends = []
+        token = chain.sponsored_sends.set(sends)
+        try:
+            with pytest.raises((VerificationFailedError, httpx.ReadError)):
+                await verification.broadcast_credential_payload(context)
+        finally:
+            chain.sponsored_sends.reset(token)
+        assert bool(sends) is (additional == 500)
+        assert len(exposed) == 1
+        assert not life.rpc.sent[1:]
+    assert int(exposed[0]["gas"], 16) == 145_000

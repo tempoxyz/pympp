@@ -503,3 +503,36 @@ class TestThroughTheSessionMethod:
         record = await read(usage, f"mppx:session:sponsorship:{CHAIN_ID}:{payer}")
         used = json.loads(record)["open"] if record is not None else 0
         assert used == (1 if sent else 0)
+
+
+async def test_signed_preflight_failure_keeps_daily_slot():
+    from tests.test_session_chain import RpcError
+
+    life = await Lifecycle().build(fee_payer=True)
+    usage = MemoryStore()
+    server = make_server(
+        life,
+        chain_id=CHAIN_ID,
+        fee_payer=SPONSOR,
+        sponsorship_limit=SponsorshipLimit(store=usage, per_day=1),
+    )
+    handler = server.session(amount="0.0001", unit_type="request")
+    challenge = await challenge_for(handler, Request("GET", URL))
+    exposed = []
+
+    def simulate(params):
+        if params[0].get("feePayerSignature"):
+            exposed.append(params[0])
+            raise RpcError("execution reverted")
+        return life.rpc._call(params)
+
+    life.rpc.overrides["eth_call"] = simulate
+    result = await handler(
+        Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
+    )
+    assert isinstance(result, PaymentRequired)
+    assert len(exposed) == 1
+    assert not life.rpc.sent
+    payer = limits.verified_payer(life.transaction)
+    record = await read(usage, f"mppx:session:sponsorship:{CHAIN_ID}:{payer}")
+    assert record is not None and json.loads(record)["open"] == 1
