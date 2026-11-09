@@ -674,6 +674,23 @@ class TestBroadcast:
         await cache.delete("new")
         assert await cache.put_if_absent("new", "pending")
 
+    async def test_explicit_memory_store_claims_expire_with_their_authorization(self) -> None:
+        store = MemoryStore()
+        method = server_method()
+        intent = charge_intent(method)
+        intent._store = store
+        req = request(method)
+        credential = native_credential(req)
+        await intent.broadcast(credential, req)
+        # Settled claims block replays but expire after validBefore, so memory stays bounded.
+        assert len(store._data) == 1
+        (key,) = store._data
+        assert store._data[key] != "pending"
+        valid_before = int(credential.payload["validBefore"])
+        assert store._expiry_deadlines[key] == max(valid_before, int(time.time())) + 60
+        with pytest.raises(CredentialReplayedError):
+            await intent.broadcast(credential, req)
+
     async def test_full_fallback_cache_refuses_without_evicting_live_claims(self) -> None:
         from mpp.methods.evm.intents import _ClaimCache
 

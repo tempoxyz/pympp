@@ -511,8 +511,19 @@ class ChargeIntent:
         claim_key = self._claim_key(payload, request)
         if self._store is None:
             self._store = _fallback_store()
+        # An authorization can't settle after validBefore, so an explicit in-process
+        # MemoryStore keeps each claim only until then, as the fallback cache does.
+        memory = (
+            self._store
+            if isinstance(self._store, MemoryStore) and not isinstance(self._store, _ClaimCache)
+            else None
+        )
+        expires_at = max(int(payload["validBefore"]), int(time.time())) + 60
         try:
-            claimed = await self._store.put_if_absent(claim_key, "pending")
+            if memory is not None:
+                claimed = await memory.put_if_absent_until(claim_key, "pending", expires_at)
+            else:
+                claimed = await self._store.put_if_absent(claim_key, "pending")
         except _ClaimCacheFull as error:
             # Refuse without a new challenge rather than forget a live claim.
             raise InternalPaymentError() from error
@@ -528,7 +539,10 @@ class ChargeIntent:
             if self._store is not None:
                 await self._store.delete(claim_key)
             raise
-        if self._store is not None:
+        if memory is not None:
+            # compare_and_set keeps the claim's expiry; put would make it permanent.
+            await memory.compare_and_set(claim_key, "pending", reference)
+        elif self._store is not None:
             await self._store.put(claim_key, reference)
 
         return Receipt(
