@@ -324,6 +324,8 @@ def _assert_zone_parent_chain(parent_chain_id: int | None, chain_id: int) -> Non
 _ZONE_SUBMISSION_MARGIN = 15.0
 # Seconds to look for a withdrawal's receipt on the Zone after its send response fails.
 _ZONE_RECEIPT_RECOVERY_TIMEOUT = 15.0
+# Seconds the first receipt lookup may take even when the recovery budget is spent.
+_ZONE_RECEIPT_FIRST_LOOKUP = 0.5
 # Gas added to the Zone's estimate for the signature, as the Tempo transfer path does.
 _ZONE_GAS_MARGIN = 5_000
 
@@ -339,8 +341,18 @@ class _ZoneSend:
 
     sent: bool = False
     raw_tx: str | None = None
+    tx_hash: str | None = None
     wanted: Callable[[], bool] = lambda: True
     on_submission: Callable[[str], None] | None = None
+    # The Challenge the withdrawal pays and the Zone it leaves, so a newly issued
+    # Challenge for the same request resumes it instead of withdrawing again.
+    challenge: Challenge | None = None
+    zone_id: int | None = None
+    # Set once a caller gave up on it (settlement wait timed out, or the send's
+    # outcome is unknown): the withdrawal may still pay.
+    stalled: bool = False
+    # First Tempo block its settlement search covered, so later searches start there.
+    search_from: int | None = None
 
 
 @dataclass
@@ -860,6 +872,14 @@ class TempoMethod:
             )
 
         if self.zone is not None:
+            # A withdrawal for the same request that a caller gave up on may still
+            # pay: resume it with its own Challenge rather than withdraw again for
+            # this newly issued one.
+            stalled = self._stalled_zone_withdrawal(challenge)
+            if stalled is not None:
+                return await self._create_zone_credential(
+                    stalled[0], stalled[1], wanted=wanted, on_submission=on_submission
+                )
             zone_id = await self._zone_payment(challenge, expected_chain_id)
             if zone_id is not None:
                 # The settlement is read from this Tempo RPC, so confirm it serves the
@@ -1399,6 +1419,23 @@ class TempoMethod:
             return None
         return zone_id
 
+    def _stalled_zone_withdrawal(self, challenge: Challenge) -> tuple[Challenge, int] | None:
+        """Return the Challenge and Zone of a stalled withdrawal for the same request.
+
+        A retry of a request whose withdrawal did not settle in time gets a newly
+        issued Challenge; paying it would withdraw a second time.
+        """
+        request_key = _zone_request_key(challenge)
+        for _, state in self._zone_withdrawals.values():
+            if (
+                state.stalled
+                and state.challenge is not None
+                and state.zone_id is not None
+                and _zone_request_key(state.challenge) == request_key
+            ):
+                return state.challenge, state.zone_id
+        return None
+
     async def _create_zone_credential(
         self,
         challenge: Challenge,
@@ -1425,28 +1462,46 @@ class TempoMethod:
         key = _zone_withdrawal_key(challenge)
         existing = self._zone_withdrawals.get(key)
         if existing is None:
-            state = _ZoneSend(wanted=wanted, on_submission=on_submission)
+            state = _ZoneSend(
+                wanted=wanted, on_submission=on_submission, challenge=challenge, zone_id=zone_id
+            )
             new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
             self._zone_withdrawals[key] = (new_task, state)
 
             def finished(done: asyncio.Task[str]) -> None:
-                # Only a failure before the transaction was sent is safe to retry.
-                # After that, the withdrawal may have gone through, so retries of
-                # this challenge keep failing.
-                if done.cancelled() or (done.exception() is not None and not state.sent):
-                    entry = self._zone_withdrawals.get(key)
-                    if entry is not None and entry[0] is done:
-                        del self._zone_withdrawals[key]
+                # Only a failure before the transaction was sent is safe to retry,
+                # cancellation included. After that, the withdrawal may have gone
+                # through, so retries of this challenge keep failing.
+                if not (done.cancelled() or done.exception() is not None):
+                    return
+                if state.sent:
+                    state.stalled = True
+                    return
+                entry = self._zone_withdrawals.get(key)
+                if entry is not None and entry[0] is done:
+                    del self._zone_withdrawals[key]
 
             new_task.add_done_callback(finished)
             task = new_task
         else:
             task, state = existing
+            if task.cancelled():
+                # Cancelled after it was sent (it is forgotten otherwise): it may
+                # have paid, so report that rather than withdraw again.
+                raise PaymentOutcomeUnknownError(
+                    challenge,
+                    TransactionError("Zone withdrawal was cancelled after it was sent."),
+                    transaction_hash=state.tx_hash,
+                )
             # A retry resuming a sent withdrawal reports it, so cancelling the
             # retry's wait still names the transaction that paid.
             if state.raw_tx is not None and on_submission is not None:
                 on_submission(state.raw_tx)
         sender_tag = await asyncio.shield(task)
+
+        def searched_from(block: int) -> None:
+            if state.search_from is None:
+                state.search_from = block
 
         try:
             settlement = await _zones.wait_for_settlement(
@@ -1456,9 +1511,12 @@ class TempoMethod:
                 to=request["recipient"],
                 timeout=_zone_settlement_timeout(challenge.expires, zone.settlement_timeout),
                 first_scan_limit=_zone_time_left(challenge.expires),
+                from_block=state.search_from,
+                on_search_start=searched_from,
                 **self._rpc,
             )
         except Exception as cause:
+            state.stalled = True
             raise ZoneSettlementPendingError(
                 challenge_id=challenge.id,
                 sender_tag=sender_tag,
@@ -1477,6 +1535,16 @@ class TempoMethod:
                 sender_tag=sender_tag,
                 zone_id=zone_id,
                 challenge=challenge,
+            )
+        if _zone_challenge_expired(challenge.expires):
+            # Settled too late: the server rejects an expired Challenge's credential,
+            # and keeping the withdrawal would refuse this request forever.
+            if entry is not None and entry[0] is task:
+                del self._zone_withdrawals[key]
+            raise TransactionError(
+                f"Zone {zone_id} withdrawal {sender_tag} settled in "
+                f"{settlement.transaction_hash} after challenge {challenge.id!r} expired, "
+                "so its credential would be rejected."
             )
         # Forget the withdrawal only when a caller takes the credential: with every
         # caller gone, a retry must find it settled rather than withdraw again.
@@ -1607,6 +1675,7 @@ class TempoMethod:
             raise asyncio.CancelledError("Zone withdrawal cancelled before submission")
         state.sent = True
         state.raw_tx = raw_tx
+        state.tx_hash = tx_hash
         if state.on_submission is not None:
             state.on_submission(raw_tx)
         try:
@@ -1618,14 +1687,24 @@ class TempoMethod:
                 state.sent = False
                 state.raw_tx = None
                 raise TransactionError(f"Zone withdrawal submission failed: {cause}") from cause
-            receipt = await _recover_zone_receipt(rpc_url, tx_hash, rpc)
+            receipt = await _recover_zone_receipt(
+                rpc_url, tx_hash, rpc, time_left=_zone_time_left(challenge.expires)
+            )
             if receipt is None:
-                raise TransactionError(
-                    f"Zone withdrawal outcome is unknown: transaction {tx_hash} may have been "
-                    "sent. Retrying this challenge does not withdraw again."
+                raise PaymentOutcomeUnknownError(
+                    challenge,
+                    TransactionError(
+                        f"Zone withdrawal outcome is unknown: transaction {tx_hash} may have "
+                        "been sent. Retrying this challenge does not withdraw again."
+                    ),
+                    transaction_hash=tx_hash,
                 ) from cause
         if not is_dict(receipt):
-            raise TransactionError(f"Zone withdrawal transaction {tx_hash} returned no receipt.")
+            raise PaymentOutcomeUnknownError(
+                challenge,
+                TransactionError(f"Zone withdrawal transaction {tx_hash} returned no receipt."),
+                transaction_hash=tx_hash,
+            )
         receipt_hash = receipt.get("transactionHash")
         receipt_hash = receipt_hash if isinstance(receipt_hash, str) else tx_hash
         # A reverted withdrawal moved nothing, so the challenge may be retried.
@@ -1655,7 +1734,12 @@ class TempoMethod:
                 transaction_hash=receipt_hash,
                 fallback_nonce=int(fields[6]),
             )
-        raise TransactionError("Zone withdrawal request did not emit WithdrawalRequested.")
+        # It went through but its sender tag can't be read, so it may still pay.
+        raise PaymentOutcomeUnknownError(
+            challenge,
+            TransactionError("Zone withdrawal request did not emit WithdrawalRequested."),
+            transaction_hash=receipt_hash,
+        )
 
     def _encode_transfer(self, to: str, amount: int) -> str:
         """Encode a TIP-20 transfer call.
@@ -1698,6 +1782,20 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
             challenge.description,
             challenge.opaque,
         ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _zone_challenge_expired(expires: str | None) -> bool:
+    """Whether a Challenge with an expiry has reached it."""
+    return _zone_time_left(expires) == 0
+
+
+def _zone_request_key(challenge: Challenge) -> str:
+    """Key what a Challenge asks to be paid for, leaving out what each issuance varies."""
+    return json.dumps(
+        [challenge.realm, challenge.method, challenge.intent, challenge.request, challenge.digest],
         sort_keys=True,
         default=str,
     )
@@ -1777,13 +1875,30 @@ def _zone_submission_failed(error: Exception) -> bool:
 
 
 async def _recover_zone_receipt(
-    rpc_url: str, tx_hash: str, rpc: dict[str, Any]
+    rpc_url: str, tx_hash: str, rpc: dict[str, Any], *, time_left: float | None = None
 ) -> dict[str, Any] | None:
-    """Look for a Zone withdrawal's receipt after its send response failed."""
-    deadline = time.monotonic() + _ZONE_RECEIPT_RECOVERY_TIMEOUT
+    """Look for a Zone withdrawal's receipt after its send response failed.
+
+    Every request is bounded by what is left of the recovery window, cut short at
+    ``time_left`` (the Challenge's remaining lifetime), so a slow Zone RPC can't
+    stretch recovery past either.
+    """
+    budget = _ZONE_RECEIPT_RECOVERY_TIMEOUT
+    if time_left is not None:
+        budget = min(budget, time_left)
+    deadline = time.monotonic() + budget
+    first = True
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 and not first:
+            return None
+        # The first lookup always runs, briefly bounded even with no time left.
+        timeout = max(remaining, _ZONE_RECEIPT_FIRST_LOOKUP) if first else remaining
+        first = False
         try:
-            receipt = await _rpc_call(rpc_url, "eth_getTransactionReceipt", [tx_hash], **rpc)
+            receipt = await asyncio.wait_for(
+                _rpc_call(rpc_url, "eth_getTransactionReceipt", [tx_hash], **rpc), timeout
+            )
         except Exception:
             receipt = None
         if is_dict(receipt):

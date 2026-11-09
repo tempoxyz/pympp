@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -258,9 +258,14 @@ def _topic_address(topic: str) -> str:
 def find_processed_event(
     logs: Iterable[Any], *, portal: str, sender_tag: str
 ) -> ProcessedEvent | None:
-    """Return the ``WithdrawalProcessed`` event a portal emitted for a sender tag."""
+    """Return the ``WithdrawalProcessed`` event a portal emitted for a sender tag.
+
+    ``None`` when there is none, or more than one: the sender tag must name one
+    withdrawal.
+    """
     from eth_abi.abi import decode
 
+    found: ProcessedEvent | None = None
     for log in logs:
         if not is_dict(log) or not _same(log.get("address"), portal):
             continue
@@ -277,14 +282,16 @@ def find_processed_event(
             token, amount, callback_success = decode(["address", "uint128", "bool"], _bytes(data))
         except Exception:
             continue
-        return ProcessedEvent(
+        if found is not None:
+            return None
+        found = ProcessedEvent(
             to=_topic_address(to_topic),
             sender_tag=sender_tag.lower(),
             token=str(token).lower(),
             amount=int(amount),
             callback_success=bool(callback_success),
         )
-    return None
+    return found
 
 
 def find_withdrawal(
@@ -294,10 +301,13 @@ def find_withdrawal(
 
     ``calls`` are ``(to, data)`` pairs, ``data`` hex with or without its ``0x``
     prefix. Only top-level ``processWithdrawals`` calls to the portal count.
+    ``None`` when there is none, or more than one: the sender tag must name one
+    withdrawal.
     """
     from eth_abi.abi import decode
 
     tag = sender_tag.lower()
+    found: Withdrawal | None = None
     for to, data in calls:
         hex_data = data.removeprefix("0x").lower()
         if not _same(to, portal) or not hex_data.startswith(PROCESS_WITHDRAWALS_SELECTOR):
@@ -312,7 +322,9 @@ def find_withdrawal(
             token, item_tag, recipient, amount, memo, gas_limit, nonce, callback, encrypted = item
             if "0x" + item_tag.hex() != tag:
                 continue
-            return Withdrawal(
+            if found is not None:
+                return None
+            found = Withdrawal(
                 token=str(token).lower(),
                 sender_tag=tag,
                 to=str(recipient).lower(),
@@ -323,7 +335,7 @@ def find_withdrawal(
                 callback_data="0x" + callback.hex(),
                 encrypted_sender="0x" + encrypted.hex(),
             )
-    return None
+    return found
 
 
 async def wait_for_settlement(
@@ -334,6 +346,8 @@ async def wait_for_settlement(
     to: str | None = None,
     timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
     first_scan_limit: float | None = None,
+    from_block: int | None = None,
+    on_search_start: Callable[[int], None] | None = None,
     client: Any | None = None,
 ) -> Settlement:
     """Wait until a portal emits ``WithdrawalProcessed`` for a sender tag on Tempo.
@@ -345,6 +359,10 @@ async def wait_for_settlement(
     is always found, but never more than ``first_scan_limit`` seconds, such as
     the time left before the Challenge expires. Later requests get only what is
     left of ``timeout``, so a slow RPC cannot stretch the wait past it.
+
+    ``from_block`` starts the first search there instead (in ``LOOKBACK_BLOCKS``
+    pages), so a retry still finds a withdrawal that settled longer ago than the
+    lookback window; ``on_search_start`` receives the first search's start block.
 
     Returns:
         The Tempo transaction that processed the withdrawal, with the event's
@@ -403,10 +421,15 @@ async def wait_for_settlement(
         return int(await call("eth_blockNumber", []), 16)
 
     latest = await block_number()
-    # Scan the lookback window once, then only blocks added since the previous poll.
-    from_block = max(latest - LOOKBACK_BLOCKS, 0)
+    # Scan the lookback window (or from ``from_block``) once, then only blocks added
+    # since the previous poll.
+    start = max(latest - LOOKBACK_BLOCKS, 0) if from_block is None else max(from_block, 0)
+    if on_search_start is not None:
+        on_search_start(start)
+    from_block = start
     while True:
-        if from_block <= latest:
+        while from_block <= latest:
+            to_block = min(latest, from_block + LOOKBACK_BLOCKS)
             logs = await call(
                 "eth_getLogs",
                 [
@@ -414,7 +437,7 @@ async def wait_for_settlement(
                         "address": portal,
                         "topics": topics,
                         "fromBlock": hex(from_block),
-                        "toBlock": hex(latest),
+                        "toBlock": hex(to_block),
                     }
                 ],
             )
@@ -423,7 +446,7 @@ async def wait_for_settlement(
                 callback_success = _callback_success(log.get("data")) if is_dict(log) else None
                 if isinstance(tx_hash, str) and callback_success is not None:
                     return Settlement(tx_hash, callback_success)
-            from_block = latest + 1
+            from_block = to_block + 1
         first_scan = False
         if time.monotonic() + POLLING_INTERVAL > deadline:
             raise timed_out()

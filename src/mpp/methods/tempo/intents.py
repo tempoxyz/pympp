@@ -1074,6 +1074,10 @@ class ChargeIntent:
                 raise VerificationError(
                     "Transaction credentials are not supported for this challenge."
                 )
+        # A Zone withdrawal's sender is encrypted, so nothing binds a claimed payer
+        # identity to it: refuse one rather than pass it on unverified.
+        if isinstance(payload, ZoneCredentialPayload) and credential.source:
+            raise VerificationError("Zone credentials must not include a source.")
 
         return req, payload
 
@@ -1392,9 +1396,20 @@ class ChargeIntent:
             or withdrawal.gas_limit != 0
             or withdrawal.to != request.recipient.lower()
             or withdrawal.token != request.currency.lower()
-            or str(withdrawal.amount) != request.amount
+            # Numeric, as hash verification compares amounts: "01" pays 1.
+            or withdrawal.amount != int(request.amount)
         ):
             raise VerificationError("Payment verification failed: Zone withdrawal not found.")
+        # The sender tag doesn't commit to what was paid, so the settled event must
+        # describe this very withdrawal.
+        if (
+            event.to != withdrawal.to
+            or event.token != withdrawal.token
+            or event.amount != withdrawal.amount
+        ):
+            raise VerificationError(
+                "Payment verification failed: Zone settlement does not match the withdrawal."
+            )
         self._assert_challenge_bound_memo(
             [MatchedTransferLog(kind="memo", memo=withdrawal.memo)],
             challenge_id=challenge_id,

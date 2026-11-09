@@ -726,11 +726,13 @@ class TestClientZoneWithdrawalFailures:
         method = payer_method(failing_zone(calls, "send"))
         issued = await zone_challenge([3])
         error = await error_of(method.create_credential(issued))
-        assert "Zone withdrawal outcome is unknown: transaction 0x" in str(error)
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert "Zone withdrawal outcome is unknown: transaction 0x" in str(error.cause)
+        assert error.transaction_hash is not None
         assert "eth_sendRawTransactionSync" in calls
         assert "eth_getTransactionReceipt" in calls
         sent = len(calls)
-        with pytest.raises(tempo_client.TransactionError, match="outcome is unknown"):
+        with pytest.raises(PaymentOutcomeUnknownError):
             await method.create_credential(issued)
         assert len(calls) == sent
 
@@ -1092,7 +1094,7 @@ class TestClientZoneSubmissionFailures:
         method = payer_method(preparing_zone(calls, send))
         issued = await zone_challenge([3])
         for _ in range(2):
-            with pytest.raises(tempo_client.TransactionError, match="outcome is unknown"):
+            with pytest.raises(PaymentOutcomeUnknownError):
                 await method.create_credential(issued)
         assert calls.count("eth_sendRawTransactionSync") == 1
 
@@ -1526,15 +1528,18 @@ class TestClientZoneCoverage:
         bad = {**requested_log(PAYER.address, 9, "0x" + "00" * 32), "data": "0x1234"}
         zone = scripted_zone([], eth_sendRawTransactionSync=sent_receipt(["junk", bad]))
         method = payer_method(zone)
-        with pytest.raises(tempo_client.TransactionError, match="did not emit"):
-            await method.create_credential(await zone_challenge([3]))
+        error = await error_of(method.create_credential(await zone_challenge([3])))
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert "did not emit" in str(error.cause)
+        assert error.transaction_hash == "0x" + "cd" * 32
 
     @pytest.mark.asyncio
     async def test_fails_when_the_send_returns_no_receipt(self) -> None:
         zone = scripted_zone([], eth_sendRawTransactionSync=None)
         method = payer_method(zone)
-        with pytest.raises(tempo_client.TransactionError, match="returned no receipt"):
-            await method.create_credential(await zone_challenge([3]))
+        error = await error_of(method.create_credential(await zone_challenge([3])))
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert "returned no receipt" in str(error.cause)
 
     @pytest.mark.asyncio
     async def test_a_bounced_withdrawal_raises_and_paying_again_withdraws_again(self) -> None:
@@ -1720,3 +1725,205 @@ class TestServerZoneCoverage:
         intent = zone_intent(lambda: fixture, eth_getTransactionByHash=RuntimeError("down"))
         with pytest.raises(InternalPaymentError):
             await intent.verify(zone_credential(issued, TAG_A), issued.request)
+
+
+def stalling_l1(settled: Callable[[], bool], queries: list[dict[str, Any]] | None = None):
+    """Tempo RPC whose portal logs show the withdrawal settled once settled() is true."""
+
+    def tempo_l1(method: str, params: list[Any]) -> Any:
+        if method == "eth_chainId":
+            return hex(MODERATO)
+        if method == "eth_blockNumber":
+            return "0x20"
+        if method == "eth_getLogs":
+            if queries is not None:
+                queries.append(params[0])
+            tag = params[0]["topics"][2]
+            return [processed_log(sender_tag=tag)] if settled() else []
+        raise AssertionError(method)
+
+    return rpc_client(tempo_l1)
+
+
+class TestClientZoneStalledWithdrawals:
+    """A withdrawal a caller gave up on may still pay, so it is never sent twice."""
+
+    @pytest.mark.asyncio
+    async def test_a_new_challenge_for_the_same_request_resumes_the_withdrawal(self) -> None:
+        settled = False
+        calls: list[str] = []
+        queries: list[dict[str, Any]] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled, queries))
+        server = setup()
+        first, _ = await issue(server)
+        pending = await error_of(method.create_credential(first))
+        assert isinstance(pending, ZoneSettlementPendingError)
+
+        # A plain HTTP retry gets a newly issued Challenge for the same request.
+        second, _ = await issue(server)
+        assert second.id != first.id
+        again = await error_of(method.create_credential(second))
+        assert isinstance(again, ZoneSettlementPendingError)
+        assert again.challenge is first
+
+        settled = True
+        credential = await method.create_credential(second)
+        assert credential.challenge.id == first.id
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # Every search after the first starts where the first one did.
+        assert {query["fromBlock"] for query in queries} == {hex(0)}
+
+    @pytest.mark.asyncio
+    async def test_a_withdrawal_that_settled_after_its_challenge_expired_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settled = False
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
+        with pytest.raises(tempo_client.TransactionError, match="after challenge .* expired"):
+            await method.create_credential(issued)
+        assert method._zone_withdrawals == {}  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio
+    async def test_a_withdrawal_cancelled_after_it_was_sent_is_not_sent_again(self) -> None:
+        calls: list[str] = []
+        sending = asyncio.Event()
+
+        async def send() -> dict[str, Any]:
+            sending.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        method = payer_method(preparing_zone(calls, send))
+        issued = await zone_challenge([3])
+        caller = asyncio.ensure_future(method.create_credential(issued))
+        await sending.wait()
+        # Cancel the shared withdrawal itself, as asyncio.run() does at shutdown.
+        ((task, _),) = method._zone_withdrawals.values()  # pyright: ignore[reportPrivateUsage]
+        task.cancel()
+        await error_of(caller)
+        error = await error_of(method.create_credential(issued))
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert error.transaction_hash is not None
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_receipt_recovery_stops_at_the_challenge_expiry(self) -> None:
+        async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+            await asyncio.sleep(5)
+            return {"result": None}
+
+        started = asyncio.get_running_loop().time()
+        receipt = await tempo_client._recover_zone_receipt(  # pyright: ignore[reportPrivateUsage]
+            "https://zone.test",
+            "0x" + "cd" * 32,
+            {"client": zone_rpc_client(handle)},
+            time_left=0.05,
+        )
+        assert receipt is None
+        assert asyncio.get_running_loop().time() - started < 1
+
+
+class TestWaitForSettlementFromBlock:
+    @pytest.mark.asyncio
+    async def test_pages_from_the_given_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(zone_lib, "LOOKBACK_BLOCKS", 10)
+        ranges: list[tuple[int, int]] = []
+        starts: list[int] = []
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_blockNumber":
+                return hex(30)
+            if method == "eth_getLogs":
+                query = params[0]
+                ranges.append((int(query["fromBlock"], 16), int(query["toBlock"], 16)))
+                if int(query["toBlock"], 16) == 30:
+                    return [processed_log(sender_tag=TAG_A)]
+                return []
+            raise AssertionError(method)
+
+        settlement = await zone_lib.wait_for_settlement(
+            "https://tempo.test",
+            portal=PORTAL,
+            sender_tag=TAG_A,
+            timeout=0,
+            from_block=0,
+            on_search_start=starts.append,
+            client=rpc_client(tempo_l1),
+        )
+        assert settlement.transaction_hash == SETTLEMENT_HASH
+        assert ranges == [(0, 10), (11, 21), (22, 30)]
+        assert starts == [0]
+
+
+class TestServerZoneBinding:
+    @pytest.mark.asyncio
+    async def test_rejects_a_sender_tag_naming_two_withdrawals(self) -> None:
+        fixture: list[Fixture] = []
+        server = setup(lambda: fixture)
+        issued, memo = await issue(server)
+        fixture[:] = [Fixture(TAG_A, memo), Fixture(TAG_A, memo, to=OTHER, event_address=OTHER)]
+        with pytest.raises(VerificationError, match="Zone withdrawal not found"):
+            await server.broadcast_credential(zone_credential(issued, TAG_A))
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_settled_event_for_another_withdrawal(self) -> None:
+        fixture: list[Fixture] = []
+        server = setup(lambda: fixture)
+        issued, memo = await issue(server)
+        fixture[:] = [
+            Fixture(TAG_A, memo, amount=5, in_calldata=False),
+            Fixture(TAG_A, memo, event_address=OTHER),
+        ]
+        with pytest.raises(VerificationError, match="does not match the withdrawal"):
+            await server.broadcast_credential(zone_credential(issued, TAG_A))
+
+    @pytest.mark.asyncio
+    async def test_compares_amounts_numerically(self) -> None:
+        fixture: list[Fixture] = []
+        issued, memo = await issue(setup(lambda: fixture))
+        fixture[:] = [Fixture(TAG_A, memo)]
+        intent = zone_intent(lambda: fixture)
+        request = {**issued.request, "amount": "0" + issued.request["amount"]}
+        receipt = await intent.verify(zone_credential(issued, TAG_A), request)
+        assert receipt.reference == SETTLEMENT_HASH
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_zone_credential_claiming_a_source(self) -> None:
+        fixture: list[Fixture] = []
+        server = setup(lambda: fixture)
+        issued, memo = await issue(server)
+        fixture[:] = [Fixture(TAG_A, memo)]
+        credential = replace(
+            zone_credential(issued, TAG_A), source=f"did:pkh:eip155:{MODERATO}:{OTHER}"
+        )
+        with pytest.raises(VerificationError, match="must not include a source"):
+            await server.broadcast_credential(credential)
+
+
+class TestZoneRecordingIdempotency:
+    def test_keys_zone_recordings_by_sender_tag(self) -> None:
+        from mpp.methods.stripe.crypto_payment_recorder import (
+            _idempotency_key,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        issued = Challenge(id="c", method="tempo", intent="charge", request={}, realm=REALM)
+        zone = zone_credential(issued, TAG_A)
+        hash_credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": SETTLEMENT_HASH}
+        )
+        assert _idempotency_key(SETTLEMENT_HASH, zone) == f"{SETTLEMENT_HASH}:{TAG_A}"
+        assert _idempotency_key(SETTLEMENT_HASH, hash_credential) == SETTLEMENT_HASH
+        assert _idempotency_key(SETTLEMENT_HASH, None) == SETTLEMENT_HASH
