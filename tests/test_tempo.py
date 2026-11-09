@@ -8697,6 +8697,16 @@ class TestTransactionCredentialPayer:
         assert _pull_transaction_hash(raw_tx) is None
         assert _sender_recovered(raw_tx) is False
 
+    def test_canonical_signature_normalizes_65_byte_signature_with_wrapper_lead_byte(self) -> None:
+        from mpp.methods.tempo.intents import _canonical_signature
+
+        for lead in (0x03, 0x04):
+            signature = bytes([lead]) + bytes(63) + bytes([1])
+            expected = bytes([lead]) + bytes(63) + bytes([28])
+            assert _canonical_signature(signature) == expected
+            wrapper = bytes([0x03]) + bytes(20)
+            assert _canonical_signature(wrapper + signature) == wrapper + expected
+
     def test_canonical_signature_survives_deep_keychain_nesting(self) -> None:
         from mpp.methods.tempo.intents import _canonical_signature
 

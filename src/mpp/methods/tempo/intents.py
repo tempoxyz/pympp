@@ -191,7 +191,11 @@ def _canonical_signature(signature: bytes) -> bytes:
     """Encode secp256k1 recovery IDs as 27/28, including inside keychain signatures."""
     # Iterative: a client controls the nesting depth of keychain wrappers.
     prefixes: list[bytes] = []
-    while len(signature) > 21 and signature[0] in (0x03, 0x04):
+    while (
+        not (len(signature) == 65 and signature[64] in (0, 1))
+        and len(signature) > 21
+        and signature[0] in (0x03, 0x04)
+    ):
         prefixes.append(signature[:21])
         signature = signature[21:]
     if len(signature) == 65 and signature[64] in (0, 1):
