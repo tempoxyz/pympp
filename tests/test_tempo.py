@@ -8690,6 +8690,13 @@ class TestTransactionCredentialPayer:
             assert details["transaction_hash"] == expected
         assert details["valid_before"] is None
 
+    @pytest.mark.parametrize("raw_tx", ["0x76zz", "0x1234", "0x76", "0x76ff"])
+    def test_settlement_helpers_reject_malformed_transactions(self, raw_tx: str) -> None:
+        from mpp.methods.tempo.intents import _pull_transaction_hash, _sender_recovered
+
+        assert _pull_transaction_hash(raw_tx) is None
+        assert _sender_recovered(raw_tx) is False
+
     @pytest.mark.asyncio
     async def test_validate_reports_valid_before(self) -> None:
         raw_tx = "0x" + self._tx(valid_before=1_900_000_000).sign(TEST_PRIVATE_KEY).encode().hex()

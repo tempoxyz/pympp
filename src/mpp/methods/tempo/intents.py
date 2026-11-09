@@ -224,24 +224,27 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
 
 
+def _signed_transaction(raw_tx: str) -> tuple[list[Any], bytes, bytes] | None:
+    """Decode a hex signed Tempo transaction, or None when it is not one."""
+    try:
+        raw = bytes.fromhex(_strip_0x(raw_tx))
+    except ValueError:
+        return None
+    return _decode_signed_transaction(raw)
+
+
 def _pull_transaction_hash(raw_tx: str) -> str | None:
     """The hash the chain records for an unsponsored signed 0x76 transaction, else None."""
-    if _strip_0x(raw_tx)[:2] != "76":
+    if _strip_0x(raw_tx)[:2] != "76" or _signed_transaction(raw_tx) is None:
         return None
-    try:
-        return _raw_transaction_hash(_canonical_raw_transaction(raw_tx)).lower()
-    except VerificationError:
-        return None
+    return _raw_transaction_hash(_canonical_raw_transaction(raw_tx)).lower()
 
 
 def _sender_recovered(raw_tx: str) -> bool:
     """Whether a signed transaction's sender signature is a 65-byte secp256k1 signature,
     the one kind recovered before broadcast. Keychain, multisig, P256 and WebAuthn
     signatures name their account, which the chain authenticates at settlement."""
-    try:
-        decoded = _decode_signed_transaction(bytes.fromhex(_strip_0x(raw_tx)))
-    except ValueError:
-        return False
+    decoded = _signed_transaction(raw_tx)
     return decoded is not None and len(decoded[1]) == 65
 
 
