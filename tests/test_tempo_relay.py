@@ -511,3 +511,20 @@ async def test_relay_receipt_preserves_funding_currency() -> None:
         )
 
     assert result.funding_currency == token
+
+
+@pytest.mark.asyncio
+async def test_relay_needs_no_local_store_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relay owns replay protection, so production starts without a local store."""
+
+    monkeypatch.setenv("VERCEL", "1")
+    async with mock_relay(lambda request: response({"success": True})) as relay:
+        mpp = Mpp(
+            methods=tempo_server.charge(
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                relay=relay,
+                rpc_url="https://rpc.test",
+            ),
+            secret_key="test-secret",
+        )
+    assert all(m.has_store is None or m.has_store() for m in mpp.methods)

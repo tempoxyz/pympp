@@ -132,3 +132,21 @@ def test_production_accepts_an_explicit_memory_store(
     else:
         mpp = Mpp(methods=METHODS[method](), secret_key=SECRET, store=MemoryStore())
     assert all(m.has_store is None or m.has_store() for m in mpp.methods)
+
+
+@pytest.mark.asyncio
+async def test_production_refuses_a_direct_intent_before_challenging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A direct intent without a store refuses before a payer can pay, not at verification."""
+    from mpp.server.verify import verify_or_challenge
+
+    monkeypatch.setenv("K_SERVICE", "api")
+    with pytest.raises(RuntimeError, match=r"tempo.charge has no store configured.*\(K_SERVICE\)"):
+        await verify_or_challenge(
+            authorization=None,
+            intent=tempo_intents.ChargeIntent(rpc_url="https://rpc.test"),
+            request={"amount": "1000", "currency": RECIPIENT, "recipient": RECIPIENT},
+            realm="api.example.com",
+            secret_key=SECRET,
+        )

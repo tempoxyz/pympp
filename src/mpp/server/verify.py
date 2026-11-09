@@ -20,6 +20,7 @@ from mpp import (
     generate_challenge_id,
 )
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
 from mpp._validation import Validation
@@ -149,6 +150,14 @@ async def verify_or_challenge(
     """
     method_name = method or "tempo"
     request = transform_units(request)
+
+    # A direct intent left to fall back to an in-memory replay store would only fail
+    # once a Credential arrives, after a payer may have paid on-chain. Refuse before
+    # issuing any Challenge instead. Relay-backed intents have no local store.
+    if getattr(intent, "_store", True) is None:
+        check_fallback_allowed(
+            f"{method_name}.{intent.name}", f"{type(intent).__name__}(store=...)"
+        )
 
     async def new_challenge() -> Challenge:
         challenge = _create_challenge(

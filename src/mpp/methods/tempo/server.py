@@ -190,7 +190,8 @@ def charge(
             on_payment_success=on_payment_success,
             defaults={"currency": accepted},
             use_store=use_store,
-            has_store=lambda: intent._store is not None,
+            # The relay consumes credentials itself, so it needs no local replay store.
+            has_store=lambda: relay is not None or intent._store is not None,
         )
         for accepted in config.currencies
     ]
