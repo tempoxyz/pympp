@@ -22,6 +22,7 @@ from eth_abi.exceptions import DecodingError
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_PAID_RETRY_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._validation import Validation
 from mpp.errors import (
@@ -66,8 +67,14 @@ def _fallback_store(method: str) -> MemoryStore:
     """Create the in-memory replay store used when *method* has no store configured.
 
     Replay protection backed by this store only covers the current process, so this
-    logs a warning once per *method* per process.
+    logs a warning once per *method* per process, and raises in production or on a
+    multi-instance platform.
+
+    Raises:
+        RuntimeError: If the runtime looks like production (see
+            :func:`mpp._replay_store.production_runtime`).
     """
+    check_fallback_allowed(method, f"{method}(store=...) or Mpp(store=...)")
     if method not in _warned_fallback_stores:
         _warned_fallback_stores.add(method)
         logger.warning(

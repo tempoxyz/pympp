@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
 from mpp._validation import Validation
 from mpp.errors import (
@@ -196,7 +197,10 @@ class Mpp:
             realm: Server realm. Auto-detected from the environment if omitted.
             secret_key: HMAC secret. Required unless ``MPP_SECRET_KEY`` is set.
             store: Replay store shared by every method configured without its own, such
-                as a Tempo or EVM charge built without ``store=``.
+                as a Tempo or EVM charge built without ``store=``. Without either, such a
+                method falls back to an in-memory store, logging a warning; in production
+                or on a multi-instance platform this raises instead. Pass
+                ``MemoryStore()`` to accept instance-local replay protection there.
             requires_auth: Read Payment credentials from ``Payment-Authorization`` so
                 ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
@@ -206,6 +210,9 @@ class Mpp:
                 values and an :class:`~mpp.server.OfferSelectionContext`. It returns a
                 non-empty, ordered subset of them. Credentials addressing an offer
                 bypass it; x402 payments must pay a selected offer.
+
+        Raises:
+            RuntimeError: If a method has no store in a production runtime.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
@@ -215,6 +222,10 @@ class Mpp:
             for method in self.methods:
                 if method.use_store is not None:
                     method.use_store(store)
+        for method in self.methods:
+            if method._has_store is not None and not method._has_store():
+                name = method.key.replace("/", ".")
+                check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges

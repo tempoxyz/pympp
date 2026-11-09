@@ -87,3 +87,26 @@ async def test_settled_evm_claim_keeps_its_own_expiry():
     with patch("time.time", return_value=1160):
         assert await cache.put_if_absent("new", "pending")
         assert await cache.get("claim") is None
+
+
+async def test_memory_store_prunes_only_expired_keys():
+    store = MemoryStore()
+    with patch("time.time", return_value=1000):
+        for i in range(100):
+            await store.put_if_absent_until(f"live-{i}", "v", 2000)
+        await store.put_if_absent_until("expiring", "v", 1100)
+        await store.put_if_absent_until("deleted", "v", 1100)
+        await store.delete("deleted")
+        await store.put_if_absent_until("deleted", "again", 1500)
+        await store.put_if_absent_until("made-permanent", "v", 1100)
+        await store.put("made-permanent", "receipt")
+    with patch("time.time", return_value=1100):
+        assert await store.get("expiring") is None
+        # Stale heap entries don't evict a key written again or made permanent.
+        assert await store.get("deleted") == "again"
+        assert await store.get("made-permanent") == "receipt"
+        assert len(store._expiry_heap) == 101
+    with patch("time.time", return_value=2000):
+        assert await store.get("live-0") is None
+        assert await store.get("made-permanent") == "receipt"
+        assert store._expiry_heap == []

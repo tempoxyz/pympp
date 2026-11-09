@@ -153,6 +153,11 @@ class ServerMethod:
     defaults: Mapping[str, Any] | None = None
     x402: X402Intent | None = None
     use_store: Callable[[Store], None] | None = None
+    # Internal: reports whether the method has a replay store, its own or one adopted
+    # through `use_store`. `Mpp` raises at construction in production or on a
+    # multi-instance platform when it returns False, rather than let the method fall back
+    # to an in-memory store.
+    _has_store: Callable[[], bool] | None = None
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None

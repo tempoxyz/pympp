@@ -97,7 +97,9 @@ def charge(
             process sharing it (default: ``SponsorBudget()`` on ``store``).
             Pass ``False`` only when it is enforced elsewhere.
         store: Replay store for transaction hashes. Use a shared store across
-            replicas; defaults to a per-process in-memory store.
+            replicas; defaults to the ``Mpp(store=...)`` store, or else a per-process
+            in-memory store, which raises in production or on a multi-instance platform.
+            Pass ``MemoryStore()`` to accept instance-local replay protection there.
         validate_sender: Authorizes a hash-credential sender that differs from
             the credential source.
         http_client: HTTP client for RPC calls, owned by the caller.
@@ -188,6 +190,8 @@ def charge(
             on_payment_success=on_payment_success,
             defaults={"currency": accepted},
             use_store=use_store,
+            # The relay consumes credentials itself, so it needs no local replay store.
+            _has_store=lambda: relay is not None or intent._store is not None,
         )
         for accepted in config.currencies
     ]
