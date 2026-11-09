@@ -131,7 +131,7 @@ def test_production_accepts_an_explicit_memory_store(
         mpp = Mpp(methods=METHODS[method](store=MemoryStore()), secret_key=SECRET)
     else:
         mpp = Mpp(methods=METHODS[method](), secret_key=SECRET, store=MemoryStore())
-    assert all(m.has_store is None or m.has_store() for m in mpp.methods)
+    assert all(m._has_store is None or m._has_store() for m in mpp.methods)
 
 
 @pytest.mark.asyncio

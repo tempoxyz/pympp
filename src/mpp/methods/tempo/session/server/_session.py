@@ -614,7 +614,7 @@ def session(
         defaults=defaults,
         respond=respond,
         use_store=use_store,
-        has_store=lambda: bool(channel_stores),
+        _has_store=lambda: bool(channel_stores),
         stable_binding=_reusable_binding if reusable_challenges else _snapshot_free_binding,
         preflight=preflight if bootstrap else None,
         # Accounting and respond classify a POST as content by its body (mppx: request.body

@@ -222,7 +222,7 @@ class Mpp:
                 if method.use_store is not None:
                     method.use_store(store)
         for method in self.methods:
-            if method.has_store is not None and not method.has_store():
+            if method._has_store is not None and not method._has_store():
                 name = method.key.replace("/", ".")
                 check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm

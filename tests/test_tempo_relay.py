@@ -527,4 +527,4 @@ async def test_relay_needs_no_local_store_in_production(monkeypatch: pytest.Monk
             ),
             secret_key="test-secret",
         )
-    assert all(m.has_store is None or m.has_store() for m in mpp.methods)
+    assert all(m._has_store is None or m._has_store() for m in mpp.methods)

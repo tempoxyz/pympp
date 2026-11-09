@@ -125,7 +125,7 @@ def charge(
         on_payment_success=on_payment_success,
         x402=intent,
         use_store=use_store,
-        has_store=lambda: intent._store is not None,
+        _has_store=lambda: intent._store is not None,
     )
 
 

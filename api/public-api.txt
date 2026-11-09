@@ -1421,7 +1421,6 @@ module mpp.server.method
         field kw_only defaults: Mapping[str, Any] | None = None
         field kw_only x402: X402Intent | None = None
         field kw_only use_store: Callable[[Store], None] | None = None
-        field kw_only has_store: Callable[[], bool] | None = None
         field kw_only credential_options: tuple[str, ...] = ()
         field kw_only needs_request_body: bool = False
         field kw_only respond: RespondFn | None = None
