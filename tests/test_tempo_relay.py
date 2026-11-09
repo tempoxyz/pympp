@@ -158,6 +158,35 @@ async def test_relay_validate_posts_to_validate_endpoint() -> None:
 
     assert paths == ["/v1/mpp/validate"]
     assert validation.request == {"amount": "1000"}
+    assert validation.payer is None
+    assert validation.details == {
+        "mode": "pull",
+        "payer_verified": False,
+        "serialized_transaction": "0x1234",
+        "transaction_hash": None,
+        "valid_before": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "details"),
+    [
+        (
+            {"type": "hash", "hash": "0xABC"},
+            {"mode": "push", "payer_verified": False, "transaction_hash": "0xabc"},
+        ),
+        ({"type": "proof", "signature": "0x12"}, {"mode": "proof", "payer_verified": False}),
+        ({"type": "other"}, {"payer_verified": False}),
+    ],
+)
+async def test_relay_validate_reports_payload_details(payload: dict, details: dict) -> None:
+    async with mock_relay(lambda _: response({"success": True})) as relay:
+        validation = await relay.configure(ChargeIntent()).validate(  # type: ignore[attr-defined]
+            credential(payload), {"amount": "1000"}
+        )
+
+    assert validation.details == details
 
 
 @pytest.mark.asyncio
