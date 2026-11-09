@@ -5,6 +5,7 @@ Ports mppx server/SponsorshipLimit.test.ts, plus the limit applied through tempo
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -364,17 +365,40 @@ class TestReserve:
 class TestLimitFeePayer:
     async def test_stops_sponsoring_a_payer_that_used_its_daily_opens(self) -> None:
         limit = SponsorshipLimit(store=MemoryStore(), per_day=2)
-        payload = open_payload("0x" + unsigned().sign(PAYER_KEY).encode().hex())
 
-        async def limit_fee_payer() -> Any:
+        async def limit_fee_payer(nonce: int) -> Any:
+            payload = open_payload("0x" + unsigned(nonce=nonce).sign(PAYER_KEY).encode().hex())
             sponsor, _ = await limits.limit_fee_payer(
                 chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
             )
             return sponsor
 
-        assert await limit_fee_payer() is SPONSOR
-        assert await limit_fee_payer() is SPONSOR
-        assert await limit_fee_payer() is None
+        assert await limit_fee_payer(0) is SPONSOR
+        assert await limit_fee_payer(1) is SPONSOR
+        assert await limit_fee_payer(2) is None
+
+    @pytest.mark.parametrize("exposures", [(False, True), (True, False), (False, False)])
+    async def test_concurrent_retries_share_one_slot(self, exposures: tuple[bool, bool]) -> None:
+        usage = MemoryStore()
+        limit = SponsorshipLimit(store=usage, per_day=1)
+        payload = open_payload("0x" + unsigned().sign(PAYER_KEY).encode().hex())
+        first, second = await asyncio.gather(
+            *[
+                limits.limit_fee_payer(
+                    chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
+                )
+                for _ in range(2)
+            ]
+        )
+        assert first[0] is SPONSOR and second[0] is SPONSOR
+        assert first[1] is not None and second[1] is not None
+        await first[1](exposures[0])
+        await second[1](exposures[1])
+        await second[1](False)  # Finishing the same attempt twice cannot release another slot.
+        record = json.loads(
+            await read(usage, f"mppx:session:sponsorship:4217:{PAYER.address.lower()}")
+        )
+        assert record["open"] == int(any(exposures))
 
     async def test_a_released_slot_can_be_used_again(self) -> None:
         limit = SponsorshipLimit(store=MemoryStore(), per_day=1)
@@ -383,8 +407,8 @@ class TestLimitFeePayer:
             chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
         )
         assert sponsor is SPONSOR and undo is not None
-        await undo()
-        await undo()  # Never goes below zero.
+        await undo(False)
+        await undo(False)  # Never goes below zero.
         again, _ = await limits.limit_fee_payer(
             chain_id=4217, fee_payer=SPONSOR, limit=limit, payload=payload
         )
@@ -527,11 +551,12 @@ async def test_signed_preflight_failure_keeps_daily_slot():
         return life.rpc._call(params)
 
     life.rpc.overrides["eth_call"] = simulate
-    result = await handler(
-        Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
-    )
-    assert isinstance(result, PaymentRequired)
-    assert len(exposed) == 1
+    for _ in range(6):
+        result = await handler(
+            Request("GET", URL, headers=authorize(challenge, life.open_payload(100).to_wire()))
+        )
+        assert isinstance(result, PaymentRequired)
+    assert len(exposed) == 6
     assert not life.rpc.sent
     payer = limits.verified_payer(life.transaction)
     record = await read(usage, f"mppx:session:sponsorship:{CHAIN_ID}:{payer}")

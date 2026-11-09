@@ -541,7 +541,7 @@ def session(
         # Settlement keeps the fee payer the challenge allowed; only the open or top-up itself
         # goes unsponsored over the limit.
         fee_payer = verify_context.fee_payer
-        sponsor, release_sponsorship = await limit_fee_payer(
+        sponsor, finish_sponsorship = await limit_fee_payer(
             chain_id=verify_context.chain_id,
             fee_payer=fee_payer,
             limit=sponsorship_limit,
@@ -557,17 +557,17 @@ def session(
 
         sends: list[str] = []
         tracking = sponsored_sends.set(sends)
+        completed = False
         try:
             receipt = await broadcast_credential_payload(verify_context)
-        except BaseException:
-            # Signed simulations expose usable sponsor authority too. Keep daily capacity
-            # once a signature may have reached the node, even if no broadcast was observed.
-            if release_sponsorship is not None and not sends:
-                with contextlib.suppress(Exception):
-                    await release_sponsorship()
-            raise
+            completed = True
         finally:
             sponsored_sends.reset(tracking)
+            # Retain one slot per transaction once a signature may have reached the node.
+            # A failed duplicate must not release another request's exposed reservation.
+            if finish_sponsorship is not None:
+                with contextlib.suppress(Exception):
+                    await finish_sponsorship(completed or bool(sends))
         if accepted_charges:
             tx_hash = await settle_charged(accepted_charges[-1], fee_payer)
             return SessionPaymentReceipt.from_session(
