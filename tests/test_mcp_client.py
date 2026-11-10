@@ -816,3 +816,19 @@ def test_mcp_zero_amount_tempo_charge_requires_pinned_realm() -> None:
     wrong_case = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["API.EXAMPLE.COM"])
     with pytest.raises(ValueError, match="trusted_tempo_realms"):
         wrong_case._match_challenge([challenge])
+
+
+@pytest.mark.parametrize("amount", ["0", "1000"])
+def test_mcp_tempo_session_requires_pinned_realm(amount: str) -> None:
+    from mpp.extensions.mcp.types import MCPChallenge
+
+    raw = _make_challenge_dict(intent="session")
+    raw["request"]["amount"] = amount
+    challenge = MCPChallenge.from_dict(raw)
+    method = fake_method(intent="session")
+
+    with pytest.raises(ValueError, match="Tempo sessions require a pinned trusted_tempo_realms"):
+        McpClient(AsyncMock(), methods=[method])._match_challenge([challenge])
+
+    pinned = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["api.example.com"])
+    assert pinned._match_challenge([challenge])[0] == challenge

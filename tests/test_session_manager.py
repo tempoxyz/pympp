@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from mpp import Challenge, Credential
-from mpp.errors import PaymentOutcomeUnknownError
+from mpp.errors import PaymentError, PaymentOutcomeUnknownError
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._protocol import (
@@ -395,7 +395,11 @@ class TestOrigin:
             assert manager.channel is not None
             stored = store.get(entry_key(manager.channel))
             assert stored is not None and stored.origin == "http://api.test"
-        async with manager_for(FakeSessionServer().handler, channel_store=store) as other:
+        async with manager_for(
+            FakeSessionServer().handler,
+            channel_store=store,
+            trusted_tempo_realms={"http://other.test": "api.test"},
+        ) as other:
             with pytest.raises(ValueError, match="stored channel origin mismatch"):
                 await other.fetch("http://other.test/paid")
 
@@ -431,16 +435,39 @@ class TestOrigin:
             assert first.channel_id is not None and first.channel_id == second.channel_id
             assert sorted(r.cumulative for r in responses) == [100, 200]
 
-    async def test_legacy_channel_is_bound_on_reuse(self, fake_chain: dict[str, list[Any]]) -> None:
+    async def test_rejects_an_originless_legacy_channel_before_signing_or_rebinding(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
         store = create_channel_store()
         legacy = entry_for()
         store.set(legacy)
-        async with manager_for(FakeSessionServer().handler, channel_store=store) as manager:
-            response = await manager.fetch(URL)
-            assert response.status_code == 200 and manager.channel_id == legacy.channel_id
-            stored = store.get(entry_key(legacy))
-            assert stored is not None and stored.origin == "http://api.test"
-            assert stored.cumulative_amount == 200
+        server = FakeSessionServer()
+        async with manager_for(server.handler, channel_store=store) as manager:
+            with pytest.raises(ValueError, match="stored channel origin mismatch"):
+                await manager.fetch(URL)
+            assert len(server.requests) == 1
+            assert "authorization" not in server.requests[0].headers
+            assert store.get(entry_key(legacy)) is legacy
+            assert legacy.origin is None and legacy.cumulative_amount == 100
+            assert fake_chain["open"] == []
+
+    async def test_rejects_a_foreign_session_realm_before_signing(
+        self, fake_chain: dict[str, list[Any]]
+    ) -> None:
+        # The challenge names realm api.test, but the request went to relay.test.
+        server = FakeSessionServer()
+        async with manager_for(server.handler) as manager:
+            with pytest.raises(PaymentError, match="Session Tempo realm 'api.test' differs"):
+                await manager.fetch("http://relay.test/paid")
+            assert len(server.requests) == 1
+            assert fake_chain["open"] == [] and manager.channel is None
+
+    async def test_pinned_session_realm_is_trusted(self, fake_chain: dict[str, list[Any]]) -> None:
+        async with manager_for(
+            FakeSessionServer().handler, trusted_tempo_realms={"http://relay.test": "api.test"}
+        ) as manager:
+            assert (await manager.fetch("http://relay.test/paid")).status_code == 200
+            assert manager.channel is not None and manager.channel.origin == "http://relay.test"
 
 
 # ── top-up ────────────────────────────────────────────────────────

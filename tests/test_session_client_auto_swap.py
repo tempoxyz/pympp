@@ -325,7 +325,7 @@ async def test_unsponsored_ousd_only_payer_fails_before_signing(fake: FakeChain)
 async def test_automatic_top_up_preserves_credential_swap_policy(
     fake: FakeChain, override: bool | AutoSwap | None, expected_token: str | None
 ) -> None:
-    method = SessionMethod(account=ACCOUNT, auto_swap=True)
+    method = SessionMethod(account=ACCOUNT, auto_swap=True, origin="https://api.test")
     await method.create_credential(
         CredentialParams(
             challenge=make_challenge(suggested_deposit="100"),
