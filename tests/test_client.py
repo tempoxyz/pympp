@@ -2926,6 +2926,8 @@ async def test_cancelling_the_request_cancels_a_hung_creation():
 
 
 async def test_second_cancellation_stops_waiting_for_the_creation():
+    from mpp.errors import PaymentOutcomeUnknownError
+
     started = asyncio.Event()
 
     async def create(challenge, authorization):
@@ -2950,8 +2952,9 @@ async def test_second_cancellation_stops_waiting_for_the_creation():
     task.cancel()
     await asyncio.sleep(0.01)
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
         await asyncio.wait_for(task, timeout=0.5)
+    assert excinfo.value.transaction_hash is None
 
 
 async def test_create_credential_after_the_hook_returned_is_refused():

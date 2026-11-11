@@ -956,6 +956,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         ):
             hook_error = asyncio.CancelledError()
         failure = creation_failure()
+        if creating is not None and not creating.done():
+            # Cancelled again before the creation finished: it may still pay, and
+            # nobody will see its result, so report the outcome as unknown.
+            raise PaymentOutcomeUnknownError(
+                challenge,
+                hook_error or asyncio.CancelledError(),
+                request=request,
+            ) from hook_error
 
         if hook_error is not None:
             if not isinstance(hook_error, (Exception, asyncio.CancelledError)):
