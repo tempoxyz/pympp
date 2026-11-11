@@ -4389,7 +4389,11 @@ class TestCosignAsFeePayer:
     async def test_unknown_recovery_expires_after_challenge_and_transaction(
         self, challenge_seconds
     ):
-        from mpp.methods.tempo.intents import VALID_BEFORE_GRACE, _transaction_valid_before
+        from mpp.methods.tempo.intents import (
+            VALID_BEFORE_GRACE,
+            _decode_broadcast_marker,
+            _transaction_valid_before,
+        )
 
         intent, store, raw, signed, credential, request, receipt = self._recovery_case()
         credential = replace(
@@ -4414,7 +4418,10 @@ class TestCosignAsFeePayer:
         assert valid_before is not None
         deadline = max(expires_at, valid_before + VALID_BEFORE_GRACE)
         with patch("time.time", return_value=deadline - 0.001):
-            assert await store.get(marker) == signed
+            assert _decode_broadcast_marker(await store.get(marker)) == (
+                credential.challenge.id,
+                signed,
+            )
         with patch("time.time", return_value=deadline):
             assert await store.get(marker) is None
 
@@ -4641,8 +4648,13 @@ class TestCosignAsFeePayer:
         assert sum(isinstance(result, InternalPaymentError) for result in results) == 1
         assert sum(isinstance(result, CredentialReplayedError) for result in results) == 1
         assert len(sends) == 1
+        from mpp.methods.tempo.intents import _decode_broadcast_marker
+
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw)}"
-        assert await store.get(marker) == sends[0]
+        assert _decode_broadcast_marker(await store.get(marker)) == (
+            credential.challenge.id,
+            sends[0],
+        )
         # The unknown submission also keeps its fee reserved against the sponsor budget.
         budget = [key for key in store._data if key.startswith("mpp:charge:sponsor-budget:")]
         admissions = [key for key in store._data if key.startswith("mpp:charge-admission:")]

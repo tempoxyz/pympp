@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
@@ -610,6 +611,37 @@ def _is_definite_node_rejection(result: dict[str, Any]) -> bool:
     if is_dict(rpc_error) and rpc_error.get("code") in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603):
         return False
     return _TIMEOUT_MESSAGE_RE.search(_rpc_error_msg(result)) is None
+
+
+def _encode_broadcast_marker(challenge_id: str, raw_tx: str) -> str:
+    """Encode a broadcast marker: the transaction sent and the Challenge it paid."""
+    return json.dumps({"challengeId": challenge_id, "transaction": raw_tx}, sort_keys=True)
+
+
+def _decode_broadcast_marker(value: Any) -> tuple[str | None, Any]:
+    """Return a broadcast marker's Challenge ID and transaction.
+
+    Markers written before the Challenge was recorded hold only the
+    transaction (or, for the oldest sponsored ones, the fee token) and have no
+    Challenge ID. An unreadable marker fails closed.
+    """
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InternalPaymentError() from error
+    if isinstance(value, str) and value.startswith("{"):
+        try:
+            parsed: object = json.loads(value)
+        except ValueError as error:
+            raise InternalPaymentError() from error
+        if is_dict(parsed):
+            challenge_id = parsed.get("challengeId")
+            transaction = parsed.get("transaction")
+            if isinstance(challenge_id, str) and isinstance(transaction, str):
+                return challenge_id, transaction
+        raise InternalPaymentError() from ValueError("Malformed broadcast marker")
+    return None, value
 
 
 # Kept for tests/test_tempo.py; nothing in the package calls it.
@@ -2273,11 +2305,8 @@ class ChargeIntent:
                     if await self._store.get(client_store_key) is not None:
                         raise CredentialReplayedError("Transaction hash already used")
                     prior_transaction = await self._store.get(broadcast_key)
-                if isinstance(prior_transaction, bytes):
-                    try:
-                        prior_transaction = prior_transaction.decode("utf-8")
-                    except UnicodeDecodeError as error:
-                        raise InternalPaymentError() from error
+                if prior_transaction is not None:
+                    prior_transaction = self._own_sponsored_marker(prior_transaction, challenge_id)
                 if prior_transaction is not None:
                     if isinstance(prior_transaction, str) and re.fullmatch(
                         r"0x[0-9a-fA-F]{40}", prior_transaction
@@ -2337,11 +2366,8 @@ class ChargeIntent:
                     if await self._store.get(client_store_key) is not None:
                         raise CredentialReplayedError("Transaction hash already used")
                     prior_hosted = await self._store.get(broadcast_key)
-                if isinstance(prior_hosted, bytes):
-                    try:
-                        prior_hosted = prior_hosted.decode("utf-8")
-                    except UnicodeDecodeError as error:
-                        raise InternalPaymentError() from error
+                if prior_hosted is not None:
+                    prior_hosted = self._own_sponsored_marker(prior_hosted, challenge_id)
                 if prior_hosted is not None:
                     # A submission whose outcome was lost: reconcile the exact
                     # transaction the sponsor signed, never ask it to sign again
@@ -2450,19 +2476,24 @@ class ChargeIntent:
                 except Exception as err:
                     raise InternalPaymentError() from err
                 if prior_broadcast is not None:
-                    if isinstance(prior_broadcast, bytes):
-                        prior_broadcast = prior_broadcast.decode("utf-8", "replace")
-                    if not (
-                        isinstance(prior_broadcast, str)
-                        and prior_broadcast.lower() == raw_tx.lower()
+                    marker_challenge, marker_transaction = _decode_broadcast_marker(prior_broadcast)
+                    if marker_challenge != challenge_id:
+                        # Another Challenge broadcast these bytes: not this
+                        # Credential's own submission. Check the chain as if no
+                        # marker existed, and leave that Challenge's marker alone.
+                        broadcast_key = None
+                    elif not (
+                        isinstance(marker_transaction, str)
+                        and marker_transaction.lower() == raw_tx.lower()
                     ):
                         raise InternalPaymentError() from RuntimeError(
                             "Recovery record does not match the submitted transaction"
                         )
-                    # This server broadcast these exact bytes before and lost the
-                    # outcome: reconcile the submission instead of refusing a
-                    # transaction it may have mined itself.
-                    reconciling = prior_marker = True
+                    else:
+                        # This server broadcast these exact bytes for this Challenge
+                        # and lost the outcome: reconcile the submission instead of
+                        # refusing a transaction it may have mined itself.
+                        reconciling = prior_marker = True
             if request.methodDetails.feePayer and self.fee_payer is not None:
                 # The implicit fallback store is per intent; admission must be
                 # process-wide so separate charge methods serialize one payer.
@@ -2603,7 +2634,7 @@ class ChargeIntent:
                         else recovery_expires_at,
                     )
                 marker_created = await self._put_broadcast_marker(
-                    broadcast_key, raw_tx, marker_expires_at
+                    broadcast_key, raw_tx, marker_expires_at, challenge_id
                 )
             # Authorize before the irreversible send: a challenge that expired
             # during sponsorship or simulation must not be settled.
@@ -2644,6 +2675,7 @@ class ChargeIntent:
                         max(bounds) + _UNSPONSORED_MARKER_GRACE
                         if bounds
                         else time.time() + _UNSPONSORED_MARKER_TTL,
+                        challenge_id,
                     )
             # Only a receipt of this server's own earlier broadcast may be adopted
             # without a memo bound to this Challenge: after a failed first send the
@@ -2997,10 +3029,24 @@ class ChargeIntent:
             return False
         return await self._get_transaction_receipt(client, tx_hash) is None
 
+    @staticmethod
+    def _own_sponsored_marker(value: Any, challenge_id: str) -> Any:
+        """Return the transaction a sponsored broadcast marker recorded for this Challenge.
+
+        A marker another Challenge wrote means the sponsor already signed this
+        client envelope for that Challenge: never sign it again or adopt that
+        submission's receipt here. Markers that predate the recorded
+        Challenge are still reconciled.
+        """
+        marker_challenge, transaction = _decode_broadcast_marker(value)
+        if marker_challenge is not None and marker_challenge != challenge_id:
+            raise CredentialReplayedError("Transaction was already submitted for another challenge")
+        return transaction
+
     async def _put_broadcast_marker(
-        self, broadcast_key: str, raw_tx: str, expires_at: float | None
+        self, broadcast_key: str, raw_tx: str, expires_at: float | None, challenge_id: str
     ) -> bool:
-        """Record that this server is about to broadcast ``raw_tx``.
+        """Record that this server is about to broadcast ``raw_tx`` for ``challenge_id``.
 
         The marker outlives the replay reservation until the transaction
         settles or can no longer be included, so a retry whose earlier outcome
@@ -3012,10 +3058,11 @@ class ChargeIntent:
         if self._store is None:
             return False
         try:
+            marker = _encode_broadcast_marker(challenge_id, raw_tx)
             if expires_at is not None and isinstance(self._store, ExpiringStore):
-                created = await self._store.put_if_absent_until(broadcast_key, raw_tx, expires_at)
+                created = await self._store.put_if_absent_until(broadcast_key, marker, expires_at)
             else:
-                created = await self._store.put_if_absent(broadcast_key, raw_tx)
+                created = await self._store.put_if_absent(broadcast_key, marker)
         except Exception as err:
             raise InternalPaymentError() from err
         if not created:
