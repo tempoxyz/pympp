@@ -412,6 +412,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         response = await self._inner.handle_async_request(request)
         # The last credential sent, until the method settles its outcome (mppx Fetch).
         sent: _SentCredential | None = None
+        challenge: Challenge
+        matched_method: ClientMethod
 
         try:
             for retry in range(self._max_payment_retries):
@@ -588,8 +590,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         return response
 
                 supplied: str | None = None
+                supplied_attempt: PaymentAttempt | None = None
                 if reused is None and self._on_challenge is not None:
-                    decision = await self._approve(
+                    decision, supplied_attempt = await self._approve(
                         challenge, matched_method, challenges, request, response
                     )
                     if decision is False:
@@ -601,7 +604,27 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     if reused is not None:
                         credential = reused
                     elif supplied is not None:
-                        credential = Credential.from_authorization(supplied)
+                        # A hook-supplied credential is tracked like a created one, so
+                        # a later 402 cannot pay again for it.
+                        hook_attempt = supplied_attempt or PaymentAttempt()
+                        try:
+                            credential = Credential.from_authorization(supplied)
+                        except BaseException:
+                            await _settle_attempt(
+                                hook_attempt,
+                                AttemptOutcome(
+                                    status="rejected",
+                                    response=response,
+                                    challenges=tuple(challenges),
+                                ),
+                            )
+                            raise
+                        sent = _SentCredential(
+                            challenge=challenge,
+                            method=matched_method,
+                            credential=credential,
+                            attempt=hook_attempt,
+                        )
                     else:
                         attempt = PaymentAttempt()
                         arguments: dict[str, Any] = {
@@ -808,27 +831,66 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         challenges: list[Challenge],
         request: httpx.Request,
         response: httpx.Response,
-    ) -> str | bool | None:
-        """Ask the ``on_challenge`` hook whether, and with what, to pay ``challenge``."""
+    ) -> tuple[str | bool | None, PaymentAttempt | None]:
+        """Ask the ``on_challenge`` hook whether, and with what, to pay ``challenge``.
+
+        Returns the decision and, when the hook returned a credential from
+        ``context.create_credential()``, the attempt its method may settle.
+        """
         assert self._on_challenge is not None
+        rejected = AttemptOutcome(
+            status="rejected", response=response, challenges=tuple(challenges)
+        )
+        created: tuple[str, PaymentAttempt] | None = None
 
         async def create_credential() -> str:
-            arguments: dict[str, Any] = {"request": request, "fetch": self._send_auxiliary}
+            nonlocal created
+            if created is not None:
+                # An earlier credential from this hook will not be sent.
+                previous, created = created, None
+                await _settle_attempt(previous[1], rejected)
+            attempt = PaymentAttempt()
+            arguments: dict[str, Any] = {
+                "request": request,
+                "fetch": self._send_auxiliary,
+                "attempt": attempt,
+            }
             keywords = self._credential_keywords
-            credential = await self._runtime.create_credential(
-                challenge,
-                method,
-                event_payload={"challenges": challenges, "request": request, "response": response},
-                **{key: value for key, value in arguments.items() if key in keywords},
-            )
-            return credential.to_authorization()
+            try:
+                credential = await self._runtime.create_credential(
+                    challenge,
+                    method,
+                    event_payload={
+                        "challenges": challenges,
+                        "request": request,
+                        "response": response,
+                    },
+                    **{key: value for key, value in arguments.items() if key in keywords},
+                )
+                authorization = credential.to_authorization()
+            except BaseException:
+                await _settle_attempt(attempt, rejected)
+                raise
+            created = (authorization, attempt)
+            return authorization
 
-        decision = self._on_challenge(challenge, ChallengeContext(create_credential))
-        if inspect.isawaitable(decision):
-            decision = await decision
-        if decision is not None and not isinstance(decision, (bool, str)):
-            raise TypeError("on_challenge must return a credential string, a bool or None")
-        return decision
+        try:
+            decision = self._on_challenge(challenge, ChallengeContext(create_credential))
+            if inspect.isawaitable(decision):
+                decision = await decision
+            if decision is not None and not isinstance(decision, (bool, str)):
+                raise TypeError("on_challenge must return a credential string, a bool or None")
+        except BaseException:
+            if created is not None:
+                await _settle_attempt(created[1], rejected)
+            raise
+        if created is not None:
+            authorization, attempt = created
+            if decision == authorization:
+                return decision, attempt
+            # The created credential is not the one sent: release its state.
+            await _settle_attempt(attempt, rejected)
+        return decision, None
 
     async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:
         """Send a request a payment method needs, without payment handling, and read it."""

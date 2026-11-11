@@ -2372,3 +2372,115 @@ async def test_binds_tempo_session_challenges_to_the_request_host(amount):
         response = await transport.handle_async_request(httpx.Request("GET", url))
         assert response.status_code == 200
         method.create_credential.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("name", "payload"),
+    [("evm", {"signature": "authorization"}), ("tempo", {"type": "hash", "hash": "0xabc"})],
+)
+@pytest.mark.parametrize("via_context", [False, True])
+async def test_hook_supplied_credential_is_not_paid_again_after_402(name, payload, via_context):
+    challenges = [
+        Challenge(id=id_, method=name, intent="charge", request={"amount": "1000"})
+        for id_ in ("first", "second")
+    ]
+    inner = MockTransport(
+        [
+            httpx.Response(402, headers={"www-authenticate": c.to_www_authenticate("example.com")})
+            for c in challenges
+        ]
+    )
+    authorization = Credential(
+        challenge=challenges[0].to_echo(), payload=payload
+    ).to_authorization()
+    create = AsyncMock(return_value=authorization)
+    method = ClientMethod(
+        method=Method(name=name, intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+    hooked: list[Challenge] = []
+
+    async def hook(challenge: Challenge, context) -> str:
+        hooked.append(challenge)
+        return await context.create_credential() if via_context else authorization
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 402
+    assert len(inner.requests) == 2
+    assert [c.id for c in hooked] == ["first"]
+    assert create.await_count == (1 if via_context else 0)
+
+
+@pytest.mark.parametrize(("status", "outcome"), [(200, "accepted"), (402, "rejected")])
+async def test_hook_created_session_credential_settles_its_attempt(status, outcome):
+    challenge = Challenge(id="test-id", method="tempo", intent="session", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(status),
+        ]
+    )
+    settled: list[str] = []
+
+    async def create(params: CredentialParams) -> str:
+        assert params.attempt is not None
+
+        async def settle(result) -> bool:
+            settled.append(result.status)
+            return True
+
+        params.attempt.settle = settle
+        return Credential(
+            challenge=params.challenge.to_echo(), payload={"action": "voucher"}
+        ).to_authorization()
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="session", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> str:
+        return await context.create_credential()
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == status
+    assert settled == [outcome]
+
+
+async def test_hook_created_credential_it_does_not_send_is_rejected():
+    challenge = Challenge(id="test-id", method="tempo", intent="session", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    settled: list[str] = []
+
+    async def create(params: CredentialParams) -> str:
+        async def settle(result) -> bool:
+            settled.append(result.status)
+            return True
+
+        assert params.attempt is not None
+        params.attempt.settle = settle
+        return Credential(challenge=params.challenge.to_echo(), payload={}).to_authorization()
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="session", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool:
+        await context.create_credential()
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 402
+    assert settled == ["rejected"]
