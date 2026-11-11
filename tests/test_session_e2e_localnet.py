@@ -255,6 +255,22 @@ async def _assert_closed(
     assert _paid(transfers, ESCROW_ADDRESS, payer) == deposit - spent
 
 
+async def _close_requested_state(
+    rpc_url: str, channel_id: str, *, timeout: float = 10.0
+) -> chain.ChannelState:
+    """Read the channel until the node's latest state shows the payer's close request.
+
+    The receipt can arrive before `eth_call` at `latest` reflects its block on a
+    busy localnet, so one read right after it is racy.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        state = await chain.get_channel_state(rpc_url, channel_id)
+        if state.close_requested_at != 0 or asyncio.get_running_loop().time() >= deadline:
+            return state
+        await asyncio.sleep(0.1)
+
+
 def _source(chain_id: int, account: TempoAccount) -> str:
     return f"did:pkh:eip155:{chain_id}:{account.address}"
 
@@ -770,7 +786,7 @@ async def test_close_supervisor_closes_a_requested_channel(
             assert channel_id is not None and entry is not None
 
         await chain.request_close_on_chain(rpc_url, payer, entry.descriptor)
-        requested = await chain.get_channel_state(rpc_url, channel_id)
+        requested = await _close_requested_state(rpc_url, channel_id)
         assert requested.close_requested_at != 0 and requested.deposit == 1000
 
         supervision = await supervise_closes(
