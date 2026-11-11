@@ -2798,3 +2798,111 @@ async def test_cancelled_while_waiting_for_an_unawaited_creation_reports_the_pay
     with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
         await task
     assert excinfo.value.transaction_hash == tx_hash
+
+
+def _push_setup(tx_hash: str, create_impl):
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    authorization = Credential(
+        challenge=challenge.to_echo(), payload={"type": "hash", "hash": tx_hash}
+    ).to_authorization()
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=lambda *a, **k: create_impl(challenge, authorization),
+    )
+    return challenge, inner, method
+
+
+async def test_scheduled_creation_before_a_decline_is_still_reported():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "c1" * 32
+
+    async def create(challenge, authorization):
+        await asyncio.sleep(0.01)
+        return authorization
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    def hook(challenge: Challenge, context) -> bool | None:
+        asyncio.ensure_future(context.create_credential())
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+
+
+async def test_creation_unknown_outcome_after_hook_timeout_is_reported():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "c2" * 32
+
+    async def create(challenge, authorization):
+        await asyncio.sleep(0.02)
+        raise PaymentOutcomeUnknownError(
+            challenge, RuntimeError("lost response"), transaction_hash=tx_hash
+        )
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await asyncio.wait_for(context.create_credential(), timeout=0.001)
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+
+
+async def test_repeated_cancellation_still_reports_the_pending_payment():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "c3" * 32
+
+    async def create(challenge, authorization):
+        await asyncio.sleep(0.05)
+        return authorization
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    task = asyncio.ensure_future(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    for _ in range(3):
+        await asyncio.sleep(0.005)
+        task.cancel()
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await task
+    assert excinfo.value.transaction_hash == tx_hash
+
+
+async def test_create_credential_after_the_hook_returned_is_refused():
+    saved = []
+
+    async def create(challenge, authorization):
+        return authorization
+
+    _, inner, method = _push_setup("0x" + "c4" * 32, create)
+
+    def hook(challenge: Challenge, context) -> bool | None:
+        saved.append(context)
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    with pytest.raises(RuntimeError):
+        saved[0].create_credential()

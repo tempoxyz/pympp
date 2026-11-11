@@ -851,20 +851,22 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         created: tuple[str, PaymentAttempt] | None = None
         # Every call, overlapping or later, shares the first creation and its
         # outcome, including a failure: creating can pay, and a failed creation
-        # may already have paid, so no call ever starts a second one.
+        # may already have paid, so no call ever starts a second one. It starts
+        # when create_credential() is called, not when its result is awaited, so
+        # a creation the hook schedules without awaiting is always tracked.
         creating: asyncio.Future[str] | None = None
+        closed = False
 
-        async def create_credential() -> str:
+        def create_credential() -> Awaitable[str]:
             nonlocal creating
+            if closed:
+                raise RuntimeError("create_credential() called after on_challenge returned")
             if creating is None:
                 creating = asyncio.ensure_future(create_once())
-            return await asyncio.shield(creating)
+            return asyncio.shield(creating)
 
         async def create_once() -> str:
             nonlocal created
-            if created is not None:
-                # Creating a credential can pay (a pushed transfer): never pay twice.
-                return created[0]
             attempt = PaymentAttempt()
             arguments: dict[str, Any] = {
                 "request": request,
@@ -890,49 +892,84 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             created = (authorization, attempt)
             return authorization
 
+        async def finish_creation() -> bool:
+            """Wait for a started creation to finish, whatever cancels this task.
+
+            A creation can pay, so its outcome must be known before deciding.
+            Returns whether this task was cancelled while waiting.
+            """
+            cancelled = False
+            while creating is not None and not creating.done():
+                try:
+                    await asyncio.shield(creating)
+                except asyncio.CancelledError:
+                    cancelled = True
+                except Exception:
+                    pass
+            return cancelled
+
+        def creation_failure() -> BaseException | None:
+            if creating is None or not creating.done() or creating.cancelled():
+                return None
+            return creating.exception()
+
+        def pushed_unknown(cause: BaseException) -> PaymentOutcomeUnknownError | None:
+            """The unknown outcome to report when the created credential pushed a payment."""
+            if created is None:
+                return None
+            pushed = Credential.from_authorization(created[0])
+            if not _is_pushed(pushed):
+                return None
+            payload = pushed.payload
+            return PaymentOutcomeUnknownError(
+                challenge,
+                cause,
+                credential=pushed,
+                request=request,
+                transaction_hash=payload.get("hash"),
+            )
+
+        hook_error: BaseException | None = None
+        decision: str | bool | None = None
         try:
-            decision = self._on_challenge(challenge, ChallengeContext(create_credential))
-            if inspect.isawaitable(decision):
-                decision = await decision
+            returned = self._on_challenge(challenge, ChallengeContext(create_credential))
+            decision = await returned if inspect.isawaitable(returned) else returned
             if decision is not None and not isinstance(decision, (bool, str)):
                 raise TypeError("on_challenge must return a credential string, a bool or None")
-            if creating is not None and not creating.done():
-                # The hook returned without awaiting a creation it started; a
-                # cancellation while waiting for it is handled below like a
-                # cancelled hook.
-                with suppress(Exception):
-                    await asyncio.shield(creating)
         except BaseException as error:
-            # A creation still running when the hook stopped (cancelled or timed
-            # out while awaiting it) may yet pay: let it finish before deciding.
-            if creating is not None and not creating.done():
-                with suppress(Exception, asyncio.CancelledError):
-                    await asyncio.shield(creating)
+            hook_error = error
+        finally:
+            closed = True
+        if await finish_creation() and hook_error is None:
+            hook_error = asyncio.CancelledError()
+        failure = creation_failure()
+
+        if hook_error is not None:
+            if not isinstance(hook_error, (Exception, asyncio.CancelledError)):
+                # KeyboardInterrupt, SystemExit and the like pass through.
+                if created is not None:
+                    await _settle_attempt(created[1], rejected)
+                raise hook_error
+            if isinstance(failure, PaymentOutcomeUnknownError):
+                # The creation's own unknown outcome carries the transaction hash.
+                raise failure from hook_error
             if created is not None:
                 await _settle_attempt(created[1], rejected)
-                pushed = Credential.from_authorization(created[0])
-                if isinstance(error, (Exception, asyncio.CancelledError)) and _is_pushed(pushed):
+                unknown = pushed_unknown(hook_error)
+                if unknown is not None:
                     # The hook failed after its credential's payment was broadcast:
                     # report it as an unknown outcome so the caller does not pay again.
-                    payload = cast("dict[str, Any]", pushed.payload)
-                    raise PaymentOutcomeUnknownError(
-                        challenge,
-                        error,
-                        credential=pushed,
-                        request=request,
-                        transaction_hash=payload.get("hash"),
-                    ) from error
-            raise
-        if (
-            (decision is None or decision is True)
-            and creating is not None
-            and not creating.cancelled()
-        ):
-            failure = creating.exception()
-            if failure is not None:
-                # The hook swallowed a failed creation, which may already have paid,
-                # and asked to pay as usual: never create a second credential.
-                raise failure
+                    raise unknown from hook_error
+            raise hook_error
+
+        if isinstance(failure, PaymentOutcomeUnknownError):
+            # A creation that may have paid failed: whatever the hook decided,
+            # report it rather than declining or paying again.
+            raise failure
+        if failure is not None and (decision is None or decision is True):
+            # The hook swallowed a failed creation and asked to pay as usual:
+            # never create a second credential.
+            raise failure
         if created is not None:
             authorization, attempt = created
             if decision is None or decision is True or decision == authorization:
@@ -940,17 +977,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 return authorization, attempt
             # The created credential is not the one sent: release its state.
             await _settle_attempt(attempt, rejected)
-            discarded = Credential.from_authorization(authorization)
-            if _is_pushed(discarded):
+            unknown = pushed_unknown(
+                ValueError("on_challenge discarded a credential whose payment was broadcast")
+            )
+            if unknown is not None:
                 # Its payment is already on chain and cannot be withdrawn.
-                payload = cast("dict[str, Any]", discarded.payload)
-                raise PaymentOutcomeUnknownError(
-                    challenge,
-                    ValueError("on_challenge discarded a credential whose payment was broadcast"),
-                    credential=discarded,
-                    request=request,
-                    transaction_hash=payload.get("hash"),
-                )
+                raise unknown
         return decision, None
 
     async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:
