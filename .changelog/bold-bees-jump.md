@@ -1,5 +1,5 @@
 ---
-pympp: major
+pympp: minor
 ---
 
-Added `on_challenge` approval hook (`OnChallenge`/`ChallengeContext`) to `PaymentTransport` and `Mpp`, and added `check_secret_key`/`MIN_SECRET_KEY_BYTES` to enforce a 32-byte minimum secret. Changed `CredentialReplayedError` to respond with `402`/`invalid-challenge` instead of `403`/`verification-failed`, and tightened the payment method ID grammar to `1*LOWERALPHA` (breaking existing IDs containing digits, hyphens, colons, or underscores).
+Aligned servers and clients with the core spec: rejected credentials report specific problem types, replays get `402` with a fresh `invalid-challenge`, HMAC secrets must be at least 32 bytes, and method IDs must be lowercase letters. Added the client `on_challenge` approval hook and made the Tempo attribution memo optional.
