@@ -2548,3 +2548,42 @@ async def test_hook_that_discards_a_pushed_credential_reports_unknown_outcome():
     assert raised.value.transaction_hash == tx_hash
     assert len(inner.requests) == 1
     create.assert_awaited_once()
+
+
+async def test_overlapping_create_credential_calls_create_once():
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    authorization = Credential(
+        challenge=challenge.to_echo(), payload={"type": "hash", "hash": "0x" + "ab" * 32}
+    ).to_authorization()
+    calls = 0
+
+    async def create(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return authorization
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        first, second = await asyncio.gather(
+            context.create_credential(), context.create_credential()
+        )
+        assert first == second
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 200
+    assert calls == 1
