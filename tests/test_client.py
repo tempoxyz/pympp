@@ -2756,3 +2756,45 @@ async def test_hook_that_swallows_a_failed_creation_does_not_pay_again():
     with pytest.raises(RuntimeError):
         await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
     assert calls == 1
+
+
+async def test_cancelled_while_waiting_for_an_unawaited_creation_reports_the_payment():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    tx_hash = "0x" + "bb" * 32
+    authorization = Credential(
+        challenge=challenge.to_echo(), payload={"type": "hash", "hash": tx_hash}
+    ).to_authorization()
+
+    async def create(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        return authorization
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        # Start the creation without awaiting it.
+        asyncio.ensure_future(context.create_credential())
+        await asyncio.sleep(0)
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    task = asyncio.ensure_future(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await task
+    assert excinfo.value.transaction_hash == tx_hash

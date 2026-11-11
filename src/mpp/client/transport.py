@@ -896,6 +896,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 decision = await decision
             if decision is not None and not isinstance(decision, (bool, str)):
                 raise TypeError("on_challenge must return a credential string, a bool or None")
+            if creating is not None and not creating.done():
+                # The hook returned without awaiting a creation it started; a
+                # cancellation while waiting for it is handled below like a
+                # cancelled hook.
+                with suppress(Exception):
+                    await asyncio.shield(creating)
         except BaseException as error:
             # A creation still running when the hook stopped (cancelled or timed
             # out while awaiting it) may yet pay: let it finish before deciding.
@@ -917,10 +923,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         transaction_hash=payload.get("hash"),
                     ) from error
             raise
-        if creating is not None and not creating.done():
-            # The hook returned without awaiting a creation it started.
-            with suppress(Exception):
-                await asyncio.shield(creating)
         if (
             (decision is None or decision is True)
             and creating is not None
