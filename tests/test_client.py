@@ -2484,3 +2484,67 @@ async def test_hook_created_credential_it_does_not_send_is_rejected():
     response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
     assert response.status_code == 402
     assert settled == ["rejected"]
+
+
+@pytest.mark.parametrize("answer", [None, True])
+async def test_hook_that_creates_and_approves_sends_that_credential(answer):
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    authorization = Credential(
+        challenge=challenge.to_echo(), payload={"type": "hash", "hash": "0x" + "ab" * 32}
+    ).to_authorization()
+    create = AsyncMock(return_value=authorization)
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        first = await context.create_credential()
+        assert await context.create_credential() == first
+        return answer
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 200
+    create.assert_awaited_once()
+    assert inner.requests[1].headers["authorization"] == authorization
+
+
+async def test_hook_that_discards_a_pushed_credential_reports_unknown_outcome():
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    tx_hash = "0x" + "cd" * 32
+    create = AsyncMock(
+        return_value=Credential(
+            challenge=challenge.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        ).to_authorization()
+    )
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool:
+        await context.create_credential()
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as raised:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert raised.value.transaction_hash == tx_hash
+    assert len(inner.requests) == 1
+    create.assert_awaited_once()

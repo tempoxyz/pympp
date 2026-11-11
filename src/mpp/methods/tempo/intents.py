@@ -107,13 +107,6 @@ TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
-_REQUIRE_BOUND_MEMO_FOR_HASH_CREDENTIALS = False
-"""Whether hash (push) credentials must carry a challenge-bound attribution memo.
-
-The Tempo charge spec makes the memo optional, so this is off. Turning it on makes
-an unattributed on-chain transfer unredeemable by anyone who did not send it."""
-
-
 class _AttributionMismatchError(VerificationError):
     """A transfer's attribution memo names another challenge or realm.
 
@@ -1570,6 +1563,9 @@ class ChargeIntent:
             source=source,
             source_address=source_address,
             validate_sender=self._validate_sender,
+            # Anyone can submit a public transaction hash: only the
+            # challenge-bound memo ties the transfer to this challenge.
+            require_bound_memo=True,
         )
 
         senders = {matched_log.sender for matched_log in matched_logs}
@@ -1586,15 +1582,19 @@ class ChargeIntent:
         *,
         require: bool = False,
     ) -> None:
-        """Reject attribution memos bound to another challenge or realm.
+        """Reject attribution memos of this realm bound to another challenge.
 
-        With ``require``, a transfer must also carry a memo bound to this challenge.
+        With ``require``, a transfer must also carry a memo bound to this challenge:
+        hash (push) credentials need it, since anyone can submit a public
+        transaction hash.
 
-        The attribution memo is optional (Tempo charge spec): plain transfers and
-        memos not in attribution format are accepted. A matched transfer whose
-        memo is in attribution format must be bound to this challenge and realm,
-        so one payment cannot authorize another challenge, and a fixed split memo
-        cannot exempt a transfer attributed to another challenge.
+        Without ``require`` (pull transactions, which the server broadcasts from the
+        client's own signature, and their simulated legs), plain transfers and memos
+        not in attribution format are accepted. A matched transfer whose
+        memo is in attribution format for this realm must be bound to this
+        challenge, so one payment cannot authorize another challenge, and a fixed
+        split memo cannot exempt a transfer attributed to another challenge.
+        Attribution memos of other realms are accepted and never count as bound.
         """
         from mpp.methods.tempo._attribution import (
             is_mpp_memo,
@@ -1605,9 +1605,13 @@ class ChargeIntent:
         bound = False
         for matched_log in matched_logs:
             memo = matched_log.memo if matched_log.kind == "memo" else None
-            if memo is None or not is_mpp_memo(memo):
+            # Another realm's attribution memo is not ours to judge: accept it
+            # like any other memo (it never counts as bound).
+            if memo is None or not is_mpp_memo(memo) or not verify_server(memo, realm):
                 continue
-            if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
+            if not verify_challenge_binding(memo, challenge_id):
+                # A transfer bound to another challenge of this realm could later
+                # be claimed for that challenge as a hash credential.
                 raise _AttributionMismatchError("memo is not bound to this challenge")
             bound = True
         if require and not bound:
@@ -1756,6 +1760,7 @@ class ChargeIntent:
         source: str | None = None,
         source_address: str | None = None,
         validate_sender: ValidateSender | None = None,
+        require_bound_memo: bool = False,
     ) -> list[MatchedTransferLog]:
         if receipt_data.get("status") == "0x0":
             raise _TransactionReverted("Transaction reverted")
@@ -1784,7 +1789,7 @@ class ChargeIntent:
             matched_logs,
             challenge_id=challenge_id,
             realm=realm,
-            require=_REQUIRE_BOUND_MEMO_FOR_HASH_CREDENTIALS,
+            require=require_bound_memo,
         )
 
         # A neutral leg cannot be assigned to one of several challenges in a
@@ -1811,6 +1816,7 @@ class ChargeIntent:
                     and len(topics) == 4
                     and topics[0] == TRANSFER_WITH_MEMO_TOPIC
                     and is_mpp_memo(topics[3])
+                    and verify_server(topics[3], realm)
                     and not is_bound(topics[3])
                 ):
                     raise _AttributionMismatchError(

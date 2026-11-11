@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, check_secret_key
-from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._parsing import _PAYMENT_METHOD_ID_RE, ParseError, _b64_decode, _parse_timestamp
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
 from mpp._validation import Validation
@@ -214,11 +214,20 @@ class Mpp:
 
         Raises:
             RuntimeError: If a method has no store in a production runtime.
+            ValueError: If a method's name is not a valid payment method id
+                (lowercase letters only).
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
         if not self.methods:
             raise ValueError("methods is required")
+        for method in self.methods:
+            # Challenges must carry a core-grammar method id; reject others here
+            # rather than on every request.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.method.name):
+                raise ValueError(
+                    f"Invalid payment method id: {method.method.name!r} (lowercase letters only)"
+                )
         if store is not None:
             for method in self.methods:
                 if method.use_store is not None:

@@ -77,7 +77,11 @@ class ChallengeContext:
     """What an :data:`OnChallenge` hook gets besides the challenge (mppx ``onChallenge``)."""
 
     create_credential: Callable[[], Awaitable[str]]
-    """Create the credential the client would pay with, serialized for the credential header."""
+    """Create the credential the client would pay with, serialized for the credential header.
+
+    Creating it can already pay (a Tempo push transfer), so repeated calls return the
+    same credential, and returning ``None`` or ``True`` afterwards sends it.
+    """
 
 
 OnChallenge: TypeAlias = Callable[
@@ -86,8 +90,10 @@ OnChallenge: TypeAlias = Callable[
 """Approval hook called before the client pays a challenge (mppx ``onChallenge``).
 
 Return ``False`` to decline: nothing is paid and the ``402`` response is returned.
-Return ``None`` or ``True`` to pay as usual, or a serialized credential (such as one
-from ``context.create_credential()``) to send it instead.
+Return ``None`` or ``True`` to pay as usual (sending the credential from
+``context.create_credential()`` when the hook created one), or a serialized credential
+to send it instead. Declining or replacing a created credential whose payment was
+already broadcast raises :class:`~mpp.errors.PaymentOutcomeUnknownError`.
 """
 
 
@@ -226,7 +232,8 @@ _INVALID_CHALLENGE_TYPE = "https://paymentauth.org/problems/invalid-challenge"
 
 async def _is_invalid_challenge(response: httpx.Response) -> bool:
     """Whether a ``402`` carries the ``invalid-challenge`` problem type; keeps its body readable."""
-    if "problem+json" not in response.headers.get("content-type", ""):
+    media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/problem+json":
         return False
     with suppress(Exception):
         await _buffer_error_body(response)
@@ -846,9 +853,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         async def create_credential() -> str:
             nonlocal created
             if created is not None:
-                # An earlier credential from this hook will not be sent.
-                previous, created = created, None
-                await _settle_attempt(previous[1], rejected)
+                # Creating a credential can pay (a pushed transfer): never pay twice.
+                return created[0]
             attempt = PaymentAttempt()
             arguments: dict[str, Any] = {
                 "request": request,
@@ -886,10 +892,22 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             raise
         if created is not None:
             authorization, attempt = created
-            if decision == authorization:
-                return decision, attempt
+            if decision is None or decision is True or decision == authorization:
+                # Paying "as usual" sends the credential the hook already created.
+                return authorization, attempt
             # The created credential is not the one sent: release its state.
             await _settle_attempt(attempt, rejected)
+            discarded = Credential.from_authorization(authorization)
+            if _is_pushed(discarded):
+                # Its payment is already on chain and cannot be withdrawn.
+                payload = cast("dict[str, Any]", discarded.payload)
+                raise PaymentOutcomeUnknownError(
+                    challenge,
+                    ValueError("on_challenge discarded a credential whose payment was broadcast"),
+                    credential=discarded,
+                    request=request,
+                    transaction_hash=payload.get("hash"),
+                )
         return decision, None
 
     async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:

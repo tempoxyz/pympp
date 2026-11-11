@@ -1659,7 +1659,7 @@ class TestChargeIntent:
         assert methods[-1] == "eth_getTransactionByHash"
 
     @pytest.mark.asyncio
-    async def test_verify_hash_accepts_plain_transfer_without_memo(self) -> None:
+    async def test_verify_hash_rejects_plain_transfer_without_memo(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -1697,15 +1697,17 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000",
-                "currency": "0x20c0000000000000000000000000000000000000",
-                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            },
-        )
-        assert receipt.status == "success"
+        # A push payment is claimed by its public hash: without the
+        # challenge-bound memo anyone could claim it.
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_verify_hash_rejects_wrong_challenge_nonce(self) -> None:
@@ -1759,7 +1761,7 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
-    async def test_verify_hash_accepts_memo_not_in_attribution_format(self) -> None:
+    async def test_verify_hash_rejects_memo_not_in_attribution_format(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -1798,15 +1800,17 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        receipt = await intent.verify(
-            credential,
-            {
-                "amount": "1000",
-                "currency": "0x20c0000000000000000000000000000000000000",
-                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-            },
-        )
-        assert receipt.status == "success"
+        # A push payment is claimed by its public hash: without the
+        # challenge-bound memo anyone could claim it.
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x20c0000000000000000000000000000000000000",
+                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                },
+            )
 
     @pytest.mark.asyncio
     async def test_verify_hash_rejects_binding_on_dust_transfer(self) -> None:
@@ -7791,7 +7795,8 @@ class TestSplitLogMemoStrictness:
                 receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
             )
 
-    def test_split_rejects_conflicting_realm_memo(self) -> None:
+    def test_split_accepts_another_realms_memo(self) -> None:
+        """Another realm's attribution memo is accepted like any other memo."""
         bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
         other = encode_attribution(challenge_id="challenge-b", server_id="other.example.com")
         receipt = {
@@ -7801,10 +7806,10 @@ class TestSplitLogMemoStrictness:
                 self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
             ],
         }
-        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
-            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
-                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
-            )
+        matches = ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+            receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+        )
+        assert len(matches) == 2
 
     def test_single_transfer_prefers_leg_bound_to_this_challenge(self) -> None:
         """An equal transfer for another challenge in the same receipt is not this payment."""

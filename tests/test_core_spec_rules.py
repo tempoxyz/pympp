@@ -271,17 +271,6 @@ async def test_client_does_not_pay_again_after_invalid_challenge() -> None:
     assert len(created) == 1
 
 
-def test_hash_credentials_can_require_a_bound_memo() -> None:
-    """The optional-memo rule for hash credentials flips with one constant."""
-    from mpp.errors import VerificationError
-    from mpp.methods.tempo.intents import ChargeIntent
-
-    intent = ChargeIntent(rpc_url="https://rpc.test")
-    intent._assert_challenge_bound_memo([], challenge_id="c", realm="r")
-    with pytest.raises(VerificationError, match="memo is not bound"):
-        intent._assert_challenge_bound_memo([], challenge_id="c", realm="r", require=True)
-
-
 def test_tempo_split_amounts_are_emitted_without_leading_zeros() -> None:
     from mpp.methods.tempo import PATH_USD
     from mpp.methods.tempo.schemas import ChargeInput, Split
@@ -303,3 +292,61 @@ def test_direct_submodule_import_names_the_extra() -> None:
     """)
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert 'pip install "pympp[tempo]"' in result.stdout, result.stderr
+
+
+class TestMethodIdAtConfiguration:
+    @pytest.mark.parametrize("name", ["stripe-pi", "tempo2", "Tempo"])
+    def test_mpp_rejects_invalid_method_ids_at_startup(self, name: str) -> None:
+        with pytest.raises(ValueError, match="Invalid payment method id"):
+            make_server(ContractMethod(name=name))
+
+
+def test_hash_credentials_require_a_bound_memo() -> None:
+    """Push (hash) credentials need the challenge-bound memo; pull transactions do not."""
+    from mpp.errors import VerificationError
+    from mpp.methods.tempo.intents import ChargeIntent
+
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+    intent._assert_challenge_bound_memo([], challenge_id="c", realm="r")
+    with pytest.raises(VerificationError, match="memo is not bound"):
+        intent._assert_challenge_bound_memo([], challenge_id="c", realm="r", require=True)
+
+
+async def test_mixed_case_problem_media_type_is_still_final() -> None:
+    """Media types are case-insensitive: a mixed-case invalid-challenge stays final."""
+    from mpp.client.transport import _is_invalid_challenge
+
+    body = json.dumps({"type": f"{PROBLEMS}/invalid-challenge"}).encode()
+    for content_type in ("application/Problem+JSON", "APPLICATION/PROBLEM+JSON; charset=utf-8"):
+        response = httpx.Response(402, headers={"content-type": content_type}, content=body)
+        assert await _is_invalid_challenge(response)
+    response = httpx.Response(402, headers={"content-type": "application/json"}, content=body)
+    assert not await _is_invalid_challenge(response)
+
+
+def test_attribution_memo_rules_for_pull_and_push() -> None:
+    """Pull accepts plain and other-realm memos; only this realm's other challenges fail."""
+    from mpp.errors import VerificationError
+    from mpp.methods.tempo._attribution import encode as encode_attribution
+    from mpp.methods.tempo.intents import ChargeIntent, MatchedTransferLog
+
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+
+    def legs(memo: str | None) -> list[MatchedTransferLog]:
+        if memo is None:
+            return [MatchedTransferLog(kind="transfer")]
+        return [MatchedTransferLog(kind="memo", memo=memo)]
+
+    bound = encode_attribution(challenge_id="c", server_id="r")
+    other_challenge = encode_attribution(challenge_id="other", server_id="r")
+    other_realm = encode_attribution(challenge_id="c", server_id="elsewhere")
+    for memo in (None, "0x" + "ab" * 32, other_realm, bound):
+        intent._assert_challenge_bound_memo(legs(memo), challenge_id="c", realm="r")
+    with pytest.raises(VerificationError, match="memo is not bound"):
+        intent._assert_challenge_bound_memo(legs(other_challenge), challenge_id="c", realm="r")
+    intent._assert_challenge_bound_memo(legs(bound), challenge_id="c", realm="r", require=True)
+    for memo in (None, "0x" + "ab" * 32, other_realm, other_challenge):
+        with pytest.raises(VerificationError, match="memo is not bound"):
+            intent._assert_challenge_bound_memo(
+                legs(memo), challenge_id="c", realm="r", require=True
+            )
