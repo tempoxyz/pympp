@@ -897,10 +897,15 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             if decision is not None and not isinstance(decision, (bool, str)):
                 raise TypeError("on_challenge must return a credential string, a bool or None")
         except BaseException as error:
+            # A creation still running when the hook stopped (cancelled or timed
+            # out while awaiting it) may yet pay: let it finish before deciding.
+            if creating is not None and not creating.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(creating)
             if created is not None:
                 await _settle_attempt(created[1], rejected)
                 pushed = Credential.from_authorization(created[0])
-                if isinstance(error, Exception) and _is_pushed(pushed):
+                if isinstance(error, (Exception, asyncio.CancelledError)) and _is_pushed(pushed):
                     # The hook failed after its credential's payment was broadcast:
                     # report it as an unknown outcome so the caller does not pay again.
                     payload = cast("dict[str, Any]", pushed.payload)
@@ -912,6 +917,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         transaction_hash=payload.get("hash"),
                     ) from error
             raise
+        if creating is not None and not creating.done():
+            # The hook returned without awaiting a creation it started.
+            with suppress(Exception):
+                await asyncio.shield(creating)
         if created is not None:
             authorization, attempt = created
             if decision is None or decision is True or decision == authorization:
