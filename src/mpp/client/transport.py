@@ -921,6 +921,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             # The hook returned without awaiting a creation it started.
             with suppress(Exception):
                 await asyncio.shield(creating)
+        if (
+            (decision is None or decision is True)
+            and creating is not None
+            and not creating.cancelled()
+        ):
+            failure = creating.exception()
+            if failure is not None:
+                # The hook swallowed a failed creation, which may already have paid,
+                # and asked to pay as usual: never create a second credential.
+                raise failure
         if created is not None:
             authorization, attempt = created
             if decision is None or decision is True or decision == authorization:

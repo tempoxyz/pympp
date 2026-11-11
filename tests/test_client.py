@@ -1,6 +1,7 @@
 """Tests for client-side transport."""
 
 import asyncio
+import contextlib
 import gzip
 import random
 from collections.abc import Callable, Sequence
@@ -2723,3 +2724,35 @@ async def test_hook_cancelled_while_awaiting_creation_still_reports_the_payment(
     with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
         await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
     assert excinfo.value.transaction_hash == tx_hash
+
+
+async def test_hook_that_swallows_a_failed_creation_does_not_pay_again():
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    calls = 0
+
+    async def create(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("outcome unknown")
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        with contextlib.suppress(RuntimeError):
+            await context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(RuntimeError):
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert calls == 1
