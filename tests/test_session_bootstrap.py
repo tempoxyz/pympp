@@ -75,7 +75,7 @@ DESCRIPTOR = ChannelDescriptor(
 CHANNEL_ID = compute_channel_id(DESCRIPTOR, chain_id=CHAIN_ID)
 URL = "https://api.test/paid"
 REALM = "api.test"
-SECRET = "secret"
+SECRET = "secret-0123456789abcdef0123456789abcdef"
 SOURCE = proof_source(PAYER.address, CHAIN_ID)
 
 
@@ -478,8 +478,10 @@ class TestBootstrapPreflight:
         issued = await boot.challenge()
         assert (await boot.prove(issued)).status == 204
         replayed = await boot.prove(issued)
-        assert replayed.status == 403
-        assert "www-authenticate" not in replayed.headers
+        # An already-used challenge gets a fresh one (core spec status table).
+        assert replayed.status == 402
+        assert "www-authenticate" in replayed.headers
+        assert problem(replayed)["type"] == "https://paymentauth.org/problems/invalid-challenge"
         assert "already been used" in problem(replayed)["detail"]
 
     async def test_no_snapshot_without_a_reusable_channel(self) -> None:
@@ -510,7 +512,9 @@ class TestBootstrapPreflight:
     async def test_rejects_challenges_this_route_did_not_issue(self) -> None:
         boot = Bootstrap()
         request = dict((await boot.challenge()).request)
-        foreign = _create_challenge("tempo", "charge", request, REALM, "other-secret")
+        foreign = _create_challenge(
+            "tempo", "charge", request, REALM, "other-secret-0123456789abcdef0123456789abcdef"
+        )
         rejected = await boot.prove(foreign)
         assert rejected.status == 402 and "invalid" in problem(rejected)["detail"]
         for change, reason in (
@@ -654,13 +658,16 @@ class TestPreflightHook:
         server = Mpp(
             methods=server_method(verify=_paid, preflight=preflight),
             realm="example.com",
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
         )
         handler = server.charge(amount="1", expires_in=timedelta(minutes=1))
         handled = await handler(http_request(method="HEAD"))
         assert isinstance(handled, PaymentRequired) and handled.status == 204
         assert seen[0].request["amount"] == "1" and seen[0].credential is None
-        assert seen[0].realm == "example.com" and seen[0].secret_key == "secret"
+        assert (
+            seen[0].realm == "example.com"
+            and seen[0].secret_key == "secret-0123456789abcdef0123456789abcdef"
+        )
         assert seen[0].expires is not None and seen[0].header is None
         unpaid = await handler(http_request())
         assert isinstance(unpaid, PaymentRequired) and unpaid.status == 402
@@ -672,7 +679,7 @@ class TestPreflightHook:
         server = Mpp(
             methods=server_method(verify=_paid, preflight=preflight),
             realm="example.com",
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
         )
         handler = server.charge(amount="1")
         mcp = await handler(http_request(url="mcp:tool"))
@@ -695,12 +702,12 @@ class TestPreflightHook:
                 verify=_paid, preflight=preflight_for("hidden"), can_offer=lambda _: False
             ),
             realm="example.com",
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
         )
         shown = Mpp(
             methods=server_method(verify=_paid, preflight=preflight_for("shown")),
             realm="example.com",
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
         )
         handler = compose(hidden.charge(amount="1"), shown.charge(amount="2"))
         handled = await handler(http_request(method="HEAD"))

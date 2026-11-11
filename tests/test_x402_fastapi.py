@@ -349,7 +349,7 @@ async def test_failed_verify_call_releases_the_authorization() -> None:
     assert facilitator.calls == ["verify", "verify", "settle"]
 
 
-async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() -> None:
+async def test_pending_settlement_keeps_the_claim() -> None:
     facilitator = Facilitator()
 
     async def pending(payload: Any, requirements: Any) -> SettleResponse:
@@ -374,7 +374,9 @@ async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() ->
             await http.get("/paid", headers=headers)
         calls = list(facilitator.calls)
         replayed = await http.get("/paid", headers=headers)
-    assert replayed.status_code == 403
+    # The claimed challenge is already used: 402 with a fresh challenge, never a settlement.
+    assert replayed.status_code == 402
+    assert "www-authenticate" in replayed.headers
     assert "settle" in calls
     assert facilitator.calls == calls
     assert app.state.handled == 0

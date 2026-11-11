@@ -41,6 +41,8 @@ import rfc8785
 
 from mpp import Challenge
 from mpp._typing import is_dict
+from mpp.errors import InvalidChallengeError, PaymentExpiredError
+from mpp.errors import MalformedCredentialError as CoreMalformedCredentialError
 from mpp.errors import PaymentRequiredError as CorePaymentRequiredError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
@@ -144,7 +146,7 @@ async def verify_or_challenge(
     except ValueError:
         decoded = None
     problem: dict[str, Any] = decoded if is_dict(decoded) else {}
-    if response.status == 402 and problem.get("type") in (None, CorePaymentRequiredError.type):
+    if response.status == 402 and problem.get("type") in _RECHALLENGE_TYPES:
         return challenges
     problem_type = problem.get("type")
     raise PaymentVerificationError(
@@ -154,6 +156,19 @@ async def verify_or_challenge(
         detail=problem.get("detail"),
         details=problem.get("details"),
     )
+
+
+_RECHALLENGE_TYPES = frozenset(
+    {
+        None,
+        CorePaymentRequiredError.type,
+        CoreMalformedCredentialError.type,
+        InvalidChallengeError.type,
+        PaymentExpiredError.type,
+    }
+)
+"""Problem types of a ``402`` answered with fresh challenges (-32042): no credential, or
+one rejected before settlement (malformed, unknown, already used or expired)."""
 
 
 def _mcp_challenge(challenge: Challenge) -> MCPChallenge:

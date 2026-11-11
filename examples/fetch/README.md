@@ -39,7 +39,7 @@ export TEMPO_PRIVATE_KEY=0x...
 fetch https://api.example.com/resource
 ```
 
-Optionally override the RPC URL (defaults to rpc.testnet.tempo.xyz):
+Optionally override the RPC URL (defaults to https://rpc.tempo.xyz, Tempo mainnet):
 
 ```bash
 fetch --key 0x... --rpc-url https://rpc.testnet.tempo.xyz/ https://api.example.com

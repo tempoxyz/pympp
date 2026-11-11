@@ -90,7 +90,7 @@ async def _serve(
             )
         ],
         realm="session.test",
-        secret_key="session-acceptance-localnet",
+        secret_key="session-acceptance-localnet-0123456789abcdef0123456789abcdef",
     )
 
     @pay(mpp.session(amount="0.0001", unit_type="request", suggested_deposit="0.01"))

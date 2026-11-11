@@ -23,17 +23,17 @@ class TestMppCreate:
         srv = Mpp(
             methods=method,
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert srv.realm == "api.example.com"
-        assert srv.secret_key == "test-secret"
+        assert srv.secret_key == "test-secret-0123456789abcdef0123456789abcdef"
         assert [configured.key for configured in srv.methods] == ["tempo/charge"]
 
     def test_create_auto_realm(self) -> None:
         with patch.dict(os.environ, {"MPP_REALM": "auto.example.com"}):
             srv = Mpp(
                 methods=tempo_server.charge(),
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "auto.example.com"
 
@@ -44,7 +44,7 @@ class TestMppCreate:
             os.environ.pop("HOSTNAME", None)
             srv = Mpp(
                 methods=tempo_server.charge(),
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "my-app.vercel.app"
 
@@ -52,7 +52,7 @@ class TestMppCreate:
         with patch.dict(os.environ, {}, clear=True):
             srv = Mpp(
                 methods=tempo_server.charge(),
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "localhost"
 
@@ -61,7 +61,7 @@ class TestMppCreate:
         with patch.dict(os.environ, env, clear=True):
             srv = Mpp(
                 methods=tempo_server.charge(),
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "localhost"
 
@@ -73,7 +73,7 @@ class TestMppCreate:
         with patch.dict(os.environ, env, clear=True):
             srv = Mpp(
                 methods=tempo_server.charge(),
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
             assert srv.realm == "api.onrender.com"
 
@@ -94,23 +94,25 @@ class TestMppCreate:
                 )
 
     def test_create_auto_secret_key_from_env(self) -> None:
-        with patch.dict(os.environ, {"MPP_SECRET_KEY": "env-secret"}):
+        with patch.dict(
+            os.environ, {"MPP_SECRET_KEY": "env-secret-0123456789abcdef0123456789abcdef"}
+        ):
             srv = Mpp(
                 methods=tempo_server.charge(),
                 realm="test.com",
             )
-            assert srv.secret_key == "env-secret"
+            assert srv.secret_key == "env-secret-0123456789abcdef0123456789abcdef"
 
     def test_create_uses_explicit_secret_key(self) -> None:
         srv1 = Mpp(
             methods=tempo_server.charge(),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         srv2 = Mpp(
             methods=tempo_server.charge(),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert srv1.secret_key == srv2.secret_key
 
@@ -124,7 +126,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         result = await srv.charge(amount="0.50")(http_request())
         result = challenge(result)
@@ -143,7 +145,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         before = datetime.now(UTC)
         result = await srv.charge(amount="1.00")(http_request())
@@ -163,7 +165,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         exp = "2030-01-20T12:00:00+00:00"
         result = await srv.charge(amount="1.00", expires=exp)(http_request())
@@ -179,7 +181,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         result = await srv.charge(
@@ -198,7 +200,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         result = await srv.charge(amount="0.001")(http_request())
         result = challenge(result)
@@ -212,7 +214,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         result = await srv.charge(amount="100")(http_request())
         result = challenge(result)
@@ -226,7 +228,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         result = await srv.charge(
             amount="1.00",
@@ -258,7 +260,7 @@ class TestMppCharge:
         srv = Mpp(
             methods=tempo_server.charge(currency="0xabc"),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         with pytest.raises(ValueError, match="recipient"):
             await srv.charge(amount="1.00")(http_request())
@@ -270,7 +272,9 @@ class TestMppCharge:
             recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
         )
         srv = Mpp(
-            methods=replace(method, defaults=None), realm="test.com", secret_key="test-secret"
+            methods=replace(method, defaults=None),
+            realm="test.com",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         with pytest.raises(ValueError, match="currency"):
             await srv.charge(amount="1.00")(http_request())
@@ -278,7 +282,11 @@ class TestMppCharge:
     @pytest.mark.asyncio
     async def test_charge_without_charge_intent_raises(self) -> None:
         with pytest.raises(ValueError, match="methods is required"):
-            Mpp(methods=[], realm="test.com", secret_key="test-secret")
+            Mpp(
+                methods=[],
+                realm="test.com",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
+            )
 
     @pytest.mark.asyncio
     async def test_charge_rejects_non_string_extra_values(self) -> None:
@@ -288,7 +296,7 @@ class TestMppCharge:
                 recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         with pytest.raises(ValueError, match="extra"):
@@ -308,7 +316,7 @@ class TestMppCharge:
                 fee_payer=TempoAccount.from_key("0x" + "ab" * 32),
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         result = await srv.charge(

@@ -3,8 +3,30 @@
 from __future__ import annotations
 
 import importlib
-from collections.abc import Mapping
+from collections.abc import Generator, Mapping
+from contextlib import contextmanager
 from typing import Any
+
+
+def extra_install_hint(extra: str) -> str:
+    """The message telling users to install ``pympp[extra]``."""
+    return f'Install the "{extra}" extra to use this module: pip install "pympp[{extra}]"'
+
+
+@contextmanager
+def install_hint(extra: str) -> Generator[None]:
+    """Name the ``pympp[extra]`` to install when a module's extra-only imports fail.
+
+    Wraps the imports of a module imported directly, such as
+    ``from mpp.methods.tempo import server``, which bypasses the package's lazy exports.
+    """
+    hint = extra_install_hint(extra)
+    try:
+        yield
+    except ImportError as exc:
+        if hint in str(exc):
+            raise
+        raise ImportError(f"{exc}. {hint}", name=exc.name) from exc
 
 
 def load_lazy_attr(

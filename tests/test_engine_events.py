@@ -25,7 +25,7 @@ from mpp.x402 import decode_payment_required
 from tests import challenge, challenges, http_request, server_method
 
 REALM = "api.example.com"
-SECRET = "test-secret"
+SECRET = "test-secret-0123456789abcdef0123456789abcdef"
 
 
 class Recorder:
@@ -316,10 +316,14 @@ class TestComposedX402Requirements:
         from tests.test_x402_server import evm_method, payment_required, x402_request
 
         first = Mpp(
-            methods=evm_method(max_timeout_seconds=60), realm="a.example.com", secret_key="k"
+            methods=evm_method(max_timeout_seconds=60),
+            realm="a.example.com",
+            secret_key="k-0123456789abcdef0123456789abcdef",
         )
         second = Mpp(
-            methods=evm_method(max_timeout_seconds=600), realm="b.example.com", secret_key="k"
+            methods=evm_method(max_timeout_seconds=600),
+            realm="b.example.com",
+            secret_key="k-0123456789abcdef0123456789abcdef",
         )
 
         result = await compose(first.charge(amount="0.01"), second.charge(amount="0.01"))(

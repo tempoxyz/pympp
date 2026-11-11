@@ -107,6 +107,24 @@ TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
 
+_REQUIRE_BOUND_MEMO_FOR_HASH_CREDENTIALS = False
+"""Whether hash (push) credentials must carry a challenge-bound attribution memo.
+
+The Tempo charge spec makes the memo optional, so this is off. Turning it on makes
+an unattributed on-chain transfer unredeemable by anyone who did not send it."""
+
+
+class _AttributionMismatchError(VerificationError):
+    """A transfer's attribution memo names another challenge or realm.
+
+    A final ``verification-failed`` answer even after broadcast: the transfer paid
+    for another challenge, so reporting an internal error would hide why.
+    """
+
+    type = VerificationError.type
+    title = VerificationError.title
+
+
 class _TransactionReverted(VerificationError):
     """A receipt establishes that the submitted transaction reverted."""
 
@@ -1409,7 +1427,12 @@ class ChargeIntent:
         return payer
 
     async def _is_active_access_key(self, account: str, access_key: str, chain_id: int) -> bool:
-        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``."""
+        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``.
+
+        As the Tempo charge spec says: the returned keyId is non-zero and equals the
+        signer, it is not revoked, and its expiry is non-zero and after now (expiry 0
+        means no key is registered).
+        """
         await self._assert_rpc_chain_id(chain_id)
         data = "0x" + GET_KEY_SELECTOR + _strip_0x(account).lower().zfill(64)
         data += _strip_0x(access_key).lower().zfill(64)
@@ -1420,12 +1443,17 @@ class ChargeIntent:
                 [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"],
                 client=await self._get_client(),
             )
-            _, _, expiry, _, revoked = decode(
+            _, key_id, expiry, _, revoked = decode(
                 ["uint8", "address", "uint64", "bool", "bool"], bytes.fromhex(_strip_0x(result))
             )
         except Exception:
             return False
-        return not revoked and expiry > int(time.time())
+        return (
+            int(key_id, 16) != 0
+            and key_id.lower() == access_key.lower()
+            and not revoked
+            and expiry > int(time.time())
+        )
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
@@ -1555,14 +1583,18 @@ class ChargeIntent:
         matched_logs: list[MatchedTransferLog],
         challenge_id: str,
         realm: str,
+        *,
+        require: bool = False,
     ) -> None:
-        """Require a challenge-bound memo and reject conflicting attribution.
+        """Reject attribution memos bound to another challenge or realm.
 
-        Every matched transfer carrying an MPP attribution memo must be bound to
-        this challenge and realm; otherwise one split payment could authorize
-        another challenge after this challenge's replay marker expires. Plain
-        transfers and non-MPP memos remain allowed. A fixed split memo cannot
-        exempt a transfer that is attributed to another challenge.
+        With ``require``, a transfer must also carry a memo bound to this challenge.
+
+        The attribution memo is optional (Tempo charge spec): plain transfers and
+        memos not in attribution format are accepted. A matched transfer whose
+        memo is in attribution format must be bound to this challenge and realm,
+        so one payment cannot authorize another challenge, and a fixed split memo
+        cannot exempt a transfer attributed to another challenge.
         """
         from mpp.methods.tempo._attribution import (
             is_mpp_memo,
@@ -1576,12 +1608,10 @@ class ChargeIntent:
             if memo is None or not is_mpp_memo(memo):
                 continue
             if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
-                raise CredentialReplayedError("memo is not bound to this challenge")
+                raise _AttributionMismatchError("memo is not bound to this challenge")
             bound = True
-        if not bound:
-            # The transfer already settled to the recipient, so another payment
-            # would not help this credential.
-            raise CredentialReplayedError("memo is not bound to this challenge")
+        if require and not bound:
+            raise _AttributionMismatchError("memo is not bound to this challenge")
 
     async def _fetch_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any]:
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
@@ -1754,6 +1784,7 @@ class ChargeIntent:
             matched_logs,
             challenge_id=challenge_id,
             realm=realm,
+            require=_REQUIRE_BOUND_MEMO_FOR_HASH_CREDENTIALS,
         )
 
         # A neutral leg cannot be assigned to one of several challenges in a
@@ -1782,7 +1813,9 @@ class ChargeIntent:
                     and is_mpp_memo(topics[3])
                     and not is_bound(topics[3])
                 ):
-                    raise CredentialReplayedError("Unbound split leg in a multi-challenge receipt")
+                    raise _AttributionMismatchError(
+                        "Unbound split leg in a multi-challenge receipt"
+                    )
 
         return matched_logs
 
@@ -2622,7 +2655,10 @@ class ChargeIntent:
             if (
                 broadcast_attempted
                 and isinstance(err, Exception)
-                and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
+                and not isinstance(
+                    err,
+                    (CredentialReplayedError, _AttributionMismatchError, InternalPaymentError),
+                )
             ):
                 raise InternalPaymentError() from err
             if (

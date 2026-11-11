@@ -56,7 +56,11 @@ def make_payments(**overrides: Any) -> tuple[FakeStripeClient, MachinePayments]:
 
 async def wire(method: ServerMethod, amount: str = "0.50") -> dict[str, Any]:
     """Return the wire request of the challenge ``method`` issues for ``amount``."""
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     return challenge(await server.charge(amount=amount)(http_request())).request
 
 
@@ -114,7 +118,7 @@ async def test_spt_only_defaults_enforce_minimum_through_implicit_handlers() -> 
     server = Mpp(
         methods=payments.default_methods(),
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
     with pytest.raises(ValueError, match="No payment offers"):
@@ -145,7 +149,11 @@ def test_configuration_boundary_errors() -> None:
 @pytest.mark.asyncio
 async def test_spt_uses_pinned_explicit_request_shape() -> None:
     client, payments = make_payments(metadata={"order": "123"})
-    server = Mpp(methods=payments.spt.charge(), realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=payments.spt.charge(),
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = server.charge(amount="1.00", recipient="bn_test")
     issued = challenge(await handler(http_request()))
 
@@ -241,7 +249,11 @@ async def test_base_charge_records_payment_in_stripe() -> None:
     )
     reference = "0x" + "cd" * 32
     method = payments.base.charge(metadata={"call": "yes"}, settle=lambda _: reference)
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = server.charge(amount="0.25", payment_intent_options={"customer": "cus_test"})
     issued = challenge(await handler(http_request()))
     payer = evm_client.charge(
@@ -294,7 +306,11 @@ async def test_single_base_method_refuses_sub_cent_payment_before_settling() -> 
     client, payments = make_payments(deposit_addresses={"base": BASE_ADDRESS})
     settled: list[Any] = []
     method = payments.base.charge(settle=lambda auth: settled.append(auth) or "0x" + "cd" * 32)
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = server.charge(amount="0.001")
     issued = challenge(await handler(http_request()))
     payer = evm_client.charge(

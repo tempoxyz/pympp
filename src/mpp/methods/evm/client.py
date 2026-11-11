@@ -9,7 +9,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypedDict, overload
 
-from eth_utils.address import to_checksum_address
+from mpp._lazy_exports import install_hint
+
+with install_hint("evm"):
+    from eth_utils.address import to_checksum_address
 
 from mpp import Challenge, Credential
 from mpp._typing import is_list, is_mapping

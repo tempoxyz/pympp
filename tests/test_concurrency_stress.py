@@ -41,7 +41,7 @@ from mpp.stores.sqlite import SQLiteStore
 from tests import http_request, server_method
 
 REALM = "api.example.com"
-SECRET = "stress-secret"
+SECRET = "stress-secret-0123456789abcdef0123456789abcdef"
 CURRENCY = "0x20c0000000000000000000000000000000000000"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 PAYER = "0x1234567890123456789012345678901234567890"
@@ -207,7 +207,8 @@ class TestTempoSettlement:
         assert len(paid) == 1
         assert paid[0].receipt.reference == _tx_hash(1)
         rejected = [result for result in results if not isinstance(result, PaymentVerified)]
-        assert {result.status for result in rejected} == {403}
+        # Each replay is an already-used challenge: 402 with a fresh one.
+        assert {result.status for result in rejected} == {402}
         assert len(route.successes) == 1
 
     @pytest.mark.parametrize("payments", SIZES)

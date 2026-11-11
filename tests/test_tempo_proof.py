@@ -102,7 +102,9 @@ def _intent(**kwargs: Any) -> ChargeIntent:
     return ChargeIntent(chain_id=CHAIN, rpc_url="https://rpc.test", **kwargs)
 
 
-def _keychain_rpc(intent: ChargeIntent, *, expiry: int, revoked: bool = False) -> list[dict]:
+def _keychain_rpc(
+    intent: ChargeIntent, *, expiry: int, revoked: bool = False, key_id: str | None = None
+) -> list[dict]:
     """Answer the intent's AccountKeychain `getKey` lookups; returns the eth_calls made."""
     calls: list[dict] = []
 
@@ -114,7 +116,7 @@ def _keychain_rpc(intent: ChargeIntent, *, expiry: int, revoked: bool = False) -
             calls.append(json["params"][0])
             words = encode(
                 ["uint8", "address", "uint64", "bool", "bool"],
-                [0, ACCESS.address, expiry, False, revoked],
+                [0, ACCESS.address if key_id is None else key_id, expiry, False, revoked],
             )
             result = "0x" + words.hex()
         request = httpx.Request("POST", url)
@@ -303,6 +305,14 @@ class TestProofVerification:
         with pytest.raises(VerificationError, match="does not match source"):
             await intent.validate(_proof_credential(VIEM_KEYCHAIN_SIGNATURE), _request())
 
+    @pytest.mark.parametrize("key_id", ["0x" + "00" * 20, ROOT.address], ids=["zero", "other"])
+    async def test_access_key_must_match_returned_key_id(self, key_id: str) -> None:
+        """A key is active only when getKey's keyId is non-zero and equals the signer."""
+        intent = _intent()
+        _keychain_rpc(intent, expiry=2**63, key_id=key_id)
+        with pytest.raises(VerificationError, match="does not match source"):
+            await intent.validate(_proof_credential(VIEM_KEYCHAIN_SIGNATURE), _request())
+
     async def test_configured_store_claims_proof_once(self) -> None:
         store = MemoryStore()
         intent = _intent(store=store)
@@ -359,7 +369,7 @@ class TestProofVerification:
                 currencies=[PATH_USD],
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             store=MemoryStore(),
         )
         handler = server.charge(amount="0")
@@ -400,7 +410,7 @@ class TestSupportedModes:
                 supported_modes=["push"],
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         default = challenge(await server.charge(amount="1")(http_request()))
         route = challenge(
@@ -424,7 +434,7 @@ class TestSupportedModes:
                 fee_payer=OTHER,
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         expires = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
         for options in ({"amount": "0"}, {"amount": "1", "supported_modes": ["push"]}):

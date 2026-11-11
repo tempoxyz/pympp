@@ -59,7 +59,7 @@ from mpp.server import (
 )
 
 REALM = "contract.example.com"
-SECRET = "contract-secret"
+SECRET = "contract-secret-0123456789abcdef0123456789abcdef"
 PROBLEMS = "https://paymentauth.org/problems"
 URL = "https://contract.example.com/paid"
 
@@ -417,7 +417,11 @@ class TestChallengeBinding:
         method = ContractMethod()
         server = make_server(method)
         events = record(server)
-        other = Mpp(methods=ContractMethod().server[0], realm=REALM, secret_key="other-secret")
+        other = Mpp(
+            methods=ContractMethod().server[0],
+            realm=REALM,
+            secret_key="other-secret-0123456789abcdef0123456789abcdef",
+        )
         foreign = await issue(other.charge(amount="1"))
         result = await server.charge(amount="1")(engine_request(authorization(foreign)))
         assert offers(result)
@@ -443,7 +447,7 @@ class TestFailureResponses:
         async with http(application) as c:
             response = await c.get("/paid", headers={"Authorization": header})
         assert response.status_code == 402
-        assert response.json()["type"] == f"{PROBLEMS}/payment-required"
+        assert response.json()["type"] == f"{PROBLEMS}/malformed-credential"
         assert len(offers(response)) == 1
         [error] = failures(events)
         assert isinstance(error, MalformedCredentialError)
@@ -463,6 +467,7 @@ class TestFailureResponses:
         async with http(application) as c:
             response = await c.get("/paid", headers=authorization(foreign))
         assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/invalid-challenge"
         assert offers(response)[0].method == "contract"
         [error] = failures(events)
         assert isinstance(error, InvalidChallengeError)
@@ -474,7 +479,8 @@ class TestFailureResponses:
             ("verification-failed", 402, "verification-failed", True),
             ("invalid-payload", 402, "invalid-payload", False),
             ("unsupported", 402, "method-unsupported", True),
-            ("replayed", 403, "verification-failed", None),
+            # An already-used challenge gets a fresh one (core spec status table).
+            ("replayed", 402, "invalid-challenge", False),
         ],
     )
     async def test_intent_rejections(
@@ -509,8 +515,9 @@ class TestFailureResponses:
         client_events = record(transport)
         async with client:
             response = await client.get("/paid")
-        # The client tries once and returns the server's final answer.
-        assert response.status_code == 403
+        # A replayed credential gets invalid-challenge, which the client returns as final.
+        assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/invalid-challenge"
         assert [name for name, _ in client_events] == [
             "challenge.received",
             "credential.created",
@@ -538,13 +545,12 @@ class TestFailureResponses:
 
         issued = Challenge.from_www_authenticate(values[0])
         replay = await decorated(PlainRequest(authorization(issued, "replayed")))
-        assert replay == {
-            "_mpp_error": True,
-            "status": 403,
-            "headers": {"Cache-Control": "no-store", "Content-Type": "application/problem+json"},
-            "body": replay["body"],
-        }
-        assert json.loads(replay["body"])["status"] == 403
+        assert replay["_mpp_challenge"] is True
+        assert replay["status"] == 402
+        assert (
+            Challenge.from_www_authenticate(replay["headers"]["WWW-Authenticate"]).id != issued.id
+        )
+        assert json.loads(replay["body"])["type"] == f"{PROBLEMS}/invalid-challenge"
 
 
 class TestComposedOffers:
@@ -598,8 +604,16 @@ class TestComposedOffers:
 
     async def test_static_compose_keeps_each_server(self) -> None:
         first, second = ContractMethod("first"), ContractMethod("second")
-        one = Mpp(methods=first.server[0], realm="one.example.com", secret_key="one")
-        two = Mpp(methods=second.server[0], realm="two.example.com", secret_key="two")
+        one = Mpp(
+            methods=first.server[0],
+            realm="one.example.com",
+            secret_key="one-0123456789abcdef0123456789abcdef",
+        )
+        two = Mpp(
+            methods=second.server[0],
+            realm="two.example.com",
+            secret_key="two-0123456789abcdef0123456789abcdef",
+        )
         handler = compose(
             one.compose((first.server[0], {"amount": "1"})),
             two.compose((second.server[0], {"amount": "2"})),

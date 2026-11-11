@@ -266,7 +266,7 @@ async def test_relay_rejection_returns_retryable_http_challenge() -> None:
             Mpp(
                 methods=tempo_server.charge(relay=relay, recipient="0x" + "11" * 20),
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             ).charge(amount="0.001")
         )
         async def handler(
@@ -326,7 +326,7 @@ async def test_ambiguous_broadcast_does_not_issue_fresh_challenge(failure: str) 
             Mpp(
                 methods=tempo_server.charge(relay=relay, recipient="0x" + "11" * 20),
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             ).charge(amount="0.001")
         )
         async def handler(
@@ -557,6 +557,6 @@ async def test_relay_needs_no_local_store_in_production(monkeypatch: pytest.Monk
                 relay=relay,
                 rpc_url="https://rpc.test",
             ),
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
     assert all(m._has_store is None or m._has_store() for m in mpp.methods)

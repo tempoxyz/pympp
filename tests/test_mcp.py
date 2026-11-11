@@ -1037,12 +1037,17 @@ class TestVerifyOrChallenge:
         challenge = _make_bound_mcp_challenge(
             request=request,
             realm="realm-A",
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(MockIntent(), request, realm="realm-B", secret_key="shared-key"),
+            _handler(
+                MockIntent(),
+                request,
+                realm="realm-B",
+                secret_key="shared-key-0123456789abcdef0123456789abcdef",
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )
@@ -1060,12 +1065,17 @@ class TestVerifyOrChallenge:
         request = {"amount": "1000"}
         challenge = _make_bound_mcp_challenge(
             request=request,
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(MockIntent(), request, secret_key="shared-key", name="stripe"),
+            _handler(
+                MockIntent(),
+                request,
+                secret_key="shared-key-0123456789abcdef0123456789abcdef",
+                name="stripe",
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )
@@ -1083,12 +1093,14 @@ class TestVerifyOrChallenge:
         request = {"amount": "1000"}
         challenge = _make_bound_mcp_challenge(
             request=request,
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(SessionIntent(), request, secret_key="shared-key"),
+            _handler(
+                SessionIntent(), request, secret_key="shared-key-0123456789abcdef0123456789abcdef"
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )
@@ -1691,7 +1703,7 @@ async def test_decorator_explicitly_separates_factory_tools() -> None:
     intent.verify.assert_not_awaited()
 
 
-async def test_terminal_replay_does_not_issue_mcp_challenge() -> None:
+async def test_replay_gets_a_fresh_mcp_challenge() -> None:
     from unittest.mock import AsyncMock
 
     from mpp.errors import CredentialReplayedError
@@ -1701,15 +1713,15 @@ async def test_terminal_replay_does_not_issue_mcp_challenge() -> None:
     intent.verify = AsyncMock(side_effect=CredentialReplayedError("Already settled"))
     handler = _handler(intent, name="stripe", realm="shared")
     challenge = await _challenge(handler, "paid")
-    with pytest.raises(PaymentVerificationError) as raised:
-        await verify_or_challenge(
-            handler,
-            tool="paid",
-            meta=MCPCredential(challenge=challenge, payload={}).to_meta(),
-        )
-    data = raised.value.to_jsonrpc_error()["data"]
-    assert data["httpStatus"] == 403
-    assert data["challenges"] == []
+    result = await verify_or_challenge(
+        handler,
+        tool="paid",
+        meta=MCPCredential(challenge=challenge, payload={}).to_meta(),
+    )
+    # An already-used challenge is answered with a fresh one (core spec).
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].id != challenge.id
 
 
 def test_unnamed_decorated_handlers_require_explicit_identity() -> None:

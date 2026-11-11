@@ -1659,7 +1659,7 @@ class TestChargeIntent:
         assert methods[-1] == "eth_getTransactionByHash"
 
     @pytest.mark.asyncio
-    async def test_verify_hash_rejects_plain_transfer_without_challenge_bound_memo(self) -> None:
+    async def test_verify_hash_accepts_plain_transfer_without_memo(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -1697,15 +1697,15 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
-            await intent.verify(
-                credential,
-                {
-                    "amount": "1000",
-                    "currency": "0x20c0000000000000000000000000000000000000",
-                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                },
-            )
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+        assert receipt.status == "success"
 
     @pytest.mark.asyncio
     async def test_verify_hash_rejects_wrong_challenge_nonce(self) -> None:
@@ -1759,7 +1759,7 @@ class TestChargeIntent:
             )
 
     @pytest.mark.asyncio
-    async def test_verify_hash_rejects_non_mpp_memo(self) -> None:
+    async def test_verify_hash_accepts_memo_not_in_attribution_format(self) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -1798,15 +1798,15 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
-            await intent.verify(
-                credential,
-                {
-                    "amount": "1000",
-                    "currency": "0x20c0000000000000000000000000000000000000",
-                    "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
-                },
-            )
+        receipt = await intent.verify(
+            credential,
+            {
+                "amount": "1000",
+                "currency": "0x20c0000000000000000000000000000000000000",
+                "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+            },
+        )
+        assert receipt.status == "success"
 
     @pytest.mark.asyncio
     async def test_verify_hash_rejects_binding_on_dust_transfer(self) -> None:
@@ -2246,7 +2246,7 @@ class TestChargeIntent:
         assert receipt.reference == _raw_transaction_hash("0xabcdef1234567890")
 
     @pytest.mark.asyncio
-    async def test_verify_transaction_rejects_plain_transfer_without_challenge_bound_memo(
+    async def test_verify_transaction_accepts_plain_transfer_without_memo(
         self,
     ) -> None:
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
@@ -2287,8 +2287,9 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        # The transfer landed, so this is a final answer rather than an internal error.
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+        # Without a memo the transfer passes attribution and reaches the receipt hash
+        # check, which this fixture's placeholder signature fails after broadcast.
+        with pytest.raises(InternalPaymentError) as raised:
             await intent.verify(
                 credential,
                 {
@@ -2297,6 +2298,7 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
+        assert "Receipt transaction hash" in str(raised.value.__cause__)
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_wrong_challenge_bound_memo(self) -> None:
@@ -2341,7 +2343,7 @@ class TestChargeIntent:
         )
 
         # The transfer landed, so this is a final answer rather than an internal error.
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             await intent.verify(
                 credential,
                 {
@@ -5304,7 +5306,7 @@ class TestCosignAsFeePayer:
             expires=future,
         )
 
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             await self._make_intent().verify(
                 credential,
                 {
@@ -7739,7 +7741,7 @@ class TestSplitLogMemoStrictness:
             )
             for cid in ("challenge-a", "challenge-b")
         ]
-        with pytest.raises(CredentialReplayedError, match="Unbound split leg"):
+        with pytest.raises(VerificationError, match="Unbound split leg"):
             ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
                 {"status": "0x1", "logs": logs},
                 request,
@@ -7763,7 +7765,7 @@ class TestSplitLogMemoStrictness:
         ]
         receipt = {"status": "0x1", "logs": [logs[i] for i in order]}
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        with pytest.raises(CredentialReplayedError, match="memo is not bound"):
+        with pytest.raises(VerificationError, match="memo is not bound"):
             intent._verify_receipt_transfers(
                 receipt, request_a, challenge_id="challenge-a", realm="api.example.com"
             )
@@ -7784,7 +7786,7 @@ class TestSplitLogMemoStrictness:
                 self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
             ],
         }
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
                 receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
             )
@@ -7799,7 +7801,7 @@ class TestSplitLogMemoStrictness:
                 self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
             ],
         }
-        with pytest.raises(CredentialReplayedError, match="memo is not bound to this challenge"):
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
             ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
                 receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
             )
@@ -7869,7 +7871,7 @@ class TestSplitLogMemoStrictness:
         ]
         receipt = {"status": "0x1", "logs": logs[::-1] if reverse else logs}
         intent = ChargeIntent(rpc_url="https://rpc.test")
-        with pytest.raises(CredentialReplayedError, match="memo is not bound"):
+        with pytest.raises(VerificationError, match="memo is not bound"):
             intent._verify_receipt_transfers(
                 receipt, request_a, challenge_id="challenge-a", realm="api.example.com"
             )
@@ -7988,7 +7990,7 @@ class TestSplitsWithFeePayer:
     ) -> None:
         from mpp.server import Mpp
 
-        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
         server = Mpp(
             methods=tempo_server.charge(
                 rpc_url="https://rpc.test",
@@ -8014,7 +8016,7 @@ class TestSponsoredChallengeLifetime:
     def _server(monkeypatch: pytest.MonkeyPatch):
         from mpp.server import Mpp
 
-        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
         return Mpp(
             methods=tempo_server.charge(
                 rpc_url="https://rpc.test",
@@ -8078,7 +8080,11 @@ class TestSponsorshipDefault:
         from mpp.server import Mpp
 
         async def run():
-            server = Mpp(methods=server_methods, realm="test.com", secret_key="k" * 32)
+            server = Mpp(
+                methods=server_methods,
+                realm="test.com",
+                secret_key="k-0123456789abcdef0123456789abcdef" * 32,
+            )
             return challenges(await server.charge(amount="1.00", **options)(http_request()))
 
         return run()
@@ -8780,7 +8786,7 @@ class TestTransactionCredentialPayer:
 async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeypatch, encoding):
     from mpp.server import Mpp
 
-    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
     server = Mpp(methods=tempo_server.charge(recipient="0x" + "11" * 20))
     memo = encode_attribution(challenge_id="other", server_id="api.example.com")
     if encoding == "bare":
@@ -8823,7 +8829,7 @@ async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
             intent=ChargeIntent(),
             request=_fixed_attribution_request(),
             realm="api.example.com",
-            secret_key="test-secret-key",
+            secret_key="test-secret-key-0123456789abcdef0123456789abcdef",
             method="tempo",
         )
 
@@ -8836,7 +8842,7 @@ async def test_mcp_verify_or_challenge_rejects_fixed_attribution():
     server = Mpp(
         methods=tempo_server.charge(recipient="0x" + "11" * 20),
         realm="api.example.com",
-        secret_key="test-secret-key",
+        secret_key="test-secret-key-0123456789abcdef0123456789abcdef",
     )
     request = _fixed_attribution_request()
     with pytest.raises(ValueError, match="Fixed split memos"):
