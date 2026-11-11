@@ -892,32 +892,42 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             created = (authorization, attempt)
             return authorization
 
-        async def finish_creation() -> bool:
-            """Wait for a started creation to finish, whatever cancels this task.
+        async def finish_creation(forward_cancel: bool) -> bool:
+            """Wait for a started creation to finish before deciding.
 
-            A creation can pay, so its outcome must be known before deciding.
-            Returns whether this task was cancelled while waiting.
+            A creation can pay, so its outcome must be known. Cancelling this
+            task forwards the cancellation to the creation, as the path without a
+            hook does, so the method reports a payment it already broadcast (the
+            Tempo client raises PaymentOutcomeUnknownError with the hash), and
+            waits for it once more; a further cancellation stops waiting.
+            With forward_cancel, the cancellation already reached the hook.
+            Returns whether a cancellation was forwarded.
             """
-            cancelled = False
-            while creating is not None and not creating.done():
+            if creating is None or creating.done():
+                return False
+            if not forward_cancel:
                 try:
                     await asyncio.shield(creating)
+                    return False
                 except asyncio.CancelledError:
-                    cancelled = True
+                    forward_cancel = True
                 except Exception:
-                    pass
-            return cancelled
+                    return False
+            creating.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait({creating})
+            return True
 
         def creation_failure() -> BaseException | None:
             if creating is None or not creating.done() or creating.cancelled():
                 return None
             return creating.exception()
 
-        def pushed_unknown(cause: BaseException) -> PaymentOutcomeUnknownError | None:
-            """The unknown outcome to report when the created credential pushed a payment."""
-            if created is None:
-                return None
-            pushed = Credential.from_authorization(created[0])
+        def pushed_unknown(
+            authorization: str, cause: BaseException
+        ) -> PaymentOutcomeUnknownError | None:
+            """The unknown outcome to report when this credential pushed a payment."""
+            pushed = Credential.from_authorization(authorization)
             if not _is_pushed(pushed):
                 return None
             payload = pushed.payload
@@ -940,7 +950,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             hook_error = error
         finally:
             closed = True
-        if await finish_creation() and hook_error is None:
+        # The hook was cancelled along with this task: forward it to the creation.
+        if await finish_creation(isinstance(hook_error, asyncio.CancelledError)) and (
+            hook_error is None
+        ):
             hook_error = asyncio.CancelledError()
         failure = creation_failure()
 
@@ -955,7 +968,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 raise failure from hook_error
             if created is not None:
                 await _settle_attempt(created[1], rejected)
-                unknown = pushed_unknown(hook_error)
+                unknown = pushed_unknown(created[0], hook_error)
                 if unknown is not None:
                     # The hook failed after its credential's payment was broadcast:
                     # report it as an unknown outcome so the caller does not pay again.
@@ -978,7 +991,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             # The created credential is not the one sent: release its state.
             await _settle_attempt(attempt, rejected)
             unknown = pushed_unknown(
-                ValueError("on_challenge discarded a credential whose payment was broadcast")
+                authorization,
+                ValueError("on_challenge discarded a credential whose payment was broadcast"),
             )
             if unknown is not None:
                 # Its payment is already on chain and cannot be withdrawn.
