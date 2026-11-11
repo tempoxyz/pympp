@@ -1582,7 +1582,7 @@ class ChargeIntent:
         *,
         require: bool = False,
     ) -> None:
-        """Reject attribution memos of this realm bound to another challenge.
+        """Reject attribution memos not bound to this realm and challenge.
 
         With ``require``, a transfer must also carry a memo bound to this challenge:
         hash (push) credentials need it, since anyone can submit a public
@@ -1590,11 +1590,11 @@ class ChargeIntent:
 
         Without ``require`` (pull transactions, which the server broadcasts from the
         client's own signature, and their simulated legs), plain transfers and memos
-        not in attribution format are accepted. A matched transfer whose
-        memo is in attribution format for this realm must be bound to this
-        challenge, so one payment cannot authorize another challenge, and a fixed
-        split memo cannot exempt a transfer attributed to another challenge.
-        Attribution memos of other realms are accepted and never count as bound.
+        not in attribution format are accepted. Every matched transfer whose memo
+        is in attribution format must be bound to this realm and challenge: once
+        settled, a transfer attributed to another challenge, of this realm or
+        another one, could be claimed for that challenge as a hash credential at a
+        server with no record of it. A fixed split memo cannot exempt it either.
         """
         from mpp.methods.tempo._attribution import (
             is_mpp_memo,
@@ -1605,13 +1605,12 @@ class ChargeIntent:
         bound = False
         for matched_log in matched_logs:
             memo = matched_log.memo if matched_log.kind == "memo" else None
-            # Another realm's attribution memo is not ours to judge: accept it
-            # like any other memo (it never counts as bound).
-            if memo is None or not is_mpp_memo(memo) or not verify_server(memo, realm):
+            if memo is None or not is_mpp_memo(memo):
                 continue
-            if not verify_challenge_binding(memo, challenge_id):
-                # A transfer bound to another challenge of this realm could later
-                # be claimed for that challenge as a hash credential.
+            if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
+                # A transfer bound to another challenge, here or at another realm
+                # with its own replay store, could later be claimed for that
+                # challenge as a hash credential.
                 raise _AttributionMismatchError("memo is not bound to this challenge")
             bound = True
         if require and not bound:
@@ -1641,6 +1640,16 @@ class ChargeIntent:
             raise InternalPaymentError() from RuntimeError("Invalid transaction receipt")
 
         return receipt_data
+
+    async def _assert_not_already_included(self, client: Any, tx_hash: str) -> None:
+        """Reject a pull transaction that is already on chain before this server sends it.
+
+        A transaction mined before this server's own broadcast was settled by
+        someone else, and replay records can be per server or expire, so it
+        cannot pay for this credential. A failed lookup fails closed.
+        """
+        if await self._get_transaction_receipt(client, tx_hash) is not None:
+            raise VerificationError("Transaction was already included on chain")
 
     async def _recover_broadcast_receipt(
         self,
@@ -2525,6 +2534,15 @@ class ChargeIntent:
             ):
                 raise VerificationError(
                     "Sponsor budget reservation ownership was lost before broadcast"
+                )
+            if not reconciling:
+                # Another server, or an earlier settlement whose replay record has
+                # expired, may already have counted a mined transaction: accept
+                # only one this server broadcasts itself. Checking right before
+                # the send also means receipt recovery below can only adopt a
+                # transaction that was still unmined here, as mppx does.
+                await self._assert_not_already_included(
+                    client, reserved_tx_hash or _raw_transaction_hash(raw_tx)
                 )
             broadcast_attempted = True
             outcome_unknown = True

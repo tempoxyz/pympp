@@ -325,7 +325,7 @@ async def test_mixed_case_problem_media_type_is_still_final() -> None:
 
 
 def test_attribution_memo_rules_for_pull_and_push() -> None:
-    """Pull accepts plain and other-realm memos; only this realm's other challenges fail."""
+    """Pull accepts plain and non-attribution memos; any other attribution memo fails."""
     from mpp.errors import VerificationError
     from mpp.methods.tempo._attribution import encode as encode_attribution
     from mpp.methods.tempo.intents import ChargeIntent, MatchedTransferLog
@@ -340,10 +340,12 @@ def test_attribution_memo_rules_for_pull_and_push() -> None:
     bound = encode_attribution(challenge_id="c", server_id="r")
     other_challenge = encode_attribution(challenge_id="other", server_id="r")
     other_realm = encode_attribution(challenge_id="c", server_id="elsewhere")
-    for memo in (None, "0x" + "ab" * 32, other_realm, bound):
+    for memo in (None, "0x" + "ab" * 32, bound):
         intent._assert_challenge_bound_memo(legs(memo), challenge_id="c", realm="r")
-    with pytest.raises(VerificationError, match="memo is not bound"):
-        intent._assert_challenge_bound_memo(legs(other_challenge), challenge_id="c", realm="r")
+    # Another realm's memo could later be redeemed there as a hash credential.
+    for memo in (other_challenge, other_realm):
+        with pytest.raises(VerificationError, match="memo is not bound"):
+            intent._assert_challenge_bound_memo(legs(memo), challenge_id="c", realm="r")
     intent._assert_challenge_bound_memo(legs(bound), challenge_id="c", realm="r", require=True)
     for memo in (None, "0x" + "ab" * 32, other_realm, other_challenge):
         with pytest.raises(VerificationError, match="memo is not bound"):

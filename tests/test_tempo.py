@@ -94,6 +94,26 @@ def mock_response(status_code: int = 200, json: dict | None = None) -> httpx.Res
     return response
 
 
+def unmined(post: AsyncMock) -> AsyncMock:
+    """Answer the receipt lookup a pull makes before its broadcast: not mined yet.
+
+    Every other call, and every receipt lookup after the first send, goes to
+    ``post``.
+    """
+    sent = False
+
+    async def answer(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        nonlocal sent
+        method = kwargs.get("json", {}).get("method")
+        if method == "eth_getTransactionReceipt" and not sent:
+            return mock_response(200, {"jsonrpc": "2.0", "result": None, "id": 1})
+        if method == "eth_sendRawTransactionSync":
+            sent = True
+        return await post(url, *args, **kwargs)
+
+    return AsyncMock(side_effect=answer)
+
+
 def assert_unconfirmed_after_broadcast(error: BaseException, cause_match: str) -> None:
     """Post-broadcast failures are internal and chain the original verification error."""
     cause = internal_cause(error)
@@ -1076,7 +1096,7 @@ class TestExpiringNonce:
             return mock_response(200, {"jsonrpc": "2.0", "result": receipt, "id": 1})
 
         intent = ChargeIntent(rpc_url="https://rpc.test", store=MemoryStore())
-        intent._http_client = with_chain_id(AsyncMock(post=AsyncMock(side_effect=post)))
+        intent._http_client = with_chain_id(AsyncMock(post=unmined(AsyncMock(side_effect=post))))
         request = challenge.request
         submitted = make_credential(
             payload={"type": "transaction", "signature": submitted_tx},
@@ -2176,6 +2196,7 @@ class TestChargeIntent:
                 200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2231,6 +2252,7 @@ class TestChargeIntent:
                 200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2282,6 +2304,7 @@ class TestChargeIntent:
                 200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2337,6 +2360,7 @@ class TestChargeIntent:
                 200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2397,6 +2421,7 @@ class TestChargeIntent:
                 mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1}),
             ]
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         transaction_credential = make_credential(
@@ -2498,6 +2523,9 @@ class TestChargeIntent:
         finish = asyncio.Event()
 
         async def broadcast(*args, **kwargs):
+            if kwargs["json"]["method"] == "eth_getTransactionReceipt":
+                # Not mined before this server's broadcast.
+                return mock_response(200, {"jsonrpc": "2.0", "result": None, "id": 1})
             started.set()
             await finish.wait()
             return mock_response(200, {"jsonrpc": "2.0", "result": receipt_with_logs, "id": 1})
@@ -2516,7 +2544,7 @@ class TestChargeIntent:
 
         assert first_receipt.reference == tx_hash
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        assert methods == ["eth_sendRawTransactionSync"]
+        assert methods == ["eth_getTransactionReceipt", "eth_sendRawTransactionSync"]
 
         if not explicit_store:
             assert intent._store is not None
@@ -2548,6 +2576,7 @@ class TestChargeIntent:
                 },
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2581,6 +2610,7 @@ class TestChargeIntent:
                 {"jsonrpc": "2.0", "error": {"message": "insufficient funds"}, "id": 1},
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2615,6 +2645,7 @@ class TestChargeIntent:
                 {"jsonrpc": "2.0", "error": {"message": "insufficient funds"}, "id": 1},
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2656,6 +2687,7 @@ class TestChargeIntent:
                 },
             )
         )
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2677,7 +2709,11 @@ class TestChargeIntent:
         assert await store.get(f"mpp:charge:{tx_hash}") is None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
         # A definitive error still gets one receipt lookup before giving up.
-        assert methods == ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"]
+        assert methods == [
+            "eth_getTransactionReceipt",
+            "eth_sendRawTransactionSync",
+            "eth_getTransactionReceipt",
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2740,6 +2776,7 @@ class TestChargeIntent:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=post)
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -2802,8 +2839,10 @@ class TestChargeIntent:
         }
 
         mock_client = AsyncMock()
+        # Each attempt first checks the transaction is not mined yet.
         mock_client.post = AsyncMock(
             side_effect=[
+                mock_response(200, {"result": None}),
                 mock_response(
                     200,
                     {"jsonrpc": "2.0", "error": {"message": "already known"}, "id": 1},
@@ -2834,14 +2873,18 @@ class TestChargeIntent:
                 "initial_malformed": mock_response(200, {"result": "invalid"}),
             }[lookup_failure]
             mock_client.post.side_effect = [
+                mock_response(200, {"result": None}),
                 mock_response(200, {"error": {"message": "already known"}}),
                 failed_lookup,
+                mock_response(200, {"result": None}),
                 mock_response(200, {"error": {"message": "already known"}}),
                 mock_response(200, {"result": receipt_with_logs}),
             ]
             if lookup_failure.startswith("initial_"):
                 mock_client.post.side_effect = [
+                    mock_response(200, {"result": None}),
                     failed_lookup,
+                    mock_response(200, {"result": None}),
                     mock_response(200, {"error": {"message": "already known"}}),
                     mock_response(200, {"result": receipt_with_logs}),
                 ]
@@ -2856,10 +2899,14 @@ class TestChargeIntent:
         assert receipt.reference == tx_hash
         assert await store.get(f"mpp:charge:{tx_hash}") is not None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
-        expected_methods = ["eth_sendRawTransactionSync", "eth_getTransactionReceipt"]
+        expected_methods = [
+            "eth_getTransactionReceipt",
+            "eth_sendRawTransactionSync",
+            "eth_getTransactionReceipt",
+        ]
         if lookup_failure:
             expected_methods = (
-                ["eth_sendRawTransactionSync"]
+                ["eth_getTransactionReceipt", "eth_sendRawTransactionSync"]
                 if lookup_failure.startswith("initial_")
                 else expected_methods
             ) + expected_methods
@@ -3097,6 +3144,7 @@ class TestChargeIntent:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=post)
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -3276,6 +3324,7 @@ class TestChargeIntent:
             mock_client.post = AsyncMock(return_value=mock_response(send_result, {}))
         else:
             mock_client.post = AsyncMock(return_value=mock_response(200, send_result))
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
 
         credential = make_credential(
@@ -3297,7 +3346,7 @@ class TestChargeIntent:
         assert await store.get(f"mpp:charge:{tx_hash}") is None
         methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
         # Transport failures never reached the node; JSON-RPC errors get one lookup.
-        expected = ["eth_sendRawTransactionSync"]
+        expected = ["eth_getTransactionReceipt", "eth_sendRawTransactionSync"]
         if isinstance(send_result, dict):
             expected.append("eth_getTransactionReceipt")
         assert methods == expected
@@ -4310,7 +4359,7 @@ class TestCosignAsFeePayer:
             if outcome == "reverted":
                 receipt = {**receipt, "status": "0x0", "logs": []}
             post = AsyncMock(return_value=mock_response(200, {"result": receipt}))
-        intent._http_client = AsyncMock(post=post)
+        intent._http_client = AsyncMock(post=unmined(post))
         simulation = AsyncMock(
             side_effect=VerificationError("preflight failed") if outcome == "preflight" else None
         )
@@ -4652,7 +4701,7 @@ class TestCosignAsFeePayer:
         async def post(url, *, json):
             return mock_response(200, {"result": receipt})
 
-        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        intent._http_client = AsyncMock(post=unmined(AsyncMock(side_effect=post)))
         reserve = AsyncMock(side_effect=sponsor_budget.reserve)
         with (
             patch.object(intent, "_simulate_before_broadcast", AsyncMock()),
@@ -4705,7 +4754,7 @@ class TestCosignAsFeePayer:
         async def post(url, *, json):
             return mock_response(200, {"result": receipt})
 
-        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        intent._http_client = AsyncMock(post=unmined(AsyncMock(side_effect=post)))
         calls: list[str] = []
         real_reserve = sponsor_budget.reserve
 
@@ -4733,7 +4782,7 @@ class TestCosignAsFeePayer:
         async def post(url, *, json):
             return mock_response(200, {"result": receipt})
 
-        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        intent._http_client = AsyncMock(post=unmined(AsyncMock(side_effect=post)))
         calls: list[str] = []
         real_reserve = sponsor_budget.reserve
 
@@ -4767,7 +4816,7 @@ class TestCosignAsFeePayer:
         async def post(url, *, json):
             return mock_response(200, {"result": receipt})
 
-        intent._http_client = AsyncMock(post=AsyncMock(side_effect=post))
+        intent._http_client = AsyncMock(post=unmined(AsyncMock(side_effect=post)))
         reserve = AsyncMock(side_effect=sponsor_budget.reserve)
         started = time.time()
         with (
@@ -5686,6 +5735,7 @@ class TestCosignAsFeePayer:
 
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(side_effect=post)
+        mock_client.post = unmined(mock_client.post)
         intent._http_client = mock_client
         marker = f"mpp:charge-broadcast:{_raw_transaction_hash(raw_tx).lower()}"
 
@@ -7806,8 +7856,8 @@ class TestSplitLogMemoStrictness:
                 receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
             )
 
-    def test_split_accepts_another_realms_memo(self) -> None:
-        """Another realm's attribution memo is accepted like any other memo."""
+    def test_split_rejects_another_realms_memo(self) -> None:
+        """Another realm's attribution memo could be redeemed there: it fails here."""
         bound = encode_attribution(challenge_id="challenge-b", server_id="api.example.com")
         other = encode_attribution(challenge_id="challenge-b", server_id="other.example.com")
         receipt = {
@@ -7817,10 +7867,10 @@ class TestSplitLogMemoStrictness:
                 self._make_log(TRANSFER_WITH_MEMO_TOPIC, self.SPLIT_RECIPIENT, 300000, other),
             ],
         }
-        matches = ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
-            receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
-        )
-        assert len(matches) == 2
+        with pytest.raises(VerificationError, match="memo is not bound to this challenge"):
+            ChargeIntent(rpc_url="https://rpc.test")._verify_receipt_transfers(
+                receipt, self._split_request(), challenge_id="challenge-b", realm="api.example.com"
+            )
 
     def test_single_transfer_prefers_leg_bound_to_this_challenge(self) -> None:
         """An equal transfer for another challenge in the same receipt is not this payment."""
@@ -8426,6 +8476,8 @@ class TestHashCredentialSourceValidation:
             "logs": [self._memo_log(self.RELAYER, self._bound_memo)],
         }
         intent = self._intent(receipt, validate_sender=boom)
+        assert isinstance(intent._http_client, AsyncMock)
+        intent._http_client.post = unmined(intent._http_client.post)
         credential = make_credential(
             payload={"type": "transaction", "signature": "0xabcdef1234567890"},
             challenge_id="challenge-123",

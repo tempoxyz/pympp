@@ -393,16 +393,57 @@ async def test_hash_replay_across_modes_is_rejected(order: str) -> None:
     intent = make_intent(rpc)
     raw_tx = signed_tx((pay_call(),))
     tx_hash = tx_hash_of(raw_tx)
-    rpc.receipts[tx_hash] = receipt(tx_hash)
+    if order == "push-then-pull":
+        rpc.receipts[tx_hash] = receipt(tx_hash)
     pull, push = _tx_credential(raw_tx), _hash_credential(tx_hash)
     first, second = (pull, push) if order == "pull-then-push" else (push, pull)
 
     assert (await intent.verify(first, _request())).reference == tx_hash
+    # The pull broadcast mines the transaction.
+    rpc.receipts[tx_hash] = receipt(tx_hash)
     with pytest.raises(CredentialReplayedError):
         await intent.verify(second, _request())
 
     assert len(rpc.sent) == (1 if order == "pull-then-push" else 0)
-    assert rpc.count("eth_getTransactionReceipt") == (0 if order == "pull-then-push" else 1)
+    # A pull looks for a receipt once before it broadcasts; a push reads it once.
+    assert rpc.count("eth_getTransactionReceipt") == 1
+
+
+@pytest.mark.parametrize("send", ["mines", "already-known"])
+async def test_pull_of_an_already_mined_transaction_is_rejected(send: str) -> None:
+    """A pull whose signed transaction is on chain before this server's broadcast
+    was settled elsewhere (another server, or a replay record that expired). With
+    no replay record here, it still never pays for this credential."""
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+    rpc.receipts[tx_hash] = receipt(tx_hash)
+    if send == "already-known":
+        # A node answering the rebroadcast as pooled must not lead to adopting
+        # the old receipt either.
+        rpc.send = lambda raw_tx: {"error": {"code": -32000, "message": "already known"}}
+
+    with pytest.raises(VerificationError, match="already included on chain") as raised:
+        await intent.verify(_tx_credential(raw_tx), _request())
+
+    assert type(raised.value).type == VerificationError.type
+    assert rpc.sent == []
+    assert stored_keys(intent) == []
+
+
+async def test_pull_checks_the_chain_before_its_own_broadcast() -> None:
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+
+    assert (await intent.verify(_tx_credential(raw_tx), _request())).reference == tx_hash
+
+    assert rpc.methods.index("eth_getTransactionReceipt") < rpc.methods.index(
+        "eth_sendRawTransactionSync"
+    )
+    assert len(rpc.sent) == 1
 
 
 def _reencode_sender_signature(envelope: str) -> str:

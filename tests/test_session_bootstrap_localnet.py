@@ -224,9 +224,12 @@ async def test_bootstrap_snapshot_header_matches_the_server_channel(
                 UNIT,
                 UNIT,
             )
-            # A proof is accepted once.
+            # A proof is accepted once: a replay gets a fresh Challenge (HEAD
+            # carries no problem body) and no session state.
             replayed = await client.head(url, headers={"Authorization": credential})
-            assert replayed.status_code == 403
+            assert replayed.status_code == 402
+            assert "www-authenticate" in replayed.headers
+            assert "payment-session" not in replayed.headers
 
 
 def _key(account: TempoAccount) -> str:
