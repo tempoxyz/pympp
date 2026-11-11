@@ -849,13 +849,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             status="rejected", response=response, challenges=tuple(challenges)
         )
         created: tuple[str, PaymentAttempt] | None = None
-        # Overlapping calls wait for the first one instead of creating (and
-        # possibly paying) a second credential.
-        creating = asyncio.Lock()
+        # Every call, overlapping or later, shares the first creation and its
+        # outcome, including a failure: creating can pay, and a failed creation
+        # may already have paid, so no call ever starts a second one.
+        creating: asyncio.Future[str] | None = None
 
         async def create_credential() -> str:
-            async with creating:
-                return await create_once()
+            nonlocal creating
+            if creating is None:
+                creating = asyncio.ensure_future(create_once())
+            return await asyncio.shield(creating)
 
         async def create_once() -> str:
             nonlocal created

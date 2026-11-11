@@ -2587,3 +2587,39 @@ async def test_overlapping_create_credential_calls_create_once():
     response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
     assert response.status_code == 200
     assert calls == 1
+
+
+async def test_failed_create_credential_is_not_retried_by_overlapping_calls():
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+        ]
+    )
+    calls = 0
+
+    async def create(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        raise RuntimeError("outcome unknown")
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        results = await asyncio.gather(
+            context.create_credential(), context.create_credential(), return_exceptions=True
+        )
+        assert all(isinstance(result, RuntimeError) for result in results)
+        with pytest.raises(RuntimeError):
+            await context.create_credential()
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert calls == 1
