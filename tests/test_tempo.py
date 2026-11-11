@@ -2426,6 +2426,17 @@ class TestChargeIntent:
         with pytest.raises(VerificationError, match="Transaction hash already used"):
             await intent.verify(hash_credential, request)
 
+        # The pull-settled transaction cannot pay another challenge as a push either:
+        # both paths share one accepted-transaction record keyed by the hash.
+        other_challenge = make_credential(
+            payload={"type": "hash", "hash": tx_hash},
+            challenge_id="challenge-456",
+            expires=future,
+            realm="api.example.com",
+        )
+        with pytest.raises(VerificationError, match="Transaction hash already used"):
+            await intent.verify(other_challenge, request)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("explicit_store", [False, True])
     async def test_verify_transaction_rejects_duplicate_without_rpc(
