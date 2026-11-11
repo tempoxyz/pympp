@@ -424,12 +424,340 @@ async def test_pull_of_an_already_mined_transaction_is_rejected(send: str) -> No
         # the old receipt either.
         rpc.send = lambda raw_tx: {"error": {"code": -32000, "message": "already known"}}
 
-    with pytest.raises(VerificationError, match="already included on chain") as raised:
+    # A replay: final, so the client never pays the fresh Challenge for it.
+    with pytest.raises(CredentialReplayedError, match="already included on chain") as raised:
         await intent.verify(_tx_credential(raw_tx), _request())
 
-    assert type(raised.value).type == VerificationError.type
+    assert type(raised.value).type == CredentialReplayedError.type
     assert rpc.sent == []
     assert stored_keys(intent) == []
+
+
+def _pull_outcome_unknown(rpc: FakeRpc) -> None:
+    """Answer every send as pooled but unconfirmed (EIP-7966), with no receipt."""
+    rpc.send = lambda raw_tx: {"error": {"code": 4, "message": "timeout"}}
+
+
+@pytest.mark.parametrize("retry", ["mined-before-retry", "pooled-on-rebroadcast"])
+async def test_unsponsored_pull_with_unknown_outcome_settles_on_retry(
+    retry: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pull this server broadcast whose outcome was lost, then mined, is this
+    server's own payment: the retry of the same Credential settles it instead of
+    rejecting it as already on chain."""
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+    marker = f"mpp:charge-broadcast:{tx_hash.lower()}"
+    _pull_outcome_unknown(rpc)
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(credential, _request())
+    # The reservation is released but the broadcast marker survives.
+    assert stored_keys(intent) == [marker]
+
+    if retry == "mined-before-retry":
+        rpc.receipts[tx_hash] = receipt(tx_hash)
+    else:
+
+        def pooled(raw_tx: str) -> dict[str, Any]:
+            rpc.receipts[tx_hash] = receipt(tx_hash)
+            return {"error": {"code": -32000, "message": "already known"}}
+
+        rpc.send = pooled
+
+    result = await intent.verify(credential, _request())
+
+    assert result.reference == tx_hash
+    assert len(rpc.sent) == (1 if retry == "mined-before-retry" else 2)
+    assert set(rpc.sent) == {_canonical_raw_transaction(raw_tx)}
+    # Settled: the replay claim guards it and the marker is gone.
+    assert stored_keys(intent) == [f"mpp:charge:{tx_hash.lower()}"]
+    with pytest.raises(CredentialReplayedError):
+        await intent.verify(credential, _request())
+
+
+async def test_unsponsored_pull_marker_still_verifies_the_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconciling adopts only a receipt that pays this Challenge."""
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+    _pull_outcome_unknown(rpc)
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(credential, _request())
+
+    rpc.receipts[tx_hash] = receipt(tx_hash, logs=[memo_log(recipient=OTHER_RECIPIENT)])
+    for _ in range(2):
+        with pytest.raises(VerificationError) as raised:
+            await intent.verify(credential, _request())
+        assert not isinstance(raised.value, CredentialReplayedError)
+
+    # Only settling removes a marker an earlier attempt left; nothing is claimed.
+    assert stored_keys(intent) == [f"mpp:charge-broadcast:{tx_hash.lower()}"]
+    assert len(rpc.sent) == 1
+
+
+async def test_unsponsored_pull_retry_while_unconfirmed_never_invites_payment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+    _pull_outcome_unknown(rpc)
+
+    for _ in range(2):
+        with pytest.raises(InternalPaymentError):
+            await intent.verify(credential, _request())
+
+    # Each retry resends the exact bytes and keeps the marker.
+    assert rpc.sent == [_canonical_raw_transaction(raw_tx)] * 2
+    assert stored_keys(intent) == [f"mpp:charge-broadcast:{tx_hash.lower()}"]
+
+
+@pytest.mark.parametrize(
+    ("error", "kept"),
+    [
+        ({"code": -32000, "message": "insufficient funds"}, False),
+        ({"code": -32000, "message": "already known"}, False),
+        ({"code": -32603, "message": "internal error"}, True),
+        ({"code": -32000, "message": "request timed out"}, True),
+        ({"code": 4, "message": "timeout"}, True),
+    ],
+    ids=["insufficient-funds", "already-known", "internal", "timed-out", "eip-7966"],
+)
+async def test_unsponsored_pull_marker_is_dropped_only_on_a_node_rejection(
+    error: dict[str, Any], kept: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+    rpc.send = lambda raw_tx: {"error": error}
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(_tx_credential(raw_tx), _request())
+
+    marker = f"mpp:charge-broadcast:{tx_hash_of(raw_tx).lower()}"
+    assert stored_keys(intent) == ([marker] if kept else [])
+
+
+async def test_unsponsored_pull_transport_failure_keeps_its_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+
+    def lost(raw_tx: str) -> dict[str, Any]:
+        raise httpx.ReadError("connection reset")
+
+    rpc.send = lost
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(_tx_credential(raw_tx), _request())
+
+    assert stored_keys(intent) == [f"mpp:charge-broadcast:{tx_hash_of(raw_tx).lower()}"]
+
+
+async def test_unsponsored_pull_never_claims_an_unbound_receipt_after_its_first_send() -> None:
+    """A first send answered "already known" may mean someone else submitted the
+    transaction: a receipt with only a plain transfer is not adopted, and once
+    it has landed the Credential is a replay."""
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    raw_tx = signed_tx((Call.create(to=CURRENCY, value=0, data=transfer_data()),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+
+    def pooled_elsewhere(raw_tx: str) -> dict[str, Any]:
+        rpc.receipts[tx_hash] = receipt(tx_hash, logs=[plain_log()])
+        return {"error": {"code": -32000, "message": "already known"}}
+
+    rpc.send = pooled_elsewhere
+
+    with pytest.raises(InternalPaymentError) as raised:
+        await intent.verify(credential, _request())
+
+    assert "attribution memo" in str(internal_cause(raised.value))
+    assert stored_keys(intent) == []
+    with pytest.raises(CredentialReplayedError, match="already included on chain"):
+        await intent.verify(credential, _request())
+    assert len(rpc.sent) == 1
+
+
+async def test_unsponsored_pull_unbound_receipt_settles_through_its_own_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After this server's own send timed out, the receipt of a memo-less pull
+    is not adopted at once, but the retry holding its marker settles it."""
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    intent = make_intent(rpc)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((Call.create(to=CURRENCY, value=0, data=transfer_data()),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+
+    def timed_out(raw_tx: str) -> dict[str, Any]:
+        rpc.receipts[tx_hash] = receipt(tx_hash, logs=[plain_log()])
+        return {"error": {"code": 4, "message": "timeout"}}
+
+    rpc.send = timed_out
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(credential, _request())
+    assert stored_keys(intent) == [f"mpp:charge-broadcast:{tx_hash.lower()}"]
+
+    assert (await intent.verify(credential, _request())).reference == tx_hash
+    assert stored_keys(intent) == [f"mpp:charge:{tx_hash.lower()}"]
+    assert len(rpc.sent) == 1
+
+
+async def test_unsponsored_pull_marker_expiry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The marker expires 60 s after the later of the Challenge's expiry and the
+    transaction's valid_before."""
+    rpc = FakeRpc()
+    store = MemoryStore()
+    intent = make_intent(rpc, store=store)
+    raw_tx = signed_tx((pay_call(),))
+    expiries: dict[str, float] = {}
+    original = store.put_if_absent_until
+
+    async def spy(key: str, value: Any, expires_at: float) -> bool:
+        expiries[key] = expires_at
+        return await original(key, value, expires_at)
+
+    monkeypatch.setattr(store, "put_if_absent_until", spy)
+    expires = _expires(600)
+    credential = make_credential(
+        payload={"type": "transaction", "signature": raw_tx},
+        challenge_id=CHALLENGE_ID,
+        expires=expires,
+    )
+
+    await intent.verify(credential, _request())
+
+    marker = f"mpp:charge-broadcast:{tx_hash_of(raw_tx).lower()}"
+    challenge_expiry = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp()
+    assert expiries[marker] == pytest.approx(challenge_expiry + 60)
+
+
+class _PlainStore:
+    """A store without expiry support."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, Any] = {}
+
+    async def get(self, key: str) -> Any | None:
+        return self.data.get(key)
+
+    async def put(self, key: str, value: Any) -> None:
+        self.data[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    async def put_if_absent(self, key: str, value: Any) -> bool:
+        if key in self.data:
+            return False
+        self.data[key] = value
+        return True
+
+
+async def test_unsponsored_pull_marker_works_without_store_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mpp.methods.tempo.intents.RECEIPT_POLL_INTERVAL", 0.01)
+    rpc = FakeRpc()
+    store = _PlainStore()
+    intent = ChargeIntent(rpc_url="https://rpc.test", http_client=rpc.client, store=store)
+    intent._confirmation_timeout = 0.05
+    raw_tx = signed_tx((pay_call(),))
+    tx_hash = tx_hash_of(raw_tx)
+    credential = _tx_credential(raw_tx)
+    _pull_outcome_unknown(rpc)
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(credential, _request())
+    assert list(store.data) == [f"mpp:charge-broadcast:{tx_hash.lower()}"]
+
+    rpc.receipts[tx_hash] = receipt(tx_hash)
+    assert (await intent.verify(credential, _request())).reference == tx_hash
+    assert list(store.data) == [f"mpp:charge:{tx_hash.lower()}"]
+
+
+async def test_unsponsored_pull_reconciles_a_marker_stored_as_bytes() -> None:
+    rpc = FakeRpc()
+    store = MemoryStore()
+    intent = make_intent(rpc, store=store)
+    raw_tx = _canonical_raw_transaction(signed_tx((pay_call(),)))
+    tx_hash = tx_hash_of(raw_tx)
+    await store.put(f"mpp:charge-broadcast:{tx_hash.lower()}", raw_tx.encode())
+    rpc.receipts[tx_hash] = receipt(tx_hash)
+
+    assert (await intent.verify(_tx_credential(raw_tx), _request())).reference == tx_hash
+    assert rpc.sent == []
+
+
+@pytest.mark.parametrize("marker", ["other-bytes", "unreadable"])
+async def test_unsponsored_pull_fails_closed_on_a_bad_marker(marker: str) -> None:
+    rpc = FakeRpc()
+    store = MemoryStore()
+    intent = make_intent(rpc, store=store)
+    raw_tx = signed_tx((pay_call(),))
+    key = f"mpp:charge-broadcast:{tx_hash_of(raw_tx).lower()}"
+    if marker == "other-bytes":
+        await store.put(key, signed_tx((pay_call(),), nonce=1))
+        expected = "does not match"
+    else:
+        original_get = store.get
+
+        async def failing_get(name: str) -> Any:
+            if name == key:
+                raise OSError("store down")
+            return await original_get(name)
+
+        store.get = failing_get  # type: ignore[method-assign]
+        expected = "store down"
+
+    with pytest.raises(InternalPaymentError) as raised:
+        await intent.verify(_tx_credential(raw_tx), _request())
+
+    assert expected in str(internal_cause(raised.value))
+    assert rpc.sent == []
+    assert [k for k in stored_keys(intent) if k.startswith("mpp:charge:")] == []
+
+
+async def test_unsponsored_pull_mined_elsewhere_after_unrelated_marker_is_rejected() -> None:
+    """A marker covers only the exact bytes this server broadcast."""
+    rpc = FakeRpc()
+    store = MemoryStore()
+    intent = make_intent(rpc, store=store)
+    raw_tx = signed_tx((pay_call(),))
+    other = signed_tx((pay_call(),), nonce=1)
+    await store.put(f"mpp:charge-broadcast:{tx_hash_of(other).lower()}", other)
+    rpc.receipts[tx_hash_of(raw_tx)] = receipt(tx_hash_of(raw_tx))
+
+    with pytest.raises(CredentialReplayedError, match="already included on chain"):
+        await intent.verify(_tx_credential(raw_tx), _request())
+    assert rpc.sent == []
 
 
 async def test_pull_checks_the_chain_before_its_own_broadcast() -> None:
@@ -724,8 +1052,9 @@ async def test_broadcast_receipt_hash_must_be_submitted_transaction(
     assert isinstance(cause, VerificationError)
     assert error in str(cause)
     assert len(rpc.sent) == 1
-    # The payment was not confirmed, so its replay reservation is released.
-    assert stored_keys(intent) == []
+    # The payment was not confirmed, so its replay reservation is released; the
+    # broadcast marker stays, since the node did not refuse the send.
+    assert stored_keys(intent) == [f"mpp:charge-broadcast:{tx_hash_of(rpc.sent[0]).lower()}"]
 
 
 async def _seed_unknown_submission(intent: ChargeIntent, envelope: str) -> str:
