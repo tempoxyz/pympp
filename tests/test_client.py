@@ -2623,3 +2623,36 @@ async def test_failed_create_credential_is_not_retried_by_overlapping_calls():
     transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
     await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
     assert calls == 1
+
+
+async def test_hook_that_raises_after_a_pushed_credential_reports_unknown_outcome():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    tx_hash = "0x" + "cd" * 32
+    create = AsyncMock(
+        return_value=Credential(
+            challenge=challenge.to_echo(), payload={"type": "hash", "hash": tx_hash}
+        ).to_authorization()
+    )
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        raise RuntimeError("hook failed")
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
