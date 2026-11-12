@@ -310,10 +310,10 @@ async def test_replayed_x402_payment_is_rejected_without_a_second_transfer(chain
             assert first.status_code == 200, first.text
             second = await http.get(url, headers=headers)
 
-        # A replay gets 402 with the invalid-challenge problem, which clients treat
-        # as final, and nothing is settled a second time.
-        assert second.status_code == 402
-        assert second.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
+        # A replay gets a 403 and no new challenge, so clients aren't invited to pay again.
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
+        assert "WWW-Authenticate" not in second.headers
         assert chain.balance(recipient.address) == recipient_before + 10_000
         assert facilitator.settle_requests == 1
     finally:

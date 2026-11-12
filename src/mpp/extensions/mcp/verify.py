@@ -48,6 +48,7 @@ from mpp.extensions.mcp.constants import META_CREDENTIAL
 from mpp.extensions.mcp.errors import (
     MalformedCredentialError,
     PaymentVerificationError,
+    RejectedChallenges,
 )
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.server import ComposedHandler, PaymentVerified, Request
@@ -80,7 +81,11 @@ async def verify_or_challenge(
 
     Returns:
         The challenges to return as a -32042 error when no valid credential was sent,
-        or the verified credential and its receipt.
+        or the verified credential and its receipt. When a credential was rejected
+        before settlement (malformed, unknown, already used or expired), the list is
+        a :class:`RejectedChallenges` that also carries its problem details (such as
+        ``invalid-challenge``), which ``PaymentRequiredError(challenges=result)`` sends
+        in ``data.problem`` so clients can tell it from a first payment request.
 
     Raises:
         MalformedCredentialError: If the credential structure is invalid (-32602).
@@ -146,9 +151,14 @@ async def verify_or_challenge(
     except ValueError:
         decoded = None
     problem: dict[str, Any] = decoded if is_dict(decoded) else {}
-    if response.status == 402 and problem.get("type") in _RECHALLENGE_TYPES:
-        return challenges
     problem_type = problem.get("type")
+    if response.status == 402 and problem_type in _RECHALLENGE_TYPES:
+        if problem_type in (None, CorePaymentRequiredError.type):
+            return challenges
+        # A rejected credential (such as an already-used one) keeps its problem
+        # details beside the fresh challenges, as the MCP transport draft and mppx
+        # allow, so a client never mistakes it for a first payment request.
+        return RejectedChallenges(challenges, problem=problem)
     raise PaymentVerificationError(
         challenges=challenges,
         http_status=response.status,
@@ -168,7 +178,8 @@ _RECHALLENGE_TYPES = frozenset(
     }
 )
 """Problem types of a ``402`` answered with fresh challenges (-32042): no credential, or
-one rejected before settlement (malformed, unknown, already used or expired)."""
+one rejected before settlement (malformed, unknown, already used or expired), whose
+problem details go in ``data.problem``."""
 
 
 def _mcp_challenge(challenge: Challenge) -> MCPChallenge:

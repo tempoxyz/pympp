@@ -31,6 +31,7 @@ from x402.schemas.hooks import SkipHandlerDirective
 from x402.server import x402ResourceServer
 
 from mpp import _expires
+from mpp._parsing import _split_header_list
 from mpp.errors import InternalPaymentError, VerificationFailedError
 from mpp.methods.evm import server as evm
 from mpp.methods.evm.client import AuthorizationConfig
@@ -197,8 +198,10 @@ class Negotiator:
             if skipped:
                 return Negotiation("handled", result.with_receipt(skipped[0]))
             return Negotiation("paid", payment=result)
-        if result.status != 402:
-            return Negotiation("handled", result.challenge)
+        if result.status != 402 or _has_mpp_credential(request):
+            # A rejected MPP credential (such as a replayed one) gets the native problem
+            # response unmerged: an x402 offer beside it would invite a second payment.
+            return Negotiation("handled", _without_x402_offer(result.challenge))
         return Negotiation("handled", _merge_challenge(result.challenge, unpaid))
 
 
@@ -213,7 +216,7 @@ def x402_credential(request: Request) -> str | None:
 
 def _has_mpp_credential(request: Request) -> bool:
     authorization = request.headers.get("authorization") or ""
-    return any(part.strip().lower().startswith("payment ") for part in authorization.split(","))
+    return any(part.lower().startswith("payment ") for part in _split_header_list(authorization))
 
 
 def select_requirement(
@@ -353,6 +356,22 @@ def _merge_challenge(mpp: Response, x402: Response) -> Response:
     headers = make_headers([*x402.headers.multi_items(), *challenges])
     headers["Cache-Control"] = "no-store"
     return Response(status=x402.status, headers=headers, body=x402.body)
+
+
+def _without_x402_offer(response: Response) -> Response:
+    """The native response without a PAYMENT-REQUIRED offer.
+
+    x402 payments on this route go to the official middleware, so the offer the
+    native handler derives from its own challenge is not one to pay.
+    """
+    headers = make_headers(
+        [
+            (name, value)
+            for name, value in response.headers.multi_items()
+            if name.lower() != PAYMENT_REQUIRED_HEADER.lower()
+        ]
+    )
+    return Response(status=response.status, headers=headers, body=response.body)
 
 
 def _payment_required(instructions: HTTPResponseInstructions) -> PaymentRequired | None:
