@@ -500,6 +500,7 @@ module mpp.identity
         @dataclass(frozen=True, slots=True)
         field verify: Callable[[Request], Awaitable[Verification[T]]]
         field authorization: bool = False
+        field body: bool = False
         field members: tuple[Verifier[Any], ...] = ()
     class AnyOfValue
         @dataclass(frozen=True, slots=True)
@@ -511,6 +512,7 @@ module mpp.identity
         field verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
         field authorization: bool = False
         field payer: Callable[[T], str | None] | None = None
+        field body: bool = False
     class PaymentCheckInput
         @dataclass(frozen=True, slots=True)
         field request: Request
@@ -566,6 +568,7 @@ module mpp.identity
         field request: tuple[Verifier[Any], ...] = ()
         field payment: PaymentCheck[Any] | None = None
         property authorization: bool
+        property body: bool
         property empty: bool
         @classmethod def of(cls, value: Route | Sequence[Verifier[Any]] | None) -> Route
         property requirements: tuple[Requirement, ...]
@@ -578,9 +581,10 @@ module mpp.identity
         @dataclass(frozen=True, slots=True)
         field verify: Callable[[Request], Awaitable[Verification[T]]]
         field authorization: bool = False
+        field body: bool = False
     def any_of(*verifiers: Verifier[Any]) -> AnyOf
     def forbidden(reason: str = '', headers: HeadersInput = None) -> Rejected
-    def from_fn(verify: Callable[[Request], Awaitable[T | None]], *, challenge: HeadersInput = None, authorization: bool = False) -> Verifier[T]
+    def from_fn(verify: Callable[[Request], Awaitable[T | None]], *, challenge: HeadersInput = None, authorization: bool = False, body: bool = False) -> Verifier[T]
     def invalid(reason: str = '', headers: HeadersInput = None) -> Rejected
     def missing(reason: str = '', headers: HeadersInput = None) -> Rejected
     def unavailable(reason: str = '', headers: HeadersInput = None) -> Rejected

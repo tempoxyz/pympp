@@ -499,7 +499,10 @@ class ComposedHandler:
         method's ``resolve_request`` reads it (:attr:`ServerMethod.needs_request_body`).
         """
         return any(
-            callable(offer.options.get("body")) or offer.method.needs_request_body
+            callable(offer.options.get("body"))
+            or offer.method.needs_request_body
+            # An identity verifier or payment check that reads the body (body=True).
+            or offer.identity.body
             for offer in self._offers
         )
 

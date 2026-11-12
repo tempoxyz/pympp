@@ -201,10 +201,13 @@ class Verifier(Generic[T]):
 
     ``authorization`` says the verifier reads ``Authorization``: its route needs a server created
     with ``requires_auth=True``, so Payment Credentials travel in ``Payment-Authorization``.
+    ``body`` says it reads ``Request.body``, which middleware and ``@pay`` then read for its route
+    (otherwise the body is None there).
     """
 
     verify: Callable[[Request], Awaitable[Verification[T]]]
     authorization: bool = False
+    body: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +248,7 @@ def any_of(*verifiers: Verifier[Any]) -> AnyOf:
     return AnyOf(
         verify=verify,
         authorization=any(member.authorization for member in members),
+        body=any(member.body for member in members),
         members=members,
     )
 
@@ -274,6 +278,7 @@ class PaymentCheck(Generic[T]):
 
     - ``authorization``: the check reads ``Authorization``, so its route needs a server created
       with ``requires_auth=True``.
+    - ``body``: the check reads the request body (see :class:`Verifier`).
     - ``payer``: returns the account the check vetted from its value. After settlement the
       engine compares it with the account the payment method reports and rejects the request as
       ``forbidden`` when they differ, or when the method reports none, so a check cannot be
@@ -290,6 +295,7 @@ class PaymentCheck(Generic[T]):
     verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
     authorization: bool = False
     payer: Callable[[T], str | None] | None = None
+    body: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "requires", tuple(self.requires))
@@ -321,6 +327,12 @@ class Route:
     def requirements(self) -> tuple[Requirement, ...]:
         """The identities every 402 of the route lists."""
         return self.payment.requires if self.payment is not None else ()
+
+    @property
+    def body(self) -> bool:
+        """Whether a verifier or the payment check reads the request body."""
+        payment = self.payment is not None and self.payment.body
+        return payment or any(verifier.body for verifier in self.request)
 
     @property
     def authorization(self) -> bool:
@@ -404,6 +416,7 @@ def from_fn(
     *,
     challenge: HeadersInput = None,
     authorization: bool = False,
+    body: bool = False,
 ) -> Verifier[T]:
     """Build a verifier from a function, such as a lookup in your own database (mppx `from`).
 
@@ -437,7 +450,7 @@ def from_fn(
             return Rejected("missing", "", headers)
         return Valid(value)
 
-    return Verifier(verify=run, authorization=authorization)
+    return Verifier(verify=run, authorization=authorization, body=body)
 
 
 # --- Client ---------------------------------------------------------------------------------

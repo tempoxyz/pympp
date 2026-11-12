@@ -552,3 +552,43 @@ async def test_a_method_that_validates_is_held_to_the_vetted_payer_before_it_bro
         assert (code, body) == (403, rejected_with)
         assert rejected is not None and rejected.stage == "payment"
         assert recorder.settled == 0, "rejected before any funds move"
+
+
+@pytest.mark.parametrize("reads_body", [True, False])
+async def test_middleware_reads_the_body_for_a_verifier_that_asks(reads_body: bool) -> None:
+    from mpp.server.asgi import PaymentMiddleware
+
+    recorder = Recorder()
+    bodies: list[bytes | None] = []
+
+    async def digest(request: Request) -> str:
+        bodies.append(request.body)
+        return "signed"
+
+    verifier = from_fn(digest, body=reads_body)
+    either = any_of(verifier, from_fn(_constant))
+    received: list[bytes] = []
+
+    async def app(scope: Any, receive: Any, send: Any) -> None:
+        received.append((await receive()).get("body", b""))
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    for identity in ([verifier], [either], Route(request=(either,))):
+        assert server(recorder).charge(identity=identity).needs_request_body is reads_body
+    handler = server(recorder).charge(identity=[verifier])
+    transport = httpx.ASGITransport(app=PaymentMiddleware(app, handler))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://test.example.com"
+    ) as client:
+        response = await client.post("/resource", content=b"payload")
+    assert response.status_code == 402
+    assert bodies == [b"payload" if reads_body else None]
+
+
+def test_a_payment_check_that_reads_the_body_makes_the_route_read_it() -> None:
+    async def vet(input: PaymentCheckInput) -> Verification[str]:
+        return Valid("x")
+
+    reads = Route(payment=PaymentCheck(requires=(), verify=vet, body=True))
+    assert server(Recorder()).charge(identity=reads).needs_request_body
