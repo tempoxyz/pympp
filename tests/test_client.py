@@ -2338,3 +2338,41 @@ async def test_cancelled_credential_observer_preserves_completed_push(wildcard, 
     assert raised.value.credential.payload == credential.payload
     assert len(inner.requests) == 1
     method.create_credential.assert_awaited_once()
+
+
+@pytest.mark.parametrize("amount", ["0", "100"])
+async def test_binds_tempo_session_challenges_to_the_request_host(amount):
+    challenge = Challenge(
+        id="session-challenge",
+        realm="target.example",
+        method="tempo",
+        intent="session",
+        request={"amount": amount},
+    )
+
+    def required() -> httpx.Response:
+        return httpx.Response(
+            402, headers={"WWW-Authenticate": challenge.to_www_authenticate(challenge.realm)}
+        )
+
+    relayed = MockMethod(intent="session")
+    inner = MockTransport([required()])
+    transport = PaymentTransport(methods=[relayed.client], inner=inner)
+    with pytest.raises(PaymentError, match="Session Tempo realm 'target.example' differs"):
+        await transport.handle_async_request(httpx.Request("GET", "https://attacker.example/"))
+    relayed.create_credential.assert_not_awaited()
+    assert len(inner.requests) == 1
+
+    for url, pins in [
+        ("https://target.example/", None),
+        ("https://attacker.example/", {"https://attacker.example": "target.example"}),
+    ]:
+        method = MockMethod(intent="session")
+        transport = PaymentTransport(
+            methods=[method.client],
+            inner=MockTransport([required(), httpx.Response(200)]),
+            trusted_tempo_realms=pins,
+        )
+        response = await transport.handle_async_request(httpx.Request("GET", url))
+        assert response.status_code == 200
+        method.create_credential.assert_awaited_once()

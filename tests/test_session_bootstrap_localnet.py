@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mpp import Challenge, Credential, Receipt
+from mpp.errors import PaymentError
 from mpp.methods.tempo import TempoAccount
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo import server as tempo_server
@@ -103,9 +104,10 @@ async def _serve(
         await task
 
 
-def _origin(url: str) -> str:
+def _trusted(url: str) -> dict[str, str]:
+    """Pin the test server's origin to its realm, as a client of a non-hostname realm must."""
     parsed = httpx.URL(url)
-    return f"{parsed.scheme}://{parsed.host}:{parsed.port}"
+    return {f"{parsed.scheme}://{parsed.host}:{parsed.port}": REALM}
 
 
 async def test_fresh_client_recovers_its_channel_via_head_bootstrap(
@@ -117,7 +119,7 @@ async def test_fresh_client_recovers_its_channel_via_head_bootstrap(
     channels: dict[str, str] = {}
     async with _serve(rpc_url, chain_id, currency, payee, channels) as url:
         async with tempo_client.session_manager(
-            account=payer, max_deposit="1", rpc_url=rpc_url
+            account=payer, max_deposit="1", rpc_url=rpc_url, trusted_tempo_realms=_trusted(url)
         ) as first:
             for n in range(1, 4):
                 response = await first.fetch(url)
@@ -141,7 +143,7 @@ async def test_fresh_client_recovers_its_channel_via_head_bootstrap(
             max_deposit="1",
             rpc_url=rpc_url,
             bootstrap=True,
-            trusted_tempo_realms={_origin(url): REALM},
+            trusted_tempo_realms=_trusted(url),
         ) as fresh:
             response = await fresh.fetch(url)
             assert response.status_code == 200, response.text
@@ -161,26 +163,28 @@ async def test_fresh_client_recovers_its_channel_via_head_bootstrap(
         assert (await chain.get_channel_state(rpc_url, channel_id)).deposit == 0
 
 
-async def test_bootstrap_without_a_trusted_realm_opens_a_new_channel(
+async def test_bootstrap_without_a_trusted_realm_is_refused(
     rpc_url: str, chain_id: int, currency: str
 ) -> None:
-    """A realm the request origin doesn't own gets no proof, so the client opens a channel."""
+    """A realm the request origin doesn't own gets neither a proof nor a session payment."""
     payee = _new_account(rpc_url, currency)
     payer = _new_account(rpc_url, currency)
     channels: dict[str, str] = {}
     async with _serve(rpc_url, chain_id, currency, payee, channels) as url:
         async with tempo_client.session_manager(
-            account=payer, max_deposit="1", rpc_url=rpc_url
+            account=payer, max_deposit="1", rpc_url=rpc_url, trusted_tempo_realms=_trusted(url)
         ) as first:
             assert (await first.fetch(url)).status_code == 200
             assert first.channel_id is not None
             channels[f"did:pkh:eip155:{chain_id}:{payer.address}".lower()] = first.channel_id
+        state = await chain.get_channel_state(rpc_url, first.channel_id)
         async with tempo_client.session_manager(
             account=payer, max_deposit="1", rpc_url=rpc_url, bootstrap=True
         ) as fresh:
-            response = await fresh.fetch(url)
-            assert response.status_code == 200, response.text
-            assert fresh.channel_id is not None and fresh.channel_id != first.channel_id
+            with pytest.raises(PaymentError, match="trusted_tempo_realms"):
+                await fresh.fetch(url)
+            assert fresh.channel_id is None
+        assert await chain.get_channel_state(rpc_url, first.channel_id) == state
 
 
 async def test_bootstrap_snapshot_header_matches_the_server_channel(
@@ -194,7 +198,7 @@ async def test_bootstrap_snapshot_header_matches_the_server_channel(
     channels: dict[str, str] = {}
     async with _serve(rpc_url, chain_id, currency, payee, channels) as url:
         async with tempo_client.session_manager(
-            account=payer, max_deposit="1", rpc_url=rpc_url
+            account=payer, max_deposit="1", rpc_url=rpc_url, trusted_tempo_realms=_trusted(url)
         ) as first:
             assert (await first.fetch(url)).status_code == 200
             assert first.channel_id is not None
@@ -239,7 +243,7 @@ async def test_mppx_client_recovers_a_pympp_channel_via_head_bootstrap(
     channels: dict[str, str] = {}
     async with _serve(rpc_url, chain_id, currency, payee, channels) as url:
         async with tempo_client.session_manager(
-            account=payer, max_deposit="1", rpc_url=rpc_url
+            account=payer, max_deposit="1", rpc_url=rpc_url, trusted_tempo_realms=_trusted(url)
         ) as first:
             for _ in range(2):
                 assert (await first.fetch(url)).status_code == 200
@@ -255,7 +259,7 @@ async def test_mppx_client_recovers_a_pympp_channel_via_head_bootstrap(
             calls=2,
             fund=False,
             bootstrap=True,
-            trusted_realms={_origin(url): REALM},
+            trusted_realms=_trusted(url),
         )
         assert result.returncode == 0, result.stderr
         calls = result.calls

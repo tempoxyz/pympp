@@ -81,8 +81,9 @@ def charge(
         max_validity_seconds: Longest an authorization may stay valid from now
             (default one hour).
         store: Store that claims each authorization before settlement, shared
-            by every worker and replica. Without one, claims are kept in this
-            process only.
+            by every worker and replica. Without one (or ``Mpp(store=...)``), claims
+            are kept in this process only, which raises in production or on a
+            multi-instance platform; pass ``MemoryStore()`` to accept that there.
         can_offer: Optional callback deciding whether to offer a request.
         on_payment_success: Optional callback for this method's payments.
     """
@@ -124,6 +125,7 @@ def charge(
         on_payment_success=on_payment_success,
         x402=intent,
         use_store=use_store,
+        _has_store=lambda: intent._store is not None,
     )
 
 

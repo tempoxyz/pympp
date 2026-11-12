@@ -33,6 +33,7 @@ from mpp.methods.tempo._defaults import (
     default_currency_for_chain,
     escrow_contract_for_chain,
     fee_tokens_for_chain,
+    rpc_url_for_chain,
 )
 
 _EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
@@ -72,4 +73,5 @@ __all__ = [
     "escrow_contract_for_chain",
     "fee_tokens_for_chain",
     "parse_pkh_source",
+    "rpc_url_for_chain",
 ]

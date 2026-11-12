@@ -30,6 +30,7 @@ from mpp.errors import (
     PaymentInsufficientError,
     PaymentMethodUnsupportedError,
     PaymentRequiredError,
+    PaymentSimulationError,
     VerificationError,
     VerificationFailedError,
 )
@@ -94,6 +95,7 @@ __all__ = [
     "PaymentMethodUnsupportedError",
     "PaymentRequired",
     "PaymentRequiredError",
+    "PaymentSimulationError",
     "PaymentResult",
     "PaymentVerified",
     "Request",

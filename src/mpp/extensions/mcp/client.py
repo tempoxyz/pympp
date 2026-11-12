@@ -144,7 +144,7 @@ class McpClient:
         methods: Client payment methods available for credential creation, in
             preference order (nested sequences are flattened).
         trusted_tempo_realms: Explicitly trusted realms for zero-amount Tempo
-            charges; MCP has no authenticated HTTP host to compare.
+            charges and Tempo sessions; MCP has no authenticated HTTP host to compare.
         order_challenges: Filters and sorts the payable challenges before credential
             creation (mppx ``orderChallenges``); the first returned candidate is paid.
 
@@ -261,14 +261,14 @@ class McpClient:
 
         ``candidates`` come from :meth:`PaymentRuntime.order_challenges` over
         ``challenges``; by default challenges keep the server's order (mppx ``McpClient``).
-        Untrusted zero-amount Tempo charges are skipped.
+        Untrusted zero-amount Tempo charges and Tempo sessions are skipped.
         """
         if candidates is None:
             candidates = self._runtime.challenge_candidates([c.to_core() for c in challenges])
         skipped_zero_tempo = False
         for candidate in candidates:
             challenge = challenges[candidate.index]
-            if self._is_untrusted_zero_tempo_charge(challenge):
+            if self._is_untrusted_tempo_realm(challenge):
                 skipped_zero_tempo = True
                 continue
             return challenge, candidate.method
@@ -279,10 +279,18 @@ class McpClient:
             f"No compatible payment method. Server offers: {available}. Client has: {installed}"
         )
         if skipped_zero_tempo:
-            message += ". Zero-amount Tempo charges require a pinned trusted_tempo_realms entry."
+            message += (
+                ". Zero-amount Tempo charges and Tempo sessions require a pinned "
+                "trusted_tempo_realms entry."
+            )
         raise NoMethodFoundError(challenges, self._runtime.methods, message=message)
 
-    def _is_untrusted_zero_tempo_charge(self, challenge: MCPChallenge) -> bool:
+    def _is_untrusted_tempo_realm(self, challenge: MCPChallenge) -> bool:
+        """Whether ``challenge`` signs for a realm MCP cannot authenticate: a zero-amount
+        ``tempo/charge`` proof or a ``tempo/session`` payment not pinned in
+        ``trusted_tempo_realms`` (mppx ``ProofRealm.assertWithoutOrigin``)."""
+        if challenge.method == "tempo" and challenge.intent == "session":
+            return challenge.realm not in self._trusted_tempo_realms
         if challenge.method != "tempo" or challenge.intent != "charge":
             return False
         try:

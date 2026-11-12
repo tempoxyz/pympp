@@ -119,6 +119,8 @@ class ChannelSink:
 
     store: ChannelStore
     notify_update: Callable[[ChannelEntry], None]
+    origin: str | None = None
+    """HTTP origin attached to newly created or recovered channels before they are stored."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -521,6 +523,8 @@ def plan_credential(
 
 async def _store_channel_entry(sink: ChannelSink, entry: ChannelEntry) -> None:
     """Persist ``entry`` (or remove it once closed) and notify observers."""
+    if sink.origin is not None:
+        entry = entry.copy(origin=sink.origin)
     if entry.opened:
         await persist_channel(sink.store, entry)
     else:

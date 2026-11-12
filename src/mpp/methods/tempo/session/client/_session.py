@@ -72,6 +72,27 @@ MANAGEMENT_TIMEOUT = 30.0
 """Seconds a management request may take before its outcome is treated as unknown."""
 
 
+def http_origin(url: str | httpx.URL) -> str | None:
+    """The ASCII serialization of an http(s) URL's origin (lowercase host, default port dropped),
+    or ``None`` for any other scheme."""
+    from mpp.client.transport import _origin  # pyright: ignore[reportPrivateUsage]
+
+    scheme, host, port = _origin(httpx.URL(url))
+    if scheme not in ("http", "https") or not host:
+        return None
+    if ":" in host:
+        host = f"[{host}]"
+    default = 443 if scheme == "https" else 80
+    return f"{scheme}://{host}" if port == default else f"{scheme}://{host}:{port}"
+
+
+def _require_http_origin(url: str | httpx.URL) -> str:
+    origin = http_origin(url)
+    if origin is None:
+        raise ValueError("Session payments require an HTTP or HTTPS origin")
+    return origin
+
+
 def management_url(url: str | httpx.URL) -> httpx.URL:
     """The URL a management request posts to: the request URL without its fragment."""
     return httpx.URL(url).copy_with(fragment=None)
@@ -300,7 +321,9 @@ class SessionMethod:
         max_atomic_amount: int | str | None = None,
         max_amount: str | Decimal | None = None,
         max_amount_decimals: int | None = None,
+        origin: str | None = None,
     ) -> None:
+        self.origin = None if origin is None else _configured_origin(origin)
         self._policy = _SpendingPolicy.resolve(
             currencies=currencies,
             expected_recipients=expected_recipients,
@@ -367,12 +390,34 @@ class SessionMethod:
         return is_tip1034_session_challenge(challenge) and self._policy.allows(challenge.request)
 
     async def create_session_credential(
-        self, challenge: Challenge, context: SessionContext | None = None
+        self,
+        challenge: Challenge,
+        context: SessionContext | None = None,
+        *,
+        origin: str | None = None,
     ) -> str:
-        """Create a credential for ``challenge``, with an optional low-level context."""
+        """Create a credential for ``challenge``, with an optional low-level context.
+
+        ``origin`` is the HTTP origin the credential is for (the configured ``origin`` when
+        omitted): a stored channel is used only when it is bound to exactly that origin.
+        Channels opened through an HTTP request are bound to that request's origin, so closing
+        or topping one up here needs ``origin=`` (or a configured ``origin``); without it the
+        call raises "Session channel origin mismatch", as mppx's ``createCredential`` does.
+        """
         from mpp.runtime import CredentialParams
 
-        return await self.create_credential(CredentialParams(challenge=challenge, context=context))
+        params = CredentialParams(challenge=challenge, context=context)
+        return await self._create(params, self._authorized_origin(origin))
+
+    def _authorized_origin(self, origin: str | None) -> str | None:
+        """The origin a credential is created for: ``origin`` (an HTTP origin, which must match
+        a configured one) or the configured origin (mppx Session.ts)."""
+        if origin is None:
+            return self.origin
+        origin = _require_http_origin(origin)
+        if self.origin is not None and origin != self.origin:
+            raise ValueError("Session channel origin mismatch")
+        return origin
 
     async def create_credential(self, params: CredentialParams) -> str:
         """Create the next open, voucher or manual credential for a challenge.
@@ -385,7 +430,20 @@ class SessionMethod:
         When a transport reports the credential's outcome (``params.attempt``), a
         new channel is stored only once the server accepts or acknowledges its
         open, and the scope stays locked until then (mppx Session.ts).
+
+        Over HTTP the credential is for the request's origin: a stored channel bound to
+        another origin, or to none, raises before anything is signed, and channels this
+        credential opens or recovers are stored bound to it.
         """
+        request = params.request
+        origin = (
+            self._authorized_origin(_require_http_origin(request.url))
+            if isinstance(request, httpx.Request)
+            else self.origin
+        )
+        return await self._create(params, origin)
+
+    async def _create(self, params: CredentialParams, origin: str | None) -> str:
         challenge = params.challenge
         context = params.context
         if context is not None and not isinstance(context, SessionContext):
@@ -405,22 +463,28 @@ class SessionMethod:
                 lock = store_lock(self.store, scope)
                 await lock.acquire()
                 held = True
-                await self._top_up_before_voucher(resolved, params)
+                await self._top_up_before_voucher(resolved, params, origin)
             entry = await store_get(self.store, resolved.key)
+            _check_entry_origin(entry, origin)
             plan = self._plan(resolved, context, entry)
+            self._check_snapshot_recovery(plan, context, origin)
             if not automatic and plan.type == "open":
                 lock = store_lock(self.store, scope)
                 await lock.acquire()
                 held = True
                 next_entry = await store_get(self.store, resolved.key)
+                _check_entry_origin(next_entry, origin)
                 if next_entry is not entry:
                     plan = self._plan(resolved, context, next_entry)
+                    self._check_snapshot_recovery(plan, context, origin)
             attempt = params.attempt
             pending: list[ChannelEntry] = []
-            sink = self.sink
+            sink = ChannelSink(store=self.store, notify_update=self._notify, origin=origin)
             if attempt is not None and self._defer_opens and plan.type == "open":
                 sink = ChannelSink(
-                    store=_PendingOpenStore(self.store, pending), notify_update=_ignore
+                    store=_PendingOpenStore(self.store, pending),
+                    notify_update=_ignore,
+                    origin=origin,
                 )
             auto_swap = (
                 resolve_auto_swap(context.auto_swap)
@@ -479,6 +543,24 @@ class SessionMethod:
 
         return settle
 
+    def _check_snapshot_recovery(
+        self, plan: CredentialPlan, context: SessionContext | None, origin: str | None
+    ) -> None:
+        """Refuse to recover an unknown channel from a server snapshot on a request origin alone.
+
+        The request origin does not prove the server owns the channel its snapshot names, so
+        recovery needs the configured ``origin`` pin or a caller-supplied descriptor (mppx).
+        """
+        if (
+            plan.type == "recover"
+            and origin is not None
+            and self.origin is None
+            and (context is None or context.descriptor is None)
+        ):
+            raise ValueError(
+                "Session snapshot recovery requires an explicitly configured origin or descriptor"
+            )
+
     def _plan(
         self,
         resolved: ChallengeContext,
@@ -495,12 +577,13 @@ class SessionMethod:
         )
 
     async def _top_up_before_voucher(
-        self, resolved: ChallengeContext, params: CredentialParams
+        self, resolved: ChallengeContext, params: CredentialParams, origin: str | None
     ) -> None:
         """Top up a channel whose deposit cannot cover the next voucher (mppx challenge hook)."""
         channel = await store_get(self.store, resolved.key)
         if channel is None or not channel.opened:
             return
+        _check_entry_origin(channel, origin)
         snapshot = resolved.snapshot
         if snapshot is not None and snapshot.channel_id.lower() != channel.channel_id.lower():
             snapshot = None
@@ -640,7 +723,9 @@ class SessionMethod:
                     additional_deposit_raw=str(additional_deposit),
                     auto_swap=auto_swap,
                 ),
-                create_session_credential=self.create_session_credential,
+                create_session_credential=lambda current, context: self.create_session_credential(
+                    current, context, origin=_require_http_origin(url)
+                ),
                 send=send,
                 url=url,
                 authorization=authorization,
@@ -663,6 +748,24 @@ class SessionMethod:
             create_credential=self.create_credential,
             can_handle_challenge=self.can_handle_challenge,
         )
+
+
+def _configured_origin(origin: str) -> str:
+    """Validate a configured origin (``scheme://host[:port]``) and serialize it."""
+    url = httpx.URL(origin)
+    if url.scheme not in ("http", "https"):
+        raise ValueError("Session origins require HTTP or HTTPS")
+    return _require_http_origin(url)
+
+
+def _check_entry_origin(entry: ChannelEntry | None, origin: str | None) -> None:
+    """Reject a stored channel bound to another origin, or to none when one is expected.
+
+    A legacy channel without an origin is never adopted by an origin-bound request, so a
+    server cannot take over a channel some other server opened (mppx Session.ts).
+    """
+    if entry is not None and entry.origin != origin:
+        raise ValueError("Session channel origin mismatch")
 
 
 def _ignore(_: ChannelEntry) -> None:
@@ -749,6 +852,7 @@ def session(
     max_atomic_amount: int | str | None = None,
     max_amount: str | Decimal | None = None,
     max_amount_decimals: int | None = None,
+    origin: str | None = None,
 ) -> ClientMethod:
     """Create the client method that pays Tempo session (TIP-1034) challenges.
 
@@ -796,6 +900,11 @@ def session(
             ``max_atomic_amount``. Requires ``max_amount_decimals`` and ``currencies``; a value
             with more fractional digits than the decimals allow is rejected, not rounded.
         max_amount_decimals: Token decimals used to convert ``max_amount`` to base units.
+        origin: HTTP origin (``scheme://host[:port]``) authorized for credential creation and
+            server-snapshot recovery. Requests supply their own origin, which must match it;
+            recovering an unknown channel from a server snapshot requires this pin or a
+            caller-supplied descriptor. Stored channels are reused only for the exact origin
+            they are bound to, so use a separate ``channel_store`` per origin.
 
     The spending options never block an explicit close (``SessionContext(action="close")``,
     :meth:`SessionManager.close`), which settles what the channel already spent.
@@ -827,4 +936,5 @@ def session(
         max_atomic_amount=max_atomic_amount,
         max_amount=max_amount,
         max_amount_decimals=max_amount_decimals,
+        origin=origin,
     ).client_method()

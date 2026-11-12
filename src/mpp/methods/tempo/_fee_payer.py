@@ -332,6 +332,30 @@ def sender_simulation_request(tx: Any, sender: str) -> dict[str, Any]:
     return _simulation_request(tx, sender)
 
 
+# TIP-20 ``transfer(address,uint256)`` and ``transferWithMemo(address,uint256,bytes32)``.
+_PAYMENT_SELECTORS = ("0xa9059cbb", "0x95777d59")
+
+
+def simulation_payment_token(request: dict[str, Any]) -> str | None:
+    """The TIP-20 token a simulation request pays in, when it is a single transfer call.
+
+    Names ``PaymentSimulationError.payment_token``: the ``to`` of the request's
+    only call when that call is a ``transfer`` or ``transferWithMemo``, else
+    None. Matches mppx's ``preflightSponsorship``.
+    """
+    calls = request.get("calls")
+    if not is_list(calls) or len(calls) != 1:
+        return None
+    call = calls[0]
+    if not is_dict(call):
+        return None
+    data = call.get("data")
+    to = call.get("to")
+    if not isinstance(data, str) or not isinstance(to, str):
+        return None
+    return to if data.lower().startswith(_PAYMENT_SELECTORS) else None
+
+
 def _simulation_request(tx: Any, sender: str) -> dict[str, Any]:
     request: dict[str, Any] = {
         "type": "0x76",

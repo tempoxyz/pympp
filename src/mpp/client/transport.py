@@ -129,6 +129,15 @@ def _is_zero_tempo_charge(challenge: Challenge) -> bool:
         return False
 
 
+def _is_realm_bound_tempo(challenge: Challenge) -> bool:
+    """Whether paying ``challenge`` signs for its realm: a zero-amount ``tempo/charge`` proof or
+    any ``tempo/session`` payment (mppx ``ProofRealm``). A foreign host could otherwise relay
+    another server's challenge and use the signed credential or channel there."""
+    return _is_zero_tempo_charge(challenge) or (
+        challenge.method == "tempo" and challenge.intent == "session"
+    )
+
+
 def _payment_origins(
     origins: Sequence[str] | None,
     *,
@@ -281,7 +290,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 amount and recipient limits separately. Challenge realms are not
                 authenticated origins and are not compared with this allowlist.
             trusted_tempo_realms: Explicit origin-to-realm pins for zero-amount
-                Tempo charges when a server uses a realm other than its hostname.
+                Tempo charges and Tempo session payments when a server uses a realm
+                other than its hostname.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
@@ -450,17 +460,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     raise error
 
-                # A zero-amount Tempo proof signs the challenge realm. Do not let a
-                # different host obtain a proof that it can relay to the server
-                # named by that realm.
+                # A zero-amount Tempo proof or a Tempo session payment signs for the
+                # challenge realm. Do not let a different host obtain a credential that
+                # it can relay to the server named by that realm.
                 while (
-                    _is_zero_tempo_charge(challenge)
+                    _is_realm_bound_tempo(challenge)
                     and challenge.realm.lower() != request.url.host.lower()
                     and challenge.realm.lower() != request.url.raw_host.decode("ascii").lower()
                     and challenge.realm != self._trusted_tempo_realms.get(current_origin)
                 ):
+                    kind = "Session" if challenge.intent == "session" else "Zero-amount"
                     error = PaymentError(
-                        f"Zero-amount Tempo realm {challenge.realm!r} differs from "
+                        f"{kind} Tempo realm {challenge.realm!r} differs from "
                         f"request host {request.url.host!r}; configure trusted_tempo_realms "
                         "for a known server origin"
                     )

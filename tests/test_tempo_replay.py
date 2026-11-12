@@ -39,14 +39,14 @@ class Route:
     ``reverted`` fails on chain.
     """
 
-    def __init__(self, receipt_case: str) -> None:
+    def __init__(self, receipt_case: str, store: MemoryStore | None = None) -> None:
         self.receipt_case = receipt_case
         self.challenge_id = ""
         self.lookups = 0
         self.hold_lookup: int | None = None
         self.lookup_held = asyncio.Event()
         self.release_lookup = asyncio.Event()
-        self.store = MemoryStore()
+        self.store = MemoryStore() if store is None else store
         methods = tempo.charge(
             rpc_url="https://rpc.test",
             store=self.store,
@@ -212,3 +212,20 @@ async def test_client_does_not_pay_again_for_spent_payment(
 
     assert response.status_code == status
     assert len(method.challenges) == payments
+
+
+@pytest.mark.asyncio
+async def test_shared_store_rejects_a_replay_on_another_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two instances of one service in production share their store.
+    monkeypatch.setenv("K_SERVICE", "api")
+    store = MemoryStore()
+    first, second = Route("ok", store=store), Route("ok", store=store)
+    authorization = (await first.credential()).to_authorization()
+    second.challenge_id = first.challenge_id
+
+    assert await _once(first, authorization) == {"reference": TX_HASH}
+    status, _, body = _response_parts(await _once(second, authorization))
+    assert status == 403
+    assert body["type"] == "https://paymentauth.org/problems/verification-failed"

@@ -69,6 +69,7 @@ module mpp
     PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
     PaymentOutcomeUnknownError -> mpp.errors.PaymentOutcomeUnknownError
     PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    PaymentSimulationError -> mpp.errors.PaymentSimulationError
     class Receipt
         @dataclass(frozen=True, slots=True)
         field status: Literal['success']
@@ -252,6 +253,14 @@ module mpp.errors
         type = 'https://paymentauth.org/problems/payment-action-required'
     class VerificationError(mpp.errors.VerificationFailedError)
         def __init__(self, message: str = 'Payment verification failed.', *, details: dict[str, Any] | None = None) -> None
+        title = 'Verification Failed'
+        type = 'https://paymentauth.org/problems/verification-failed'
+    class PaymentSimulationError(mpp.errors.VerificationError)
+        phase: Literal['sender', 'sponsored']
+        sender: str | None
+        fee_payer: str | None
+        payment_token: str | None
+        def __init__(self, message: str = 'Payment verification failed.', *, phase: Literal['sender', 'sponsored'], sender: str | None = None, fee_payer: str | None = None, payment_token: str | None = None, details: dict[str, Any] | None = None) -> None
         title = 'Verification Failed'
         type = 'https://paymentauth.org/problems/verification-failed'
     class CredentialReplayedError(mpp.errors.VerificationError)
@@ -708,6 +717,7 @@ module mpp.methods.tempo
     def escrow_contract_for_chain(chain_id: int) -> str
     def fee_tokens_for_chain(chain_id: int) -> tuple[str, ...]
     def parse_pkh_source(source: str) -> PkhSource | None
+    def rpc_url_for_chain(chain_id: int) -> str
 
 module mpp.methods.tempo.account
     class TempoAccount
@@ -1020,11 +1030,11 @@ module mpp.methods.tempo.session.client
         property spent: int
         async def top_up(self, amount: str | int) -> SessionReceipt | None
     class SessionMethod
-        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None) -> None
+        def __init__(self, *, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None) -> None
         def can_handle_challenge(self, challenge: Challenge) -> bool
         def client_method(self) -> ClientMethod
         async def create_credential(self, params: CredentialParams) -> str
-        async def create_session_credential(self, challenge: Challenge, context: SessionContext | None = None) -> str
+        async def create_session_credential(self, challenge: Challenge, context: SessionContext | None = None, *, origin: str | None = None) -> str
         async def post_top_up(self, *, challenge: Challenge, channel: ChannelEntry, additional_deposit: int, url: str | httpx.URL, send: Send, authorization: str | None = None, on_challenge: Callable[[Challenge], None] | None = None, auto_swap: bool | AutoSwap | None = None) -> SessionReceipt | None
         async def resolve(self, challenge: Challenge) -> ChallengeContext
         async def top_up_channel_if_needed(self, *, challenge: Challenge, channel: ChannelEntry, deposit: int, required_cumulative: int, url: str | httpx.URL, send: Send, authorization: str | None = None, auto_swap: bool | AutoSwap | None = None) -> SessionReceipt | None
@@ -1049,7 +1059,7 @@ module mpp.methods.tempo.session.client
     def create_json_channel_store(kv: JsonChannelKv) -> JsonChannelStore
     def deserialize_snapshot(value: str) -> SessionSnapshot
     def serialize_snapshot(snapshot: SessionSnapshot) -> str
-    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None) -> ClientMethod
+    def session(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, on_channel_update: Callable[[ChannelEntry], None] | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, currencies: Sequence[str] | None = None, expected_recipients: Sequence[str] | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, origin: str | None = None) -> ClientMethod
     def session_manager(*, account: TempoAccount, max_deposit: str | None = None, top_up_amount: str | None = None, decimals: int = 6, escrow: str | None = None, allow_custom_escrow: bool = False, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, channel_store: ChannelStore | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, transport: httpx.AsyncBaseTransport | None = None, bootstrap: bool = False, trusted_tempo_realms: Mapping[str, str] | None = None) -> SessionManager
 
 module mpp.methods.tempo.session.server
@@ -1279,6 +1289,7 @@ module mpp.server
     PaymentMethodUnsupportedError -> mpp.errors.PaymentMethodUnsupportedError
     PaymentRequired -> mpp.server.http.PaymentRequired
     PaymentRequiredError -> mpp.errors.PaymentRequiredError
+    PaymentSimulationError -> mpp.errors.PaymentSimulationError
     PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
     PaymentVerified -> mpp.server.http.PaymentVerified
     Request -> mpp.server.http.Request
@@ -1455,13 +1466,13 @@ module mpp.server.mpp
         def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None
     class Mpp
         def __init__(self, methods: ServerMethod | Sequence[ServerMethod | Sequence[ServerMethod]], *, realm: str | None = None, secret_key: str | None = None, store: Store | None = None, requires_auth: bool = False, unique_challenges: bool = True, select_offers: SelectOffers | None = None) -> None
-        async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Receipt
+        async def broadcast_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, http_request: Request | None = None, **method_options: Any) -> Receipt
         def compose(self, *entries: tuple[Any, Mapping[str, Any]]) -> ComposedHandler
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
         def on_challenge_created(self, handler: EventHandler) -> Unsubscribe
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_success(self, handler: EventHandler) -> Unsubscribe
-        async def validate_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, **method_options: Any) -> Validation
+        async def validate_credential(self, credential: Credential | str, *, intent: str | None = None, request: dict[str, Any] | None = None, meta: dict[str, str] | None = <unset>, body: str | bytes | dict[str, Any] | None = <unset>, http_request: Request | None = None, **method_options: Any) -> Validation
 
 module mpp.server.verify
     DEFAULT_EXPIRES_MINUTES = 5
@@ -1502,6 +1513,24 @@ module mpp.stores.redis
         async def put(self, key: str, value: Any) -> None
         async def put_if_absent(self, key: str, value: Any) -> bool
         async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+
+module mpp.stores.sql
+    SQLDialect = typing.Literal['postgres', 'sqlite']
+    class SQLDriver(typing.Protocol)
+        def __init__(self, *args, **kwargs)
+        property dialect: SQLDialect
+        async def query(self, sql: str, params: Sequence[Any]) -> Sequence[Sequence[Any]]
+    class SQLStore
+        def __init__(self, driver: SQLDriver, *, table: str = 'mppx_store', create_table: bool = True) -> None
+        async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool
+        async def delete(self, key: str) -> None
+        async def get(self, key: str) -> Any | None
+        @classmethod def postgres(cls, client: Any, *, table: str = 'mppx_store', create_table: bool = True) -> SQLStore
+        async def purge_expired(self) -> int
+        async def put(self, key: str, value: Any) -> None
+        async def put_if_absent(self, key: str, value: Any) -> bool
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool
+        @classmethod def sqlite(cls, db: Any, *, table: str = 'mppx_store', create_table: bool = True) -> SQLStore
 
 module mpp.stores.sqlite
     NO_TTL_EXPIRES_AT = 253402300799.0

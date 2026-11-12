@@ -5,6 +5,7 @@ Available backends:
 - ``MemoryStore`` – in-memory ``dict``, for development/testing.
 - ``RedisStore`` – Redis/Valkey, for multi-instance production deployments.
 - ``SQLiteStore`` – local SQLite file, for single-instance production deployments.
+- ``SQLStore`` – one table on Postgres or SQLite, atomic across processes.
 """
 
 from typing import Any
@@ -17,6 +18,7 @@ _EXTRA_INSTALL_HINT = "Install the required store extra for this backend."
 _LAZY_EXPORTS = {
     "mpp.stores.redis": ("RedisStore",),
     "mpp.stores.sqlite": ("SQLiteStore",),
+    "mpp.stores.sql": ("SQLDriver", "SQLStore"),
 }
 
 

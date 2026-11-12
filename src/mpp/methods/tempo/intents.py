@@ -23,18 +23,20 @@ from pydantic import ValidationError
 from mpp import Credential, Receipt
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_PAID_RETRY_TIMEOUT, DEFAULT_TIMEOUT
 from mpp._did import parse_pkh_source
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._validation import Validation
 from mpp.errors import (
     CredentialReplayedError,
     InternalPaymentError,
     PaymentExpiredError,
+    PaymentSimulationError,
     VerificationError,
 )
 from mpp.methods.tempo import _fee_payer, _machine_token, _sponsored_admission
 from mpp.methods.tempo import sponsor_budget as _sponsor_budget
 from mpp.methods.tempo._defaults import fee_tokens_for_chain, rpc_url_for_chain
-from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance
+from mpp.methods.tempo._rpc import RpcError, _rpc_call, _tip20_balance
 from mpp.methods.tempo.fee_payer_policy import MIN_REMAINING_VALIDITY_SECONDS, get_policy
 from mpp.methods.tempo.remote_fee_payer import RemoteFeePayer
 from mpp.methods.tempo.schemas import (
@@ -67,8 +69,14 @@ def _fallback_store(method: str) -> MemoryStore:
     """Create the in-memory replay store used when *method* has no store configured.
 
     Replay protection backed by this store only covers the current process, so this
-    logs a warning once per *method* per process.
+    logs a warning once per *method* per process, and raises in production or on a
+    multi-instance platform.
+
+    Raises:
+        RuntimeError: If the runtime looks like production (see
+            :func:`mpp._replay_store.production_runtime`).
     """
+    check_fallback_allowed(method, f"{method}(store=...) or Mpp(store=...)")
     if method not in _warned_fallback_stores:
         _warned_fallback_stores.add(method)
         logger.warning(
@@ -190,11 +198,18 @@ def _raw_transaction_hash(raw_tx: str) -> str:
 
 def _canonical_signature(signature: bytes) -> bytes:
     """Encode secp256k1 recovery IDs as 27/28, including inside keychain signatures."""
+    # Iterative: a client controls the nesting depth of keychain wrappers.
+    prefixes: list[bytes] = []
+    while (
+        not (len(signature) == 65 and signature[64] in (0, 1))
+        and len(signature) > 21
+        and signature[0] in (0x03, 0x04)
+    ):
+        prefixes.append(signature[:21])
+        signature = signature[21:]
     if len(signature) == 65 and signature[64] in (0, 1):
-        return signature[:64] + bytes([signature[64] + 27])
-    if len(signature) > 21 and signature[0] in (0x03, 0x04):
-        return signature[:21] + _canonical_signature(signature[21:])
-    return signature
+        signature = signature[:64] + bytes([signature[64] + 27])
+    return b"".join(prefixes) + signature
 
 
 def _canonical_raw_transaction(raw_tx: str) -> str:
@@ -223,6 +238,30 @@ def _canonical_raw_transaction(raw_tx: str) -> str:
     if canonical == signature:
         return raw_tx
     return "0x" + (b"\x76" + rlp.encode([*fields[:-1], canonical])).hex()
+
+
+def _signed_transaction(raw_tx: str) -> tuple[list[Any], bytes, bytes] | None:
+    """Decode a hex signed Tempo transaction, or None when it is not one."""
+    try:
+        raw = bytes.fromhex(_strip_0x(raw_tx))
+    except ValueError:
+        return None
+    return _decode_signed_transaction(raw)
+
+
+def _pull_transaction_hash(raw_tx: str) -> str | None:
+    """The hash the chain records for an unsponsored signed 0x76 transaction, else None."""
+    if _strip_0x(raw_tx)[:2] != "76" or _signed_transaction(raw_tx) is None:
+        return None
+    return _raw_transaction_hash(_canonical_raw_transaction(raw_tx)).lower()
+
+
+def _sender_recovered(raw_tx: str) -> bool:
+    """Whether a signed transaction's sender signature is a 65-byte secp256k1 signature,
+    the one kind recovered before broadcast. Keychain, multisig, P256 and WebAuthn
+    signatures name their account, which the chain authenticates at settlement."""
+    decoded = _signed_transaction(raw_tx)
+    return decoded is not None and len(decoded[1]) == 65
 
 
 def _decode_signed_transaction(raw: bytes) -> tuple[list[Any], bytes, bytes] | None:
@@ -1106,6 +1145,20 @@ class ChargeIntent:
             differ) and whose ``details`` carry the settlement ``mode`` and,
             in pull mode, the serialized transaction.
 
+            ``details`` also carries:
+
+            - ``payer_verified``: whether ``payer`` is authenticated already, by
+              a recovered secp256k1 sender signature, a zero-amount proof or a
+              confirmed transfer. ``False`` for a pull-mode transaction signed
+              with a keychain, multisig, P256 or WebAuthn key: it only names its
+              account, which the chain authenticates at broadcast.
+            - ``transaction_hash`` (push and pull): the hash the chain records,
+              the same in both modes, so one transfer has one key. ``None`` for a
+              pull-mode transaction a fee payer co-signs, whose final hash is
+              known only once it is broadcast.
+            - ``valid_before`` (pull): the transaction's ``valid_before``
+              Unix timestamp, or ``None`` when it has none.
+
         Raises:
             VerificationError: If the credential is invalid.
             InternalPaymentError: If the credential cannot be checked, e.g.
@@ -1117,7 +1170,7 @@ class ChargeIntent:
             await self._ensure_proof_unused(credential.challenge.id)
             return Validation(
                 credential=credential,
-                details={"mode": "proof"},
+                details={"mode": "proof", "payer_verified": True},
                 intent=self.name,
                 request=dict(request),
                 payer=await self._validate_proof(credential, payload, req),
@@ -1149,7 +1202,11 @@ class ChargeIntent:
                 source=credential.source,
             )
             payer = receipt.payer
-            details: dict[str, Any] = {"mode": "push"}
+            details: dict[str, Any] = {
+                "mode": "push",
+                "payer_verified": payer is not None,
+                "transaction_hash": payload.hash.lower(),
+            }
         else:
             legs = self._validate_transaction_payload(payload.signature, req, strict=True)
             if legs is not None:
@@ -1161,7 +1218,13 @@ class ChargeIntent:
             payer = self._transaction_payer(
                 payload.signature, credential.source, req.methodDetails.chainId
             )
-            details = {"mode": "pull", "serialized_transaction": payload.signature}
+            details = {
+                "mode": "pull",
+                "payer_verified": payer is not None and _sender_recovered(payload.signature),
+                "serialized_transaction": payload.signature,
+                "transaction_hash": _pull_transaction_hash(payload.signature),
+                "valid_before": _transaction_valid_before(payload.signature),
+            }
 
         return Validation(
             credential=credential,
@@ -3115,7 +3178,8 @@ class ChargeIntent:
         earlier one passed, so a local fee payer signs nothing for a
         transaction whose sender simulation fails. Fails closed: a transport
         error or an unreadable reply is an internal error; an execution error
-        (a revert or running out of gas) is a verification failure. Only a
+        (a revert or running out of gas) is a :class:`~mpp.errors.PaymentSimulationError`
+        naming the failing phase, with the node's error as its cause. Only a
         sponsored request without the full gas buffer
         (``_UnpaddedSponsoredSimulation``: hosted, or local clamped by the
         sponsor policy) that fails solely by running out of gas passes, matched by the node's
@@ -3156,13 +3220,25 @@ class ChargeIntent:
             out_of_gas = _fee_payer.is_out_of_gas_error(error)
             if unpadded and out_of_gas:
                 continue
-            if code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas:
-                raise VerificationError(
-                    f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
-                )
-            raise InternalPaymentError() from RuntimeError(
-                f"Pre-broadcast simulation failed: {message}"
+            # Tag every node rejection with its phase like mppx, so callers can tell a
+            # payer's failure from a sponsor's without matching node messages.
+            sponsored = "feePayerSignature" in request
+            execution = code in _EXECUTION_ERROR_CODES or "revert" in message.lower() or out_of_gas
+            simulation = PaymentSimulationError(
+                f"Sponsored transaction would revert in pre-broadcast simulation: {message}"
+                if execution
+                else f"Pre-broadcast simulation failed: {message}",
+                phase="sponsored" if sponsored else "sender",
+                sender=request.get("from"),
+                fee_payer=request.get("feePayer") if sponsored else None,
+                payment_token=_fee_payer.simulation_payment_token(request),
             )
+            if execution:
+                raise simulation from RpcError(result)
+            # Other node errors (such as an insufficient fee token balance) stay an
+            # internal error, as in mppx, with the tagged simulation as its cause.
+            simulation.__cause__ = RpcError(result)
+            raise InternalPaymentError() from simulation
 
     def _validate_calls(self, calls: tuple[Any, ...], request: ChargeRequest) -> None:
         """Validate that calls match all expected transfers."""

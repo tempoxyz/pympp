@@ -101,8 +101,16 @@ _warned_fallback_store = False
 
 
 def _fallback_store() -> Store:
-    """The in-memory channel store used without a configured one, warning once per process."""
+    """The in-memory channel store used without a configured one, warning once per process.
+
+    Raises:
+        RuntimeError: If the runtime looks like production (see
+            :func:`mpp._replay_store.production_runtime`).
+    """
+    from mpp._replay_store import check_fallback_allowed
     from mpp.store import MemoryStore
+
+    check_fallback_allowed("tempo.session", "tempo.session(store=...) or Mpp(store=...)")
 
     global _warned_fallback_store
     if not _warned_fallback_store:
@@ -236,7 +244,8 @@ def session(
         store: Channel store. Use a :class:`~mpp.store.CompareAndSetStore` (MemoryStore,
             RedisStore, SQLiteStore) shared by every instance, so channel updates are
             linearizable; defaults to the ``Mpp(store=...)`` store, or else a per-process
-            in-memory store.
+            in-memory store, which raises in production or on a multi-instance platform.
+            Pass ``MemoryStore()`` to accept instance-local channel state there.
         fee_payer: Account that sponsors open/top-up and server settle/close fees; ``True``
             makes ``account`` the fee payer.
         fee_payer_policy: Overrides of the fee-payer policy (``max_gas``, ...).
@@ -541,7 +550,7 @@ def session(
         # Settlement keeps the fee payer the challenge allowed; only the open or top-up itself
         # goes unsponsored over the limit.
         fee_payer = verify_context.fee_payer
-        sponsor, release_sponsorship = await limit_fee_payer(
+        sponsor, finish_sponsorship = await limit_fee_payer(
             chain_id=verify_context.chain_id,
             fee_payer=fee_payer,
             limit=sponsorship_limit,
@@ -557,17 +566,17 @@ def session(
 
         sends: list[str] = []
         tracking = sponsored_sends.set(sends)
+        completed = False
         try:
             receipt = await broadcast_credential_payload(verify_context)
-        except BaseException:
-            # A sponsored transaction never handed to the node does not count against the
-            # payer's daily limit; one that was sent may have landed, so it keeps its slot.
-            if release_sponsorship is not None and not sends:
-                with contextlib.suppress(Exception):
-                    await release_sponsorship()
-            raise
+            completed = True
         finally:
             sponsored_sends.reset(tracking)
+            # Retain one slot per transaction once a signature may have reached the node.
+            # A failed duplicate must not release another request's exposed reservation.
+            if finish_sponsorship is not None:
+                with contextlib.suppress(Exception):
+                    await finish_sponsorship(completed or bool(sends))
         if accepted_charges:
             tx_hash = await settle_charged(accepted_charges[-1], fee_payer)
             return SessionPaymentReceipt.from_session(
@@ -605,6 +614,7 @@ def session(
         defaults=defaults,
         respond=respond,
         use_store=use_store,
+        _has_store=lambda: bool(channel_stores),
         stable_binding=_reusable_binding if reusable_challenges else _snapshot_free_binding,
         preflight=preflight if bootstrap else None,
         # Accounting and respond classify a POST as content by its body (mppx: request.body

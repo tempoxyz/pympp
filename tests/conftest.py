@@ -140,3 +140,15 @@ def funded_payer(rpc_url, currency):
 @pytest.fixture(scope="session")
 def funded_recipient(rpc_url, currency):
     return _funded_account(rpc_url, currency, "TEMPO_TEST_RECIPIENT_KEY")
+
+
+@pytest.fixture(autouse=True)
+def _development_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run tests as development, whatever platform or environment runs them.
+
+    Production runtimes refuse the in-memory replay store fallback (mpp._replay_store).
+    """
+    from mpp import _replay_store
+
+    for name in (*_replay_store._PLATFORM_VARS, *_replay_store._ENVIRONMENT_VARS):  # pyright: ignore[reportPrivateUsage]
+        monkeypatch.delenv(name, raising=False)

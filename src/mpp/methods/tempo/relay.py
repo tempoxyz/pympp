@@ -179,9 +179,11 @@ class _RelayIntent:
             raise _failure() from None
         # The relay validates the echoed challenge request, so report the
         # exact request that was checked.
+        # The relay names no payer, so none is verified here; the other details
+        # come from the payload itself, as local validation reports them.
         return Validation(
             credential=credential,
-            details={},
+            details=_payload_details(credential.payload),
             intent=self.name,
             request=body["challenge"]["request"],
         )
@@ -206,6 +208,31 @@ class _RelayIntent:
                 credential=credential,
                 request=request,
             ) from error
+
+
+def _payload_details(payload: Any) -> dict[str, Any]:
+    """Settlement details a charge payload carries on its own, with no payer verified.
+
+    For validation that does not authenticate the payer itself, such as a relay's.
+    """
+    from mpp.methods.tempo.intents import _pull_transaction_hash, _transaction_valid_before
+
+    if not is_dict(payload):
+        return {"payer_verified": False}
+    kind = payload.get("type")
+    if kind == "hash" and isinstance(hash_ := payload.get("hash"), str):
+        return {"mode": "push", "payer_verified": False, "transaction_hash": hash_.lower()}
+    if kind == "transaction" and isinstance(raw := payload.get("signature"), str):
+        return {
+            "mode": "pull",
+            "payer_verified": False,
+            "serialized_transaction": raw,
+            "transaction_hash": _pull_transaction_hash(raw),
+            "valid_before": _transaction_valid_before(raw),
+        }
+    if kind == "proof":
+        return {"mode": "proof", "payer_verified": False}
+    return {"payer_verified": False}
 
 
 def _relay_input(credential: Credential, expected_request: dict[str, Any]) -> dict[str, Any]:

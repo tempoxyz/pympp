@@ -158,6 +158,35 @@ async def test_relay_validate_posts_to_validate_endpoint() -> None:
 
     assert paths == ["/v1/mpp/validate"]
     assert validation.request == {"amount": "1000"}
+    assert validation.payer is None
+    assert validation.details == {
+        "mode": "pull",
+        "payer_verified": False,
+        "serialized_transaction": "0x1234",
+        "transaction_hash": None,
+        "valid_before": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "details"),
+    [
+        (
+            {"type": "hash", "hash": "0xABC"},
+            {"mode": "push", "payer_verified": False, "transaction_hash": "0xabc"},
+        ),
+        ({"type": "proof", "signature": "0x12"}, {"mode": "proof", "payer_verified": False}),
+        ({"type": "other"}, {"payer_verified": False}),
+    ],
+)
+async def test_relay_validate_reports_payload_details(payload: dict, details: dict) -> None:
+    async with mock_relay(lambda _: response({"success": True})) as relay:
+        validation = await relay.configure(ChargeIntent()).validate(  # type: ignore[attr-defined]
+            credential(payload), {"amount": "1000"}
+        )
+
+    assert validation.details == details
 
 
 @pytest.mark.asyncio
@@ -374,7 +403,7 @@ async def test_charge_validation_does_not_consume_hash() -> None:
             },
         )
 
-    assert result.details == {"mode": "push"}
+    assert result.details == {"mode": "push", "payer_verified": False, "transaction_hash": "0xabc"}
     assert await store.get("mpp:charge:0xabc") is None
 
 
@@ -422,7 +451,10 @@ async def test_charge_validation_uses_python_field_names() -> None:
 
     assert result.details == {
         "mode": "pull",
+        "payer_verified": False,
         "serialized_transaction": "0x1234",
+        "transaction_hash": None,
+        "valid_before": None,
     }
 
 
@@ -511,3 +543,20 @@ async def test_relay_receipt_preserves_funding_currency() -> None:
         )
 
     assert result.funding_currency == token
+
+
+@pytest.mark.asyncio
+async def test_relay_needs_no_local_store_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The relay owns replay protection, so production starts without a local store."""
+
+    monkeypatch.setenv("VERCEL", "1")
+    async with mock_relay(lambda request: response({"success": True})) as relay:
+        mpp = Mpp(
+            methods=tempo_server.charge(
+                recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
+                relay=relay,
+                rpc_url="https://rpc.test",
+            ),
+            secret_key="test-secret",
+        )
+    assert all(m._has_store is None or m._has_store() for m in mpp.methods)

@@ -74,7 +74,8 @@ class Negotiator:
         paywall_provider: Optional x402 paywall provider for unpaid browser requests.
         store: Store claiming MPP authorizations before settlement, shared by every
             worker and replica. Defaults to an in-process store whose claims expire
-            with their authorization.
+            with their authorization; without one, construction raises in production
+            or on a multi-instance platform.
     """
 
     def __init__(
@@ -94,7 +95,7 @@ class Negotiator:
         self.secret_key = secret_key
         self.realm = realm
         self.paywall_config = paywall_config
-        self.store: Store = store if store is not None else _fallback_store()
+        self.store: Store = store if store is not None else _fallback_store("Negotiator(store=...)")
         self.http_server = x402HTTPResourceServer(server, routes)
         if paywall_provider is not None:
             self.http_server.register_paywall_provider(paywall_provider)

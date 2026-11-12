@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
 from mpp._validation import Validation
 from mpp.errors import (
@@ -33,6 +34,7 @@ from mpp.events import (
 )
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
+from mpp.server.http import Request
 from mpp.server.method import (
     SETTLING_METHOD,
     RequestContext,
@@ -195,7 +197,10 @@ class Mpp:
             realm: Server realm. Auto-detected from the environment if omitted.
             secret_key: HMAC secret. Required unless ``MPP_SECRET_KEY`` is set.
             store: Replay store shared by every method configured without its own, such
-                as a Tempo or EVM charge built without ``store=``.
+                as a Tempo or EVM charge built without ``store=``. Without either, such a
+                method falls back to an in-memory store, logging a warning; in production
+                or on a multi-instance platform this raises instead. Pass
+                ``MemoryStore()`` to accept instance-local replay protection there.
             requires_auth: Read Payment credentials from ``Payment-Authorization`` so
                 ``Authorization`` remains available for application authentication.
             unique_challenges: Disable only while rolling out nonce-aware verification
@@ -205,6 +210,9 @@ class Mpp:
                 values and an :class:`~mpp.server.OfferSelectionContext`. It returns a
                 non-empty, ordered subset of them. Credentials addressing an offer
                 bypass it; x402 payments must pay a selected offer.
+
+        Raises:
+            RuntimeError: If a method has no store in a production runtime.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
@@ -214,6 +222,10 @@ class Mpp:
             for method in self.methods:
                 if method.use_store is not None:
                     method.use_store(store)
+        for method in self.methods:
+            if method._has_store is not None and not method._has_store():
+                name = method.key.replace("/", ".")
+                check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges
@@ -347,6 +359,7 @@ class Mpp:
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
         method_options: Mapping[str, Any] | None = None,
+        http_request: Request | None = None,
     ) -> tuple[Credential, ServerMethod, dict[str, Any], Challenge]:
         """Authenticate and resolve a credential outside an HTTP route."""
         credential = self._parse_credential(value)
@@ -379,6 +392,8 @@ class Mpp:
             raise PaymentExpiredError(echo.expires) from error
         if expires.tzinfo is None or expires <= datetime.now(UTC):
             raise PaymentExpiredError(echo.expires)
+        if http_request is not None and not _route_scope_matches(http_request, echoed_request):
+            raise InvalidChallengeError(echo.id, "credential route does not match")
 
         echoed = _comparable(echoed_request)
         if request is None:
@@ -474,6 +489,7 @@ class Mpp:
         request: dict[str, Any] | None = None,
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
+        http_request: Request | None = None,
         **method_options: Any,
     ) -> Validation:
         """Validate a bound credential without consuming payment state.
@@ -505,6 +521,10 @@ class Mpp:
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
             body: Expected request body for the challenge's digest binding.
+            http_request: If provided, also require the challenge's signed route
+                scope (HTTP method, route, path and query) to be this request's,
+                as an HTTP route handler does, so a credential issued for one
+                route cannot be spent on another.
 
         Returns:
             The intent's validation record for the accepted credential.
@@ -526,6 +546,7 @@ class Mpp:
             meta=meta,
             body=body,
             method_options=method_options,
+            http_request=http_request,
         )
         if method.validate is None:
             raise VerificationFailedError(
@@ -546,6 +567,7 @@ class Mpp:
         request: dict[str, Any] | None = None,
         meta: dict[str, str] | None = _CONTEXT_UNSET,
         body: str | bytes | dict[str, Any] | None = _CONTEXT_UNSET,
+        http_request: Request | None = None,
         **method_options: Any,
     ) -> Receipt:
         """Revalidate and perform a bound credential's terminal operation.
@@ -574,6 +596,10 @@ class Mpp:
                 meta, or body context checks all three bindings; omitted
                 bindings are treated as absent.
             body: Expected request body for the challenge's digest binding.
+            http_request: If provided, also require the challenge's signed route
+                scope (HTTP method, route, path and query) to be this request's,
+                as an HTTP route handler does, so a credential issued for one
+                route cannot be spent on another.
 
         Returns:
             The settlement receipt from the intent's terminal operation.
@@ -592,6 +618,7 @@ class Mpp:
                 meta=meta,
                 body=body,
                 method_options=method_options,
+                http_request=http_request,
             )
         except Exception as error:
             echo = parsed.challenge
@@ -667,6 +694,19 @@ def _binding_matches(
         return dict(method.stable_binding(expected)) == dict(method.stable_binding(echoed))
     except Exception:
         return False
+
+
+def _route_scope_matches(http_request: Request, echoed: Mapping[str, Any]) -> bool:
+    """Whether an echoed request's signed route scope names this HTTP request.
+
+    Route issuance binds ``Request.scope()`` as the wire ``_mppx_scope``, with any
+    application scope under its ``custom`` key, which this does not compare.
+    """
+    scope = echoed.get("_mppx_scope")
+    if not is_mapping(scope):
+        return False
+    engine = {key: value for key, value in scope.items() if key != "custom"}
+    return engine == http_request.scope()
 
 
 def _comparable(request: Mapping[str, Any]) -> dict[str, Any]:

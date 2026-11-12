@@ -5,6 +5,7 @@ Modeled after Cloudflare KV's API (get/put/delete).
 
 from __future__ import annotations
 
+import heapq
 import math
 import time
 from typing import Any, Protocol, runtime_checkable
@@ -76,11 +77,16 @@ class MemoryStore:
         self._max_entries = max_entries
         self._data: dict[str, Any] = {}
         self._expiry_deadlines: dict[str, float] = {}
+        # Earliest deadline first, so pruning costs only the keys that expired.
+        # Entries for keys deleted or overwritten since are skipped when popped.
+        self._expiry_heap: list[tuple[float, str]] = []
 
     def _prune_expired(self) -> None:
         now = time.time()
-        for key, expires_at in list(self._expiry_deadlines.items()):
-            if expires_at <= now:
+        heap = self._expiry_heap
+        while heap and heap[0][0] <= now:
+            expires_at, key = heapq.heappop(heap)
+            if self._expiry_deadlines.get(key) == expires_at:
                 self._data.pop(key, None)
                 del self._expiry_deadlines[key]
 
@@ -119,6 +125,10 @@ class MemoryStore:
         if not await self.put_if_absent(key, value):
             return False
         self._expiry_deadlines[key] = expires_at
+        heapq.heappush(self._expiry_heap, (expires_at, key))
+        if len(self._expiry_heap) > 2 * len(self._expiry_deadlines) + 1024:
+            self._expiry_heap = [(when, name) for name, when in self._expiry_deadlines.items()]
+            heapq.heapify(self._expiry_heap)
         return True
 
     async def compare_and_set(self, key: str, expected: Any | None, value: Any | None) -> bool:
