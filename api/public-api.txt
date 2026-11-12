@@ -104,12 +104,14 @@ module mpp.client
     CHALLENGE_RECEIVED = <PaymentEventName.CHALLENGE_RECEIVED: 'challenge.received'>
     CREDENTIAL_CREATED = <PaymentEventName.CREDENTIAL_CREATED: 'credential.created'>
     ChallengeCandidate -> mpp.runtime.ChallengeCandidate
+    ChallengeContext -> mpp.client.transport.ChallengeContext
     ClientMethod -> mpp.runtime.ClientMethod
     CredentialParams -> mpp.runtime.CredentialParams
     EventDispatcher -> mpp.events.EventDispatcher
     Expires: module
     Method -> mpp.methods.Method
     Mpp -> mpp.client.transport.Mpp
+    OnChallenge = collections.abc.Callable[[mpp.Challenge, mpp.client.transport.ChallengeContext], 'str | bool | None | Awaitable[str | bool | None]']
     PAYMENT_FAILED = <PaymentEventName.PAYMENT_FAILED: 'payment.failed'>
     PAYMENT_RESPONSE = <PaymentEventName.PAYMENT_RESPONSE: 'payment.response'>
     PaymentEvent -> mpp.events.PaymentEvent
@@ -119,8 +121,12 @@ module mpp.client
     WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
 
 module mpp.client.transport
+    class ChallengeContext
+        @dataclass(frozen=True, slots=True)
+        field create_credential: Callable[[], Awaitable[str]]
+    OnChallenge = collections.abc.Callable[[mpp.Challenge, mpp.client.transport.ChallengeContext], 'str | bool | None | Awaitable[str | bool | None]']
     class PaymentTransport(httpx.AsyncBaseTransport)
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, on_challenge: OnChallenge | None = None) -> None
         async def aclose(self) -> None
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
@@ -129,7 +135,7 @@ module mpp.client.transport
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_response(self, handler: EventHandler) -> Unsubscribe
     class Mpp
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, on_challenge: OnChallenge | None = None) -> None
         async def aclose(self) -> None
         def client(self, **kwargs: Any) -> httpx.AsyncClient
         async def fetch(self, url: str | httpx.URL, *, method: str = 'GET', **kwargs: Any) -> httpx.Response
