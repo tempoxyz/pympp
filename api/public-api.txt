@@ -120,7 +120,7 @@ module mpp.client
 
 module mpp.client.transport
     class PaymentTransport(httpx.AsyncBaseTransport)
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, inner: httpx.AsyncBaseTransport | None = None, events: EventDispatcher | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, identity: Sequence[Prover] | None = None) -> None
         async def aclose(self) -> None
         async def handle_async_request(self, request: httpx.Request) -> httpx.Response
         def on(self, name: str, handler: EventHandler) -> Unsubscribe
@@ -129,7 +129,7 @@ module mpp.client.transport
         def on_payment_failed(self, handler: EventHandler) -> Unsubscribe
         def on_payment_response(self, handler: EventHandler) -> Unsubscribe
     class Mpp
-        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None) -> None
+        def __init__(self, methods: Sequence[ClientMethod | Any] | None = None, *, runtime: PaymentRuntime | None = None, allowed_origins: Sequence[str] | None = None, trusted_tempo_realms: Mapping[str, str] | None = None, max_payment_retries: int = 3, paid_retry_timeout: float | None = <inherited, read >= 35s>, order_challenges: OrderChallenges | None = None, identity: Sequence[Prover] | None = None) -> None
         async def aclose(self) -> None
         def client(self, **kwargs: Any) -> httpx.AsyncClient
         async def fetch(self, url: str | httpx.URL, *, method: str = 'GET', **kwargs: Any) -> httpx.Response
@@ -345,6 +345,55 @@ module mpp.events
 
 module mpp.extensions
 
+module mpp.extensions.identity
+
+module mpp.extensions.identity.tempo
+    CLOCK_TOLERANCE = 60
+    DEFAULT_CHAIN_ID = 4217
+    ID_TOKEN_HEADER = 'Tempo-Id-Token'
+    ISSUER = 'https://id.tempo.xyz'
+    PROOF_MAX_AGE = 300
+    TYPE = 'tempo-id'
+    class Caller
+        @dataclass(frozen=True, slots=True)
+        field user_id: str
+        field client_id: str
+        field accounts: tuple[str, ...] = ()
+        field compliance: Mapping[str, ComplianceState] = <factory <lambda>>
+        field email: str | None = None
+        field email_verified: bool | None = None
+    ComplianceState = typing.Literal['clear', 'exit_only', 'blocked', 'pending']
+    class Payer(mpp.extensions.identity.tempo.Caller)
+        @dataclass(frozen=True, slots=True)
+        field user_id: str
+        field client_id: str
+        field accounts: tuple[str, ...] = ()
+        field compliance: Mapping[str, ComplianceState] = <factory <lambda>>
+        field email: str | None = None
+        field email_verified: bool | None = None
+        field account: str | None = None
+    client: module
+    server: module
+
+module mpp.extensions.identity.tempo.client
+    class DpopKey
+        @dataclass(frozen=True, slots=True)
+        field private_key: ec.EllipticCurvePrivateKey
+        @classmethod def generate(cls) -> DpopKey
+        property jwk: dict[str, str]
+        def proof(self, access_token: str, method: str, url: str) -> str
+        property thumbprint: str
+    def prover(*, access_token: Callable[[], MaybeAwaitable[str]], scope: Sequence[str] | Literal['*'], dpop: DpopKey | None = None, id_token: Callable[[], MaybeAwaitable[str | None]] | None = None) -> Prover
+
+module mpp.extensions.identity.tempo.server
+    CHALLENGE = (('WWW-Authenticate', 'DPoP algs="ES256", Bearer'),)
+    Allow = collections.abc.Callable[[mpp.extensions.identity.tempo.Caller], bool | collections.abc.Awaitable[bool]]
+    class TempoId
+        @dataclass(frozen=True, slots=True)
+        field verifier: Verifier[Caller]
+        field payment_check: PaymentCheck[Payer]
+    def create(*, client_id: str | Sequence[str], store: ExpiringStore | None = None, chain_id: int = 4217, audience: str | None = None, issuer: str = 'https://id.tempo.xyz', allow: Allow | None = None, http: httpx.AsyncClient | None = None) -> TempoId
+
 module mpp.extensions.mcp
     CODE_MALFORMED_CREDENTIAL = -32602
     CODE_PAYMENT_REQUIRED = -32042
@@ -440,6 +489,100 @@ module mpp.extensions.mcp.types
 module mpp.extensions.mcp.verify
     TOOL_ROUTE_PREFIX = 'tool:'
     async def verify_or_challenge(handler: ComposedHandler, *, tool: str, meta: dict[str, Any] | None = None) -> list[MCPChallenge] | tuple[MCPCredential, MCPReceipt]
+
+module mpp.identity
+    _DEFAULT_REASONS: mappingproxy
+    IDENTITY_REQUIRED_HEADER = 'Identity-Required'
+    PRECEDENCE = ('forbidden', 'unavailable', 'invalid', 'missing')
+    REQUEST_HEADERS = ('identity-attestation', 'identity-presentation')
+    STATUS_CODES: mappingproxy
+    class AnyOf(mpp.identity.Verifier[mpp.identity.AnyOfValue])
+        @dataclass(frozen=True, slots=True)
+        field verify: Callable[[Request], Awaitable[Verification[T]]]
+        field authorization: bool = False
+        field members: tuple[Verifier[Any], ...] = ()
+    class AnyOfValue
+        @dataclass(frozen=True, slots=True)
+        field index: int
+        field value: Any
+    class PaymentCheck(typing.Generic[~T])
+        @dataclass(frozen=True, slots=True)
+        field requires: tuple[Requirement, ...]
+        field verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
+    class PaymentCheckInput
+        @dataclass(frozen=True, slots=True)
+        field request: Request
+        field challenge: Challenge
+        field credential: Credential
+    class PrepareContext
+        @dataclass(frozen=True, slots=True)
+        field challenge: Challenge
+        field requirements: tuple[Requirement, ...]
+    ProverScope = typing.Union[tuple[str, ...], typing.Literal['*']]
+    class ProveContext
+        @dataclass(frozen=True, slots=True)
+        field created: int
+        field nonce: str
+        field challenge: Challenge | None = None
+        @classmethod def new(cls, challenge: Challenge | None = None) -> ProveContext
+    class Prover
+        @dataclass(frozen=True, slots=True)
+        field scope: ProverScope
+        field prove: Callable[[httpx.Request, ProveContext], Awaitable[httpx.Request]]
+        field headers: tuple[str, ...] = ()
+        field prepare: Callable[[httpx.Response, PrepareContext], Awaitable[None]] | None = None
+        field retry: Callable[[httpx.Response, RetryContext], Awaitable[Mapping[str, str] | None]] | None = None
+        def covers(self, url: httpx.URL | str) -> bool
+    class Rejected
+        @dataclass(frozen=True, slots=True)
+        field status: RejectionStatus
+        field reason: str = ''
+        field headers: HeaderPairs = ()
+        property code: int
+    class Rejection
+        @dataclass(frozen=True, slots=True)
+        field stage: Literal['request', 'payment']
+        field status: RejectionStatus
+        field reason: str
+    class RejectionError(Exception)
+        status: Literal['invalid', 'forbidden', 'unavailable']
+        def __init__(self, reason: str, *, status: Literal['invalid', 'forbidden', 'unavailable'] = 'invalid') -> None
+    RejectionStatus = typing.Literal['missing', 'invalid', 'forbidden', 'unavailable']
+    class Requirement
+        @dataclass(frozen=True, slots=True)
+        field type: str
+        field issuer: str | None = None
+    class Results
+        @dataclass(frozen=True, slots=True)
+        field values: Mapping[Verifier[Any] | PaymentCheck[Any], Any] = <factory <lambda>>
+        def get(self, source: Verifier[T] | PaymentCheck[T]) -> T | None
+    class RetryContext
+        @dataclass(frozen=True, slots=True)
+        field request: httpx.Request
+    class Route
+        @dataclass(frozen=True, slots=True)
+        field request: tuple[Verifier[Any], ...] = ()
+        field payment: PaymentCheck[Any] | None = None
+        property authorization: bool
+        property empty: bool
+        @classmethod def of(cls, value: Route | Sequence[Verifier[Any]] | None) -> Route
+        property requirements: tuple[Requirement, ...]
+    class Valid(typing.Generic[+T_co])
+        @dataclass(frozen=True, slots=True)
+        field value: T_co
+        field status: Literal['valid'] = 'valid'
+    Verification = typing.Union[mpp.identity.Valid[~T], mpp.identity.Rejected]
+    class Verifier(typing.Generic[~T])
+        @dataclass(frozen=True, slots=True)
+        field verify: Callable[[Request], Awaitable[Verification[T]]]
+        field authorization: bool = False
+    def any_of(*verifiers: Verifier[Any]) -> AnyOf
+    def forbidden(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def from_fn(verify: Callable[[Request], Awaitable[T | None]], *, challenge: HeadersInput = None, authorization: bool = False) -> Verifier[T]
+    def invalid(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def missing(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def unavailable(reason: str = '', headers: HeadersInput = None) -> Rejected
+    def with_headers(request: httpx.Request, headers: Mapping[str, str]) -> httpx.Request
 
 module mpp.methods
     CanOfferFn = collections.abc.Callable[[dict[str, typing.Any]], bool | collections.abc.Awaitable[bool]]
@@ -1299,7 +1442,7 @@ module mpp.server.asgi
 module mpp.server.compose
     BodyType = str | bytes | dict[str, typing.Any]
     BodyParamsType = str | bytes | dict[str, typing.Any] | collections.abc.Callable[[mpp.server.http.Request], str | bytes | dict[str, typing.Any] | collections.abc.Awaitable[str | bytes | dict[str, typing.Any]]] | None
-    ROUTE_OPTION_KEYS = frozenset({'body', 'description', 'expires', 'expires_in', 'meta'})
+    ROUTE_OPTION_KEYS = frozenset({'body', 'description', 'expires', 'expires_in', 'identity', 'meta'})
     MCP_URL_PREFIX = 'mcp:'
     class ComposedChallenges
         @dataclass(frozen=False, slots=False)
@@ -1357,6 +1500,7 @@ module mpp.server.http
     class PaymentRequired
         @dataclass(frozen=True, slots=True)
         field challenge: Response
+        field kw_only rejection: Rejection | None = None
         property status: int
     class PaymentVerified
         @dataclass(frozen=True, slots=True)
@@ -1364,6 +1508,7 @@ module mpp.server.http
         field receipt: Receipt
         field status: Literal[200] = 200
         field kw_only response: Response | None = None
+        field kw_only identity: Results = Results(values=mappingproxy({}))
         def with_receipt(self, response: Any = None) -> Any
     PaymentResult = mpp.server.http.PaymentRequired | mpp.server.http.PaymentVerified
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeAlias
 
 import httpx
 
+from mpp.identity import _EMPTY_RESULTS, Rejection, Results
 from mpp.x402._server import is_x402_credential, payment_response_header
 from mpp.x402._types import PAYMENT_RESPONSE_HEADER
 
@@ -34,7 +35,7 @@ def make_headers(headers: HeadersInput = None) -> httpx.Headers:
     return httpx.Headers(list(headers or ()), encoding="latin-1")
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class Request:
     """An incoming HTTP request as seen by the payment engine.
 
@@ -124,9 +125,13 @@ class PaymentRequired:
     or a final ``403`` problem response when paying again cannot help. It is also the
     response a method's preflight hook handled the request with (such as a session
     bootstrap's ``204``), which the route returns as-is without running.
+
+    ``rejection`` is set when the route rejected the request's identity: ``challenge`` is then the
+    rejection response (401, 403 or 503, without a Payment Challenge).
     """
 
     challenge: Response
+    rejection: Rejection | None = field(default=None, kw_only=True)
 
     @property
     def status(self) -> int:
@@ -147,12 +152,16 @@ class PaymentVerified:
         if result.response is not None:
             return result.response
         return result.with_receipt(Response.json(content()))
+
+    ``identity`` holds the verified values of the route's identity verifiers and payment check:
+    ``result.identity.get(verifier)``.
     """
 
     credential: Credential
     receipt: Receipt
     status: Literal[200] = 200
     response: Response | None = field(default=None, kw_only=True)
+    identity: Results = field(default=_EMPTY_RESULTS, kw_only=True)
 
     def with_receipt(self, response: Any = None) -> Any:
         """Attach the receipt headers to ``response``.
