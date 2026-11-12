@@ -2480,6 +2480,9 @@ class ChargeIntent:
         # True when this attempt's own send never reached the node, or the
         # node refused it outright.
         node_rejected = False
+        # True when the node answered the send with a JSON-RPC error that leaves
+        # the outcome open (such as -32603): the transaction may still mine.
+        open_rpc_error = False
         verified = False
         admission_store: CompareAndSetStore | None = None
         challenge_claim: _sponsored_admission.Claim | None = None
@@ -2785,6 +2788,7 @@ class ChargeIntent:
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
                 node_rejected = _is_definite_node_rejection(result)
+                open_rpc_error = not node_rejected
                 require_bound_memo = self._recovery_requires_bound_memo(
                     request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
@@ -2862,7 +2866,17 @@ class ChargeIntent:
             # attempts must let retries acquire the reservation and verify again.
             if not verified and self._store is not None:
                 if request.methodDetails.feePayer:
-                    if marker_created and not outcome_unknown:
+                    # Keep the marker after a JSON-RPC error that leaves the outcome
+                    # open, as for an unsponsored pull: if the transaction mines, a
+                    # retry reconciles it instead of refusing it as a replay.
+                    if (
+                        marker_created
+                        and not outcome_unknown
+                        and (
+                            not open_rpc_error
+                            or isinstance(err, (_TransactionReverted, _TransactionNotIncluded))
+                        )
+                    ):
                         await self._clear_broadcast_marker(broadcast_key)
                 elif marker_created and node_rejected:
                     # Keep an unsponsored pull's marker unless this attempt's own
