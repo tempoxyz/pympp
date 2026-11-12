@@ -119,7 +119,8 @@ def generate_challenge_id(
     Output: base64url(HMAC-SHA256(secret_key, input))
 
     Args:
-        secret_key: Server secret for HMAC computation.
+        secret_key: Server secret for HMAC computation, at least
+            :data:`MIN_SECRET_KEY_BYTES` bytes in UTF-8.
         realm: Server realm (e.g., hostname).
         method: Payment method name (e.g., "tempo").
         intent: Intent name (e.g., "charge").
@@ -133,9 +134,12 @@ def generate_challenge_id(
     Returns:
         Base64url-encoded HMAC-SHA256 of the challenge parameters.
 
+    Raises:
+        ValueError: If ``secret_key`` is shorter than :data:`MIN_SECRET_KEY_BYTES`.
+
     Example:
         challenge_id = generate_challenge_id(
-            secret_key="my-server-secret",
+            secret_key=os.environ["MPP_SECRET_KEY"],
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -267,7 +271,7 @@ class Challenge:
 
         # Create with HMAC-bound ID (recommended for servers):
         challenge = Challenge.create(
-            secret_key="my-server-secret",
+            secret_key=os.environ["MPP_SECRET_KEY"],
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -324,7 +328,8 @@ class Challenge:
         storing state.
 
         Args:
-            secret_key: Server secret for HMAC computation.
+            secret_key: Server secret for HMAC computation, at least
+                :data:`MIN_SECRET_KEY_BYTES` bytes in UTF-8.
             realm: Server realm (e.g., hostname).
             method: Payment method name (e.g., "tempo").
             intent: Intent name (e.g., "charge").
@@ -391,6 +396,9 @@ class Challenge:
 
         Returns:
             True if the ID is valid, False otherwise.
+
+        Raises:
+            ValueError: If ``secret_key`` is shorter than :data:`MIN_SECRET_KEY_BYTES`.
         """
         expected_id = _challenge_id(
             secret_key=secret_key,
