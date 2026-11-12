@@ -56,6 +56,7 @@ from mpp.methods.tempo.session.client import (
     session,
     session_manager,
 )
+from mpp.methods.tempo.session.client import _session as session_module
 from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
 )
@@ -1942,6 +1943,36 @@ class TestHookDecline:
         assert await attempts[3].settle(declined)  # pyright: ignore[reportOptionalCall]
         entry = stored(method)
         assert entry is not None and entry.cumulative_amount == 200
+
+    async def test_sent_voucher_settling_during_a_declined_rollback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        attempts = [PaymentAttempt() for _ in range(3)]
+        for attempt in attempts:
+            await pay(method, attempt=attempt)
+        first, second, third = (attempt.settle for attempt in attempts)
+        assert first is not None and second is not None and third is not None
+        declined = AttemptOutcome(status="rejected", sent=False)
+        # The first voucher is remembered as declined under the later ones.
+        assert await first(declined)
+        persist = session_module.persist_channel
+        settled: list[bool] = []
+
+        async def persist_then_settle(store: Any, entry: Any) -> None:
+            await persist(store, entry)
+            if not settled:
+                # The sent second voucher settles while the third one's rollback awaits.
+                settled.append(await second(AttemptOutcome(status="accepted")))
+
+        monkeypatch.setattr(session_module, "persist_channel", persist_then_settle)
+        assert await third(declined)
+        assert settled == [True]
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 300
+        monkeypatch.setattr(session_module, "persist_channel", persist)
+        assert (await pay(method))["cumulativeAmount"] == "400"
 
     @pytest.mark.parametrize("recover_declined_first", [True, False])
     async def test_declined_recover_and_later_voucher_both_roll_back(
