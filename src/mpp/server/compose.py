@@ -659,8 +659,11 @@ class ComposedHandler:
             for challenge in challenges
         ]
         headers += [("Cache-Control", "no-store"), ("Content-Type", "application/problem+json")]
+        # Matched by terms, not request: a retained session Challenge may carry an older
+        # request, and offers with the same terms share their payment check.
         requirements = identity_requirements.merge(
-            offer.offer.identity.requirements for offer in _issuers(call, challenges)
+            offer.offer.identity.requirements
+            for offer in _issuers(call, challenges, same_request=False)
         )
         if requirements:
             headers.append(
@@ -966,8 +969,11 @@ def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | No
     return None
 
 
-def _issuers(call: _Call, challenges: Sequence[Challenge]) -> list[_PreparedOffer]:
-    """The prepared offers that issued ``challenges``."""
+def _issuers(
+    call: _Call, challenges: Sequence[Challenge], *, same_request: bool = True
+) -> list[_PreparedOffer]:
+    """The prepared offers that issued ``challenges`` (by method, intent and realm, and
+    unless ``same_request`` is False, request)."""
     return [
         prepared
         for prepared in call.prepared
@@ -975,7 +981,7 @@ def _issuers(call: _Call, challenges: Sequence[Challenge]) -> list[_PreparedOffe
             prepared.offer.method.name == challenge.method
             and prepared.offer.method.intent == challenge.intent
             and prepared.offer.server.realm == challenge.realm
-            and prepared.request == challenge.request
+            and (not same_request or prepared.request == challenge.request)
             for challenge in challenges
         )
     ]

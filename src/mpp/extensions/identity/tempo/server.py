@@ -215,6 +215,8 @@ class _Rules:
             return _invalid("The access token is for another API.")
         if not _expires_after(claims.get("exp"), now):
             return _invalid("The access token has expired.")
+        if not _valid_yet(claims.get("nbf"), now):
+            return _invalid("The access token is not valid yet.")
         client_id = claims.get("client_id")
         if client_id not in self.client_ids:
             return forbidden("This app may not call this API.")
@@ -344,9 +346,9 @@ class _Rules:
         if claims.get("ath") != jwt.sha256(token):
             return "The DPoP proof is for another token."
         iat: object = claims.get("iat")
-        if not isinstance(iat, int | float) or isinstance(iat, bool) or iat > now + CLOCK_TOLERANCE:
+        if not _is_number(iat) or cast("float", iat) > now + CLOCK_TOLERANCE:
             return "The DPoP proof has expired."
-        expires = float(iat) + PROOF_MAX_AGE + CLOCK_TOLERANCE
+        expires = float(cast("float", iat)) + PROOF_MAX_AGE + CLOCK_TOLERANCE
         if expires < now:
             return "The DPoP proof has expired."
         jti = claims.get("jti")
@@ -367,11 +369,22 @@ def _invalid(reason: str) -> Rejected:
 
 
 def _is_number(value: object) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+    """Whether a claim is a finite JSON number (not a bool, NaN, an infinity or too large)."""
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except OverflowError:
+        return False
 
 
 def _expires_after(exp: object, now: int) -> bool:
     return _is_number(exp) and cast("float", exp) + CLOCK_TOLERANCE > now
+
+
+def _valid_yet(nbf: object, now: int) -> bool:
+    """Whether an optional ``nbf`` claim has passed, allowing for clock skew."""
+    return nbf is None or (_is_number(nbf) and cast("float", nbf) - CLOCK_TOLERANCE <= now)
 
 
 def _list(value: object) -> list[Any]:

@@ -182,6 +182,16 @@ TOKEN_CASES: list[tuple[str, Callable[[Issuer], Request], tuple[str, str]]] = [
         ("invalid", "The access token has expired."),
     ),
     (
+        "not valid yet",
+        lambda i: bearer(i.access_token(nbf=int(time.time()) + 120)),
+        ("invalid", "The access token is not valid yet."),
+    ),
+    (
+        "bad nbf",
+        lambda i: bearer(i.access_token(nbf="soon")),
+        ("invalid", "The access token is not valid yet."),
+    ),
+    (
         "other app",
         lambda i: bearer(i.access_token(client_id="app_2")),
         ("forbidden", "This app may not call this API."),
@@ -296,6 +306,14 @@ def _proof(key: DpopKey, token: str, **claims: Any) -> str:
     return f"{signing_input}.{jwt.sign_es256(key.private_key, signing_input.encode())}"
 
 
+def _raw_iat(key: DpopKey, token: str, iat: str) -> str:
+    """A proof whose iat is written as is, such as NaN, which JSON encoders refuse to write."""
+    header = jwt.encode({"alg": "ES256", "jwk": key.jwk, "typ": "dpop+jwt"})
+    claims = f'{{"ath":"{jwt.sha256(token)}","htm":"GET","htu":"{API}","iat":{iat},"jti":"j1"}}'
+    signing_input = f"{header}.{jwt.b64url_encode(claims.encode())}"
+    return f"{signing_input}.{jwt.sign_es256(key.private_key, signing_input.encode())}"
+
+
 PROOF_CASES: list[tuple[str, Callable[[DpopKey, str], str], str]] = [
     ("malformed", lambda k, t: "not-a-proof", "The DPoP proof is malformed."),
     (
@@ -326,6 +344,9 @@ PROOF_CASES: list[tuple[str, Callable[[DpopKey, str], str], str]] = [
     ("old", lambda k, t: _proof(k, t, iat=int(time.time()) - 361), "The DPoP proof has expired."),
     ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 61), "The DPoP proof has expired."),
     ("no iat", lambda k, t: _proof(k, t, iat=None), "The DPoP proof has expired."),
+    ("nan iat", lambda k, t: _raw_iat(k, t, "NaN"), "The DPoP proof has expired."),
+    ("infinite iat", lambda k, t: _raw_iat(k, t, "-Infinity"), "The DPoP proof has expired."),
+    ("huge iat", lambda k, t: _raw_iat(k, t, "-1" + "0" * 400), "The DPoP proof has expired."),
     ("no jti", lambda k, t: _proof(k, t, jti=None), "The DPoP proof has no ID."),
 ]
 
@@ -340,6 +361,11 @@ async def test_dpop_proof_rejections(
     token = issuer.access_token(key)
     request = dpop_request(token, key, proof=build(key, token))
     assert reason(await tempo_id(issuer).verifier.verify(request)) == ("invalid", expected)
+
+
+async def test_a_token_within_clock_tolerance_of_nbf_passes(issuer: Issuer) -> None:
+    token = issuer.access_token(nbf=int(time.time()) + 30)
+    assert isinstance(await tempo_id(issuer).verifier.verify(bearer(token)), Valid)
 
 
 async def test_a_proof_ignores_the_query_string(issuer: Issuer) -> None:

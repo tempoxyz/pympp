@@ -592,3 +592,23 @@ def test_a_payment_check_that_reads_the_body_makes_the_route_read_it() -> None:
 
     reads = Route(payment=PaymentCheck(requires=(), verify=vet, body=True))
     assert server(Recorder()).charge(identity=reads).needs_request_body
+
+
+def test_identity_requirements_follow_a_retained_challenge_with_an_older_request() -> None:
+    from types import SimpleNamespace
+
+    from mpp.server.compose import _Call, _issuers  # pyright: ignore[reportPrivateUsage]
+
+    offer = SimpleNamespace(
+        offer=SimpleNamespace(
+            method=SimpleNamespace(name="tempo", intent="session"),
+            server=SimpleNamespace(realm="api.example"),
+        ),
+        request={"amount": "2"},
+    )
+    call = _Call(prepared=[offer])  # pyright: ignore[reportArgumentType]
+    retained = Challenge(
+        id="c1", realm="api.example", method="tempo", intent="session", request={"amount": "1"}
+    )
+    assert _issuers(call, [retained]) == []
+    assert _issuers(call, [retained], same_request=False) == [offer]

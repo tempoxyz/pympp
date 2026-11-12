@@ -97,7 +97,11 @@ class IdentityClient:
             or response.status_code == 402
         ):
             return response, carried
-        resend = await _resend_headers(retriers, response, sent)
+        try:
+            resend = await _resend_headers(retriers, response, sent)
+        except BaseException:
+            await response.aclose()
+            raise
         if resend is None:
             return response, carried
         await response.aclose()

@@ -203,6 +203,17 @@ async def test_a_resend_is_proved_again_with_the_retry_headers_once() -> None:
     assert carried == (("X-Fresh", "1"),)
 
 
+async def test_a_retry_hook_that_raises_closes_the_rejected_response() -> None:
+    def retry(response: httpx.Response, context: RetryContext) -> None:
+        raise RuntimeError("boom")
+
+    rejected = httpx.Response(401, stream=httpx.ByteStream(b"no"))
+    client = IdentityClient([header_prover("X-Proof", retry=retry)])
+    with pytest.raises(RuntimeError, match="boom"):
+        await client.send(Script(rejected), httpx.Request("GET", API))
+    assert rejected.is_closed
+
+
 async def test_retry_sees_the_request_as_proved() -> None:
     seen: list[str] = []
 
