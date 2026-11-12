@@ -1083,8 +1083,17 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 try:
                     await release(attempt)
                 except BaseException as settle_error:
-                    # Report the settlement's own error, as creating without a hook does.
-                    reported = settle_error
+                    if isinstance(reported, PaymentOutcomeUnknownError):
+                        # The creation may have paid: keep its unknown outcome, with
+                        # its transaction hash, so nothing declines or pays again,
+                        # and note the settlement's error on it. (The settlement's
+                        # error already has it as __context__; linking back would
+                        # make a cycle.)
+                        reported.add_note(f"Releasing the attempt also failed: {settle_error!r}")
+                    else:
+                        # Report the settlement's own error, as creating without a
+                        # hook does.
+                        reported = settle_error
                     if not isinstance(settle_error, Exception):
                         raise
                 finally:
