@@ -169,7 +169,11 @@ class ChargeInput(BaseModel):
     def _wire(self) -> dict[str, Any]:
         details: dict[str, Any] = {}
         if self.splits:
-            details["splits"] = [split.model_dump(exclude_none=True) for split in self.splits]
+            # Base-10 integer strings without leading zeros, as the Tempo charge spec says.
+            details["splits"] = [
+                {**split.model_dump(exclude_none=True), "amount": str(int(split.amount))}
+                for split in self.splits
+            ]
         if self.fee_payer:
             details["feePayer"] = True
         if self.machine_token_enabled:
