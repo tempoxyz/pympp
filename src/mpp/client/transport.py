@@ -1075,13 +1075,22 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     )
                     created = (credential, credential.to_authorization(), attempt)
             except BaseException as error:
-                await release(attempt)
-                failures.append(
+                reported: BaseException = (
                     RuntimeError("Credential creation was cancelled")
                     if isinstance(error, cancelled)
                     else error
                 )
-                finished.set()
+                try:
+                    await release(attempt)
+                except BaseException as settle_error:
+                    # Report the settlement's own error, as creating without a hook does.
+                    reported = settle_error
+                    if not isinstance(settle_error, Exception):
+                        raise
+                finally:
+                    # Always signal, so nothing waiting for the creation hangs.
+                    failures.append(reported)
+                    finished.set()
                 if not isinstance(error, Exception):
                     # Cancellation (and KeyboardInterrupt) must propagate in the group.
                     raise

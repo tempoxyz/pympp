@@ -1853,6 +1853,44 @@ class TestHookDecline:
         assert [p["action"] for p in server.payloads] == ["open", "voucher"]
         assert server.payloads[-1]["cumulativeAmount"] == "200"
 
+    async def test_declined_recover_voucher_does_not_raise_the_next_cumulative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_chain(monkeypatch, settled=100, deposit=1000)
+        previous = entry_for(cumulative=300)
+        challenge = make_challenge(
+            sessionSnapshot=snapshot_wire(previous, accepted=300, required=300, spent=250)
+        )
+        method = SessionMethod(account=ACCOUNT)
+        attempt = PaymentAttempt()
+        declined = await pay(method, challenge, attempt=attempt)
+        assert declined["action"] == "voucher" and declined["cumulativeAmount"] == "350"
+        assert attempt.settle is not None
+        assert not await attempt.settle(AttemptOutcome(status="pending"))
+        assert await attempt.settle(AttemptOutcome(status="rejected", sent=False))
+        # The declined recovery leaves nothing cached to build on.
+        assert stored(method) is None
+        voucher = await pay(method, challenge)
+        assert voucher["action"] == "voucher" and voucher["cumulativeAmount"] == "350"
+        assert (await pay(method))["cumulativeAmount"] == "450"
+
+    async def test_declined_recover_voucher_keeps_a_later_cumulative(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        on_chain(monkeypatch, settled=100, deposit=1000)
+        previous = entry_for(cumulative=300)
+        challenge = make_challenge(
+            sessionSnapshot=snapshot_wire(previous, accepted=300, required=300, spent=250)
+        )
+        method = SessionMethod(account=ACCOUNT)
+        attempt = PaymentAttempt()
+        await pay(method, challenge, attempt=attempt)
+        assert (await pay(method))["cumulativeAmount"] == "450"
+        assert attempt.settle is not None
+        assert await attempt.settle(AttemptOutcome(status="rejected", sent=False))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 450
+
     async def test_voucher_settled_after_sending_keeps_its_cumulative(self) -> None:
         method = SessionMethod(account=ACCOUNT)
         method.store.set(replace(entry_for(cumulative=100), origin=ORIGIN))
