@@ -32,6 +32,7 @@ from mpp.events import (
     Unsubscribe,
     _SnapshotEventDispatcher,
 )
+from mpp.identity import Route
 from mpp.server._defaults import detect_realm, detect_secret_key
 from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_options
 from mpp.server.http import Request
@@ -79,15 +80,39 @@ class HandlerFactory:
         other option is method input, merged over the method's ``defaults``.
         """
         options = _validate_options(options)
+        identity = Route.of(options.pop("identity", None))
         methods = _select(self.methods, options)
         for method in methods:
             _check_input(method, options)
+        _check_identity(self._server, methods, identity)
         composed = self._server._compose_implicit or len(methods) > 1
         selection = object() if composed and self._server.select_offers is not None else None
         return ComposedHandler._from_offers(
-            [_Offer(self._server, method, dict(options), selection) for method in methods],
+            [
+                _Offer(self._server, method, dict(options), selection, identity)
+                for method in methods
+            ],
             composed=composed,
         )
+
+
+def _check_identity(server: Mpp, methods: Sequence[ServerMethod], identity: Route) -> None:
+    """Refuse identity a route could not enforce."""
+    # A verifier that reads Authorization would lose its credential to the Payment Credential.
+    if identity.authorization and not server.requires_auth:
+        raise TypeError(
+            "An identity verifier on this route reads Authorization: "
+            "create the server with requires_auth=True."
+        )
+    # Preflight hooks (such as a session bootstrap) issue and settle their own challenges,
+    # which the payment check cannot see.
+    if identity.payment is not None:
+        for method in methods:
+            if method.preflight is not None:
+                raise TypeError(
+                    f"An identity payment check is not supported on {method.name}/"
+                    f"{method.intent} routes with a preflight hook."
+                )
 
 
 class _Namespace:
