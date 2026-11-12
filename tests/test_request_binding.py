@@ -255,3 +255,78 @@ async def test_custom_business_scope_cannot_be_overwritten(key):
     paid_result = await handler("invoice:42")(http_request(authorization, url=url))
     assert isinstance(paid_result, PaymentVerified)
     assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tempo_split_amounts_compare_by_value():
+    """A Challenge issued with non-canonical split amounts still pays its route."""
+    from mpp import generate_challenge_id
+    from mpp._canonical import canonical_b64url
+    from mpp.methods.tempo import server as tempo
+    from mpp.server.mpp import _binding_matches
+
+    recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    split = "0x1111111111111111111111111111111111111111"
+    currency = "0x20c0000000000000000000000000000000000000"
+    calls = []
+
+    async def broadcast(context):
+        calls.append(context.challenge.request)
+        return Receipt.success("paid")
+
+    methods = [
+        replace(method, validate=None, broadcast=broadcast)
+        for method in tempo.charge(recipient=recipient, currencies=[currency])
+    ]
+    method = methods[0]
+    request = {
+        "amount": "1000",
+        "currency": currency,
+        "recipient": recipient,
+        "methodDetails": {"chainId": 4217, "splits": [{"amount": "100", "recipient": split}]},
+    }
+
+    def with_split(amount):
+        return {
+            **request,
+            "methodDetails": {
+                **request["methodDetails"],
+                "splits": [{"amount": amount, "recipient": split}],
+            },
+        }
+
+    assert _binding_matches(method, request, with_split("0100"))
+    assert not _binding_matches(method, request, with_split("101"))
+    assert not _binding_matches(method, request, {**with_split("0100"), "amount": "1001"})
+    assert not _binding_matches(method, request, with_split("1e2"))
+
+    secret = "secret-0123456789abcdef0123456789abcdef"
+    server = Mpp(methods=methods, realm="example.com", secret_key=secret)
+    route = server.charge(amount="0.001", splits=[{"amount": "100", "recipient": split}])
+    issued = challenge(await route(http_request()))
+    echoed = json.loads(json.dumps(issued.request))
+    assert echoed["methodDetails"]["splits"][0]["amount"] == "100"
+    # The same Challenge as an older release issued it, with a leading zero.
+    echoed["methodDetails"]["splits"][0]["amount"] = "0100"
+    old = replace(
+        issued,
+        request=echoed,
+        request_b64=canonical_b64url(echoed),
+        id=generate_challenge_id(
+            secret_key=secret,
+            realm=issued.realm,
+            method=issued.method,
+            intent=issued.intent,
+            request=echoed,
+            expires=issued.expires,
+            digest=issued.digest,
+            opaque=issued.opaque,
+            header=issued.header,
+        ),
+    )
+    credential = Credential(
+        challenge=old.to_echo(), payload={"type": "hash", "hash": "0x" + "ab" * 32}
+    )
+    result = await route(http_request(credential.to_authorization()))
+    assert isinstance(result, PaymentVerified), result
+    assert len(calls) == 1

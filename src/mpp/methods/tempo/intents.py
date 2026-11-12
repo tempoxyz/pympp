@@ -592,10 +592,30 @@ def _is_ambiguous_broadcast_error(
     return False
 
 
-# Seconds an unsponsored pull's broadcast marker outlives the later of its
-# Challenge's expiry and its ``valid_before``, and its lifetime when it has neither.
+# Seconds an unsponsored pull's broadcast marker outlives its deadline, and the
+# most a payer-chosen ``valid_before`` extends that deadline from now.
 _UNSPONSORED_MARKER_GRACE = 60
 _UNSPONSORED_MARKER_TTL = 3600
+
+
+def _unsponsored_marker_expiry(challenge_expires_at: float | None, raw_tx: str) -> float:
+    """Return when an unsponsored pull's broadcast marker expires (Unix seconds).
+
+    A minute after the later of the Challenge's expiry and the transaction's
+    ``valid_before``, so a retry while the transaction can still mine reconciles
+    it. The payer chooses ``valid_before``, so it counts for at most an hour from
+    now, as mpp-rs's ``broadcast_record_ttl`` caps it; without either bound the
+    marker lives an hour (plus the minute).
+    """
+    now = time.time()
+    cap = now + _UNSPONSORED_MARKER_TTL
+    valid_before = _transaction_valid_before(raw_tx)
+    bounds = [min(valid_before, cap) if valid_before is not None else None, challenge_expires_at]
+    present = [bound for bound in bounds if bound is not None]
+    deadline = max(present) if present else cap
+    return max(deadline, now) + _UNSPONSORED_MARKER_GRACE
+
+
 _TIMEOUT_MESSAGE_RE = re.compile(r"\btime(?:d)? ?out\b", re.I)
 
 
@@ -2341,6 +2361,10 @@ class ChargeIntent:
         this SDK. For regular transactions, submits directly.
         """
         legs = self._validate_transaction_payload(payload.signature, request)
+        # A transaction this SDK cannot decode was never checked against the
+        # request: its receipt must carry a transfer whose memo binds it to this
+        # Challenge, as a hash credential's must, never just any plain transfer.
+        undecodable = legs is None
         if legs is not None:
             # Reject unbound or conflicting MPP memos before any funds move.
             self._assert_challenge_bound_memo(legs, challenge_id=challenge_id, realm=realm)
@@ -2653,7 +2677,12 @@ class ChargeIntent:
                 prior_receipt = await self._get_transaction_receipt(client, tx_hash)
                 if prior_receipt is not None:
                     receipt = self._verify_recovered_receipt(
-                        prior_receipt, tx_hash, request, challenge_id=challenge_id, realm=realm
+                        prior_receipt,
+                        tx_hash,
+                        request,
+                        challenge_id=challenge_id,
+                        realm=realm,
+                        require_bound_memo=undecodable,
                     )
                     verified = True
                     await self._clear_broadcast_marker(broadcast_key)
@@ -2757,16 +2786,10 @@ class ChargeIntent:
                     # Record this server's own broadcast of these exact bytes, so a
                     # retry after a lost outcome reconciles the transaction instead
                     # of refusing it as mined by someone else.
-                    valid_before = _transaction_valid_before(raw_tx)
-                    bounds = [
-                        bound for bound in (recovery_expires_at, valid_before) if bound is not None
-                    ]
                     marker_created = await self._put_broadcast_marker(
                         broadcast_key,
                         raw_tx,
-                        max(bounds) + _UNSPONSORED_MARKER_GRACE
-                        if bounds
-                        else time.time() + _UNSPONSORED_MARKER_TTL,
+                        _unsponsored_marker_expiry(recovery_expires_at, raw_tx),
                         challenge_id,
                     )
             # The awaits since the check above (budget transition, receipt lookup,
@@ -2806,7 +2829,7 @@ class ChargeIntent:
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
                 node_rejected = _is_undelivered_send_error(send_error)
-                require_bound_memo = self._recovery_requires_bound_memo(
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
                     request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
                 if not _is_ambiguous_broadcast_error(send_error, resubmitted=reconciling):
@@ -2833,7 +2856,7 @@ class ChargeIntent:
                 )
                 node_rejected = _is_definite_node_rejection(result)
                 open_rpc_error = not node_rejected
-                require_bound_memo = self._recovery_requires_bound_memo(
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
                     request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
                 if not _is_ambiguous_broadcast_error(result, resubmitted=reconciling):
@@ -2881,6 +2904,7 @@ class ChargeIntent:
                 request,
                 challenge_id=challenge_id,
                 realm=realm,
+                require_bound_memo=undecodable,
             )
 
             receipt_tx_hash = receipt_data.get("transactionHash")
