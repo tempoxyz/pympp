@@ -149,7 +149,8 @@ class KeySet:
     """An issuer's RS256 keys by key ID, from ``<issuer>/oauth2/jwks``.
 
     The set is cached for five minutes, and an unknown key ID refetches it at most every 30
-    seconds. A failed fetch keeps the last set that loaded; without one, it raises.
+    seconds. A failed fetch keeps the last set that loaded; without one, it raises, and keeps
+    raising that error without fetching again for 30 seconds.
     """
 
     def __init__(self, issuer: str, http: httpx.AsyncClient | None = None) -> None:
@@ -158,6 +159,7 @@ class KeySet:
         self._keys: dict[str, rsa.RSAPublicKey] | None = None
         self._loaded_at = 0.0
         self._attempted_at = float("-inf")
+        self._error: Exception | None = None
         # One fetch at a time; anyio's lock works on asyncio and Trio alike.
         self._lock = anyio.Lock()
 
@@ -171,23 +173,37 @@ class KeySet:
         return key if key is not None else (await self._fresh(KEY_SET_RETRY)).get(kid)
 
     async def _fresh(self, max_age: float) -> dict[str, rsa.RSAPublicKey]:
-        if self._usable(max_age):
-            assert self._keys is not None
-            return self._keys
+        if (keys := self._cached(max_age)) is not None:
+            return keys
         async with self._lock:
-            # Another caller may have loaded the set while this one waited.
-            if self._usable(max_age):
-                assert self._keys is not None
-                return self._keys
+            # Another caller may have loaded the set, or failed to, while this one waited.
+            if (keys := self._cached(max_age)) is not None:
+                return keys
             self._attempted_at = time.monotonic()
             try:
                 self._keys = await self._load()
-            except Exception:
+            except Exception as error:
                 if self._keys is not None:
                     return self._keys
+                self._error = error
                 raise
             self._loaded_at = time.monotonic()
+            self._error = None
             return self._keys
+
+    def _cached(self, max_age: float) -> dict[str, rsa.RSAPublicKey] | None:
+        """The set to serve without fetching, or None to fetch.
+
+        Raises:
+            Exception: The last fetch's error, when no set ever loaded and that fetch was
+                within the last 30 seconds.
+        """
+        if self._usable(max_age):
+            return self._keys
+        if self._keys is None and self._error is not None:
+            if time.monotonic() - self._attempted_at < KEY_SET_RETRY:
+                raise self._error
+        return None
 
     def _usable(self, max_age: float) -> bool:
         """Whether the cached set serves: fresh enough, or fetched within the last 30 seconds."""

@@ -532,10 +532,21 @@ async def test_keys_are_cached_and_unknown_ids_refetch_at_most_every_30_seconds(
     assert await keys.get("key-1") is not None, "a failed refetch keeps the last set"
 
 
-async def test_a_key_set_that_never_loaded_raises(issuer: Issuer) -> None:
+async def test_a_key_set_that_never_loaded_raises_and_retries_at_most_every_30_seconds(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
     issuer.status = 500
-    with pytest.raises(RuntimeError, match="500"):
-        await jwt.KeySet(ISSUER, issuer.http()).get("key-1")
+    keys = jwt.KeySet(ISSUER, issuer.http())
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="500"):
+            await keys.get("key-1")
+    assert issuer.fetches == 1, "within 30 seconds the failure is remembered"
+    now[0] += 31
+    issuer.status = 200
+    assert await keys.get("key-1") is not None
+    assert issuer.fetches == 2
 
 
 # --- Prover -------------------------------------------------------------------------------------
