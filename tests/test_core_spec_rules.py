@@ -159,6 +159,22 @@ class TestCredentialFields:
         assert "www-authenticate" not in response.headers
         assert method.settled == []
 
+    async def test_quoted_payment_text_in_another_scheme_is_not_a_credential(self) -> None:
+        """A quoted auth-param holding ', Payment x' is not a second credential."""
+        method = ContractMethod()
+        handler = make_server(method, requires_auth=True).charge(amount="1")
+        async with http(app({"/paid": handler})) as c:
+            unpaid = await c.get("/paid")
+            issued = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+            [value] = authorization(issued).values()
+            headers = {
+                "Authorization": 'Digest realm="a, Payment x", nonce="n"',
+                "Payment-Authorization": value,
+            }
+            response = await c.get("/paid", headers=headers)
+        assert response.status_code == 200
+        assert method.settled == ["ok"]
+
 
 async def _rejected(handler: Any, challenge: Challenge) -> tuple[int, str, list[Challenge]]:
     result = await handler(engine_request(authorization(challenge)))
@@ -235,11 +251,39 @@ class TestMethodIdAtConfiguration:
 
 async def test_mixed_case_problem_media_type_is_still_final() -> None:
     """Media types are case-insensitive: a mixed-case invalid-challenge stays final."""
-    from mpp.client.transport import _is_invalid_challenge
+    from mpp.client.transport import _paid_retry_is_final
 
     body = json.dumps({"type": f"{PROBLEMS}/invalid-challenge"}).encode()
     for content_type in ("application/Problem+JSON", "APPLICATION/PROBLEM+JSON; charset=utf-8"):
         response = httpx.Response(402, headers={"content-type": content_type}, content=body)
-        assert await _is_invalid_challenge(response)
+        assert await _paid_retry_is_final(response)
     response = httpx.Response(402, headers={"content-type": "application/json"}, content=body)
-    assert not await _is_invalid_challenge(response)
+    assert not await _paid_retry_is_final(response)
+
+
+async def test_paid_retry_without_a_readable_problem_is_final() -> None:
+    """A 402 after a paid retry that cannot say why (HEAD, empty or unparseable) is final."""
+    from mpp.client.transport import _paid_retry_is_final
+
+    problem = {"content-type": "application/problem+json"}
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem))
+    assert await _paid_retry_is_final(httpx.Response(402), "HEAD")
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem, content=b"{not json"))
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem, content=b"[]"))
+    retryable = json.dumps({"type": f"{PROBLEMS}/payment-expired"}).encode()
+    assert not await _paid_retry_is_final(httpx.Response(402, headers=problem, content=retryable))
+
+
+async def test_client_does_not_pay_again_after_a_head_replay() -> None:
+    """A HEAD answer carries no body: a 402 to its paid retry is final."""
+    created: list[Any] = []
+    client, transport = paying(
+        app({"/paid": make_server(ContractMethod()).charge(amount="1")}),
+        ContractMethod(token="replayed"),
+    )
+    transport.on_credential_created(created.append)
+    async with client:
+        response = await client.head("/paid")
+    assert response.status_code == 402
+    assert response.content == b""
+    assert len(created) == 1

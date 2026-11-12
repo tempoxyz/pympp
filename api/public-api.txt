@@ -380,8 +380,10 @@ module mpp.extensions.mcp.decorator
     def pay(handler: HandlerType, *, tool: str) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]
 
 module mpp.extensions.mcp.errors
+    class RejectedChallenges(list['MCPChallenge'])
+        def __init__(self, challenges: list[MCPChallenge], *, problem: dict[str, Any]) -> None
     class PaymentRequiredError(mcp.shared.exceptions.McpError)
-        def __init__(self, challenges: list[MCPChallenge], message: str = 'Payment Required') -> None
+        def __init__(self, challenges: list[MCPChallenge], message: str = 'Payment Required', problem: dict[str, Any] | None = None) -> None
         def to_jsonrpc_error(self) -> dict[str, Any]
     class PaymentVerificationError(mcp.shared.exceptions.McpError)
         def __init__(self, challenges: list[MCPChallenge], reason: str | None = None, detail: str | None = None, details: dict[str, Any] | None = None, message: str = 'Payment Verification Failed', http_status: int = 402) -> None

@@ -20,7 +20,7 @@ from mpp import (
     _constant_time_equal,
     generate_challenge_id,
 )
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode, _split_header_list
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
@@ -63,6 +63,23 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
             receipt = replace(receipt, payer=validation.payer)
         return receipt
     return await intent.verify(credential, request)
+
+
+class _X402ReplayedError(CredentialReplayedError):
+    """An already-used x402 payment: a final 403 without a retry challenge.
+
+    Native Payment credentials answer a replay with 402 ``invalid-challenge`` and a
+    fresh challenge, which MPP clients treat as final. x402 clients pay any
+    ``PAYMENT-REQUIRED`` they get, so x402 replays keep the 403 they had before.
+    """
+
+    status = 403
+    type = VerificationFailedError.type
+    title = VerificationFailedError.title
+
+    def __init__(self, replayed: CredentialReplayedError) -> None:
+        PaymentError.__init__(self, str(replayed))
+        self.details = replayed.details
 
 
 class _CredentialRejected(Exception):  # noqa: N818
@@ -151,7 +168,7 @@ async def _verify_or_challenge(
             intent=ChargeIntent(client),
             request={"amount": "1000", ...},
             realm="api.example.com",
-            secret_key="my-server-secret",  # Enables HMAC-bound IDs
+            secret_key=os.environ["MPP_SECRET_KEY"],  # Enables HMAC-bound IDs
         )
 
         if isinstance(result, Challenge):
@@ -261,6 +278,12 @@ async def _verify_or_challenge(
             # The payment may have landed; a retryable 402 would invite a second one.
             await emit_failure(error, submitted_challenge, credential)
             raise
+        except CredentialReplayedError as error:
+            # x402 clients don't act on invalid-challenge: a fresh PAYMENT-REQUIRED
+            # would invite them to pay twice, so an x402 replay stays a final 403.
+            final = _X402ReplayedError(error)
+            await emit_failure(final, submitted_challenge, credential)
+            raise final from error
         except PaymentError as error:
             if error.status != 403:
                 error.retry_challenge = await new_challenge()
@@ -678,8 +701,9 @@ def _payment_schemes(header: str) -> list[str]:
     if len(header) > MAX_AUTHORIZATION_SIZE:
         return []
     schemes: list[str] = []
-    for scheme in header.split(","):
-        scheme = scheme.strip()
+    # Split quote-aware so a quoted auth-param of another scheme (such as
+    # realm="a, Payment b") is not taken for a Payment credential.
+    for scheme in _split_header_list(header):
         if scheme.lower().startswith("payment ") and scheme[len("payment ") :].strip():
             schemes.append(scheme)
     return schemes

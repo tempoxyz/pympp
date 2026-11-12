@@ -26,11 +26,25 @@ if TYPE_CHECKING:
     from mpp.extensions.mcp.types import MCPChallenge
 
 
+class RejectedChallenges(list["MCPChallenge"]):
+    """Fresh challenges answering a credential rejected before settlement.
+
+    A list of challenges, as :func:`~mpp.extensions.mcp.verify_or_challenge`
+    returns, that also carries the rejection's RFC 9457 ``problem`` details;
+    :class:`PaymentRequiredError` sends them in ``data.problem``.
+    """
+
+    def __init__(self, challenges: list[MCPChallenge], *, problem: dict[str, Any]) -> None:
+        super().__init__(challenges)
+        self.problem = problem
+
+
 class PaymentRequiredError(McpError):
     """Payment is required to proceed.
 
-    Raised when no credential was provided or credential was missing.
-    Returns error code -32042.
+    Raised when no credential was provided, or with ``problem`` (RFC 9457
+    problem details, such as ``invalid-challenge``) when a submitted credential
+    was rejected before settlement. Returns error code -32042.
 
     Example:
         raise PaymentRequiredError(
@@ -50,28 +64,31 @@ class PaymentRequiredError(McpError):
         self,
         challenges: list[MCPChallenge],
         message: str = "Payment Required",
+        problem: dict[str, Any] | None = None,
     ) -> None:
         self.challenges = challenges
         self.message = message
-        error = ErrorData(
-            code=CODE_PAYMENT_REQUIRED,
-            message=message,
-            data={
-                "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
-                "challenges": [c.to_dict() for c in challenges],
-            },
-        )
+        if problem is None and isinstance(challenges, RejectedChallenges):
+            problem = challenges.problem
+        self.problem = problem
+        error = ErrorData(code=CODE_PAYMENT_REQUIRED, message=message, data=self._error_data())
         super().__init__(error)
+
+    def _error_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
+            "challenges": [c.to_dict() for c in self.challenges],
+        }
+        if self.problem is not None:
+            data["problem"] = self.problem
+        return data
 
     def to_jsonrpc_error(self) -> dict[str, Any]:
         """Convert to JSON-RPC error response format."""
         return {
             "code": CODE_PAYMENT_REQUIRED,
             "message": self.message,
-            "data": {
-                "httpStatus": HTTP_STATUS_PAYMENT_REQUIRED,
-                "challenges": [c.to_dict() for c in self.challenges],
-            },
+            "data": self._error_data(),
         }
 
 
