@@ -1211,6 +1211,7 @@ module mpp.runtime
         field kw_only status: Literal['accepted', 'pending', 'rejected']
         field kw_only response: Any = None
         field kw_only challenges: Sequence[Challenge] = ()
+        field kw_only sent: bool = True
     class PaymentAttempt
         @dataclass(frozen=False, slots=True)
         field kw_only settle: Callable[[AttemptOutcome], Awaitable[bool]] | None = None
