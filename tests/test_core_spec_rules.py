@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+import textwrap
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -276,6 +279,19 @@ def test_tempo_split_amounts_are_emitted_without_leading_zeros() -> None:
     split = Split(amount="000100", recipient="0x" + "11" * 20)
     wire = ChargeInput(amount="1", currency=PATH_USD, recipient=recipient, splits=[split])
     assert wire.model_dump()["methodDetails"]["splits"][0]["amount"] == "100"
+
+
+def test_direct_submodule_import_names_the_extra() -> None:
+    script = textwrap.dedent("""\
+        import sys
+        sys.modules["attrs"] = None
+        try:
+            from mpp.methods.tempo import server
+        except ImportError as error:
+            print(error)
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert 'pip install "pympp[tempo]"' in result.stdout, result.stderr
 
 
 class TestMethodIdAtConfiguration:
