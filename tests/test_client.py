@@ -3347,6 +3347,55 @@ async def test_failed_creation_whose_settlement_raises_surfaces_the_error(awaite
     assert len(inner.requests) == 1
 
 
+@pytest.mark.parametrize("decision", ["decline", "replace"])
+async def test_unknown_outcome_creation_whose_settlement_raises_keeps_the_outcome(decision: str):
+    """A creation that may have paid keeps its unknown outcome when its release raises."""
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e2" * 32
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(200),
+        ]
+    )
+
+    async def create(params: CredentialParams) -> str:
+        assert params.attempt is not None
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            raise RuntimeError("settle failed")
+
+        params.attempt.settle = settle
+        raise PaymentOutcomeUnknownError(
+            params.challenge, RuntimeError("lost response"), transaction_hash=tx_hash
+        )
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+    other = Credential(
+        challenge=challenge.to_echo(), payload={"type": "transaction", "signature": "0x01"}
+    ).to_authorization()
+
+    async def hook(challenge: Challenge, context) -> str | bool:
+        with suppress(PaymentOutcomeUnknownError):
+            await context.create_credential()
+        return False if decision == "decline" else other
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+    assert any("settle failed" in note for note in excinfo.value.__notes__)
+    # Neither a plain 402 nor a second payment.
+    assert len(inner.requests) == 1
+
+
 async def test_creation_finishing_after_two_cancellations_releases_its_attempt():
     started = asyncio.Event()
 
