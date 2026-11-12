@@ -387,6 +387,53 @@ async def test_paid_retry_without_a_readable_problem_is_final() -> None:
     assert not await _paid_retry_is_final(httpx.Response(402, headers=problem, content=retryable))
 
 
+async def test_paid_retry_problem_is_bounded_once_decoded() -> None:
+    """A compressed 402 problem is decoded to at most 64 KiB; past that it is final.
+
+    The responses stream their bodies, as from a transport: built with
+    ``content=`` httpx would decode them up front.
+    """
+    import gzip
+    import zlib
+
+    from mpp.client.transport import _paid_retry_is_final
+
+    retryable = json.dumps({"type": f"{PROBLEMS}/payment-expired"}).encode()
+    for encoding, encoded in (
+        ("gzip", gzip.compress(retryable)),
+        ("deflate", zlib.compress(retryable)),
+    ):
+        response = httpx.Response(
+            402,
+            headers={"content-type": "application/problem+json", "content-encoding": encoding},
+            stream=httpx.ByteStream(encoded),
+        )
+        assert not await _paid_retry_is_final(response)
+        assert response.json() == {"type": f"{PROBLEMS}/payment-expired"}
+
+    # Small on the wire, 16 MiB once decoded.
+    padded = retryable[:-1] + b', "detail": "' + b" " * (16 * 1024 * 1024) + b'"}'
+    response = httpx.Response(
+        402,
+        headers={"content-type": "application/problem+json", "content-encoding": "gzip"},
+        stream=httpx.ByteStream(gzip.compress(padded)),
+    )
+    assert len(gzip.compress(padded)) < 64 * 1024
+    assert await _paid_retry_is_final(response)
+    assert response.extensions["mpp.body_truncated"] is True
+    assert "content-encoding" not in response.headers
+    assert len(await response.aread()) == 64 * 1024
+
+    # A coding that cannot be decoded within the bound is unreadable.
+    response = httpx.Response(
+        402,
+        headers={"content-type": "application/problem+json", "content-encoding": "br"},
+        stream=httpx.ByteStream(b"not decoded"),
+    )
+    assert await _paid_retry_is_final(response)
+    assert await response.aread() == b""
+
+
 async def test_client_does_not_pay_again_after_a_head_replay() -> None:
     """A HEAD answer carries no body: a 402 to its paid retry is final."""
     created: list[Any] = []

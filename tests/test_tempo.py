@@ -62,6 +62,7 @@ from mpp.methods.tempo.intents import (
     VALID_BEFORE_GRACE,
     ChargeIntent,
     _is_ambiguous_broadcast_error,
+    _is_definite_node_rejection,
     _match_single_transfer_calldata,
     _match_transfer_calldata,
     _parse_memo_bytes,
@@ -2319,9 +2320,10 @@ class TestChargeIntent:
         assert receipt.reference == _raw_transaction_hash("0xabcdef1234567890")
 
     @pytest.mark.asyncio
-    async def test_verify_transaction_accepts_plain_transfer_without_memo(
+    async def test_verify_undecodable_transaction_needs_a_bound_memo(
         self,
     ) -> None:
+        """A pull transaction that does not decode never settles on a plain transfer."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -2330,7 +2332,7 @@ class TestChargeIntent:
         amount = 1000
 
         receipt_with_logs = {
-            "transactionHash": "0xtxhash123",
+            "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
             "status": "0x1",
             "logs": [
                 {
@@ -2361,9 +2363,9 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        # Without a memo the transfer passes attribution and reaches the receipt hash
-        # check, which this fixture's placeholder signature fails after broadcast.
-        with pytest.raises(InternalPaymentError) as raised:
+        # The placeholder bytes were never checked against the request, so the
+        # receipt's plain transfer cannot show it pays this Challenge.
+        with pytest.raises(VerificationError, match="memo is not bound") as raised:
             await intent.verify(
                 credential,
                 {
@@ -2372,7 +2374,7 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
-        assert "Receipt transaction hash" in str(raised.value.__cause__)
+        assert not isinstance(raised.value, InternalPaymentError)
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_wrong_challenge_bound_memo(self) -> None:
@@ -5822,9 +5824,11 @@ class TestCosignAsFeePayer:
             assert len(set(lookups)) == 1
             assert await store.get(marker) is not None
         else:
-            # Another envelope may hold the replay slot: one lookup, then release.
+            # Another envelope may hold the replay slot: one lookup. A nonce error
+            # does not show the node refused this envelope, so its marker stays
+            # for a retry to reconcile.
             assert len(lookups) == 1
-            assert await store.get(marker) is None
+            assert await store.get(marker) is not None
 
     @pytest.mark.asyncio
     async def test_verify_ambiguous_retry_after_expiry_is_reconciled(
@@ -6064,6 +6068,7 @@ class TestCosignAsFeePayer:
             currency=currency,
             recipient=recipient,
             amount=1000000,
+            valid_before=int(time.time()) + 120,
         )
         credential = make_credential(
             payload={"type": "transaction", "signature": raw_tx},
@@ -6091,11 +6096,127 @@ class TestCosignAsFeePayer:
 
         with (
             patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
-            patch.object(intent, "_transaction_payer", return_value=None),
+            patch.object(intent, "_resolve_fee_token", AsyncMock(return_value=PATH_USD)),
             pytest.raises(InternalPaymentError),
         ):
             await intent.verify(credential, request)
+        mock_client.post.assert_awaited()
         assert store._data == {}
+
+    def test_unsponsored_marker_expiry_caps_valid_before(self) -> None:
+        """A payer-chosen valid_before keeps a marker at most an hour past now."""
+        from mpp.methods.tempo import intents
+
+        now = 1_000_000.0
+        grace = intents._UNSPONSORED_MARKER_GRACE
+        cap = intents._UNSPONSORED_MARKER_TTL
+
+        def expiry(challenge_expires_at: float | None, valid_before: int | None) -> float:
+            with (
+                patch("mpp.methods.tempo.intents.time.time", return_value=now),
+                patch(
+                    "mpp.methods.tempo.intents._transaction_valid_before",
+                    return_value=valid_before,
+                ),
+            ):
+                return intents._unsponsored_marker_expiry(challenge_expires_at, "0x76")
+
+        # The later of the Challenge's expiry and valid_before.
+        assert expiry(now + 300, int(now) + 120) == now + 300 + grace
+        assert expiry(now + 120, int(now) + 300) == now + 300 + grace
+        # A far valid_before counts for at most the cap.
+        assert expiry(now + 300, int(now) + 10 * cap) == now + cap + grace
+        assert expiry(None, int(now) + 10 * cap) == now + cap + grace
+        assert expiry(None, None) == now + cap + grace
+        # A Challenge expiry the server set is kept even past the cap.
+        assert expiry(now + 2 * cap, None) == now + 2 * cap + grace
+
+    @pytest.mark.parametrize(
+        ("error", "refused"),
+        [
+            ({"code": -32000, "message": "already known"}, True),
+            ({"code": -32000, "message": "insufficient funds for gas * price + value"}, True),
+            ({"code": -32000, "message": "invalid signature"}, True),
+            ({"code": -32000, "message": "intrinsic gas too low"}, True),
+            ({"code": -32000, "message": "transaction underpriced"}, True),
+            ({"code": -32000, "message": "max fee per gas less than block base fee"}, True),
+            ({"code": -32000, "message": "valid_before has passed"}, True),
+            ({"code": -32602, "message": "invalid params"}, True),
+            ({"code": -32600, "message": "invalid request"}, True),
+            ({"code": -32000, "message": "nonce too low"}, False),
+            ({"code": -32000, "message": "nonce already used"}, False),
+            ({"code": -32000, "message": "node unavailable"}, False),
+            ({"code": -32000, "message": "upstream request failed"}, False),
+            ({"code": -32000, "message": "request timed out"}, False),
+            ({"code": 4, "message": "transaction was not included in time"}, False),
+            ({"code": -32603, "message": "insufficient funds"}, False),
+            ({"message": "something went wrong"}, False),
+            ("unexplained", False),
+        ],
+    )
+    def test_is_definite_node_rejection(self, error: object, refused: bool) -> None:
+        """Only an error that names a validation failure is a refusal, as mpp-rs."""
+        assert _is_definite_node_rejection({"error": error}) is refused
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fee_payer", [True, False])
+    @pytest.mark.parametrize(
+        "rpc_error",
+        [
+            {"code": -32000, "message": "nonce too low"},
+            {"code": -32000, "message": "upstream request failed"},
+            {"code": -32603, "message": "internal error"},
+        ],
+    )
+    async def test_verify_open_rpc_error_keeps_broadcast_marker(
+        self, fee_payer: bool, rpc_error: dict[str, object]
+    ) -> None:
+        """An error that names no validation failure keeps the marker for a retry."""
+        from mpp.store import MemoryStore
+
+        currency = "0x20c0000000000000000000000000000000000000"
+        recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+        intent = self._make_intent()
+        store = MemoryStore()
+        intent._store = store
+        raw_tx = self._build_client_tx(
+            with_memo=encode_attribution(challenge_id="test", server_id=TEST_REALM),
+            currency=currency,
+            recipient=recipient,
+            amount=1000000,
+            valid_before=int(time.time()) + 120,
+        )
+        credential = make_credential(
+            payload={"type": "transaction", "signature": raw_tx},
+            expires=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        request = {
+            "amount": "1000000",
+            "currency": currency,
+            "recipient": recipient,
+            "methodDetails": {"feePayer": fee_payer, "chainId": TESTNET_CHAIN_ID},
+        }
+
+        async def post(url: str, *, json: dict) -> httpx.Response:
+            if json["method"] == "eth_getTransactionReceipt":
+                return mock_response(200, {"jsonrpc": "2.0", "id": 1, "result": None})
+            assert json["method"] == "eth_sendRawTransactionSync"
+            return mock_response(200, {"error": rpc_error})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+
+        async def simulate(*_args: object) -> None:
+            return None
+
+        with (
+            patch.object(intent, "_simulate_before_broadcast", side_effect=simulate),
+            patch.object(intent, "_resolve_fee_token", AsyncMock(return_value=PATH_USD)),
+            pytest.raises((InternalPaymentError, VerificationError)),
+        ):
+            await intent.verify(credential, request)
+        assert any(key.startswith("mpp:charge-broadcast:") for key in store._data)
 
     @pytest.mark.asyncio
     async def test_verify_near_expiry_releases_reservation(self) -> None:

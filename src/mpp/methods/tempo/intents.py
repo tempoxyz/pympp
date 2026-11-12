@@ -592,10 +592,30 @@ def _is_ambiguous_broadcast_error(
     return False
 
 
-# Seconds an unsponsored pull's broadcast marker outlives the later of its
-# Challenge's expiry and its ``valid_before``, and its lifetime when it has neither.
+# Seconds an unsponsored pull's broadcast marker outlives its deadline, and the
+# most a payer-chosen ``valid_before`` extends that deadline from now.
 _UNSPONSORED_MARKER_GRACE = 60
 _UNSPONSORED_MARKER_TTL = 3600
+
+
+def _unsponsored_marker_expiry(challenge_expires_at: float | None, raw_tx: str) -> float:
+    """Return when an unsponsored pull's broadcast marker expires (Unix seconds).
+
+    A minute after the later of the Challenge's expiry and the transaction's
+    ``valid_before``, so a retry while the transaction can still mine reconciles
+    it. The payer chooses ``valid_before``, so it counts for at most an hour from
+    now, as mpp-rs's ``broadcast_record_ttl`` caps it; without either bound the
+    marker lives an hour (plus the minute).
+    """
+    now = time.time()
+    cap = now + _UNSPONSORED_MARKER_TTL
+    valid_before = _transaction_valid_before(raw_tx)
+    bounds = [min(valid_before, cap) if valid_before is not None else None, challenge_expires_at]
+    present = [bound for bound in bounds if bound is not None]
+    deadline = max(present) if present else cap
+    return max(deadline, now) + _UNSPONSORED_MARKER_GRACE
+
+
 _TIMEOUT_MESSAGE_RE = re.compile(r"\btime(?:d)? ?out\b", re.I)
 
 
@@ -629,18 +649,62 @@ def _is_undelivered_send_error(error: Exception) -> bool:
     return False
 
 
+# Message fragments of node validation errors that reject a transaction before
+# it enters the pool, as mpp-rs's ``broadcast_refused`` lists them.
+_NODE_REFUSAL_FRAGMENTS = (
+    "insufficient funds",
+    "insufficient balance",
+    "invalid signature",
+    "signature is invalid",
+    "intrinsic gas",
+    "gas limit too low",
+    "exceeds block gas limit",
+    "fee too low",
+    "underpriced",
+    "max fee per gas less than",
+    "fee cap",
+    "valid_before",
+    "validbefore",
+    "valid_after",
+    "validafter",
+    "transaction expired",
+    "transaction type not supported",
+    "invalid chain id",
+    "chain id mismatch",
+)
+
+# JSON-RPC parse error, invalid request and invalid params: the request was
+# refused before the transaction was looked at.
+_MALFORMED_REQUEST_CODES = frozenset({-32700, -32600, -32602})
+
+
 def _is_definite_node_rejection(result: dict[str, Any]) -> bool:
     """Return true when a JSON-RPC error shows the node refused the transaction.
 
-    EIP-7966 timeouts (code 4), internal errors (-32603) and messages that
-    mention a timeout leave the outcome open. Everything else, including
-    "already known" (someone else may have submitted the transaction), is a
-    refusal of this server's own submission.
+    Only an error that names a validation failure counts: a malformed request
+    or invalid params, insufficient funds or balance, a bad signature, too
+    little gas, a fee below what the node takes, an expired or out-of-range
+    ``valid_before``, or "already known" (the node already held the
+    transaction from another submission). Nonce errors (the nonce may have
+    been used by this very submission), EIP-7966 timeouts (code 4), internal
+    errors (-32603), messages that mention a timeout and any error the node
+    does not explain leave the outcome open, so the broadcast marker is kept
+    for a retry to reconcile.
     """
     rpc_error = result.get("error")
-    if is_dict(rpc_error) and rpc_error.get("code") in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603):
+    code = rpc_error.get("code") if is_dict(rpc_error) else None
+    message = _rpc_error_msg(result).lower()
+    if (
+        code in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603)
+        or "nonce" in message
+        or _TIMEOUT_MESSAGE_RE.search(message) is not None
+    ):
         return False
-    return _TIMEOUT_MESSAGE_RE.search(_rpc_error_msg(result)) is None
+    return (
+        code in _MALFORMED_REQUEST_CODES
+        or ALREADY_KNOWN_TRANSACTION_RE.search(message) is not None
+        or any(fragment in message for fragment in _NODE_REFUSAL_FRAGMENTS)
+    )
 
 
 def _encode_broadcast_marker(challenge_id: str, raw_tx: str) -> str:
@@ -2297,6 +2361,10 @@ class ChargeIntent:
         this SDK. For regular transactions, submits directly.
         """
         legs = self._validate_transaction_payload(payload.signature, request)
+        # A transaction this SDK cannot decode was never checked against the
+        # request: its receipt must carry a transfer whose memo binds it to this
+        # Challenge, as a hash credential's must, never just any plain transfer.
+        undecodable = legs is None
         if legs is not None:
             # Reject unbound or conflicting MPP memos before any funds move.
             self._assert_challenge_bound_memo(legs, challenge_id=challenge_id, realm=realm)
@@ -2609,7 +2677,12 @@ class ChargeIntent:
                 prior_receipt = await self._get_transaction_receipt(client, tx_hash)
                 if prior_receipt is not None:
                     receipt = self._verify_recovered_receipt(
-                        prior_receipt, tx_hash, request, challenge_id=challenge_id, realm=realm
+                        prior_receipt,
+                        tx_hash,
+                        request,
+                        challenge_id=challenge_id,
+                        realm=realm,
+                        require_bound_memo=undecodable,
                     )
                     verified = True
                     await self._clear_broadcast_marker(broadcast_key)
@@ -2713,16 +2786,10 @@ class ChargeIntent:
                     # Record this server's own broadcast of these exact bytes, so a
                     # retry after a lost outcome reconciles the transaction instead
                     # of refusing it as mined by someone else.
-                    valid_before = _transaction_valid_before(raw_tx)
-                    bounds = [
-                        bound for bound in (recovery_expires_at, valid_before) if bound is not None
-                    ]
                     marker_created = await self._put_broadcast_marker(
                         broadcast_key,
                         raw_tx,
-                        max(bounds) + _UNSPONSORED_MARKER_GRACE
-                        if bounds
-                        else time.time() + _UNSPONSORED_MARKER_TTL,
+                        _unsponsored_marker_expiry(recovery_expires_at, raw_tx),
                         challenge_id,
                     )
             # The awaits since the check above (budget transition, receipt lookup,
@@ -2762,7 +2829,7 @@ class ChargeIntent:
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
                 node_rejected = _is_undelivered_send_error(send_error)
-                require_bound_memo = self._recovery_requires_bound_memo(
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
                     request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
                 if not _is_ambiguous_broadcast_error(send_error, resubmitted=reconciling):
@@ -2789,7 +2856,7 @@ class ChargeIntent:
                 )
                 node_rejected = _is_definite_node_rejection(result)
                 open_rpc_error = not node_rejected
-                require_bound_memo = self._recovery_requires_bound_memo(
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
                     request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
                 if not _is_ambiguous_broadcast_error(result, resubmitted=reconciling):
@@ -2837,6 +2904,7 @@ class ChargeIntent:
                 request,
                 challenge_id=challenge_id,
                 realm=realm,
+                require_bound_memo=undecodable,
             )
 
             receipt_tx_hash = receipt_data.get("transactionHash")
