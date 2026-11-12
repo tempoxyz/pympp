@@ -148,7 +148,10 @@ def create(
     return TempoId(
         verifier=Verifier(verify=verify_request, authorization=True),
         payment_check=PaymentCheck(
-            requires=(Requirement(type=TYPE, issuer=origin),), verify=verify_payment
+            requires=(Requirement(type=TYPE, issuer=origin),),
+            verify=verify_payment,
+            authorization=True,
+            payer=lambda payer: payer.account,
         ),
     )
 
@@ -347,7 +350,7 @@ class _Rules:
             return "The DPoP proof has no ID."
         if self.store is not None:
             key_id = f"mppx:tempo-id:dpop:{jwt.sha256(f'{jkt}:{jti}')}"
-            if not await self.store.put_if_absent_until(key_id, True, max(expires, now + 1)):
+            if not await self.store.put_if_absent_until(key_id, "1", max(expires, now + 1)):
                 return "The DPoP proof was already used."
         return None
 

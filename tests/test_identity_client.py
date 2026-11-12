@@ -419,3 +419,21 @@ async def test_auxiliary_requests_are_proved_too() -> None:
     transport._inner = httpx.MockTransport(record)
     await transport._send_auxiliary(httpx.Request("POST", f"{API}/session/top-up"))
     assert [request.headers["X-Api-Key"] for request in seen] == ["alice"]
+
+
+@pytest.mark.parametrize(
+    ("header", "challenge_header"),
+    [("Authorization", None), ("Payment-Authorization", "Payment-Authorization")],
+)
+async def test_a_prover_never_replaces_the_payment_credential(
+    header: str, challenge_header: str | None
+) -> None:
+    async def bearer(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return with_headers(request, {"Authorization": "Bearer token", header: "Bearer token"})
+
+    client = IdentityClient([Prover(scope="*", prove=bearer)])
+    send = Script(httpx.Response(200))
+    paid = httpx.Request("GET", API, headers={header: "Payment eyJ"})
+    await client.send(send, paid, challenge=challenge(header=challenge_header))
+    [sent] = send.sent
+    assert sent.headers[header] == "Payment eyJ"

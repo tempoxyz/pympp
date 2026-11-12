@@ -509,6 +509,8 @@ module mpp.identity
         @dataclass(frozen=True, slots=True)
         field requires: tuple[Requirement, ...]
         field verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
+        field authorization: bool = False
+        field payer: Callable[[T], str | None] | None = None
     class PaymentCheckInput
         @dataclass(frozen=True, slots=True)
         field request: Request

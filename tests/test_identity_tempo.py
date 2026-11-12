@@ -769,3 +769,34 @@ def test_the_key_set_loads_on_trio(issuer: Issuer) -> None:
     first, last = trio.run(main)
     assert first is not None and last is not None
     assert issuer.fetches == 1, "concurrent callers share one fetch"
+
+
+def test_htu_uses_the_encoded_host() -> None:
+    assert jwt.htu("https://b\u00fccher.example/a") == "https://xn--bcher-kva.example/a"
+
+
+class StringStore(MemoryStore):
+    """A store that, like Redis and Postgres, only takes string values."""
+
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        if not isinstance(value, str):
+            raise TypeError(f"expected str, got {type(value).__name__}")
+        return await super().put_if_absent_until(key, value, expires_at)
+
+
+async def test_dpop_replay_claims_work_with_string_stores(issuer: Issuer) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    verifier = tempo_id(issuer, store=StringStore()).verifier
+    request = dpop_request(token, key)
+    assert isinstance(await verifier.verify(request), Valid)
+    replay = dpop_request(token, key, proof=request.headers["DPoP"])
+    assert reason(await verifier.verify(replay)) == ("invalid", "The DPoP proof was already used.")
+
+
+def test_tempo_ids_payment_check_reads_authorization_and_names_the_payer(issuer: Issuer) -> None:
+    check = tempo_id(issuer).payment_check
+    assert check.authorization
+    assert check.payer is not None
+    payer = tempo.Payer(user_id="u", client_id="c", account=ALICE_CHECKSUM)
+    assert check.payer(payer) == ALICE_CHECKSUM

@@ -89,7 +89,9 @@ def htu(url: str) -> str:
     parsed = httpx.URL(url)
     default = {"http": 80, "https": 443}.get(parsed.scheme)
     port = "" if parsed.port in (None, default) else f":{parsed.port}"
-    host = f"[{parsed.host}]" if ":" in parsed.host else parsed.host
+    # The host as sent (IDNA-encoded), as a WHATWG URL serializes it.
+    raw_host = parsed.raw_host.decode("ascii")
+    host = f"[{raw_host}]" if ":" in raw_host else raw_host
     # The path as sent, percent-encoding kept, so a%2Fb and a/b stay distinct targets.
     path = parsed.raw_path.split(b"?", 1)[0].decode("ascii") or "/"
     return f"{parsed.scheme}://{host}{port}{path}"

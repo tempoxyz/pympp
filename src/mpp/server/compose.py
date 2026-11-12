@@ -28,7 +28,12 @@ from mpp.errors import (
 from mpp.events import PAYMENT_FAILED
 from mpp.identity import _EMPTY_ROUTE, PaymentCheck, PaymentCheckInput, Rejected, Results, Route
 from mpp.identity import _requirements as identity_requirements
-from mpp.server._identity import X402_REJECTED, IdentityContext, IdentityRejectedError
+from mpp.server._identity import (
+    PAYER_MISMATCH,
+    X402_REJECTED,
+    IdentityContext,
+    IdentityRejectedError,
+)
 from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
 from mpp.server.method import (
     SETTLING_METHOD,
@@ -127,9 +132,12 @@ class _MethodIntent:
             ),
             input=self._http_request,
         )
+        confirm = None
         if self._gate is not None:
-            await self._gate(context.credential, context.challenge)
+            confirm = await self._gate(context.credential, context.challenge)
         receipt, _ = await self._method.settle(context)
+        if confirm is not None:
+            confirm(receipt)
         if self._method.respond is not None:
             # Like mppx, after verification and before ``payment.success``.
             response = await resolve(
@@ -277,7 +285,8 @@ class _PreparedOffer:
         )
 
 
-_PaymentGate: TypeAlias = Callable[[Credential, Challenge], Awaitable[None]]
+_PaymentConfirm: TypeAlias = Callable[[Receipt], None]
+_PaymentGate: TypeAlias = Callable[[Credential, Challenge], Awaitable[_PaymentConfirm]]
 
 
 @dataclass
@@ -301,7 +310,7 @@ class _Call:
         if check is None or context is None:
             return None
 
-        async def run(credential: Credential, challenge: Challenge) -> None:
+        async def run(credential: Credential, challenge: Challenge) -> _PaymentConfirm:
             outcome = await context.check(
                 check,
                 PaymentCheckInput(request=request, challenge=challenge, credential=credential),
@@ -310,6 +319,14 @@ class _Call:
                 # The client may already have pushed this payment: reject without a fresh 402.
                 raise IdentityRejectedError("payment", outcome)
             self.checked[check] = outcome.value
+            vetted = check.payer(outcome.value) if check.payer is not None else None
+
+            def confirm(receipt: Receipt) -> None:
+                # The method reports who paid: it must be the account the check vetted.
+                if vetted and receipt.payer and vetted.lower() != receipt.payer.lower():
+                    raise IdentityRejectedError("payment", PAYER_MISMATCH)
+
+            return confirm
 
         return run
 

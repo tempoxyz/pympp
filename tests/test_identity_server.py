@@ -457,3 +457,50 @@ async def test_a_paid_retry_ignores_same_terms_offers_whose_identity_rejects() -
     assert isinstance(result, PaymentVerified)
     assert result.identity.get(first) == "k"
     assert recorder.settled == 1
+
+
+@pytest.mark.parametrize(
+    ("paid_by", "verified"),
+    [("0xABC", True), ("0xabc", True), (None, True), ("0xdef", False)],
+)
+async def test_the_account_that_paid_must_be_the_one_the_check_vetted(
+    paid_by: str | None, verified: bool
+) -> None:
+    from dataclasses import replace as replace_receipt
+
+    recorder = Recorder()
+
+    async def settle(context: VerifyContext) -> Receipt:
+        recorder.settled += 1
+        return replace_receipt(Receipt.success("tx"), payer=paid_by)
+
+    async def vet(input: PaymentCheckInput) -> Verification[str]:
+        return Valid("0xAbc")
+
+    check = PaymentCheck(requires=(), verify=vet, payer=lambda account: account)
+    handler = server(recorder, server_method(request={"amount": "1"}, verify=settle)).charge(
+        identity=Route(payment=check)
+    )
+    [issued] = challenges(await handler(http_request()))
+    result = await handler(paid(issued))
+    if verified:
+        assert isinstance(result, PaymentVerified)
+    else:
+        code, rejected, body, _ = rejection(result)
+        assert (code, body) == (
+            403,
+            "The account that paid is not the one the identity check vetted.",
+        )
+        assert rejected is not None and rejected.stage == "payment"
+
+
+def test_a_payment_check_reading_authorization_needs_requires_auth() -> None:
+    recorder = Recorder()
+
+    async def vet(input: PaymentCheckInput) -> Verification[str]:
+        return Valid("x")
+
+    reads = Route(payment=PaymentCheck(requires=(), verify=vet, authorization=True))
+    with pytest.raises(TypeError, match="requires_auth=True"):
+        server(recorder).charge(identity=reads)
+    server(recorder, requires_auth=True).charge(identity=reads)

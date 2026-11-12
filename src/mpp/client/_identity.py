@@ -144,11 +144,22 @@ class IdentityClient:
             stream=request.stream,
             extensions=dict(request.extensions),
         )
+        # A payment credential the request carries survives every prover: a prover that writes
+        # the same header (such as Authorization) never replaces it.
+        credentials = [
+            (name, value)
+            for name, value in request.headers.multi_items()
+            if holds_payment(value)
+            or name.lower() in _X402_HEADERS
+            or (challenge is not None and name.lower() == challenge.credential_header.lower())
+        ]
         context = ProveContext.new(challenge)
         for prover in scoped:
             proved = await prover.prove(proved, context)
             if not isinstance(proved, httpx.Request):
                 raise TypeError("Prover.prove must return an httpx.Request")
+        for name, value in credentials:
+            proved.headers[name] = value
         return proved, await send(proved)
 
 

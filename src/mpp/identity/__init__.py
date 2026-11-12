@@ -272,12 +272,21 @@ class PaymentCheck(Generic[T]):
     may already have pushed the payment. A route with a payment check does not accept x402
     payments, which name no Challenge a proof could bind to.
 
+    - ``authorization``: the check reads ``Authorization``, so its route needs a server created
+      with ``requires_auth=True``.
+    - ``payer``: returns the account the check vetted from its value. After settlement the
+      engine compares it with the account the payment method reports (``Receipt.payer``) and
+      rejects the request as ``forbidden`` when they differ, so a check cannot be satisfied with
+      one account and paid from another.
+
     Raises:
         ValueError: If a requirement cannot be serialized.
     """
 
     requires: tuple[Requirement, ...]
     verify: Callable[[PaymentCheckInput], Awaitable[Verification[T]]]
+    authorization: bool = False
+    payer: Callable[[T], str | None] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "requires", tuple(self.requires))
@@ -312,8 +321,9 @@ class Route:
 
     @property
     def authorization(self) -> bool:
-        """Whether a verifier reads ``Authorization``."""
-        return any(verifier.authorization for verifier in self.request)
+        """Whether a verifier or the payment check reads ``Authorization``."""
+        payment = self.payment is not None and self.payment.authorization
+        return payment or any(verifier.authorization for verifier in self.request)
 
     @classmethod
     def of(cls, value: Route | Sequence[Verifier[Any]] | None) -> Route:
