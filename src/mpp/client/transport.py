@@ -452,7 +452,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 # used challenge, such as a replay), or that cannot say why (a HEAD
                 # response, an empty or unparseable problem), is final: paying the fresh challenge
                 # could pay twice for one request.
-                if retry > 0 and await _paid_retry_is_final(response, request.method):
+                if retry > 0 and await self._paid_retry_is_final(response, request, sent):
                     return response
                 # EIP-3009 authorizations remain spendable even after a 402 response.
                 if sent is not None and (
@@ -618,36 +618,44 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         # same request could pay twice, so the 402 is final.
                         return response
 
-                supplied: str | None = None
-                supplied_attempt: PaymentAttempt | None = None
-                if reused is None and self._on_challenge is not None:
-                    decision, supplied_attempt = await self._approve(
-                        challenge, matched_method, challenges, request, response
-                    )
-                    if decision is False:
-                        return response
-                    if isinstance(decision, str):
-                        supplied = decision
-
                 try:
+                    # Approval runs here so its errors (including the creation it can
+                    # start) get the same events and handling as creation without a hook.
+                    decision: str | bool | Credential | None = None
+                    hook_attempt: PaymentAttempt | None = None
+                    if reused is None and self._on_challenge is not None:
+                        decision, hook_attempt = await self._approve(
+                            challenge,
+                            # Spelled out: pyright otherwise loses the type in this loop.
+                            cast("ClientMethod", matched_method),
+                            challenges,
+                            request,
+                            response,
+                        )
+                        if decision is False:
+                            return response
                     if reused is not None:
                         credential = reused
-                    elif supplied is not None:
+                    elif isinstance(decision, (str, Credential)):
                         # A hook-supplied credential is tracked like a created one, so
                         # a later 402 cannot pay again for it.
-                        hook_attempt = supplied_attempt or PaymentAttempt()
-                        try:
-                            credential = Credential.from_authorization(supplied)
-                        except BaseException:
-                            await _settle_attempt(
-                                hook_attempt,
-                                AttemptOutcome(
-                                    status="rejected",
-                                    response=response,
-                                    challenges=tuple(challenges),
-                                ),
-                            )
-                            raise
+                        hook_attempt = hook_attempt or PaymentAttempt()
+                        if isinstance(decision, Credential):
+                            credential = decision
+                        else:
+                            try:
+                                credential = Credential.from_authorization(decision)
+                            except BaseException:
+                                await _settle_attempt(
+                                    hook_attempt,
+                                    AttemptOutcome(
+                                        status="rejected",
+                                        response=response,
+                                        challenges=tuple(challenges),
+                                        sent=False,
+                                    ),
+                                )
+                                raise
                         sent = _SentCredential(
                             challenge=challenge,
                             method=matched_method,
@@ -686,6 +694,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                                     status="rejected",
                                     response=response,
                                     challenges=tuple(challenges),
+                                    sent=False,
                                 ),
                             )
                             raise
@@ -709,7 +718,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         _client_payment_failed_payload(
                             challenge=challenge,
                             challenges=challenges,
-                            credential=None,
+                            credential=error.credential
+                            if isinstance(error, PaymentOutcomeUnknownError)
+                            else None,
                             error=error,
                             method=matched_method,
                             request=request,
@@ -745,6 +756,8 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 # HTTPX redirects from the original request, not the inner retry.
                 request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                 retry_request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
+                if sent is not None:
+                    sent.delivered = True
                 try:
                     payment_response = await self._inner.handle_async_request(retry_request)
                     response = payment_response
@@ -850,8 +863,44 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         status="rejected",
                         response=response,
                         challenges=_response_challenges(response),
+                        sent=sent.delivered,
                     ),
                 )
+
+    async def _paid_retry_is_final(
+        self, response: httpx.Response, request: httpx.Request, sent: _SentCredential | None
+    ) -> bool:
+        """Whether a ``402`` answering the sent credential is final (see the function).
+
+        Its body is read after the credential was sent, so a failed read raises
+        :class:`~mpp.errors.PaymentOutcomeUnknownError` with that credential, as a failed
+        paid request does, and nothing more is paid.
+        """
+        try:
+            return await _paid_retry_is_final(response, request.method)
+        except (Exception, asyncio.CancelledError) as cause:
+            if sent is None:
+                raise
+            error = PaymentOutcomeUnknownError(
+                sent.challenge,
+                cause,
+                credential=sent.credential,
+                request=request,
+                transaction_hash=_transaction_hash(sent.method, sent.credential),
+            )
+            await self._events.emit(
+                PAYMENT_FAILED,
+                _client_payment_failed_payload(
+                    challenge=sent.challenge,
+                    challenges=list(_response_challenges(response)),
+                    credential=sent.credential,
+                    error=error,
+                    method=sent.method,
+                    request=request,
+                    response=response,
+                ),
+            )
+            raise error from cause
 
     async def _approve(
         self,
@@ -860,17 +909,20 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         challenges: list[Challenge],
         request: httpx.Request,
         response: httpx.Response,
-    ) -> tuple[str | bool | None, PaymentAttempt | None]:
+    ) -> tuple[str | bool | Credential | None, PaymentAttempt | None]:
         """Ask the ``on_challenge`` hook whether, and with what, to pay ``challenge``.
 
-        Returns the decision and, when the hook returned a credential from
-        ``context.create_credential()``, the attempt its method may settle.
+        Returns the decision and, when the client is to send the credential from
+        ``context.create_credential()``, that :class:`Credential` with the attempt its
+        method may settle. Only a credential string the hook supplies itself is
+        returned as a string, to be parsed.
         """
         assert self._on_challenge is not None
-        rejected = AttemptOutcome(
-            status="rejected", response=response, challenges=tuple(challenges)
+        # A created credential the hook does not send never reached the server.
+        unsent = AttemptOutcome(
+            status="rejected", response=response, challenges=tuple(challenges), sent=False
         )
-        created: tuple[str, PaymentAttempt] | None = None
+        created: tuple[Credential, str, PaymentAttempt] | None = None
         # Every call, overlapping or later, shares the first creation and its
         # outcome, including a failure: creating can pay, and a failed creation
         # may already have paid, so no call ever starts a second one. It starts
@@ -909,36 +961,47 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 )
                 authorization = credential.to_authorization()
             except BaseException:
-                await _settle_attempt(attempt, rejected)
+                await _settle_attempt(attempt, unsent)
                 raise
-            created = (authorization, attempt)
+            created = (credential, authorization, attempt)
             return authorization
 
         async def finish_creation(forward_cancel: bool) -> bool:
             """Wait for a started creation to finish before deciding.
 
-            A creation can pay, so its outcome must be known. Cancelling this
-            task forwards the cancellation to the creation, as the path without a
-            hook does, so the method reports a payment it already broadcast (the
-            Tempo client raises PaymentOutcomeUnknownError with the hash), and
-            waits for it once more; a further cancellation stops waiting.
-            With forward_cancel, the cancellation already reached the hook.
+            A creation can pay, so its outcome must be known. Every cancellation of
+            this task is forwarded to the creation, as the path without a hook
+            delivers it to the creation itself, so the method reports a payment it
+            already broadcast (the Tempo client raises PaymentOutcomeUnknownError
+            with the hash) or stops; this waits until it has. That also holds for an
+            anyio cancel scope, which cancels this task again at every await.
+            With forward_cancel, a cancellation already reached the hook.
             Returns whether a cancellation was forwarded.
             """
             if creating is None or creating.done():
                 return False
-            if not forward_cancel:
+            forwarded = False
+            if forward_cancel:
+                creating.cancel()
+                forwarded = True
+            while not creating.done():
                 try:
-                    await asyncio.shield(creating)
-                    return False
+                    await asyncio.wait({creating})
                 except asyncio.CancelledError:
-                    forward_cancel = True
-                except Exception:
-                    return False
-            creating.cancel()
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait({creating})
-            return True
+                    creating.cancel()
+                    forwarded = True
+            return forwarded
+
+        def reject_late(task: asyncio.Future[str]) -> None:
+            """Release the attempt of a creation nobody waits for any more."""
+            if task.cancelled() or task.exception() is not None:
+                # create_once already rejected the attempt of a failed creation.
+                return
+            if created is not None:
+                settling = asyncio.ensure_future(_settle_attempt(created[2], unsent))
+                _BACKGROUND.add(settling)
+                settling.add_done_callback(_BACKGROUND.discard)
+                settling.add_done_callback(_retrieve_exception)
 
         def creation_failure() -> BaseException | None:
             if creating is None or not creating.done() or creating.cancelled():
@@ -946,17 +1009,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             return creating.exception()
 
         def pushed_unknown(
-            authorization: str, cause: BaseException
+            credential: Credential, cause: BaseException
         ) -> PaymentOutcomeUnknownError | None:
             """The unknown outcome to report when this credential pushed a payment."""
-            pushed = Credential.from_authorization(authorization)
-            if not _is_pushed(pushed):
+            if not _is_pushed(credential):
                 return None
-            payload = pushed.payload
+            payload = credential.payload
             return PaymentOutcomeUnknownError(
                 challenge,
                 cause,
-                credential=pushed,
+                credential=credential,
                 request=request,
                 transaction_hash=payload.get("hash"),
             )
@@ -972,37 +1034,40 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             hook_error = error
         finally:
             closed = True
-        # The hook was cancelled along with this task: forward it to the creation.
-        if await finish_creation(isinstance(hook_error, asyncio.CancelledError)) and (
-            hook_error is None
-        ):
+        try:
+            # The hook was cancelled along with this task: forward it to the creation.
+            forwarded = await finish_creation(isinstance(hook_error, asyncio.CancelledError))
+        except BaseException:
+            # Interrupted (KeyboardInterrupt and the like) before the creation finished:
+            # release its attempt whenever it does, and retrieve its error.
+            if creating is not None and not creating.done():
+                creating.add_done_callback(reject_late)
+            raise
+        if forwarded and hook_error is None:
             hook_error = asyncio.CancelledError()
         failure = creation_failure()
-        if creating is not None and not creating.done():
-            # Cancelled again before the creation finished: it may still pay, and
-            # nobody will see its result, so report the outcome as unknown.
-            raise PaymentOutcomeUnknownError(
-                challenge,
-                hook_error or asyncio.CancelledError(),
-                request=request,
-            ) from hook_error
 
         if hook_error is not None:
             if not isinstance(hook_error, (Exception, asyncio.CancelledError)):
                 # KeyboardInterrupt, SystemExit and the like pass through.
                 if created is not None:
-                    await _settle_attempt(created[1], rejected)
+                    await _settle_attempt(created[2], unsent)
                 raise hook_error
             if isinstance(failure, PaymentOutcomeUnknownError):
                 # The creation's own unknown outcome carries the transaction hash.
                 raise failure from hook_error
             if created is not None:
-                await _settle_attempt(created[1], rejected)
+                await _settle_attempt(created[2], unsent)
                 unknown = pushed_unknown(created[0], hook_error)
                 if unknown is not None:
                     # The hook failed after its credential's payment was broadcast:
                     # report it as an unknown outcome so the caller does not pay again.
                     raise unknown from hook_error
+            if isinstance(hook_error, asyncio.CancelledError) and isinstance(
+                failure, asyncio.CancelledError
+            ):
+                # The creation stopped on the cancellation, as it would without a hook.
+                raise failure from None
             raise hook_error
 
         if isinstance(failure, PaymentOutcomeUnknownError):
@@ -1014,14 +1079,14 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             # never create a second credential.
             raise failure
         if created is not None:
-            authorization, attempt = created
+            credential, authorization, attempt = created
             if decision is None or decision is True or decision == authorization:
                 # Paying "as usual" sends the credential the hook already created.
-                return authorization, attempt
+                return credential, attempt
             # The created credential is not the one sent: release its state.
-            await _settle_attempt(attempt, rejected)
+            await _settle_attempt(attempt, unsent)
             unknown = pushed_unknown(
-                authorization,
+                credential,
                 ValueError("on_challenge discarded a credential whose payment was broadcast"),
             )
             if unknown is not None:
@@ -1051,6 +1116,12 @@ class _SentCredential:
     method: ClientMethod
     credential: Credential
     attempt: PaymentAttempt
+    delivered: bool = False
+    """Whether the credential was handed to the inner transport."""
+
+
+_BACKGROUND: set[asyncio.Task[Any]] = set()
+"""Settlement tasks of abandoned creations, kept referenced until they finish."""
 
 
 async def _settle_attempt(attempt: PaymentAttempt, outcome: AttemptOutcome) -> bool:
@@ -1063,6 +1134,12 @@ async def _settle_attempt(attempt: PaymentAttempt, outcome: AttemptOutcome) -> b
     if not settled:
         attempt.settle = settle
     return settled
+
+
+def _retrieve_exception(task: asyncio.Future[Any]) -> None:
+    """Mark a background task's error as retrieved, so asyncio does not log it."""
+    if not task.cancelled():
+        task.exception()
 
 
 def _response_challenges(response: httpx.Response) -> tuple[Challenge, ...]:

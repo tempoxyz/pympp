@@ -1822,3 +1822,53 @@ class TestOriginBinding:
         assert payload_of(sent.headers["authorization"])["action"] == "topUp"
         entry = store.get(KEY)
         assert entry is not None and entry.origin == ORIGIN and entry.deposit == 200
+
+
+class TestHookDecline:
+    async def test_declined_voucher_does_not_raise_the_next_cumulative(self) -> None:
+        server = Server()
+        method = SessionMethod(account=ACCOUNT)
+        decline = False
+
+        async def hook(challenge: Challenge, context: Any) -> bool | None:
+            if decline:
+                await context.create_credential()
+                return False
+            return None
+
+        transport = PaymentTransport(
+            methods=[method.client_method()],
+            inner=httpx.MockTransport(server.handler),
+            on_challenge=hook,
+        )
+        assert (await get(transport)).status_code == 200
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 100
+        decline = True
+        assert (await get(transport)).status_code == 402
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 100
+        decline = False
+        assert (await get(transport)).status_code == 200
+        assert [p["action"] for p in server.payloads] == ["open", "voucher"]
+        assert server.payloads[-1]["cumulativeAmount"] == "200"
+
+    async def test_voucher_settled_after_sending_keeps_its_cumulative(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(replace(entry_for(cumulative=100), origin=ORIGIN))
+        attempt = PaymentAttempt()
+        await method.create_credential(
+            CredentialParams(
+                challenge=make_challenge(),
+                request=httpx.Request("GET", URL),
+                attempt=attempt,
+            )
+        )
+        assert attempt.settle is not None
+        assert not await attempt.settle(AttemptOutcome(status="pending"))
+        assert await attempt.settle(AttemptOutcome(status="rejected"))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+        assert await attempt.settle(AttemptOutcome(status="rejected", sent=False))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 100

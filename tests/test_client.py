@@ -22,6 +22,7 @@ from mpp import (
     PaymentOutcomeUnknownError,
 )
 from mpp.client import Mpp, OnChallenge, PaymentTransport
+from mpp.errors import PaymentExpiredError
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -33,7 +34,13 @@ from mpp.events import (
     PaymentEventName,
 )
 from mpp.methods import Method
-from mpp.runtime import ChallengeCandidate, ClientMethod, CredentialParams, PaymentRuntime
+from mpp.runtime import (
+    AttemptOutcome,
+    ChallengeCandidate,
+    ClientMethod,
+    CredentialParams,
+    PaymentRuntime,
+)
 from tests import make_credential
 
 _NOISE_GZIP = gzip.compress(random.Random(0).randbytes(100_000))
@@ -2925,17 +2932,20 @@ async def test_cancelling_the_request_cancels_a_hung_creation():
         await asyncio.wait_for(task, timeout=0.5)
 
 
-async def test_second_cancellation_stops_waiting_for_the_creation():
-    from mpp.errors import PaymentOutcomeUnknownError
-
+async def test_second_cancellation_reaches_the_creation():
+    """Every cancellation reaches the creation, as it does without a hook."""
     started = asyncio.Event()
+    stopped = asyncio.Event()
 
     async def create(challenge, authorization):
         started.set()
         try:
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(10)
             await asyncio.sleep(10)
         except asyncio.CancelledError:
-            await asyncio.sleep(10)
+            stopped.set()
+            raise
         return authorization
 
     _, inner, method = _push_setup("0x" + "c6" * 32, create)
@@ -2952,9 +2962,9 @@ async def test_second_cancellation_stops_waiting_for_the_creation():
     task.cancel()
     await asyncio.sleep(0.01)
     task.cancel()
-    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+    with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=0.5)
-    assert excinfo.value.transaction_hash is None
+    assert stopped.is_set()
 
 
 async def test_create_credential_after_the_hook_returned_is_refused():
@@ -3109,3 +3119,379 @@ async def test_declined_402_whose_body_fails_to_read_raises_the_read_error():
         with pytest.raises(httpx.ReadError, match="connection reset"):
             await client.get("https://example.com")
     create.assert_not_awaited()
+
+
+async def test_hook_creation_of_an_expired_challenge_returns_the_402_and_reports_it():
+    """With a hook, a creation error gets the handling it gets without one."""
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                content=b"expired",
+            )
+        ]
+    )
+
+    async def create(params: CredentialParams) -> str:
+        raise PaymentExpiredError()
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    failed: list[dict] = []
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    transport.on(PAYMENT_FAILED, failed.append)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 402
+    assert response.content == b"expired"
+    assert [type(event["error"]) for event in failed] == [PaymentExpiredError]
+
+
+async def test_hook_creation_unknown_outcome_is_reported_as_a_failed_payment():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e1" * 32
+
+    async def create(challenge, authorization):
+        raise PaymentOutcomeUnknownError(
+            challenge, RuntimeError("lost response"), transaction_hash=tx_hash
+        )
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    failed: list[dict] = []
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    transport.on(PAYMENT_FAILED, failed.append)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+    assert [event["error"] for event in failed] == [excinfo.value]
+
+
+def _large_credential_setup(payload: dict):
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(200),
+        ]
+    )
+    # Larger than the 64 KiB a parsed Authorization header may have, as the echo of a
+    # large x402 PAYMENT-REQUIRED offer can be.
+    credential = Credential(
+        challenge=challenge.to_echo(), payload={**payload, "padding": "x" * 70_000}
+    )
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=AsyncMock(),
+    )
+
+    class LargeRuntime(PaymentRuntime):
+        async def create_credential(self, challenge, method, **kwargs) -> Credential:  # pyright: ignore[reportIncompatibleMethodOverride]
+            return credential
+
+    return inner, LargeRuntime([method]), credential
+
+
+@pytest.mark.parametrize("returns_string", [False, True])
+async def test_hook_sends_a_large_created_credential_without_reparsing_it(returns_string):
+    inner, runtime, credential = _large_credential_setup({"type": "transaction"})
+
+    async def hook(challenge: Challenge, context) -> str | None:
+        created = await context.create_credential()
+        return created if returns_string else None
+
+    transport = PaymentTransport(runtime=runtime, inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 200
+    assert inner.requests[1].headers["authorization"] == credential.to_authorization()
+
+
+async def test_hook_declines_a_large_created_credential():
+    inner, runtime, _ = _large_credential_setup({"type": "transaction"})
+
+    async def hook(challenge: Challenge, context) -> bool:
+        await context.create_credential()
+        return False
+
+    transport = PaymentTransport(runtime=runtime, inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 402
+    assert len(inner.requests) == 1
+
+
+async def test_hook_declining_a_large_pushed_credential_reports_its_hash():
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e2" * 32
+    inner, runtime, credential = _large_credential_setup({"type": "hash", "hash": tx_hash})
+
+    async def hook(challenge: Challenge, context) -> bool:
+        await context.create_credential()
+        return False
+
+    transport = PaymentTransport(runtime=runtime, inner=inner, on_challenge=hook)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert excinfo.value.transaction_hash == tx_hash
+    assert excinfo.value.credential == credential
+
+
+def _settled_setup(create_impl):
+    """A charge method whose credentials record how their attempts settle."""
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+    outcomes: list[AttemptOutcome] = []
+
+    async def create(params: CredentialParams) -> str:
+        assert params.attempt is not None
+        await create_impl()
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            outcomes.append(outcome)
+            return True
+
+        params.attempt.settle = settle
+        return Credential(
+            challenge=params.challenge.to_echo(), payload={"type": "transaction"}
+        ).to_authorization()
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+    return inner, method, outcomes
+
+
+async def test_hook_declined_credential_is_rejected_as_unsent():
+    async def create():
+        return None
+
+    inner, method, outcomes = _settled_setup(create)
+
+    async def hook(challenge: Challenge, context) -> bool:
+        await context.create_credential()
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert response.status_code == 402
+    assert [(o.status, o.sent) for o in outcomes] == [("rejected", False)]
+
+
+async def test_creation_finishing_after_two_cancellations_releases_its_attempt():
+    started = asyncio.Event()
+
+    async def create():
+        started.set()
+        for _ in range(2):
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(10)
+
+    inner, method, outcomes = _settled_setup(create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    task = asyncio.ensure_future(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+    assert [(o.status, o.sent) for o in outcomes] == [("rejected", False)]
+    assert len(inner.requests) == 1
+
+
+async def test_interrupted_wait_releases_a_late_creation(monkeypatch: pytest.MonkeyPatch):
+    class Stop(BaseException):
+        pass
+
+    release = asyncio.Event()
+
+    async def create():
+        await release.wait()
+
+    inner, method, outcomes = _settled_setup(create)
+    real_wait = asyncio.wait
+
+    async def interrupted_wait(*args, **kwargs):
+        monkeypatch.setattr(asyncio, "wait", real_wait)
+        raise Stop
+
+    def hook(challenge: Challenge, context) -> bool | None:
+        asyncio.ensure_future(context.create_credential())
+        monkeypatch.setattr(asyncio, "wait", interrupted_wait)
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    with pytest.raises(Stop):
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert outcomes == []
+    release.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert [(o.status, o.sent) for o in outcomes] == [("rejected", False)]
+
+
+async def test_cancel_scope_during_hook_creation_reports_the_creation_hash():
+    import anyio
+
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e3" * 32
+    started = asyncio.Event()
+
+    async def create(challenge, authorization):
+        # Like the Tempo client: a cancellation after broadcast reports the payment.
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            raise PaymentOutcomeUnknownError(
+                challenge, RuntimeError("cancelled after broadcast"), transaction_hash=tx_hash
+            ) from None
+        return authorization
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    scope = anyio.CancelScope()
+
+    async def cancel() -> None:
+        await started.wait()
+        scope.cancel()
+
+    canceller = asyncio.ensure_future(cancel())
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        with scope:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    await canceller
+    assert excinfo.value.transaction_hash == tx_hash
+
+
+async def test_cancel_scope_during_hook_creation_exits_quietly():
+    import anyio
+
+    started = asyncio.Event()
+
+    async def create(challenge, authorization):
+        started.set()
+        await asyncio.sleep(10)
+        return authorization
+
+    _, inner, method = _push_setup("0x" + "e4" * 32, create)
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        await context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    scope = anyio.CancelScope()
+
+    async def cancel() -> None:
+        await started.wait()
+        scope.cancel()
+
+    canceller = asyncio.ensure_future(cancel())
+    with anyio.fail_after(1), scope:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    await canceller
+    assert scope.cancelled_caught
+    assert len(inner.requests) == 1
+
+
+async def test_paid_retry_402_whose_body_fails_to_read_reports_an_unknown_outcome():
+    """After a credential is sent, a failed 402 read keeps the paid-attempt context."""
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+
+    class FailingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"type": '
+            raise httpx.ReadError("connection reset")
+
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            ),
+            httpx.Response(
+                402,
+                headers={
+                    "www-authenticate": challenge.to_www_authenticate("example.com"),
+                    "content-type": "application/problem+json",
+                },
+                stream=FailingStream(),
+            ),
+        ]
+    )
+    authorization = Credential(
+        challenge=challenge.to_echo(), payload={"type": "transaction"}
+    ).to_authorization()
+    create = AsyncMock(return_value=authorization)
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    failed: list[dict] = []
+    transport = PaymentTransport(methods=[method], inner=inner)
+    transport.on(PAYMENT_FAILED, failed.append)
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert isinstance(excinfo.value.__cause__, httpx.ReadError)
+    assert excinfo.value.credential == Credential.from_authorization(authorization)
+    assert [event["error"] for event in failed] == [excinfo.value]
+    assert len(inner.requests) == 2
+    create.assert_awaited_once()
+
+
+async def test_hook_supplied_credential_that_does_not_parse_is_reported():
+    async def create():
+        return None
+
+    inner, method, outcomes = _settled_setup(create)
+
+    async def hook(challenge: Challenge, context) -> str:
+        await context.create_credential()
+        return "Payment not-a-credential"
+
+    failed: list[dict] = []
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    transport.on(PAYMENT_FAILED, failed.append)
+    with pytest.raises(ParseError):
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    assert [(o.status, o.sent) for o in outcomes] == [("rejected", False)]
+    assert [type(event["error"]) for event in failed] == [ParseError]
+    assert len(inner.requests) == 1

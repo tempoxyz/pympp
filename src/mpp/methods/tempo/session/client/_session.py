@@ -505,12 +505,51 @@ class SessionMethod:
                     assert lock is not None
                     attempt.settle = self._settle_open(challenge, resolved.key, pending[0], lock)
                     held = False
+                elif automatic and plan.type == "voucher":
+                    assert plan.entry is not None
+                    attempt.settle = self._settle_voucher(
+                        scope,
+                        resolved.key,
+                        plan.entry.channel_id,
+                        previous=plan.entry.cumulative_amount,
+                        signed=plan.entry.cumulative_amount + resolved.amount,
+                    )
                 else:
                     attempt.settle = _settle_stateless
             return credential
         finally:
             if held and lock is not None:
                 lock.release()
+
+    def _settle_voucher(
+        self, scope: str, key: str, channel_id: str, *, previous: int, signed: int
+    ) -> Callable[[AttemptOutcome], Awaitable[bool]]:
+        """Undo an automatic voucher's increment when the voucher is never sent.
+
+        A voucher the transport drops before sending (declined by an ``on_challenge``
+        hook, for one) authorizes nothing the server saw, so the cached cumulative amount
+        returns to ``previous``; otherwise the next voucher would also authorize the
+        dropped amount. The cache is left alone once a later voucher built on it.
+        """
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            if outcome.status == "pending":
+                return False
+            if outcome.status != "rejected" or outcome.sent:
+                return True
+            async with store_lock(self.store, scope):
+                current = await store_get(self.store, key)
+                if (
+                    current is not None
+                    and current.channel_id.lower() == channel_id.lower()
+                    and current.cumulative_amount == signed
+                ):
+                    restored = current.copy(cumulative_amount=previous)
+                    await persist_channel(self.store, restored)
+                    self._notify(restored)
+            return True
+
+        return settle
 
     def _settle_open(
         self, challenge: Challenge, key: str, opened: ChannelEntry, lock: asyncio.Lock

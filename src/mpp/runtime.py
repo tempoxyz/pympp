@@ -28,12 +28,15 @@ class AttemptOutcome:
     ``status`` is ``accepted`` (a successful response), ``rejected`` (a failed response,
     an error, or a replacement challenge) or ``pending`` (an identical challenge again, or
     a redirect). ``response`` is the response, when there is one; ``challenges`` are the
-    challenges it carried.
+    challenges it carried. ``sent`` is ``False`` for a ``rejected`` credential that never
+    reached the server (declined by an ``on_challenge`` hook, replaced, or abandoned
+    before sending), so a method may release what it reserved for it.
     """
 
     status: Literal["accepted", "pending", "rejected"]
     response: Any = None
     challenges: Sequence[Challenge] = ()
+    sent: bool = True
 
 
 @dataclass(slots=True, kw_only=True, eq=False)
