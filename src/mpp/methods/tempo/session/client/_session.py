@@ -649,8 +649,7 @@ class SessionMethod:
             if declined is not None:
                 # Vouchers above the restored amount are undone with it.
                 declined.drop_above(target)
-                if not declined.restores:
-                    del self._declined[key]
+                self._discard_if_empty(key, declined)
 
     def _declined_for(self, key: str, current: ChannelEntry) -> _Declined | None:
         """The declined vouchers remembered for ``current``'s channel, dropping stale ones."""
@@ -673,7 +672,15 @@ class SessionMethod:
             return
         for amount in [amount for amount in declined.restores if amount <= signed]:
             del declined.restores[amount]
-        if not declined.restores:
+        self._discard_if_empty(key, declined)
+
+    def _discard_if_empty(self, key: str, declined: _Declined) -> None:
+        """Stop remembering ``declined`` once it holds nothing, if ``key`` still maps to it.
+
+        A rollback holds ``declined`` across awaits while a sent voucher settling without
+        the store lock can empty and discard it in the meantime, so the entry may be gone.
+        """
+        if not declined.restores and self._declined.get(key) is declined:
             del self._declined[key]
 
     def _settle_open(
