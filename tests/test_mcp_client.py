@@ -623,6 +623,56 @@ class TestMcpClientPaidTool:
                 else:
                     sys.modules[mod_name] = orig
 
+    @pytest.mark.asyncio
+    async def test_payment_required_after_paid_retry_does_not_pay_again(self) -> None:
+        """A -32042 answering the credential just sent (such as a replay) is not paid."""
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            first = FakeMcpError(-32042, data={"challenges": [_make_challenge_dict()]})
+            fresh = dict(_make_challenge_dict(), id="ch_fresh")
+            replayed = FakeMcpError(
+                -32042,
+                data={
+                    "httpStatus": 402,
+                    "challenges": [fresh],
+                    "problem": {"type": "https://paymentauth.org/problems/invalid-challenge"},
+                },
+            )
+            session.call_tool = AsyncMock(side_effect=[first, replayed, FakeCallToolResult()])
+            created: list[str] = []
+
+            async def create(params: CredentialParams) -> str:
+                created.append(params.challenge.id)
+                return _credential().to_authorization()
+
+            client = McpClient(session, methods=[fake_method(create_credential=create)])
+
+            with pytest.raises(PaymentOutcomeUnknownError) as exc_info:
+                await client.call_tool("premium_tool", {"query": "test"})
+
+            assert exc_info.value.__cause__ is replayed
+            assert session.call_tool.call_count == 2
+            assert created == ["ch_test123"]
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
     @pytest.mark.parametrize("backend", ["asyncio", "trio"])
     def test_cancelled_paid_retry_has_unknown_outcome(self, backend: str) -> None:
         anyio = pytest.importorskip("anyio")

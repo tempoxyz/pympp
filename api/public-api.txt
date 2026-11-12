@@ -257,9 +257,9 @@ module mpp.errors
         type = 'https://paymentauth.org/problems/verification-failed'
     class CredentialReplayedError(mpp.errors.VerificationError)
         def __init__(self, reason: str = 'Credential has already been used', *, details: dict[str, Any] | None = None) -> None
-        status = 403
-        title = 'Verification Failed'
-        type = 'https://paymentauth.org/problems/verification-failed'
+        status = 402
+        title = 'Invalid Challenge'
+        type = 'https://paymentauth.org/problems/invalid-challenge'
 
 module mpp.events
     logger: logging.Logger

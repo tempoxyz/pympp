@@ -336,7 +336,12 @@ async def test_implicit_pay_supports_shared_non_charge_intents() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("first_realm", "second_realm", "second_secret", "second_body"),
+    (
+        "first_realm",
+        "second_realm",
+        "second_secret",
+        "second_body",
+    ),
     [
         (
             "first.example.com",

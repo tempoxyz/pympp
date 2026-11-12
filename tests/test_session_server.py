@@ -1391,6 +1391,23 @@ class TestSessionMethod:
         assert json.loads(replay.challenge.body or b"")["type"].endswith("/delta-too-small")
         assert (await life.channel()).spent == 200
 
+    async def test_vouchers_and_close_reuse_one_challenge(self, life: Lifecycle) -> None:
+        """A session challenge is not consumed by its first credential (core spec, intent-aware
+        single use): later vouchers and the close on the same challenge are accepted."""
+        await opened(life, 100, spent=100, units=1)
+        handler = handler_for(life)
+        challenge = await challenge_for(handler, Request("GET", URL))
+        for amount in (200, 300):
+            headers = authorize(challenge, life.voucher_payload(amount).to_wire())
+            result = await handler(Request("GET", URL, headers=headers))
+            assert isinstance(result, PaymentVerified), result
+        assert (await life.channel()).spent == 300
+        life.rpc.logs = [closed_log(life.descriptor, life.channel_id, 300, DEPOSIT - 300)]
+        headers = authorize(challenge, life.close_payload(300).to_wire())
+        closed = await handler(Request("GET", URL, headers=headers))
+        assert isinstance(closed, PaymentVerified), closed
+        assert (await life.channel()).finalized
+
     async def test_answers_management_requests_with_204(self, life: Lifecycle) -> None:
         await opened(life, 100, spent=100, units=1)
         result = await pay(handler_for(life), life.voucher_payload(300), method="POST")

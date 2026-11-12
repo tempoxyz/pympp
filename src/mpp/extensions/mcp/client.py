@@ -195,7 +195,8 @@ class McpClient:
 
         Raises:
             McpError: If the error is not payment-related or no method matches.
-            PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
+            PaymentOutcomeUnknownError: If the paid retry fails after sending a credential,
+                including a payment required error, which is never paid automatically.
             NoMethodFoundError: If no installed method matches the server's challenge.
             ValueError: If the server's challenges are malformed.
         """
@@ -247,6 +248,9 @@ class McpClient:
             try:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
             except (Exception, get_cancelled_exc_class()) as exc:
+                # Never pay again here, not even a fresh challenge in a -32042 (such as
+                # invalid-challenge after a replay): the credential just sent may have
+                # settled already, so paying again could pay twice.
                 raise PaymentOutcomeUnknownError(challenge, exc) from exc
 
             receipt = self._extract_receipt(retry_result)

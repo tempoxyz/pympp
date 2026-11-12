@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import secrets
 from collections.abc import Callable, Mapping
@@ -25,6 +26,8 @@ from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
 from mpp._validation import Validation
 from mpp.errors import (
+    BadRequestError,
+    CredentialReplayedError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
@@ -62,7 +65,19 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
     return await intent.verify(credential, request)
 
 
-async def verify_or_challenge(
+class _CredentialRejected(Exception):  # noqa: N818
+    """A submitted credential was rejected before settlement.
+
+    Carries the fresh ``challenge`` to return and the typed ``error`` the response reports.
+    """
+
+    def __init__(self, challenge: Challenge, error: Exception) -> None:
+        super().__init__(str(error))
+        self.challenge = challenge
+        self.error = error
+
+
+async def _verify_or_challenge(
     *,
     authorization: str | None,
     intent: Intent,
@@ -81,6 +96,9 @@ async def verify_or_challenge(
     stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
+
+    Like :func:`verify_or_challenge`, but a credential rejected before settlement
+    raises :class:`_CredentialRejected` with the fresh challenge and the typed error.
 
     Set ``unique_challenges=False`` only for a verifier-first rolling upgrade.
 
@@ -190,7 +208,7 @@ async def verify_or_challenge(
         # typed reason for why the submitted credential was rejected.
         challenge = await new_challenge()
         await emit_failure(error, challenge, credential)
-        return challenge
+        raise _CredentialRejected(challenge, error)
 
     async def emit_failure(
         error: Exception,
@@ -276,7 +294,11 @@ async def verify_or_challenge(
                     MalformedCredentialError("Authorization header exceeds maximum size")
                 )
         else:
-            payment_scheme = _extract_payment_scheme(authorization)
+            schemes = _payment_schemes(authorization)
+            if len(schemes) > 1:
+                # More than one Payment credential is a bad request: no challenge.
+                raise BadRequestError("multiple Payment credentials")
+            payment_scheme = schemes[0] if schemes else None
     if payment_scheme is None:
         # A Payment credential takes precedence; otherwise accept an x402
         # payment for intents that support it, like mppx (MPP, then x402).
@@ -352,7 +374,15 @@ async def verify_or_challenge(
         if error.status != 403:
             error.retry_challenge = (
                 await new_challenge()
-                if isinstance(error, (InvalidPayloadError, PaymentExpiredError))
+                if isinstance(
+                    error,
+                    (
+                        InvalidPayloadError,
+                        PaymentExpiredError,
+                        InvalidChallengeError,
+                        CredentialReplayedError,
+                    ),
+                )
                 else submitted_challenge
             )
         await emit_failure(error, submitted_challenge, credential)
@@ -375,6 +405,68 @@ async def verify_or_challenge(
         )
 
     return (credential, receipt)
+
+
+async def verify_or_challenge(
+    *,
+    authorization: str | None,
+    intent: Intent,
+    request: dict[str, Any],
+    realm: str,
+    secret_key: str,
+    method: str | None = None,
+    description: str | None = None,
+    meta: dict[str, str] | None = None,
+    expires: str | None = None,
+    body: str | bytes | dict[str, Any] | None = None,
+    events: EventDispatcher | None = None,
+    header: str | None = None,
+    unique_challenges: bool = True,
+    x402: X402Input | None = None,
+    stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+) -> Challenge | tuple[Credential, Receipt]:
+    """Verify a payment credential or generate a new challenge.
+
+    Returns a fresh Challenge to answer with ``402`` when no credential was sent or
+    one was rejected before settlement, or ``(credential, receipt)`` once paid.
+    Settlement failures raise their :class:`~mpp.errors.PaymentError`, carrying a
+    ``retry_challenge`` when the client may pay again. More than one Payment
+    credential raises :class:`~mpp.errors.BadRequestError` (``400``, no challenge).
+    Arguments are those of the engine's internal verifier: ``secret_key`` must be
+    at least 32 bytes, and ``unique_challenges=False`` issues challenges without
+    the random ``_mpp_nonce`` opaque entry.
+
+    Example:
+        result = await verify_or_challenge(
+            authorization=request.headers.get("Authorization"),
+            intent=ChargeIntent(client),
+            request={"amount": "1000", ...},
+            realm="api.example.com",
+            secret_key=os.environ["MPP_SECRET_KEY"],
+        )
+        if isinstance(result, Challenge):
+            ...  # answer 402 with result.to_www_authenticate(realm)
+    """
+    try:
+        return await _verify_or_challenge(
+            authorization=authorization,
+            intent=intent,
+            request=request,
+            realm=realm,
+            secret_key=secret_key,
+            method=method,
+            description=description,
+            meta=meta,
+            expires=expires,
+            body=body,
+            events=events,
+            header=header,
+            unique_challenges=unique_challenges,
+            x402=x402,
+            stable_binding=stable_binding,
+        )
+    except _CredentialRejected as rejected:
+        return rejected.challenge
 
 
 def _requests_match(
@@ -473,11 +565,9 @@ def _create_challenge(
         _assert_sponsored_challenge_lifetime(request, expires)
 
     digest = _body_digest.compute(body) if body is not None else None
-    if meta is not None and "_mpp_nonce" in meta:
-        raise ValueError("_mpp_nonce is reserved for challenge issuance")
-    issued_meta = (
-        {**(meta or {}), "_mpp_nonce": secrets.token_hex(32)} if unique_challenges else meta
-    )
+    if meta is not None and any(key in meta for key in _NONCE_KEYS):
+        raise ValueError("_mpp_nonce and _mppx_nonce are reserved for challenge issuance")
+    issued_meta = {**(meta or {}), _NONCE_KEY: _new_nonce()} if unique_challenges else meta
 
     return Challenge.create(
         secret_key=secret_key,
@@ -563,27 +653,46 @@ def _challenge_from_echo(
     )
 
 
+_NONCE_KEY = "_mpp_nonce"
+"""Opaque key of the random per-challenge nonce servers add by default."""
+
+_NONCE_KEYS = frozenset({_NONCE_KEY, "_mppx_nonce"})
+"""Opaque nonce keys ignored when matching an echoed opaque against route meta,
+including the legacy ``_mppx_nonce``."""
+
+
+def _new_nonce() -> str:
+    """Return a per-challenge nonce: 16 random bytes, base64url without padding."""
+    return base64.urlsafe_b64encode(secrets.token_bytes(16)).decode("ascii").rstrip("=")
+
+
 _PAYMENT_SCHEME_RE = re.compile(r"(?:^|,)[ \t]*payment ", re.IGNORECASE)
 
 
-def _extract_payment_scheme(header: str) -> str | None:
-    """Extract the Payment scheme from an Authorization header.
+def _payment_schemes(header: str) -> list[str]:
+    """Return every ``Payment <token>`` credential in an Authorization-style header.
 
-    Supports comma-separated multiple schemes per RFC 9110.
-    Returns the full ``Payment ...`` string, or None if not found.
-    Headers longer than 64 KiB are rejected before splitting.
+    Supports comma-separated multiple schemes per RFC 9110. A bare ``Payment``
+    without a token counts as absent. Headers longer than 64 KiB yield none.
     """
     if len(header) > MAX_AUTHORIZATION_SIZE:
-        return None
+        return []
+    schemes: list[str] = []
     for scheme in header.split(","):
         scheme = scheme.strip()
-        if scheme.lower().startswith("payment "):
-            return scheme
-    return None
+        if scheme.lower().startswith("payment ") and scheme[len("payment ") :].strip():
+            schemes.append(scheme)
+    return schemes
+
+
+def _extract_payment_scheme(header: str) -> str | None:  # pyright: ignore[reportUnusedFunction]
+    """Extract the first Payment scheme from an Authorization header, or None."""
+    schemes = _payment_schemes(header)
+    return schemes[0] if schemes else None
 
 
 def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
     """Remove the HMAC-authenticated issuance nonce for route comparison."""
     if not isinstance(meta, dict):
         return None
-    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
+    return {key: value for key, value in meta.items() if key not in _NONCE_KEYS} or None

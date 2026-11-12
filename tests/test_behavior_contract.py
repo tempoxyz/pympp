@@ -447,7 +447,7 @@ class TestFailureResponses:
         async with http(application) as c:
             response = await c.get("/paid", headers={"Authorization": header})
         assert response.status_code == 402
-        assert response.json()["type"] == f"{PROBLEMS}/payment-required"
+        assert response.json()["type"] == f"{PROBLEMS}/malformed-credential"
         assert len(offers(response)) == 1
         [error] = failures(events)
         assert isinstance(error, MalformedCredentialError)
@@ -467,6 +467,7 @@ class TestFailureResponses:
         async with http(application) as c:
             response = await c.get("/paid", headers=authorization(foreign))
         assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/invalid-challenge"
         assert offers(response)[0].method == "contract"
         [error] = failures(events)
         assert isinstance(error, InvalidChallengeError)
@@ -478,7 +479,8 @@ class TestFailureResponses:
             ("verification-failed", 402, "verification-failed", True),
             ("invalid-payload", 402, "invalid-payload", False),
             ("unsupported", 402, "method-unsupported", True),
-            ("replayed", 403, "verification-failed", None),
+            # An already-used challenge gets a fresh one (core spec status table).
+            ("replayed", 402, "invalid-challenge", False),
         ],
     )
     async def test_intent_rejections(
@@ -513,8 +515,9 @@ class TestFailureResponses:
         client_events = record(transport)
         async with client:
             response = await client.get("/paid")
-        # The client tries once and returns the server's final answer.
-        assert response.status_code == 403
+        # A replayed credential gets invalid-challenge, which the client returns as final.
+        assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/invalid-challenge"
         assert [name for name, _ in client_events] == [
             "challenge.received",
             "credential.created",
@@ -542,13 +545,12 @@ class TestFailureResponses:
 
         issued = Challenge.from_www_authenticate(values[0])
         replay = await decorated(PlainRequest(authorization(issued, "replayed")))
-        assert replay == {
-            "_mpp_error": True,
-            "status": 403,
-            "headers": {"Cache-Control": "no-store", "Content-Type": "application/problem+json"},
-            "body": replay["body"],
-        }
-        assert json.loads(replay["body"])["status"] == 403
+        assert replay["_mpp_challenge"] is True
+        assert replay["status"] == 402
+        assert (
+            Challenge.from_www_authenticate(replay["headers"]["WWW-Authenticate"]).id != issued.id
+        )
+        assert json.loads(replay["body"])["type"] == f"{PROBLEMS}/invalid-challenge"
 
 
 class TestComposedOffers:

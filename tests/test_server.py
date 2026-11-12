@@ -564,7 +564,7 @@ class TestVerificationError:
         [
             (VerificationError("Payment verification failed"), True, False),
             (PaymentExpiredError("2020-01-01T00:00:00Z"), True, True),
-            (CredentialReplayedError("Transaction hash already used"), False, False),
+            (CredentialReplayedError("Transaction hash already used"), True, True),
             (InternalPaymentError(), False, False),
         ],
         ids=["verification", "expired", "replay", "internal"],
@@ -1329,18 +1329,16 @@ class TestPay:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("error", "status", "challenged"),
+        ("error", "problem"),
         [
-            (VerificationError("Transaction reverted"), 402, True),
-            (CredentialReplayedError("Transaction hash already used"), 403, False),
-            (CredentialReplayedError("memo is not bound to this challenge"), 403, False),
+            (VerificationError("Transaction reverted"), "verification-failed"),
+            (CredentialReplayedError("Transaction hash already used"), "invalid-challenge"),
+            (VerificationError("memo is not bound to this challenge"), "verification-failed"),
         ],
         ids=["verification", "replay", "memo"],
     )
-    async def test_payment_error_response(
-        self, error: PaymentError, status: int, challenged: bool
-    ) -> None:
-        """Verification failures get a fresh challenge; spent payments get a final 403."""
+    async def test_payment_error_response(self, error: PaymentError, problem: str) -> None:
+        """Rejected payments get a 402 with a challenge; a replay is an invalid challenge."""
 
         @intent(name="charge")
         async def failing_intent(credential: Credential, request: dict) -> Receipt:
@@ -1362,14 +1360,15 @@ class TestPay:
             assert isinstance(result, dict)
             actual, body = result["status"], json.loads(result["body"])
             headers = result["headers"]
-        assert actual == status
-        assert body["status"] == status
-        assert body["type"] == "https://paymentauth.org/problems/verification-failed"
+        assert actual == 402
+        assert body["status"] == 402
+        assert body["type"] == f"https://paymentauth.org/problems/{problem}"
         assert body["detail"] == str(error)
         assert headers["Cache-Control"] == "no-store"
-        assert ("WWW-Authenticate" in headers) is challenged
-        if challenged:
-            assert challenge_from_402(result).id == credential.challenge.id
+        assert "WWW-Authenticate" in headers
+        # A verification failure re-offers the paid challenge; a replay gets a fresh one.
+        reoffered = challenge_from_402(result).id == credential.challenge.id
+        assert reoffered is (problem == "verification-failed")
 
     @pytest.mark.asyncio
     async def test_internal_payment_error_is_not_answered_with_402(self) -> None:

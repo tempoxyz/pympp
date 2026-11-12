@@ -1,15 +1,61 @@
 """Core spec rules every SDK server shares.
 
-The minimum length of the HMAC secret that binds challenge IDs.
+Problem types and check order for rejected credentials, credential fields, the
+per-challenge nonce, the minimum HMAC secret, the method grammar and the client's
+handling of an invalid-challenge answer to a paid retry.
 """
 
 from __future__ import annotations
 
+import json
+import re
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
 import pytest
 
-from mpp import generate_challenge_id
+from mpp import Challenge, generate_challenge_id
+from mpp._parsing import ParseError
 from mpp.server import Mpp
-from tests.test_behavior_contract import REALM, ContractMethod
+from tests.test_behavior_contract import (
+    PROBLEMS,
+    REALM,
+    SECRET,
+    ContractMethod,
+    app,
+    authorization,
+    engine_request,
+    http,
+    issue,
+    make_server,
+    offers,
+    paying,
+)
+
+
+def _rebind(challenge: Challenge, **changes: Any) -> Challenge:
+    """Return the challenge with the changes, re-signed with the server secret."""
+    changed = replace(challenge, **changes)
+    return replace(
+        changed,
+        id=generate_challenge_id(
+            secret_key=SECRET,
+            realm=changed.realm,
+            method=changed.method,
+            intent=changed.intent,
+            request=changed.request,
+            expires=changed.expires,
+            digest=changed.digest,
+            opaque=changed.opaque,
+            header=changed.header,
+        ),
+    )
+
+
+def _past() -> str:
+    return (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
 
 
 class TestSecretKey:
@@ -54,3 +100,146 @@ class TestSecretKey:
             )
             == expected
         )
+
+
+class TestNonce:
+    async def test_challenges_carry_a_16_byte_nonce(self) -> None:
+        issued = await issue(make_server(ContractMethod()).charge(amount="1"))
+        assert issued.opaque is not None
+        assert re.fullmatch(r"[A-Za-z0-9_-]{22}", issued.opaque["_mpp_nonce"])
+
+    async def test_nonce_can_be_turned_off(self) -> None:
+        server = make_server(ContractMethod(), unique_challenges=False)
+        issued = await issue(server.charge(amount="1"))
+        assert issued.opaque is None
+
+    @pytest.mark.parametrize("key", ["_mpp_nonce", "_mppx_nonce"])
+    async def test_route_meta_matching_ignores_nonces(self, key: str) -> None:
+        method = ContractMethod()
+        handler = make_server(method).charge(amount="1", meta={"plan": "pro"})
+        issued = await issue(handler)
+        echoed = _rebind(issued, opaque={"plan": "pro", key: "abc"})
+        result = await handler(engine_request(authorization(echoed)))
+        assert result.status == 200
+        assert method.settled == ["ok"]
+
+
+class TestCredentialFields:
+    async def test_bare_payment_counts_as_absent(self) -> None:
+        handler = make_server(ContractMethod()).charge(amount="1")
+        async with http(app({"/paid": handler})) as c:
+            response = await c.get("/paid", headers={"Authorization": "Payment"})
+        assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/payment-required"
+
+    async def test_credential_in_the_unselected_field_is_ignored(self) -> None:
+        method = ContractMethod()
+        handler = make_server(method, requires_auth=True).charge(amount="1")
+        issued = await issue(handler)
+        result = await handler(engine_request(authorization(issued)))
+        assert result.status == 402
+        assert offers(result)
+        assert method.settled == []
+
+    @pytest.mark.parametrize("where", ["comma-joined", "both-fields"])
+    async def test_more_than_one_credential_is_a_bad_request(self, where: str) -> None:
+        method = ContractMethod()
+        handler = make_server(method).charge(amount="1")
+        issued = await issue(handler)
+        [value] = authorization(issued).values()
+        headers = (
+            {"Authorization": f"{value}, {value}"}
+            if where == "comma-joined"
+            else {"Authorization": value, "Payment-Authorization": value}
+        )
+        async with http(app({"/paid": handler})) as c:
+            response = await c.get("/paid", headers=headers)
+        assert response.status_code == 400
+        assert response.json()["type"] == f"{PROBLEMS}/bad-request"
+        assert "www-authenticate" not in response.headers
+        assert method.settled == []
+
+
+async def _rejected(handler: Any, challenge: Challenge) -> tuple[int, str, list[Challenge]]:
+    result = await handler(engine_request(authorization(challenge)))
+    body = json.loads(result.challenge.body)
+    return result.status, body["type"], offers(result)
+
+
+class TestProblemTypes:
+    async def test_expired(self) -> None:
+        handler = make_server(ContractMethod()).charge(amount="1")
+        issued = await issue(handler)
+        status, problem, retry = await _rejected(handler, _rebind(issued, expires=_past()))
+        assert (status, problem) == (402, f"{PROBLEMS}/payment-expired")
+        assert retry and retry[0].id != issued.id
+
+    async def test_unknown_challenge(self) -> None:
+        handler = make_server(ContractMethod()).charge(amount="1")
+        issued = await issue(handler)
+        status, problem, retry = await _rejected(handler, replace(issued, id="forged"))
+        assert (status, problem) == (402, f"{PROBLEMS}/invalid-challenge")
+        assert retry
+
+    async def test_body_digest_mismatch(self) -> None:
+        server = make_server(ContractMethod())
+        issued = await issue(server.charge(amount="1", body=b"one"))
+        status, problem, retry = await _rejected(server.charge(amount="1", body=b"two"), issued)
+        assert (status, problem) == (402, f"{PROBLEMS}/invalid-challenge")
+        assert retry
+
+    async def test_binding_is_checked_before_expiry(self) -> None:
+        handler = make_server(ContractMethod()).charge(amount="1")
+        issued = await issue(handler)
+        stale = _rebind(issued, realm="other.example.com", expires=_past())
+        _, problem, _ = await _rejected(handler, stale)
+        assert problem == f"{PROBLEMS}/invalid-challenge"
+
+
+class TestMethodGrammar:
+    @pytest.mark.parametrize("method", ["tempo2", "tempo-v2", "vendor:pay", "Tempo"])
+    def test_parse_rejects_non_lowercase_alpha_methods(self, method: str) -> None:
+        with pytest.raises(ParseError):
+            Challenge.from_www_authenticate(
+                f'Payment id="x", realm="r", method="{method}", intent="charge", '
+                'request="eyJhbW91bnQiOiIxIn0"'
+            )
+
+    def test_format_rejects_non_lowercase_alpha_methods(self) -> None:
+        challenge = Challenge(id="x", realm="r", method="tempo-v2", intent="charge", request={})
+        with pytest.raises(ValueError, match="payment method"):
+            challenge.to_www_authenticate("r")
+
+
+async def test_client_does_not_pay_again_after_invalid_challenge() -> None:
+    """A paid retry answered with invalid-challenge (such as a replay) is final."""
+    created: list[Any] = []
+    client, transport = paying(
+        app({"/paid": make_server(ContractMethod()).charge(amount="1")}),
+        ContractMethod(token="replayed"),
+    )
+    transport.on_credential_created(created.append)
+    async with client:
+        response = await client.get("/paid")
+    assert response.status_code == 402
+    assert response.json()["type"] == f"{PROBLEMS}/invalid-challenge"
+    assert len(created) == 1
+
+
+class TestMethodIdAtConfiguration:
+    @pytest.mark.parametrize("name", ["stripe-pi", "tempo2", "Tempo"])
+    def test_mpp_rejects_invalid_method_ids_at_startup(self, name: str) -> None:
+        with pytest.raises(ValueError, match="Invalid payment method id"):
+            make_server(ContractMethod(name=name))
+
+
+async def test_mixed_case_problem_media_type_is_still_final() -> None:
+    """Media types are case-insensitive: a mixed-case invalid-challenge stays final."""
+    from mpp.client.transport import _is_invalid_challenge
+
+    body = json.dumps({"type": f"{PROBLEMS}/invalid-challenge"}).encode()
+    for content_type in ("application/Problem+JSON", "APPLICATION/PROBLEM+JSON; charset=utf-8"):
+        response = httpx.Response(402, headers={"content-type": content_type}, content=body)
+        assert await _is_invalid_challenge(response)
+    response = httpx.Response(402, headers={"content-type": "application/json"}, content=body)
+    assert not await _is_invalid_challenge(response)

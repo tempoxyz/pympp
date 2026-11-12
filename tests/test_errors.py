@@ -20,6 +20,7 @@ from mpp.errors import (
     VerificationFailedError,
 )
 
+_INVALID_CHALLENGE = "https://paymentauth.org/problems/invalid-challenge"
 _VERIFICATION_FAILED = "https://paymentauth.org/problems/verification-failed"
 
 
@@ -292,16 +293,16 @@ class TestServerErrorMapping:
             ),
             (
                 CredentialReplayedError(),
-                403,
-                _VERIFICATION_FAILED,
-                "Verification Failed",
+                402,
+                _INVALID_CHALLENGE,
+                "Invalid Challenge",
                 "Payment verification failed: Credential has already been used.",
             ),
             (
                 CredentialReplayedError("Transaction hash already used"),
-                403,
-                _VERIFICATION_FAILED,
-                "Verification Failed",
+                402,
+                _INVALID_CHALLENGE,
+                "Invalid Challenge",
                 "Payment verification failed: Transaction hash already used.",
             ),
             (
@@ -324,13 +325,15 @@ class TestServerErrorMapping:
             "detail": detail,
         }
 
-    def test_credential_replayed_differs_from_verification_failed_only_in_status(self) -> None:
+    def test_credential_replayed_is_an_invalid_challenge(self) -> None:
         reason = "Transaction hash already used"
         details = {"code": "already_used"}
         expected = VerificationFailedError(reason, details=details).to_problem_details("ch")
         assert CredentialReplayedError(reason, details=details).to_problem_details("ch") == {
             **expected,
-            "status": 403,
+            "type": _INVALID_CHALLENGE,
+            "title": "Invalid Challenge",
+            "status": 402,
         }
 
     def test_internal_error_keeps_cause_out_of_problem_details(self) -> None:
