@@ -3299,6 +3299,54 @@ async def test_hook_declined_credential_is_rejected_as_unsent():
     assert [(o.status, o.sent) for o in outcomes] == [("rejected", False)]
 
 
+@pytest.mark.parametrize("awaited", [True, False])
+async def test_failed_creation_whose_settlement_raises_surfaces_the_error(awaited: bool):
+    """A creation that fails and whose release raises still ends the request."""
+    challenge = Challenge(id="test-id", method="tempo", intent="session", request={"amount": "1"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402, headers={"www-authenticate": challenge.to_www_authenticate("example.com")}
+            )
+        ]
+    )
+
+    async def create(params: CredentialParams) -> str:
+        assert params.attempt is not None
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            raise RuntimeError("settle failed")
+
+        params.attempt.settle = settle
+        raise ValueError("creation failed")
+
+    method = ClientMethod(
+        method=Method(name="tempo", intent="session", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool | None:
+        if awaited:
+            with suppress(RuntimeError):
+                await context.create_credential()
+        else:
+            # Scheduled without awaiting: the transport waits for it after the hook.
+            context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    task = asyncio.ensure_future(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    # Not wait_for: a hung request waits shielded and would not take its cancellation.
+    done, _ = await asyncio.wait({task}, timeout=1)
+    assert task in done, "the request hung after its settlement raised"
+    with pytest.raises(RuntimeError, match="settle failed") as excinfo:
+        task.result()
+    assert isinstance(excinfo.value.__context__, ValueError)
+    assert len(inner.requests) == 1
+
+
 async def test_creation_finishing_after_two_cancellations_releases_its_attempt():
     started = asyncio.Event()
 

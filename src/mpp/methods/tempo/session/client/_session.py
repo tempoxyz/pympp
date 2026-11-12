@@ -28,6 +28,7 @@ from mpp.methods.tempo.client import (
 )
 from mpp.methods.tempo.session._protocol import (
     SessionReceipt,
+    VoucherPayload,
     definition,
     deserialize_session_receipt,
 )
@@ -52,6 +53,7 @@ from mpp.methods.tempo.session.client._store import (
     ChannelStore,
     UncertainFundingError,
     create_channel_store,
+    delete_channel,
     entry_key,
     maybe_await,
     persist_channel,
@@ -514,6 +516,14 @@ class SessionMethod:
                         previous=plan.entry.cumulative_amount,
                         signed=plan.entry.cumulative_amount + resolved.amount,
                     )
+                elif plan.type == "recover" and isinstance(payload, VoucherPayload):
+                    attempt.settle = self._settle_recover(
+                        scope,
+                        resolved.key,
+                        payload.channel_id,
+                        previous=entry,
+                        recovered=int(payload.cumulative_amount),
+                    )
                 else:
                     attempt.settle = _settle_stateless
             return credential
@@ -547,6 +557,44 @@ class SessionMethod:
                     restored = current.copy(cumulative_amount=previous)
                     await persist_channel(self.store, restored)
                     self._notify(restored)
+            return True
+
+        return settle
+
+    def _settle_recover(
+        self,
+        scope: str,
+        key: str,
+        channel_id: str,
+        *,
+        previous: ChannelEntry | None,
+        recovered: int,
+    ) -> Callable[[AttemptOutcome], Awaitable[bool]]:
+        """Undo a recovered channel's cached entry when its voucher is never sent.
+
+        Recovery stores the channel at the recovered cumulative amount before the voucher
+        goes out. When the transport drops that voucher, the cache returns to what it held
+        before (no entry, usually), so the next voucher does not also authorize the dropped
+        amount. The cache is left alone once a later voucher built on it.
+        """
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            if outcome.status == "pending":
+                return False
+            if outcome.status != "rejected" or outcome.sent:
+                return True
+            async with store_lock(self.store, scope):
+                current = await store_get(self.store, key)
+                if (
+                    current is not None
+                    and current.channel_id.lower() == channel_id.lower()
+                    and current.cumulative_amount == recovered
+                ):
+                    if previous is None:
+                        await delete_channel(self.store, key)
+                    else:
+                        await persist_channel(self.store, previous)
+                        self._notify(previous)
             return True
 
         return settle
