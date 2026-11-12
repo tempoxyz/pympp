@@ -663,12 +663,17 @@ class ComposedHandler:
             if x402_result is not None:
                 return x402_result
         if credential is not None:
-            prepared_offers = [
-                await _prepare_offer(offer, request, credential, call)
-                for offer in self._offers
-                if offer.method.name == credential.challenge.method
-                and offer.method.intent == credential.challenge.intent
-            ]
+            # Offers whose identity verifiers reject were never advertised to this caller, so
+            # they cannot make the credential's offer ambiguous.
+            prepared_offers = await self._identified(
+                [
+                    await _prepare_offer(offer, request, credential, call)
+                    for offer in self._offers
+                    if offer.method.name == credential.challenge.method
+                    and offer.method.intent == credential.challenge.intent
+                ],
+                call,
+            )
             try:
                 selected_offer = self._select_offer(credential, prepared_offers)
             except _AmbiguousOffersError as error:
@@ -682,9 +687,6 @@ class ComposedHandler:
                     challenges.append(result)
                 return ComposedChallenges(tuple(challenges))
             if selected_offer is not None:
-                requested = await call.request_identity(selected_offer.offer)
-                if isinstance(requested, Rejected):
-                    raise IdentityRejectedError("request", requested)
                 result = await selected_offer.verify(authorization)
                 if isinstance(result, Challenge):
                     return ComposedChallenges((result,))

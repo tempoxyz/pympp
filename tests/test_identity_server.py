@@ -442,3 +442,18 @@ async def test_a_route_with_a_payment_check_neither_offers_nor_accepts_x402() ->
     assert rejected is not None and rejected.stage == "payment"
     assert recorder.calls == []
     assert isinstance(await plain(x402_request(signature)), PaymentVerified)
+
+
+async def test_a_paid_retry_ignores_same_terms_offers_whose_identity_rejects() -> None:
+    recorder = Recorder()
+    mpp = server(recorder)
+    first = api_key(recorder, "first")
+    blocked = from_fn(_blocked)
+    handler = mpp.compose(
+        ("tempo/charge", {"identity": [blocked]}), ("tempo/charge", {"identity": [first]})
+    )
+    [issued] = challenges(await handler(http_request(headers={"X-Api-Key": "k"})))
+    result = await handler(paid(issued, {"X-Api-Key": "k"}))
+    assert isinstance(result, PaymentVerified)
+    assert result.identity.get(first) == "k"
+    assert recorder.settled == 1

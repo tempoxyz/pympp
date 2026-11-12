@@ -776,8 +776,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 )
 
     async def _send_auxiliary(self, request: httpx.Request) -> httpx.Response:
-        """Send a request a payment method needs, without payment handling, and read it."""
-        response = await self._inner.handle_async_request(request)
+        """Send a request a payment method needs, without payment handling, and read it.
+
+        Identity provers still prove it, so a session's top-up carries the caller's identity.
+        """
+        response, _ = await self._send(request)
         try:
             await response.aread()
         finally:

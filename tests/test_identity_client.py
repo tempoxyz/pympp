@@ -402,3 +402,20 @@ async def test_sensitive_identity_headers_never_follow_a_cross_origin_redirect()
     assert first.headers["Identity-Attestation"] == "bearer-proof"
     assert "x-api-key" not in redirected.headers
     assert "identity-attestation" not in redirected.headers
+
+
+async def test_auxiliary_requests_are_proved_too() -> None:
+    from mpp.client import PaymentTransport
+
+    seen: list[httpx.Request] = []
+
+    async def record(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    transport = PaymentTransport(
+        [paying_method()], identity=[header_prover("X-Api-Key", lambda _: "alice")]
+    )
+    transport._inner = httpx.MockTransport(record)
+    await transport._send_auxiliary(httpx.Request("POST", f"{API}/session/top-up"))
+    assert [request.headers["X-Api-Key"] for request in seen] == ["alice"]

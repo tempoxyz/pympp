@@ -62,7 +62,7 @@ server = ["pydantic>=2.0"]
 # Coinbase's x402 facilitator (mpp.x402.cdp): signs CDP API key JWTs.
 cdp = ["pyjwt[crypto]>=2.8"]
 # Tempo ID identity (mpp.extensions.identity.tempo): RS256 tokens, ES256 DPoP proofs.
-tempo-id = ["cryptography>=42", "eth-hash[pycryptodome]>=0.7"]
+tempo-id = ["anyio>=4", "cryptography>=42", "eth-hash[pycryptodome]>=0.7"]
 redis = ["redis>=5.0"]
 sqlite = ["aiosqlite>=0.20"]
 postgres = ["asyncpg>=0.30"]

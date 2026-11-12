@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import json
@@ -11,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+import anyio
 import httpx
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
@@ -60,7 +60,8 @@ def decode(token: str) -> Decoded | None:
         header = json.loads(b64url_decode(parts[0]))
         claims = json.loads(b64url_decode(parts[1]))
         signature = b64url_decode(parts[2])
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        # RecursionError: deeply nested JSON, which a few kilobytes can carry.
         return None
     if not isinstance(header, dict) or not isinstance(claims, dict):
         return None
@@ -89,7 +90,9 @@ def htu(url: str) -> str:
     default = {"http": 80, "https": 443}.get(parsed.scheme)
     port = "" if parsed.port in (None, default) else f":{parsed.port}"
     host = f"[{parsed.host}]" if ":" in parsed.host else parsed.host
-    return f"{parsed.scheme}://{host}{port}{parsed.path or '/'}"
+    # The path as sent, percent-encoding kept, so a%2Fb and a/b stay distinct targets.
+    path = parsed.raw_path.split(b"?", 1)[0].decode("ascii") or "/"
+    return f"{parsed.scheme}://{host}{port}{path}"
 
 
 def verify_rs256(key: rsa.RSAPublicKey, jws: Decoded) -> bool:
@@ -153,7 +156,8 @@ class KeySet:
         self._keys: dict[str, rsa.RSAPublicKey] | None = None
         self._loaded_at = 0.0
         self._attempted_at = float("-inf")
-        self._pending: asyncio.Future[dict[str, rsa.RSAPublicKey]] | None = None
+        # One fetch at a time; anyio's lock works on asyncio and Trio alike.
+        self._lock = anyio.Lock()
 
     async def get(self, kid: str) -> rsa.RSAPublicKey | None:
         """The key with ID ``kid``, or None if the issuer has none.
@@ -165,30 +169,30 @@ class KeySet:
         return key if key is not None else (await self._fresh(KEY_SET_RETRY)).get(kid)
 
     async def _fresh(self, max_age: float) -> dict[str, rsa.RSAPublicKey]:
-        now = time.monotonic()
-        if self._keys is not None and now - self._loaded_at < max_age:
+        if self._usable(max_age):
+            assert self._keys is not None
             return self._keys
-        if (
-            self._keys is not None
-            and self._pending is None
-            and now - self._attempted_at < KEY_SET_RETRY
-        ):
-            return self._keys
-        if self._pending is None:
-            self._attempted_at = now
-            self._pending = asyncio.ensure_future(self._load())
-        pending = self._pending
-        try:
-            keys = await asyncio.shield(pending)
-        except Exception:
-            if self._keys is not None:
+        async with self._lock:
+            # Another caller may have loaded the set while this one waited.
+            if self._usable(max_age):
+                assert self._keys is not None
                 return self._keys
-            raise
-        finally:
-            if self._pending is pending and pending.done():
-                self._pending = None
-        self._keys, self._loaded_at = keys, time.monotonic()
-        return keys
+            self._attempted_at = time.monotonic()
+            try:
+                self._keys = await self._load()
+            except Exception:
+                if self._keys is not None:
+                    return self._keys
+                raise
+            self._loaded_at = time.monotonic()
+            return self._keys
+
+    def _usable(self, max_age: float) -> bool:
+        """Whether the cached set serves: fresh enough, or fetched within the last 30 seconds."""
+        if self._keys is None:
+            return False
+        now = time.monotonic()
+        return now - self._loaded_at < max_age or now - self._attempted_at < KEY_SET_RETRY
 
     async def _load(self) -> dict[str, rsa.RSAPublicKey]:
         if self._http is None:

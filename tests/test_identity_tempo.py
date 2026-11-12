@@ -713,3 +713,59 @@ def test_the_tempo_module_loads_its_submodules_lazily() -> None:
     assert tempo.server.create is create
     with pytest.raises(AttributeError, match="no attribute"):
         tempo.nothing  # noqa: B018  # pyright: ignore[reportAttributeAccessIssue]
+
+
+# --- Review fixes -------------------------------------------------------------------------------
+
+
+def test_deeply_nested_jws_json_decodes_to_none() -> None:
+    nested = jwt.b64url_encode(("[" * 5000 + "]" * 5000).encode())
+    assert jwt.decode(f"{nested}.e30.c2ln") is None
+    assert jwt.decode(f"e30.{nested}.c2ln") is None
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://api.example/hello%20world?q=1", "https://api.example/hello%20world"),
+        ("https://api.example/files/a%2Fb", "https://api.example/files/a%2Fb"),
+        ("https://api.example/files/a/b", "https://api.example/files/a/b"),
+    ],
+)
+def test_htu_keeps_percent_encoding(url: str, expected: str) -> None:
+    assert jwt.htu(url) == expected
+
+
+async def test_a_proof_for_an_encoded_path_verifies(issuer: Issuer) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    url = "https://api.example/files/a%2Fb"
+    request = dpop_request(token, key, url=url)
+    assert isinstance(await tempo_id(issuer).verifier.verify(request), Valid)
+    other = dpop_request(
+        token, key, url="https://api.example/files/a/b", proof=key.proof(token, "GET", url)
+    )
+    assert reason(await tempo_id(issuer).verifier.verify(other)) == (
+        "invalid",
+        "The DPoP proof is for another request.",
+    )
+
+
+def test_the_key_set_loads_on_trio(issuer: Issuer) -> None:
+    import trio
+
+    async def main() -> tuple[object, object]:
+        keys = jwt.KeySet(ISSUER, issuer.http())
+        async with trio.open_nursery() as nursery:
+            results: list[object] = []
+
+            async def get() -> None:
+                results.append(await keys.get("key-1"))
+
+            for _ in range(5):
+                nursery.start_soon(get)
+        return results[0], results[-1]
+
+    first, last = trio.run(main)
+    assert first is not None and last is not None
+    assert issuer.fetches == 1, "concurrent callers share one fetch"
