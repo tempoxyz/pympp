@@ -12,6 +12,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -300,6 +301,29 @@ def _address_set(addresses: Sequence[str] | None, kind: str) -> frozenset[str] |
     return frozenset(address.lower() for address in addresses)
 
 
+@dataclass(frozen=True, slots=True)
+class _Replaced:
+    """A rollback that replaces the cached entry (with none: deletes it), for a recovery."""
+
+    entry: ChannelEntry | None
+
+
+@dataclass(slots=True)
+class _Declined:
+    """Declined vouchers on one channel whose rollback waits on a later voucher built on them.
+
+    ``restores`` maps each one's signed cumulative amount to what the cache held before it.
+    """
+
+    channel_id: str
+    restores: dict[int, int | _Replaced] = dataclass_field(default_factory=lambda: {})
+
+    def drop_above(self, amount: int) -> None:
+        """Forget vouchers above ``amount``: the cache is already below them."""
+        for signed in [signed for signed in self.restores if signed > amount]:
+            del self.restores[signed]
+
+
 class SessionMethod:
     """The configured session client method behind :func:`session` and the session manager."""
 
@@ -356,6 +380,7 @@ class SessionMethod:
         self.sink = ChannelSink(store=self.store, notify_update=self._notify)
         # SessionManager keeps its own transaction boundary and turns this off.
         self._defer_opens = True
+        self._declined: dict[str, _Declined] = {}
         self._rpc_chain_id: int | None = None
 
     def _notify(self, entry: ChannelEntry) -> None:
@@ -539,24 +564,17 @@ class SessionMethod:
         A voucher the transport drops before sending (declined by an ``on_challenge``
         hook, for one) authorizes nothing the server saw, so the cached cumulative amount
         returns to ``previous``; otherwise the next voucher would also authorize the
-        dropped amount. The cache is left alone once a later voucher built on it.
+        dropped amount. Once a later voucher built on it, the cache is left alone until that
+        voucher settles too (see :meth:`_roll_back`).
         """
 
         async def settle(outcome: AttemptOutcome) -> bool:
             if outcome.status == "pending":
                 return False
             if outcome.status != "rejected" or outcome.sent:
+                self._forget_declined(key, channel_id, signed)
                 return True
-            async with store_lock(self.store, scope):
-                current = await store_get(self.store, key)
-                if (
-                    current is not None
-                    and current.channel_id.lower() == channel_id.lower()
-                    and current.cumulative_amount == signed
-                ):
-                    restored = current.copy(cumulative_amount=previous)
-                    await persist_channel(self.store, restored)
-                    self._notify(restored)
+            await self._roll_back(scope, key, channel_id, signed, previous)
             return True
 
         return settle
@@ -575,29 +593,88 @@ class SessionMethod:
         Recovery stores the channel at the recovered cumulative amount before the voucher
         goes out. When the transport drops that voucher, the cache returns to what it held
         before (no entry, usually), so the next voucher does not also authorize the dropped
-        amount. The cache is left alone once a later voucher built on it.
+        amount. Once a later voucher built on it, the cache is left alone until that voucher
+        settles too (see :meth:`_roll_back`).
         """
 
         async def settle(outcome: AttemptOutcome) -> bool:
             if outcome.status == "pending":
                 return False
             if outcome.status != "rejected" or outcome.sent:
+                self._forget_declined(key, channel_id, recovered)
                 return True
-            async with store_lock(self.store, scope):
-                current = await store_get(self.store, key)
-                if (
-                    current is not None
-                    and current.channel_id.lower() == channel_id.lower()
-                    and current.cumulative_amount == recovered
-                ):
-                    if previous is None:
-                        await delete_channel(self.store, key)
-                    else:
-                        await persist_channel(self.store, previous)
-                        self._notify(previous)
+            await self._roll_back(scope, key, channel_id, recovered, _Replaced(previous))
             return True
 
         return settle
+
+    async def _roll_back(
+        self, scope: str, key: str, channel_id: str, signed: int, restore: int | _Replaced
+    ) -> None:
+        """Return the cache to ``restore`` for a voucher at ``signed`` that was never sent.
+
+        When a later voucher already built on this one, the cache stays where it is and the
+        declined voucher is remembered: when that later voucher is declined too, its rollback
+        continues past every remembered declined voucher, down to the last amount a sent
+        voucher (or the original state) holds.
+        """
+        async with store_lock(self.store, scope):
+            current = await store_get(self.store, key)
+            if current is None or current.channel_id.lower() != channel_id.lower():
+                self._declined.pop(key, None)
+                return
+            declined = self._declined_for(key, current)
+            cumulative = current.cumulative_amount
+            if cumulative != signed:
+                if cumulative > signed:
+                    if declined is None:
+                        declined = _Declined(channel_id=current.channel_id.lower())
+                        self._declined[key] = declined
+                    declined.restores[signed] = restore
+                return
+            target = restore
+            while isinstance(target, int) and declined is not None and target in declined.restores:
+                target = declined.restores.pop(target)
+            if isinstance(target, _Replaced):
+                self._declined.pop(key, None)
+                if target.entry is None:
+                    await delete_channel(self.store, key)
+                else:
+                    await persist_channel(self.store, target.entry)
+                    self._notify(target.entry)
+                return
+            restored = current.copy(cumulative_amount=target)
+            await persist_channel(self.store, restored)
+            self._notify(restored)
+            if declined is not None:
+                # Vouchers above the restored amount are undone with it.
+                declined.drop_above(target)
+                if not declined.restores:
+                    del self._declined[key]
+
+    def _declined_for(self, key: str, current: ChannelEntry) -> _Declined | None:
+        """The declined vouchers remembered for ``current``'s channel, dropping stale ones."""
+        declined = self._declined.get(key)
+        if declined is None:
+            return None
+        if declined.channel_id != current.channel_id.lower():
+            del self._declined[key]
+            return None
+        declined.drop_above(current.cumulative_amount)
+        if not declined.restores:
+            del self._declined[key]
+            return None
+        return declined
+
+    def _forget_declined(self, key: str, channel_id: str, signed: int) -> None:
+        """Forget declined vouchers a sent voucher at ``signed`` covers: the server saw it."""
+        declined = self._declined.get(key)
+        if declined is None or declined.channel_id != channel_id.lower():
+            return
+        for amount in [amount for amount in declined.restores if amount <= signed]:
+            del declined.restores[amount]
+        if not declined.restores:
+            del self._declined[key]
 
     def _settle_open(
         self, challenge: Challenge, key: str, opened: ChannelEntry, lock: asyncio.Lock
