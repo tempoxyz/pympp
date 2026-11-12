@@ -20,17 +20,20 @@ pip install "pympp[tempo]"   # the Tempo payment method
 
 ### Server
 
-Install the Tempo method with FastAPI and uvicorn, and set the secret that signs
-Challenges. It must be at least 32 bytes:
+Install the Tempo method with FastAPI and uvicorn, set the secret that signs
+Challenges (at least 32 bytes), and the address you want paid:
 
 ```bash
 pip install "pympp[tempo]" fastapi uvicorn
 export MPP_SECRET_KEY="$(openssl rand -base64 32)"
+export MPP_RECIPIENT="0x..."  # your own Tempo address
 ```
 
 Save this as `app.py`:
 
 ```python
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -39,7 +42,8 @@ from mpp.methods.tempo import server as tempo
 from mpp.server import Mpp, pay
 
 app = FastAPI()
-server = Mpp(methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"))
+# Charges on the Moderato testnet; drop chain_id to charge on mainnet.
+server = Mpp(methods=tempo.charge(recipient=os.environ["MPP_RECIPIENT"], chain_id=42431))
 
 
 @app.get("/paid")

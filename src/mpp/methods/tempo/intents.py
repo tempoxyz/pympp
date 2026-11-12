@@ -599,6 +599,36 @@ _UNSPONSORED_MARKER_TTL = 3600
 _TIMEOUT_MESSAGE_RE = re.compile(r"\btime(?:d)? ?out\b", re.I)
 
 
+def _is_undelivered_send_error(error: Exception) -> bool:
+    """Return true when a failed send shows the node never took this submission.
+
+    ``error`` is matched anywhere in its ``__cause__``/``__context__`` chain.
+    Connect and pool failures never sent the request, an HTTP 4xx refused it,
+    and "already known" means the node already held the transaction from
+    another submission. Timeouts, lost connections, HTTP 5xx responses and
+    unreadable replies may still have delivered it.
+    """
+    import httpx
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return True
+        if isinstance(cause, httpx.HTTPStatusError):
+            return 400 <= cause.response.status_code < 500
+        if isinstance(
+            cause,
+            (TimeoutError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError),
+        ):
+            return False
+        if ALREADY_KNOWN_TRANSACTION_RE.search(str(cause)):
+            return True
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
 def _is_definite_node_rejection(result: dict[str, Any]) -> bool:
     """Return true when a JSON-RPC error shows the node refused the transaction.
 
@@ -1805,6 +1835,20 @@ class ChargeIntent:
             require_bound_memo=require_bound_memo,
         )
 
+    @staticmethod
+    def _recovery_requires_bound_memo(request: ChargeRequest, *, own_marker: bool) -> bool:
+        """Return true when a receipt recovered after a failed send needs a bound memo.
+
+        ``own_marker`` is true when this server's broadcast marker covers the
+        send: an earlier attempt's, or this attempt's when its send was neither
+        undelivered nor refused. That receipt is of this server's own
+        broadcast, checked unmined right before it, so it is adopted without a
+        memo bound to this Challenge, as the reconciling retry does. Without
+        one, the transaction may have been submitted by someone else.
+        Sponsored pulls never require one here.
+        """
+        return not request.methodDetails.feePayer and not own_marker
+
     def _verify_recovered_receipt(
         self,
         receipt_data: dict[str, Any],
@@ -2433,8 +2477,12 @@ class ChargeIntent:
         # existed before this attempt: this server broadcast them earlier, so
         # the attempt reconciles that submission and only settling removes it.
         prior_marker = False
-        # True when the node refused this attempt's own send outright.
+        # True when this attempt's own send never reached the node, or the
+        # node refused it outright.
         node_rejected = False
+        # True when the node answered the send with a JSON-RPC error that leaves
+        # the outcome open (such as -32603): the transaction may still mine.
+        open_rpc_error = False
         verified = False
         admission_store: CompareAndSetStore | None = None
         challenge_claim: _sponsored_admission.Claim | None = None
@@ -2677,10 +2725,18 @@ class ChargeIntent:
                         else time.time() + _UNSPONSORED_MARKER_TTL,
                         challenge_id,
                     )
-            # Only a receipt of this server's own earlier broadcast may be adopted
-            # without a memo bound to this Challenge: after a failed first send the
-            # transaction may have been submitted by someone else.
-            require_bound_memo = not request.methodDetails.feePayer and not prior_marker
+            # The awaits since the check above (budget transition, receipt lookup,
+            # marker write) can outlast the Challenge: check again with no await
+            # between this check and the send.
+            if expires is not None and _challenge_expired(expires):
+                if reconciling:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Earlier submission of this transaction has an unknown outcome"
+                    )
+                # Nothing was sent: drop the marker this attempt wrote, as for a send
+                # that never reached the node.
+                node_rejected = True
+                raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
             try:
@@ -2705,6 +2761,10 @@ class ChargeIntent:
                     send_error = TimeoutError(
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
+                node_rejected = _is_undelivered_send_error(send_error)
+                require_bound_memo = self._recovery_requires_bound_memo(
+                    request, own_marker=prior_marker or (marker_created and not node_rejected)
+                )
                 if not _is_ambiguous_broadcast_error(send_error, resubmitted=reconciling):
                     outcome_unknown = False
                     raise
@@ -2728,6 +2788,10 @@ class ChargeIntent:
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
                 )
                 node_rejected = _is_definite_node_rejection(result)
+                open_rpc_error = not node_rejected
+                require_bound_memo = self._recovery_requires_bound_memo(
+                    request, own_marker=prior_marker or (marker_created and not node_rejected)
+                )
                 if not _is_ambiguous_broadcast_error(result, resubmitted=reconciling):
                     outcome_unknown = False
                     # The node answered, so it may have included the transaction
@@ -2802,12 +2866,23 @@ class ChargeIntent:
             # attempts must let retries acquire the reservation and verify again.
             if not verified and self._store is not None:
                 if request.methodDetails.feePayer:
-                    if marker_created and not outcome_unknown:
+                    # Keep the marker after a JSON-RPC error that leaves the outcome
+                    # open, as for an unsponsored pull: if the transaction mines, a
+                    # retry reconciles it instead of refusing it as a replay.
+                    if (
+                        marker_created
+                        and not outcome_unknown
+                        and (
+                            not open_rpc_error
+                            or isinstance(err, (_TransactionReverted, _TransactionNotIncluded))
+                        )
+                    ):
                         await self._clear_broadcast_marker(broadcast_key)
                 elif marker_created and node_rejected:
-                    # Keep an unsponsored pull's marker unless the node refused
-                    # this attempt's own send: a transport failure or timeout may
-                    # still have delivered it.
+                    # Keep an unsponsored pull's marker unless this attempt's own
+                    # send never reached the node or the node refused it: a lost
+                    # connection, a timeout or an HTTP 5xx may still have
+                    # delivered it.
                     await self._clear_broadcast_marker(broadcast_key)
                 for key in store_keys:
                     await self._store.delete(key)

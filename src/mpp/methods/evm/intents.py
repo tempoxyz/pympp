@@ -465,8 +465,9 @@ class ChargeIntent:
                 raise VerificationFailedError("EVM authorization source mismatch")
 
         # A claimed authorization was settled (or is settling) already. Report it
-        # as a replay (403) before the facilitator calls it unpayable, so clients
-        # aren't offered a fresh challenge and invited to pay twice.
+        # as a replay before the facilitator calls it unpayable: a native credential
+        # gets 402 invalid-challenge, which clients treat as final, and an x402
+        # payment a 403 without a new offer, so neither is invited to pay twice.
         claim = self._claim_key(payload, request)
         if self._store is not None and await self._store.get(claim) is not None:
             raise CredentialReplayedError("EVM authorization has already been used")

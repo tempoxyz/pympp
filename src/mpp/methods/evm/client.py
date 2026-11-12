@@ -9,29 +9,31 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, TypedDict, overload
 
-from mpp._lazy_exports import install_hint
-
-with install_hint("evm"):
-    from eth_utils.address import to_checksum_address
-
 from mpp import Challenge, Credential
+from mpp._lazy_exports import install_hint
 from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
-from mpp.methods.evm._eip3009 import (
-    authorization_domain,
-    challenge_hash,
-    sign_authorization,
-    to_source,
-)
-from mpp.methods.evm.assets import EvmAsset
-from mpp.methods.evm.intents import CREDENTIAL_TYPE, SettleFn
-from mpp.methods.evm.intents import charge as definition
 from mpp.runtime import ClientMethod, CredentialParams
 from mpp.x402._client import is_x402_challenge
-from mpp.x402._exact import check_exact, create_payment_signature
 from mpp.x402._server import RouteBinding
 from mpp.x402.facilitator import Facilitator
+
+# Every import that needs the evm extra (eth-account, eth-utils), directly or through
+# the module it loads.
+with install_hint("evm"):
+    from eth_utils.address import to_checksum_address
+
+    from mpp.methods.evm._eip3009 import (
+        authorization_domain,
+        challenge_hash,
+        sign_authorization,
+        to_source,
+    )
+    from mpp.methods.evm.assets import EvmAsset
+    from mpp.methods.evm.intents import CREDENTIAL_TYPE, SettleFn
+    from mpp.methods.evm.intents import charge as definition
+    from mpp.x402._exact import check_exact, create_payment_signature
 
 if TYPE_CHECKING:
     from mpp.server.method import RequestContext, ServerMethod

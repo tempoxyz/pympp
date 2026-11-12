@@ -163,6 +163,22 @@ class TestCredentialFields:
         assert "www-authenticate" not in response.headers
         assert method.settled == []
 
+    async def test_quoted_payment_text_in_another_scheme_is_not_a_credential(self) -> None:
+        """A quoted auth-param holding ', Payment x' is not a second credential."""
+        method = ContractMethod()
+        handler = make_server(method, requires_auth=True).charge(amount="1")
+        async with http(app({"/paid": handler})) as c:
+            unpaid = await c.get("/paid")
+            issued = Challenge.from_www_authenticate(unpaid.headers["www-authenticate"])
+            [value] = authorization(issued).values()
+            headers = {
+                "Authorization": 'Digest realm="a, Payment x", nonce="n"',
+                "Payment-Authorization": value,
+            }
+            response = await c.get("/paid", headers=headers)
+        assert response.status_code == 200
+        assert method.settled == ["ok"]
+
 
 async def _rejected(handler: Any, challenge: Challenge) -> tuple[int, str, list[Challenge]]:
     result = await handler(engine_request(authorization(challenge)))
@@ -294,6 +310,40 @@ def test_direct_submodule_import_names_the_extra() -> None:
     assert 'pip install "pympp[tempo]"' in result.stdout, result.stderr
 
 
+def test_evm_client_import_names_the_extra_for_every_extra_dependency() -> None:
+    """eth_account is needed only through mpp.methods.evm._eip3009: still hinted."""
+    script = textwrap.dedent("""\
+        import sys
+        sys.modules["eth_account"] = None
+        try:
+            from mpp.methods.evm import client
+        except ImportError as error:
+            print(type(error).__name__, error)
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert 'pip install "pympp[evm]"' in result.stdout, result.stderr
+    assert result.stdout.startswith("ModuleNotFoundError"), result.stdout
+
+
+def test_install_hint_keeps_the_import_error_class_name_and_path() -> None:
+    from mpp._lazy_exports import install_hint
+
+    with pytest.raises(ModuleNotFoundError) as raised, install_hint("evm"):
+        raise ModuleNotFoundError("No module named 'eth_account'", name="eth_account", path="/x")
+    assert 'pip install "pympp[evm]"' in str(raised.value)
+    assert (raised.value.name, raised.value.path) == ("eth_account", "/x")
+    assert isinstance(raised.value.__cause__, ModuleNotFoundError)
+
+    class Strict(ImportError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+
+    with pytest.raises(ImportError) as fallback, install_hint("evm"):
+        raise Strict("broken")
+    assert type(fallback.value) is ImportError
+    assert 'pip install "pympp[evm]"' in str(fallback.value)
+
+
 class TestMethodIdAtConfiguration:
     @pytest.mark.parametrize("name", ["stripe-pi", "tempo2", "Tempo"])
     def test_mpp_rejects_invalid_method_ids_at_startup(self, name: str) -> None:
@@ -314,14 +364,42 @@ def test_hash_credentials_require_a_bound_memo() -> None:
 
 async def test_mixed_case_problem_media_type_is_still_final() -> None:
     """Media types are case-insensitive: a mixed-case invalid-challenge stays final."""
-    from mpp.client.transport import _is_invalid_challenge
+    from mpp.client.transport import _paid_retry_is_final
 
     body = json.dumps({"type": f"{PROBLEMS}/invalid-challenge"}).encode()
     for content_type in ("application/Problem+JSON", "APPLICATION/PROBLEM+JSON; charset=utf-8"):
         response = httpx.Response(402, headers={"content-type": content_type}, content=body)
-        assert await _is_invalid_challenge(response)
+        assert await _paid_retry_is_final(response)
     response = httpx.Response(402, headers={"content-type": "application/json"}, content=body)
-    assert not await _is_invalid_challenge(response)
+    assert not await _paid_retry_is_final(response)
+
+
+async def test_paid_retry_without_a_readable_problem_is_final() -> None:
+    """A 402 after a paid retry that cannot say why (HEAD, empty or unparseable) is final."""
+    from mpp.client.transport import _paid_retry_is_final
+
+    problem = {"content-type": "application/problem+json"}
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem))
+    assert await _paid_retry_is_final(httpx.Response(402), "HEAD")
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem, content=b"{not json"))
+    assert await _paid_retry_is_final(httpx.Response(402, headers=problem, content=b"[]"))
+    retryable = json.dumps({"type": f"{PROBLEMS}/payment-expired"}).encode()
+    assert not await _paid_retry_is_final(httpx.Response(402, headers=problem, content=retryable))
+
+
+async def test_client_does_not_pay_again_after_a_head_replay() -> None:
+    """A HEAD answer carries no body: a 402 to its paid retry is final."""
+    created: list[Any] = []
+    client, transport = paying(
+        app({"/paid": make_server(ContractMethod()).charge(amount="1")}),
+        ContractMethod(token="replayed"),
+    )
+    transport.on_credential_created(created.append)
+    async with client:
+        response = await client.head("/paid")
+    assert response.status_code == 402
+    assert response.content == b""
+    assert len(created) == 1
 
 
 def test_attribution_memo_rules_for_pull_and_push() -> None:

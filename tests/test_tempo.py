@@ -1479,6 +1479,53 @@ class TestChargeIntent:
         assert await intent._store.get(f"mpp:charge:{tx_hash.lower()}") is None
 
     @pytest.mark.asyncio
+    async def test_verify_transaction_rechecks_expiry_after_receipt_lookup(self) -> None:
+        """A challenge that expires during the pre-send receipt lookup is not broadcast."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        intent = ChargeIntent(rpc_url="https://rpc.test")
+        expired = [False]
+
+        async def post(_url: str, *, json: dict[str, Any], **_: Any) -> Any:
+            if json["method"] == "eth_getTransactionReceipt":
+                # The challenge expires while the lookup is in flight.
+                expired[0] = True
+            return mock_response(200, {"jsonrpc": "2.0", "result": None, "id": 1})
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=post)
+        intent._http_client = mock_client
+        credential = make_credential(
+            payload={"type": "transaction", "signature": "0xabcdef1234567890"},
+            expires=future,
+        )
+
+        with (
+            patch(
+                "mpp.methods.tempo.intents._challenge_expired",
+                side_effect=lambda _expires: expired[0],
+            ),
+            pytest.raises(PaymentExpiredError),
+        ):
+            await intent.verify(
+                credential,
+                {
+                    "amount": "1000",
+                    "currency": "0x1234567890123456789012345678901234567890",
+                    "recipient": "0x4567890123456789012345678901234567890123",
+                },
+            )
+
+        methods = [call.kwargs["json"]["method"] for call in mock_client.post.await_args_list]
+        assert "eth_getTransactionReceipt" in methods
+        assert "eth_sendRawTransactionSync" not in methods
+        # Neither the hash claim nor this attempt's broadcast marker survives, so a
+        # retry is not mistaken for the reconciliation of an earlier send.
+        assert intent._store is not None
+        tx_hash = _raw_transaction_hash("0xabcdef1234567890").lower()
+        assert await intent._store.get(f"mpp:charge:{tx_hash}") is None
+        assert await intent._store.get(f"mpp:charge-broadcast:{tx_hash}") is None
+
+    @pytest.mark.asyncio
     async def test_verify_missing_expires_rejected(self) -> None:
         """Should reject credentials with no expires (fail-closed)."""
         intent = ChargeIntent(rpc_url="https://rpc.test")

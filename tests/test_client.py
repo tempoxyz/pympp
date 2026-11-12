@@ -3075,3 +3075,37 @@ async def test_base_exception_before_any_creation_passes_through():
     transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
     with pytest.raises(Stop):
         await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+
+async def test_declined_402_whose_body_fails_to_read_raises_the_read_error():
+    """A decline never returns a closed, unread 402: the read's own error surfaces."""
+    challenge = Challenge(id="test-id", method="tempo", intent="charge", request={"amount": "1"})
+
+    class FailingStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"type": '
+            raise httpx.ReadError("connection reset")
+
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers={"www-authenticate": challenge.to_www_authenticate("example.com")},
+                stream=FailingStream(),
+            )
+        ]
+    )
+    create = AsyncMock()
+    method = ClientMethod(
+        method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+        create_credential=create,
+    )
+
+    async def hook(challenge: Challenge, context) -> bool:
+        return False
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(httpx.ReadError, match="connection reset"):
+            await client.get("https://example.com")
+    create.assert_not_awaited()

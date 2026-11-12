@@ -445,10 +445,10 @@ class TestRejectedX402Payments:
         second = await live.get(**{PAYMENT_SIGNATURE_HEADER: signature})
 
         assert first.status_code == 200
-        # Claimed by the per-process fallback store: an already-used challenge gets 402
-        # with a fresh one, and the facilitator never settles it again.
-        assert second.status_code == 402
-        assert second.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
+        # Claimed by the per-process fallback store: a 403 without a new challenge.
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
+        assert "WWW-Authenticate" not in second.headers
         assert len(live.facilitator.settle_requests) == 1
 
     async def test_composed_payment_matching_no_offer(self, live: Live) -> None:
@@ -772,7 +772,7 @@ class TestRouteBinding:
 
 
 class TestReplayStore:
-    async def test_replay_with_a_store_is_an_invalid_challenge(self) -> None:
+    async def test_replay_with_a_store_is_a_403_without_a_challenge(self) -> None:
         facilitator = StubFacilitator()
         async with serve(facilitator.app()) as facilitator_url:
             server = Mpp(
@@ -801,9 +801,9 @@ class TestReplayStore:
                     second = await http.get(f"{url}/paid", headers=headers)
 
         assert first.status_code == 200
-        assert second.status_code == 402
-        assert second.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
-        assert "WWW-Authenticate" in second.headers
+        assert second.status_code == 403
+        assert PAYMENT_REQUIRED_HEADER not in second.headers
+        assert "WWW-Authenticate" not in second.headers
         assert len(facilitator.verify_requests) == 1
 
 

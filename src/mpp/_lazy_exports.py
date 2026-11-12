@@ -26,7 +26,14 @@ def install_hint(extra: str) -> Generator[None]:
     except ImportError as exc:
         if hint in str(exc):
             raise
-        raise ImportError(f"{exc}. {hint}", name=exc.name) from exc
+        message = f"{exc}. {hint}"
+        # Keep the original class (such as ModuleNotFoundError) and its name and path,
+        # so callers that catch or inspect them still can.
+        try:
+            hinted = type(exc)(message, name=exc.name, path=exc.path)
+        except Exception:
+            hinted = ImportError(message, name=exc.name, path=exc.path)
+        raise hinted from exc
 
 
 def load_lazy_attr(
