@@ -32,10 +32,9 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # JSON and base64url encoding. Matches mppx.
 MAX_AUTHORIZATION_SIZE = 64 * 1024
 
-# Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
-# Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
-# colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
-_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+# Syntax-level Payment Auth grammar, the core spec's 1*LOWERALPHA. Supported-method
+# dispatch is handled after parsing.
+_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z]+$")
 # Characters mppx accepts in an auth-param name.
 _AUTH_PARAM_KEY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 
@@ -161,8 +160,30 @@ def _unescape_quoted(s: str) -> str:
     return "".join(result)
 
 
+def _split_header_list(value: str) -> list[str]:  # pyright: ignore[reportUnusedFunction]
+    """Split a comma-separated header value, keeping commas inside quoted strings.
+
+    Fields are stripped; a backslash escapes the next character inside quotes.
+    """
+    fields: list[str] = []
+    start = 0
+    quoted = escaped = False
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quoted and character == "\\":
+            escaped = True
+        elif character == '"':
+            quoted = not quoted
+        elif character == "," and not quoted:
+            fields.append(value[start:index].strip())
+            start = index + 1
+    fields.append(value[start:].strip())
+    return fields
+
+
 def _validate_payment_method_id(method: str) -> None:
-    """Validate a payment method id against the grammar mppx accepts."""
+    """Validate a payment method id against the core spec's grammar (``1*LOWERALPHA``)."""
     if not _PAYMENT_METHOD_ID_RE.fullmatch(method):
         raise ParseError(f"Invalid payment method id: {method!r}")
 
@@ -322,6 +343,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     Output format (per IETF draft-ietf-httpauth-payment):
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
+    if not _PAYMENT_METHOD_ID_RE.fullmatch(challenge.method):
+        raise ValueError(f"Invalid payment method id: {challenge.method!r}")
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
 

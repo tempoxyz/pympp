@@ -14,10 +14,18 @@ from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from pydantic import ValidationError
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
+from mpp import (
+    AUTHORIZATION_HEADER,
+    PAYMENT_AUTHORIZATION_HEADER,
+    Challenge,
+    Credential,
+    Receipt,
+    _body_digest,
+)
 from mpp._parsing import ParseError, _b64_decode, _validate_expires
 from mpp._typing import is_dict, is_mapping
 from mpp.errors import (
+    BadRequestError,
     InvalidChallengeError,
     InvalidPayloadError,
     MalformedCredentialError,
@@ -40,9 +48,11 @@ from mpp.server.verify import (
     _application_meta,
     _authenticate_echo,
     _challenge_from_echo,
+    _CredentialRejected,
     _extract_payment_scheme,
+    _payment_schemes,
     _requests_match,
-    verify_or_challenge,
+    _verify_or_challenge,
 )
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
 from mpp.x402._server import X402Input, challenges_payment_required_header
@@ -219,6 +229,8 @@ class _PreparedOffer:
     expires: str | None
     body: BodyType | None
     header: str | None = None
+    rejection: Exception | None = None
+    """Why this offer's last verification rejected the submitted credential, if it did."""
 
     async def is_available(self) -> bool:
         """Return whether the method wants to advertise this prepared offer."""
@@ -246,7 +258,16 @@ class _PreparedOffer:
     async def _verify(
         self, server: Mpp, authorization: str | None, x402: X402Input | None
     ) -> Challenge | tuple[Credential, Receipt]:
-        return await verify_or_challenge(
+        try:
+            return await self._verify_or_challenge(server, authorization, x402)
+        except _CredentialRejected as rejected:
+            self.rejection = rejected.error
+            return rejected.challenge
+
+    async def _verify_or_challenge(
+        self, server: Mpp, authorization: str | None, x402: X402Input | None
+    ) -> Challenge | tuple[Credential, Receipt]:
+        return await _verify_or_challenge(
             authorization=authorization,
             intent=self.intent,
             request=self.request,
@@ -419,9 +440,20 @@ class ComposedHandler:
     async def __call__(self, request: Request) -> PaymentResult:
         """Verify the request's credential, or return the challenges to pay."""
         server = self._offers[0].server
-        authorization = request.headers.get(
-            PAYMENT_AUTHORIZATION_HEADER if server.requires_auth else "Authorization"
-        )
+        selected = PAYMENT_AUTHORIZATION_HEADER if server.requires_auth else AUTHORIZATION_HEADER
+        authorization = request.headers.get(selected)
+        if not request.url.startswith(MCP_URL_PREFIX):
+            # A Payment credential in the field the challenge didn't select is ignored,
+            # but more than one Payment credential in a request is a bad request.
+            count = sum(
+                len(_payment_schemes(value))
+                for name in (AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER)
+                for value in request.headers.get_list(name)
+            )
+            if count > 1:
+                return PaymentRequired(
+                    _problem_response(BadRequestError("multiple Payment credentials"))
+                )
         x402 = (
             X402Input(
                 resource_url=request.url,
@@ -442,17 +474,8 @@ class ComposedHandler:
                 return PaymentRequired(
                     self._challenge_response(request, (error.retry_challenge,), error, call)
                 )
-            if error.status == 403:
-                return PaymentRequired(
-                    Response(
-                        status=error.status,
-                        headers={
-                            "Cache-Control": "no-store",
-                            "Content-Type": "application/problem+json",
-                        },
-                        body=json.dumps(error.to_problem_details()),
-                    )
-                )
+            if error.status in (400, 403):
+                return PaymentRequired(_problem_response(error))
             raise
         if isinstance(result, ComposedChallenges):
             return PaymentRequired(
@@ -594,7 +617,11 @@ class ComposedHandler:
                 return ComposedChallenges(tuple(challenges))
             if selected_offer is not None:
                 result = await selected_offer.verify(authorization)
-                return ComposedChallenges((result,)) if isinstance(result, Challenge) else result
+                return (
+                    ComposedChallenges((result,), error=selected_offer.rejection)
+                    if isinstance(result, Challenge)
+                    else result
+                )
 
         prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
         challenges: list[Challenge] = []
@@ -603,7 +630,11 @@ class ComposedHandler:
             if not isinstance(result, Challenge):
                 return result
             challenges.append(result)
-        return ComposedChallenges(tuple(challenges))
+        error = next((offer.rejection for offer in prepared if offer.rejection is not None), None)
+        if error is None and authorization and _extract_payment_scheme(authorization):
+            # A credential no configured offer could take (another method or intent).
+            error = InvalidChallengeError(reason="credential does not match this route")
+        return ComposedChallenges(tuple(challenges), error=error)
 
     async def _advertised(
         self, prepared: Sequence[_PreparedOffer], request: Request, call: _Call
@@ -803,6 +834,15 @@ def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | No
         ):
             return prepared.intent.x402_requirements(challenge.request)
     return None
+
+
+def _problem_response(error: PaymentError) -> Response:
+    """A final problem response that carries no challenge, such as 400 or 403."""
+    return Response(
+        status=error.status,
+        headers={"Cache-Control": "no-store", "Content-Type": "application/problem+json"},
+        body=json.dumps(error.to_problem_details()),
+    )
 
 
 def compose(*handlers: ComposedHandler) -> ComposedHandler:

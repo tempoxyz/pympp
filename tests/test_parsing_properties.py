@@ -60,7 +60,7 @@ quoted_field = st.one_of(nonempty_header_text, scheme_like_text)
 rfc3339_datetimes = st.datetimes(timezones=st.just(UTC)).map(
     lambda value: value.isoformat().replace("+00:00", "Z")
 )
-method_ids = st.from_regex(r"\A[a-z][a-z0-9:_-]{0,15}\Z")
+method_ids = st.from_regex(r"\A[a-z]{1,16}\Z")
 json_scalars = st.one_of(
     st.none(), st.booleans(), st.integers(min_value=-(2**63), max_value=2**63), st.text()
 )

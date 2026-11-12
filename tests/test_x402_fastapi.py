@@ -160,7 +160,13 @@ async def test_mpp_credential_is_not_accepted_twice() -> None:
         credential = await sign_native(payer, challenge, BASE_SEPOLIA_USDC)
         headers = {"Authorization": credential.to_authorization()}
         assert (await http.get("/paid", headers=headers)).status_code == 200
-        assert (await http.get("/paid", headers=headers)).status_code != 200
+        replayed = await http.get("/paid", headers=headers)
+    # The native problem response, unmerged: no x402 offer invites a second payment.
+    assert replayed.status_code == 402
+    assert replayed.headers["content-type"] == "application/problem+json"
+    assert replayed.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
+    assert Challenge.from_www_authenticate(replayed.headers["www-authenticate"]).id != challenge.id
+    assert PAYMENT_REQUIRED_HEADER not in replayed.headers
     assert facilitator.calls.count("settle") == 1
 
 
@@ -208,13 +214,15 @@ async def test_rejects_mpp_and_x402_credentials_together() -> None:
     }
 
 
-async def test_failed_verification_answers_both_challenges() -> None:
+async def test_failed_verification_answers_the_native_problem() -> None:
     facilitator = Facilitator(valid=False)
     app = create_app(facilitator)
     async with client(app) as http:
         response = await pay_mpp(http)
     assert response.status_code == 402
-    assert response.headers[PAYMENT_REQUIRED_HEADER]
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["type"] == "https://paymentauth.org/problems/verification-failed"
+    assert PAYMENT_REQUIRED_HEADER not in response.headers
     assert Challenge.from_www_authenticate(response.headers["www-authenticate"]).method == "evm"
     assert facilitator.calls == ["verify"]
     assert app.state.handled == 0
@@ -349,7 +357,7 @@ async def test_failed_verify_call_releases_the_authorization() -> None:
     assert facilitator.calls == ["verify", "verify", "settle"]
 
 
-async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() -> None:
+async def test_pending_settlement_keeps_the_claim() -> None:
     facilitator = Facilitator()
 
     async def pending(payload: Any, requirements: Any) -> SettleResponse:
@@ -374,7 +382,12 @@ async def test_pending_settlement_keeps_the_claim_without_a_retry_challenge() ->
             await http.get("/paid", headers=headers)
         calls = list(facilitator.calls)
         replayed = await http.get("/paid", headers=headers)
-    assert replayed.status_code == 403
+    # The claimed challenge is already used: 402 with a fresh challenge, never a settlement,
+    # and no x402 offer beside it.
+    assert replayed.status_code == 402
+    assert replayed.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
+    assert "www-authenticate" in replayed.headers
+    assert PAYMENT_REQUIRED_HEADER not in replayed.headers
     assert "settle" in calls
     assert facilitator.calls == calls
     assert app.state.handled == 0

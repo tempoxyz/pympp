@@ -207,7 +207,8 @@ class TestTempoSettlement:
         assert len(paid) == 1
         assert paid[0].receipt.reference == _tx_hash(1)
         rejected = [result for result in results if not isinstance(result, PaymentVerified)]
-        assert {result.status for result in rejected} == {403}
+        # Each replay is an already-used challenge: 402 with a fresh one.
+        assert {result.status for result in rejected} == {402}
         assert len(route.successes) == 1
 
     @pytest.mark.parametrize("payments", SIZES)

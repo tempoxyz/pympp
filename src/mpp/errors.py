@@ -367,21 +367,19 @@ def _rebuild_payment_simulation_error(
 
 
 class CredentialReplayedError(VerificationError):
-    """The payment behind a credential is already used or bound elsewhere.
+    """The challenge or payment behind a credential was already used.
 
-    Raised when a payment that already settled cannot pay for this request:
-    the credential was consumed by an earlier request, is being settled by a
-    concurrent one, or its transfer is bound to a different challenge.
+    Raised when the credential was consumed by an earlier request or is being
+    settled by a concurrent one.
 
-    Servers answer with 403 and no challenge (the payment was valid, but
-    policy denies access), because a fresh 402 challenge would invite an
-    auto-paying client to pay again. The problem type stays
-    ``verification-failed``.
+    As the core spec requires for an already-used challenge, servers answer
+    with 402, a fresh challenge and the ``invalid-challenge`` problem type.
+    It stays a :class:`VerificationError` subclass for compatibility.
     """
 
-    status = 403
-    type = VerificationFailedError.type
-    title = VerificationFailedError.title
+    status = 402
+    type = InvalidChallengeError.type
+    title = InvalidChallengeError.title
 
     def __init__(
         self,

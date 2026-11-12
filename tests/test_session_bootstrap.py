@@ -478,8 +478,10 @@ class TestBootstrapPreflight:
         issued = await boot.challenge()
         assert (await boot.prove(issued)).status == 204
         replayed = await boot.prove(issued)
-        assert replayed.status == 403
-        assert "www-authenticate" not in replayed.headers
+        # An already-used challenge gets a fresh one (core spec status table).
+        assert replayed.status == 402
+        assert "www-authenticate" in replayed.headers
+        assert problem(replayed)["type"] == "https://paymentauth.org/problems/invalid-challenge"
         assert "already been used" in problem(replayed)["detail"]
 
     async def test_no_snapshot_without_a_reusable_channel(self) -> None:

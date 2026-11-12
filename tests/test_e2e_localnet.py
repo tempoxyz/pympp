@@ -173,8 +173,9 @@ async def _push(
 
 
 def _refused(response: httpx.Response) -> None:
-    """A spent credential is refused with 403 and no receipt."""
-    assert response.status_code == 403, response.text
+    """A spent credential gets 402 with the invalid-challenge problem and no receipt."""
+    assert response.status_code == 402, response.text
+    assert response.json()["type"] == "https://paymentauth.org/problems/invalid-challenge"
     assert "Payment-Receipt" not in response.headers
 
 

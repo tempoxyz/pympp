@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import zlib
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -22,7 +23,7 @@ import httpx
 
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _split_header_list
 from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
@@ -167,13 +168,58 @@ def _accept_payment(methods: Sequence[ClientMethod]) -> str:
     return ", ".join(dict.fromkeys(method.key for method in methods))
 
 
+def _bounded_decode(body: bytes, content_encoding: str) -> tuple[bytes, bool] | None:
+    """Decode ``body`` to at most 64 KiB; return it and whether it was cut short.
+
+    Only ``gzip``, ``x-gzip``, ``deflate`` and ``identity`` decode within a
+    bound: any other coding, or a body that does not decode, returns ``None``.
+    Decoding stops once the output passes 64 KiB, so a small compressed body
+    never expands without limit in memory.
+    """
+    data = body
+    cut = False
+    for coding in reversed(content_encoding.lower().split(",")):
+        coding = coding.strip()
+        if coding in {"", "identity"}:
+            continue
+        if coding in {"gzip", "x-gzip"}:
+            attempts = (zlib.MAX_WBITS | 16,)
+        elif coding == "deflate":
+            # Servers send zlib-wrapped and raw deflate alike; httpx reads both.
+            attempts = (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+        else:
+            return None
+        decoded: bytes | None = None
+        for wbits in attempts:
+            try:
+                decoder = zlib.decompressobj(wbits)
+                decoded = decoder.decompress(data, _MAX_BUFFERED_ERROR_BODY + 1)
+                if len(decoded) <= _MAX_BUFFERED_ERROR_BODY:
+                    decoded += decoder.flush()
+            except zlib.error:
+                decoded = None
+                continue
+            break
+        if decoded is None:
+            return None
+        if len(decoded) > _MAX_BUFFERED_ERROR_BODY:
+            decoded = decoded[:_MAX_BUFFERED_ERROR_BODY]
+            cut = True
+        data = decoded
+    return data, cut
+
+
 async def _buffer_error_body(response: httpx.Response) -> None:
     """Buffer a paid-retry error body within a size and time bound, then release it.
 
     The body is diagnostic only. One larger than 64 KiB, or still arriving after
     2 seconds, is cut to what arrived (or dropped if compressed, since a partial
     encoding cannot be decoded reliably) and flagged with
-    ``response.extensions["mpp.body_truncated"] = True``.
+    ``response.extensions["mpp.body_truncated"] = True``. The bound holds once
+    decoded too: a compressed body that decodes to more than 64 KiB is cut to
+    its first 64 KiB, decoded, and one that cannot be decoded within the bound
+    (a coding such as ``br`` or ``zstd``, or a corrupt encoding) is dropped,
+    flagged the same way.
     """
     stream = response.stream
     if not isinstance(stream, httpx.AsyncByteStream):
@@ -193,12 +239,50 @@ async def _buffer_error_body(response: httpx.Response) -> None:
     finally:
         with suppress(Exception):
             await stream.aclose()
+    content_encoding = response.headers.get("content-encoding", "identity")
     if truncated:
-        if response.headers.pop("content-encoding", "identity").lower() != "identity":
+        if content_encoding.lower() != "identity":
             body.clear()
+    elif content_encoding.strip().lower() not in {"", "identity"}:
+        decoded = _bounded_decode(bytes(body), content_encoding)
+        if decoded is None or decoded[1]:
+            # Keep at most the decoded prefix, never more than 64 KiB decoded.
+            body = bytearray(decoded[0] if decoded is not None else b"")
+            truncated = True
+    if truncated:
+        response.headers.pop("content-encoding", None)
         response.headers.pop("content-length", None)
         response.extensions = {**response.extensions, _BODY_TRUNCATED_EXTENSION: True}
     response.stream = httpx.ByteStream(bytes(body[:_MAX_BUFFERED_ERROR_BODY]))
+
+
+_INVALID_CHALLENGE_TYPE = "https://paymentauth.org/problems/invalid-challenge"
+
+
+async def _paid_retry_is_final(response: httpx.Response, method: str = "GET") -> bool:
+    """Whether a ``402`` answering a sent credential is final; keeps its body readable.
+
+    An ``invalid-challenge`` problem (an unknown or already used challenge) is final,
+    as in mppx. So is a ``402`` that cannot say why the credential was rejected: the
+    answer to ``HEAD``, which has no body, or a problem document that is empty, does
+    not parse or is cut short (over 64 KiB, encoded or decoded). Paying its fresh
+    challenge could pay twice for one request.
+    """
+    if method.upper() == "HEAD":
+        return True
+    media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if media_type != "application/problem+json":
+        return False
+    try:
+        await _buffer_error_body(response)
+        if response.extensions.get(_BODY_TRUNCATED_EXTENSION):
+            # Cut short, in transit or once decoded: it cannot say why.
+            return True
+        await response.aread()
+        problem = response.json()
+    except Exception:
+        return True
+    return not is_dict(problem) or problem.get("type") == _INVALID_CHALLENGE_TYPE
 
 
 def _is_pushed(credential: Credential) -> bool:
@@ -374,6 +458,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         try:
             for retry in range(self._max_payment_retries):
                 if response.status_code != 402:
+                    return response
+                # A sent credential answered with invalid-challenge (an unknown or already
+                # used challenge, such as a replay), or that cannot say why (a HEAD
+                # response, an empty or unparseable problem), is final: paying the fresh challenge
+                # could pay twice for one request.
+                if retry > 0 and await _paid_retry_is_final(response, request.method):
                     return response
                 # EIP-3009 authorizations remain spendable even after a 402 response.
                 if sent is not None and (
@@ -902,24 +992,9 @@ def _payment_challenges(value: str) -> list[str]:
     """Return Payment challenges, preserving quoted commas and escapes."""
     if len(value) > MAX_AUTHORIZATION_SIZE:
         return []
-    fields: list[str] = []
-    start = 0
-    quoted = escaped = False
-    for index, character in enumerate(value):
-        if escaped:
-            escaped = False
-        elif quoted and character == "\\":
-            escaped = True
-        elif character == '"':
-            quoted = not quoted
-        elif character == "," and not quoted:
-            fields.append(value[start:index])
-            start = index + 1
-    fields.append(value[start:])
-
     challenges: list[str] = []
     current: list[str] | None = None
-    for field in map(str.strip, fields):
+    for field in _split_header_list(value):
         scheme, _, remainder = field.partition(" ")
         if "=" not in scheme and not remainder.lstrip().startswith("="):
             if current:

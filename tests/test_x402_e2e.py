@@ -448,6 +448,7 @@ class TestRejectedX402Payments:
         # Claimed by the per-process fallback store: a 403 without a new challenge.
         assert second.status_code == 403
         assert PAYMENT_REQUIRED_HEADER not in second.headers
+        assert "WWW-Authenticate" not in second.headers
         assert len(live.facilitator.settle_requests) == 1
 
     async def test_composed_payment_matching_no_offer(self, live: Live) -> None:

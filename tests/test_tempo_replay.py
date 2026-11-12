@@ -129,18 +129,19 @@ Scenario = Callable[[Route, str], Awaitable[Any]]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("receipt_case", "scenario", "status", "challenged"),
+    ("receipt_case", "scenario", "problem"),
     [
-        ("ok", _replayed, 403, False),
-        ("ok", _in_flight, 403, False),
-        ("memo", _once, 403, False),
-        ("amount", _once, 402, True),
-        ("reverted", _once, 402, True),
+        # An already-used challenge gets a fresh one (core spec status table).
+        ("ok", _replayed, "invalid-challenge"),
+        ("ok", _in_flight, "invalid-challenge"),
+        ("memo", _once, "invalid-challenge"),
+        ("amount", _once, "verification-failed"),
+        ("reverted", _once, "verification-failed"),
     ],
     ids=["replay", "in-flight", "memo", "amount", "reverted"],
 )
 async def test_hash_credential_failure_response(
-    receipt_case: str, scenario: Scenario, status: int, challenged: bool
+    receipt_case: str, scenario: Scenario, problem: str
 ) -> None:
     route = Route(receipt_case)
     credential = await route.credential()
@@ -148,11 +149,11 @@ async def test_hash_credential_failure_response(
     result = await scenario(route, credential.to_authorization())
 
     actual, headers, body = _response_parts(result)
-    assert actual == status
-    assert body["status"] == status
-    assert body["type"] == "https://paymentauth.org/problems/verification-failed"
+    assert actual == 402
+    assert body["status"] == 402
+    assert body["type"] == f"https://paymentauth.org/problems/{problem}"
     assert headers["Cache-Control"] == "no-store"
-    assert ("WWW-Authenticate" in headers) is challenged
+    assert "WWW-Authenticate" in headers
 
 
 class HashMethod:
@@ -190,10 +191,10 @@ class RouteTransport(httpx.AsyncBaseTransport):
 @pytest.mark.parametrize(
     ("receipt_case", "consumed", "status", "payments"),
     [
-        ("ok", True, 403, 1),
-        ("memo", False, 403, 1),
         # A pushed payment is already on chain: a 402 answering it is final, so the
         # client never broadcasts again for the same request.
+        ("ok", True, 402, 1),
+        ("memo", False, 402, 1),
         ("amount", False, 402, 1),
     ],
     ids=["replay", "memo", "amount"],
@@ -227,5 +228,5 @@ async def test_shared_store_rejects_a_replay_on_another_instance(
 
     assert await _once(first, authorization) == {"reference": TX_HASH}
     status, _, body = _response_parts(await _once(second, authorization))
-    assert status == 403
-    assert body["type"] == "https://paymentauth.org/problems/verification-failed"
+    assert status == 402
+    assert body["type"] == "https://paymentauth.org/problems/invalid-challenge"

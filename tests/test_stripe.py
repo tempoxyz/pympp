@@ -590,7 +590,7 @@ class TestChargeIntent:
                 {**SAMPLE_REQUEST, "externalId": "server-order-123"},
             )
 
-        assert excinfo.value.type == "https://paymentauth.org/problems/verification-failed"
+        assert excinfo.value.type == "https://paymentauth.org/problems/invalid-challenge"
 
     @pytest.mark.asyncio
     async def test_verify_expired_challenge(self):
@@ -979,7 +979,7 @@ class TestStripeFactory:
 
 @pytest.mark.parametrize("backend", ["sdk", "http"])
 @pytest.mark.parametrize("status", ["succeeded", "requires_action", "processing"])
-async def test_cached_stripe_success_never_issues_replacement_challenge(backend, status):
+async def test_cached_stripe_success_is_an_already_used_challenge(backend, status):
     from mpp.server.verify import verify_or_challenge
     from tests import TEST_SECRET
 
@@ -1015,8 +1015,15 @@ async def test_cached_stripe_success_never_issues_replacement_challenge(backend,
 
     with pytest.raises(PaymentError) as caught:
         await verify_or_challenge(authorization=credential.to_authorization(), **options)
-    assert caught.value.status == (403 if status == "succeeded" else 402)
-    assert caught.value.retry_challenge is None
+    if status == "succeeded":
+        # An already-processed payment is an already-used challenge: 402 with a fresh one.
+        assert caught.value.status == 402
+        assert caught.value.type == "https://paymentauth.org/problems/invalid-challenge"
+        assert isinstance(caught.value.retry_challenge, Challenge)
+        assert caught.value.retry_challenge.id != challenge.id
+    else:
+        assert caught.value.status == 402
+        assert caught.value.retry_challenge is None
 
 
 @pytest.mark.parametrize("backend", ["sdk", "http"])
