@@ -1891,6 +1891,79 @@ class TestHookDecline:
         entry = stored(method)
         assert entry is not None and entry.cumulative_amount == 450
 
+    async def _overlapping(self, method: SessionMethod) -> tuple[PaymentAttempt, PaymentAttempt]:
+        """Two vouchers on one channel, the second built on the first, neither settled."""
+        method.store.set(entry_for(cumulative=100))
+        first, second = PaymentAttempt(), PaymentAttempt()
+        assert (await pay(method, attempt=first))["cumulativeAmount"] == "200"
+        assert (await pay(method, attempt=second))["cumulativeAmount"] == "300"
+        assert first.settle is not None and second.settle is not None
+        return first, second
+
+    @pytest.mark.parametrize("first_declined", [True, False])
+    async def test_overlapping_declined_vouchers_both_roll_back(self, first_declined: bool) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        first, second = await self._overlapping(method)
+        order = [first, second] if first_declined else [second, first]
+        for attempt in order:
+            assert attempt.settle is not None
+            assert await attempt.settle(AttemptOutcome(status="rejected", sent=False))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 100
+        assert (await pay(method))["cumulativeAmount"] == "200"
+
+    async def test_declined_voucher_under_a_sent_one_keeps_its_cumulative(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        first, second = await self._overlapping(method)
+        assert first.settle is not None and second.settle is not None
+        assert await first.settle(AttemptOutcome(status="rejected", sent=False))
+        assert await second.settle(AttemptOutcome(status="accepted"))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 300
+        third = PaymentAttempt()
+        assert (await pay(method, attempt=third))["cumulativeAmount"] == "400"
+        assert third.settle is not None
+        assert await third.settle(AttemptOutcome(status="rejected", sent=False))
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 300
+
+    async def test_chained_declined_vouchers_roll_back_to_the_last_sent_one(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        attempts = [PaymentAttempt() for _ in range(4)]
+        for attempt in attempts:
+            await pay(method, attempt=attempt)
+        settles = [attempt.settle for attempt in attempts]
+        assert all(settle is not None for settle in settles)
+        declined = AttemptOutcome(status="rejected", sent=False)
+        assert await attempts[2].settle(declined)  # pyright: ignore[reportOptionalCall]
+        assert await attempts[0].settle(AttemptOutcome(status="accepted"))  # pyright: ignore[reportOptionalCall]
+        assert await attempts[1].settle(declined)  # pyright: ignore[reportOptionalCall]
+        assert await attempts[3].settle(declined)  # pyright: ignore[reportOptionalCall]
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+
+    @pytest.mark.parametrize("recover_declined_first", [True, False])
+    async def test_declined_recover_and_later_voucher_both_roll_back(
+        self, monkeypatch: pytest.MonkeyPatch, recover_declined_first: bool
+    ) -> None:
+        on_chain(monkeypatch, settled=100, deposit=1000)
+        previous = entry_for(cumulative=300)
+        challenge = make_challenge(
+            sessionSnapshot=snapshot_wire(previous, accepted=300, required=300, spent=250)
+        )
+        method = SessionMethod(account=ACCOUNT)
+        recover, later = PaymentAttempt(), PaymentAttempt()
+        assert (await pay(method, challenge, attempt=recover))["cumulativeAmount"] == "350"
+        assert (await pay(method, attempt=later))["cumulativeAmount"] == "450"
+        order = [recover, later] if recover_declined_first else [later, recover]
+        for attempt in order:
+            assert attempt.settle is not None
+            assert await attempt.settle(AttemptOutcome(status="rejected", sent=False))
+        assert stored(method) is None
+        voucher = await pay(method, challenge)
+        assert voucher["action"] == "voucher" and voucher["cumulativeAmount"] == "350"
+
     async def test_voucher_settled_after_sending_keeps_its_cumulative(self) -> None:
         method = SessionMethod(account=ACCOUNT)
         method.store.set(replace(entry_for(cumulative=100), origin=ORIGIN))
