@@ -984,6 +984,43 @@ async def test_sponsored_marker_is_bound_to_its_challenge() -> None:
     assert rpc.sent == []
 
 
+@pytest.mark.parametrize(
+    ("error", "kept"),
+    [
+        ({"code": -32603, "message": "internal error"}, True),
+        ({"code": -32000, "message": "request timed out"}, True),
+        ({"code": -32000, "message": "insufficient funds"}, False),
+    ],
+    ids=["internal", "timed-out", "insufficient-funds"],
+)
+async def test_sponsored_pull_keeps_its_marker_after_an_open_rpc_error(
+    error: dict[str, Any], kept: bool
+) -> None:
+    """A sponsored send answered with a JSON-RPC error that leaves the outcome open
+    keeps its marker, so a retry after the transaction mines settles it instead of
+    rejecting it as a replay. A definite refusal drops the marker."""
+    rpc = FakeRpc()
+    intent = make_intent(rpc, fee_payer=True)
+    envelope = signed_tx((pay_call(),), fee_payer=True)
+    credential = _tx_credential(envelope)
+    key = f"mpp:charge-broadcast:{_raw_transaction_hash(envelope).lower()}"
+    rpc.send = lambda raw_tx: {"error": error}
+
+    with pytest.raises(InternalPaymentError):
+        await intent.verify(credential, _request(fee_payer=True))
+    assert (key in stored_keys(intent)) is kept
+    if not kept:
+        return
+
+    [sent] = rpc.sent
+    tx_hash = tx_hash_of(sent)
+    rpc.receipts[tx_hash] = receipt(tx_hash)
+    result = await intent.verify(credential, _request(fee_payer=True))
+    assert result.reference == tx_hash
+    assert key not in stored_keys(intent)
+    assert len(rpc.sent) == 1
+
+
 async def test_unsponsored_pull_mined_elsewhere_after_unrelated_marker_is_rejected() -> None:
     """A marker covers only the exact bytes this server broadcast."""
     rpc = FakeRpc()
