@@ -1577,7 +1577,7 @@ module mpp.server.method
         property intent: str
         property key: str
         property name: str
-        async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]
+        async def settle(self, context: VerifyContext, *, before_broadcast: Callable[[Validation], None] | None = None) -> tuple[Receipt, Validation | None]
 
 module mpp.server.mpp
     class HandlerFactory

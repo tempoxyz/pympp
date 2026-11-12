@@ -506,3 +506,49 @@ def test_a_payment_check_reading_authorization_needs_requires_auth() -> None:
     with pytest.raises(TypeError, match="requires_auth=True"):
         server(recorder).charge(identity=reads)
     server(recorder, requires_auth=True).charge(identity=reads)
+
+
+@pytest.mark.parametrize(
+    ("validated_payer", "rejected_with"),
+    [
+        ("0xabc", None),
+        (None, "The payment method did not report which account paid."),
+        ("0xdef", "The account that paid is not the one the identity check vetted."),
+    ],
+)
+async def test_a_method_that_validates_is_held_to_the_vetted_payer_before_it_broadcasts(
+    validated_payer: str | None, rejected_with: str | None
+) -> None:
+    from mpp.server import ValidateContext, Validation
+
+    recorder = Recorder()
+
+    async def validate(context: ValidateContext) -> Validation:
+        return Validation(
+            credential=context.credential,
+            details={},
+            intent="charge",
+            request=context.challenge.request,
+            payer=validated_payer,
+        )
+
+    async def broadcast(context: VerifyContext) -> Receipt:
+        recorder.settled += 1
+        return Receipt.success("tx")
+
+    async def vet(input: PaymentCheckInput) -> Verification[str]:
+        return Valid("0xAbc")
+
+    check = PaymentCheck(requires=(), verify=vet, payer=lambda account: account)
+    method = server_method(request={"amount": "1"}, validate=validate, broadcast=broadcast)
+    handler = server(recorder, method).charge(identity=Route(payment=check))
+    [issued] = challenges(await handler(http_request()))
+    result = await handler(paid(issued))
+    if rejected_with is None:
+        assert isinstance(result, PaymentVerified)
+        assert recorder.settled == 1
+    else:
+        code, rejected, body, _ = rejection(result)
+        assert (code, body) == (403, rejected_with)
+        assert rejected is not None and rejected.stage == "payment"
+        assert recorder.settled == 0, "rejected before any funds move"

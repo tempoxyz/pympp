@@ -193,10 +193,16 @@ class ServerMethod:
         """The `name/intent` key."""
         return self.method.key
 
-    async def settle(self, context: VerifyContext) -> tuple[Receipt, Validation | None]:
+    async def settle(
+        self,
+        context: VerifyContext,
+        *,
+        before_broadcast: Callable[[Validation], None] | None = None,
+    ) -> tuple[Receipt, Validation | None]:
         """Run `validate` then `broadcast`, or `verify`.
 
         The validation's `payer` is copied to the receipt unless it already has one.
+        `before_broadcast` sees the validation before anything settles, and can raise to stop it.
         """
         if self.verify is not None:
             return await self.verify(context), None
@@ -214,6 +220,8 @@ class ServerMethod:
             )
             if not isinstance(validation, Validation):
                 raise VerificationFailedError("Intent returned an invalid validation result")
+            if before_broadcast is not None:
+                before_broadcast(validation)
         receipt = await self.broadcast(context)
         if validation is not None and validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)

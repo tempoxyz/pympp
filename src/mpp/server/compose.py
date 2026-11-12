@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _body_digest
 from mpp._parsing import ParseError, _b64_decode, _validate_expires
 from mpp._typing import is_dict, is_mapping
+from mpp._validation import Validation
 from mpp.errors import (
     InvalidChallengeError,
     InvalidPayloadError,
@@ -133,12 +134,11 @@ class _MethodIntent:
             ),
             input=self._http_request,
         )
-        confirm = None
+        match = _PayerMatch()
         if self._gate is not None:
-            confirm = await self._gate(context.credential, context.challenge)
-        receipt, _ = await self._method.settle(context)
-        if confirm is not None:
-            confirm(receipt)
+            match = await self._gate(context.credential, context.challenge)
+        receipt, _ = await self._method.settle(context, before_broadcast=match.before_broadcast)
+        match.after_settle(receipt)
         if self._method.respond is not None:
             # Like mppx, after verification and before ``payment.success``.
             response = await resolve(
@@ -286,8 +286,33 @@ class _PreparedOffer:
         )
 
 
-_PaymentConfirm: TypeAlias = Callable[[Receipt], None]
-_PaymentGate: TypeAlias = Callable[[Credential, Challenge], Awaitable[_PaymentConfirm]]
+@dataclass(frozen=True, slots=True)
+class _PayerMatch:
+    """Holds a settlement to the account a payment check vetted (none: anything matches).
+
+    A method that validates before it broadcasts is held to it before any funds move; one that
+    only verifies, after settlement.
+    """
+
+    vetted: str | None = None
+
+    def before_broadcast(self, validation: Validation) -> None:
+        self._match(validation.payer)
+
+    def after_settle(self, receipt: Receipt) -> None:
+        self._match(receipt.payer)
+
+    def _match(self, payer: str | None) -> None:
+        # A method that cannot say who paid cannot prove it was the vetted account.
+        if not self.vetted:
+            return
+        if not payer:
+            raise IdentityRejectedError("payment", PAYER_UNKNOWN)
+        if payer.lower() != self.vetted.lower():
+            raise IdentityRejectedError("payment", PAYER_MISMATCH)
+
+
+_PaymentGate: TypeAlias = Callable[[Credential, Challenge], Awaitable[_PayerMatch]]
 
 
 @dataclass
@@ -311,7 +336,7 @@ class _Call:
         if check is None or context is None:
             return None
 
-        async def run(credential: Credential, challenge: Challenge) -> _PaymentConfirm:
+        async def run(credential: Credential, challenge: Challenge) -> _PayerMatch:
             outcome = await context.check(
                 check,
                 PaymentCheckInput(request=request, challenge=challenge, credential=credential),
@@ -320,17 +345,7 @@ class _Call:
                 # The client may already have pushed this payment: reject without a fresh 402.
                 raise IdentityRejectedError("payment", outcome)
             self.checked[check] = outcome.value
-            vetted = check.payer(outcome.value) if check.payer is not None else None
-
-            def confirm(receipt: Receipt) -> None:
-                # The account that paid must be the one the check vetted; a method that cannot
-                # say who paid cannot prove it was.
-                if vetted and not receipt.payer:
-                    raise IdentityRejectedError("payment", PAYER_UNKNOWN)
-                if vetted and receipt.payer and vetted.lower() != receipt.payer.lower():
-                    raise IdentityRejectedError("payment", PAYER_MISMATCH)
-
-            return confirm
+            return _PayerMatch(check.payer(outcome.value) if check.payer is not None else None)
 
         return run
 
