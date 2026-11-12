@@ -516,10 +516,16 @@ class Prover:
 
 
 def _origin(url: str) -> str:
+    """``url``'s origin as ``scheme://host[:port]``, the default port left out.
+
+    An IPv6 host keeps its brackets, so ``[::1:8080]`` and ``[::1]:8080`` stay distinct.
+    """
     parsed = httpx.URL(url)
     default = {"http": 80, "https": 443}.get(parsed.scheme)
     port = "" if parsed.port in (None, default) else f":{parsed.port}"
-    return f"{parsed.scheme}://{parsed.host}{port}"
+    host = parsed.host.lower()
+    host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{host}{port}"
 
 
 def with_headers(request: httpx.Request, headers: Mapping[str, str]) -> httpx.Request:

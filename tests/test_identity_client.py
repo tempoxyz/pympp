@@ -437,3 +437,19 @@ async def test_a_prover_never_replaces_the_payment_credential(
     await client.send(send, paid, challenge=challenge(header=challenge_header))
     [sent] = send.sent
     assert sent.headers[header] == "Payment eyJ"
+
+
+@pytest.mark.parametrize(
+    ("url", "covered"),
+    [
+        ("http://[2001:db8::1]:8080/a", True),
+        ("http://[2001:DB8::1]:8080/", True),
+        ("http://[2001:db8::1:8080]/", False),
+        ("http://[2001:db8::1]/", False),
+    ],
+)
+def test_a_prover_scope_keeps_ipv6_hosts_apart(url: str, covered: bool) -> None:
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return request
+
+    assert Prover(scope=("http://[2001:db8::1]:8080",), prove=prove).covers(url) is covered

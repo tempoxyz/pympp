@@ -35,6 +35,7 @@ from mpp.identity import (
     Valid,
     Verification,
     Verifier,
+    _origin,  # pyright: ignore[reportPrivateUsage]
     forbidden,
     invalid,
     missing,
@@ -363,13 +364,6 @@ class _Rules:
 
 def _invalid(reason: str) -> Rejected:
     return invalid(reason, CHALLENGE)
-
-
-def _origin(url: str) -> str:
-    parsed = httpx.URL(url)
-    default = {"http": 80, "https": 443}.get(parsed.scheme)
-    port = "" if parsed.port in (None, default) else f":{parsed.port}"
-    return f"{parsed.scheme}://{parsed.host}{port}"
 
 
 def _is_number(value: object) -> bool:
