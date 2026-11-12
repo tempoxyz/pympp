@@ -152,6 +152,18 @@ mpp = Mpp(
 )
 ```
 
+To approve each payment first, pass `on_challenge` (mppx `onChallenge`). It gets the
+challenge and a context whose `create_credential()` builds the default credential.
+Return `False` to decline (nothing is paid and the `402` is returned), `None` to pay as
+usual, or a credential string to send instead:
+
+```python
+mpp = Mpp(
+    methods=[tempo.charge(account=account)],
+    on_challenge=lambda challenge, context: int(challenge.request["amount"]) <= 1_000_000,
+)
+```
+
 ### Pay x402 servers
 
 The `evm` client method also pays x402 v2 `exact` servers (EIP-3009 USDC),

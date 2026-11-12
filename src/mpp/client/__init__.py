@@ -13,7 +13,7 @@ Example:
 """
 
 from mpp import _expires as Expires
-from mpp.client.transport import Mpp, PaymentTransport
+from mpp.client.transport import ChallengeContext, Mpp, OnChallenge, PaymentTransport
 from mpp.events import (
     CHALLENGE_RECEIVED,
     CREDENTIAL_CREATED,
@@ -31,12 +31,14 @@ __all__ = [
     "CHALLENGE_RECEIVED",
     "CREDENTIAL_CREATED",
     "ChallengeCandidate",
+    "ChallengeContext",
     "ClientMethod",
     "CredentialParams",
     "EventDispatcher",
     "Expires",
     "Method",
     "Mpp",
+    "OnChallenge",
     "PAYMENT_FAILED",
     "PAYMENT_RESPONSE",
     "PaymentEvent",

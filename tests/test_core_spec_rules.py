@@ -1,8 +1,8 @@
-"""Core spec rules every SDK server shares.
+"""Core spec rules every SDK server and client shares.
 
 Problem types and check order for rejected credentials, credential fields, the
-per-challenge nonce, the minimum HMAC secret, the method grammar and the client's
-handling of an invalid-challenge answer to a paid retry.
+per-challenge nonce, the minimum HMAC secret, the method grammar and the client
+approval hook.
 """
 
 from __future__ import annotations
@@ -16,8 +16,9 @@ from typing import Any
 import httpx
 import pytest
 
-from mpp import Challenge, generate_challenge_id
+from mpp import Challenge, Credential, generate_challenge_id
 from mpp._parsing import ParseError
+from mpp.client import ChallengeContext
 from mpp.server import Mpp
 from tests.test_behavior_contract import (
     PROBLEMS,
@@ -225,6 +226,47 @@ class TestMethodGrammar:
         challenge = Challenge(id="x", realm="r", method="tempo-v2", intent="charge", request={})
         with pytest.raises(ValueError, match="payment method"):
             challenge.to_www_authenticate("r")
+
+
+class TestOnChallenge:
+    async def _call(self, hook: Any) -> tuple[httpx.Response, ContractMethod]:
+        method = ContractMethod()
+        client, _ = paying(
+            app({"/paid": make_server(method).charge(amount="1")}),
+            ContractMethod(),
+            on_challenge=hook,
+        )
+        async with client:
+            return await client.get("/paid"), method
+
+    async def test_declining_returns_the_402_without_paying(self) -> None:
+        seen: list[Challenge] = []
+
+        def decline(challenge: Challenge, context: ChallengeContext) -> bool:
+            seen.append(challenge)
+            return False
+
+        response, method = await self._call(decline)
+        assert response.status_code == 402
+        assert response.json()["type"] == f"{PROBLEMS}/payment-required"
+        assert [c.method for c in seen] == ["contract"]
+        assert method.settled == []
+
+    @pytest.mark.parametrize("answer", [None, True])
+    async def test_approving_pays(self, answer: bool | None) -> None:
+        response, method = await self._call(lambda challenge, context: answer)
+        assert response.status_code == 200
+        assert method.settled == ["ok"]
+
+    async def test_hook_can_supply_the_credential(self) -> None:
+        async def supply(challenge: Challenge, context: ChallengeContext) -> str:
+            value = await context.create_credential()
+            assert Credential.from_authorization(value).challenge.id == challenge.id
+            return value
+
+        response, method = await self._call(supply)
+        assert response.status_code == 200
+        assert method.settled == ["ok"]
 
 
 async def test_client_does_not_pay_again_after_invalid_challenge() -> None:
