@@ -83,9 +83,10 @@ def create(
     for five minutes). The token uses ``Authorization``, so create the server with
     ``requires_auth=True``.
 
-    The payment check requires a ``tempo`` payment whose ``source`` is an account the token
+    The payment check requires a ``tempo`` charge whose ``source`` is an account the token
     grants to the app on ``chain_id``, so one user's token cannot pay with another user's
-    wallet, and refuses an account Tempo ID screened as anything but ``clear``.
+    wallet, and refuses an account Tempo ID screened as anything but ``clear``. After
+    settlement the account that paid must be that source.
 
     Args:
         client_id: The app or apps whose tokens the API accepts.
@@ -250,9 +251,10 @@ class _Rules:
 
     def payer(self, caller: Caller, input: PaymentCheckInput) -> Verification[Payer]:
         """Check that the paid retry's Credential pays from one of the caller's accounts."""
-        # Only the tempo method checks the source against the transaction's sender.
-        if input.challenge.method != "tempo":
-            return forbidden("Pay with the tempo method.")
+        # Only a tempo charge reports the account that paid, which the engine compares with
+        # the source after settlement; a session's source can be a signer for another payer.
+        if (input.challenge.method, input.challenge.intent) != ("tempo", "charge"):
+            return forbidden("Pay with a tempo charge.")
         source = parse_pkh_source(input.credential.source or "")
         if source is None or source.chain_id != self.chain_id:
             return invalid(f"The payment must name its source account on chain {self.chain_id}.")

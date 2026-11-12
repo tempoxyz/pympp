@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Callable
 from typing import Any
@@ -411,8 +412,12 @@ async def test_allow_decides_by_the_verified_user(issuer: Issuer) -> None:
 # --- Payment check ------------------------------------------------------------------------------
 
 
-def payment(request: Request, *, method: str = "tempo", source: str | None) -> PaymentCheckInput:
-    challenge = Challenge(id="c1", realm="api.example", method=method, intent="charge", request={})
+def payment(
+    request: Request, *, method: str = "tempo.charge", source: str | None
+) -> PaymentCheckInput:
+    """A paid retry's check input; ``method`` is ``<method>.<intent>``."""
+    name, _, intent = method.partition(".")
+    challenge = Challenge(id="c1", realm="api.example", method=name, intent=intent, request={})
     credential = Credential(challenge=challenge.to_echo(), payload={}, source=source)
     return PaymentCheckInput(request=request, challenge=challenge, credential=credential)
 
@@ -420,29 +425,40 @@ def payment(request: Request, *, method: str = "tempo", source: str | None) -> P
 @pytest.mark.parametrize(
     ("method", "source", "compliance", "expected"),
     [
-        ("tempo", f"did:pkh:eip155:4217:{ALICE}", {ALICE: "clear"}, None),
-        ("tempo", f"did:pkh:eip155:4217:{ALICE_CHECKSUM}", {}, None),
-        ("stripe", f"did:pkh:eip155:4217:{ALICE}", {}, ("forbidden", "Pay with the tempo method.")),
+        ("tempo.charge", f"did:pkh:eip155:4217:{ALICE}", {ALICE: "clear"}, None),
+        ("tempo.charge", f"did:pkh:eip155:4217:{ALICE_CHECKSUM}", {}, None),
         (
-            "tempo",
+            "stripe.charge",
+            f"did:pkh:eip155:4217:{ALICE}",
+            {},
+            ("forbidden", "Pay with a tempo charge."),
+        ),
+        (
+            "tempo.session",
+            f"did:pkh:eip155:4217:{ALICE}",
+            {ALICE: "clear"},
+            ("forbidden", "Pay with a tempo charge."),
+        ),
+        (
+            "tempo.charge",
             None,
             {},
             ("invalid", "The payment must name its source account on chain 4217."),
         ),
         (
-            "tempo",
+            "tempo.charge",
             f"did:pkh:eip155:1:{ALICE}",
             {},
             ("invalid", "The payment must name its source account on chain 4217."),
         ),
         (
-            "tempo",
+            "tempo.charge",
             f"did:pkh:eip155:4217:{BOB}",
             {},
             ("forbidden", "The paying account is not one this user granted to the app."),
         ),
         (
-            "tempo",
+            "tempo.charge",
             f"did:pkh:eip155:4217:{ALICE}",
             {ALICE: "blocked"},
             ("forbidden", "The paying account is not cleared to pay."),
@@ -563,7 +579,9 @@ async def test_a_tempo_id_user_pays_with_their_own_account(issuer: Issuer) -> No
     from tests.test_identity_client import ServerTransport, paying_method
 
     async def settle(context: VerifyContext) -> Receipt:
-        return Receipt.success("tx")
+        # Like a tempo charge, report the account that paid.
+        paid_by = (context.credential.source or "").rsplit(":", 1)[-1]
+        return dataclasses.replace(Receipt.success("tx"), payer=paid_by)
 
     tempo_ids = tempo_id(issuer, store=MemoryStore())
     server = Server(

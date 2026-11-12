@@ -460,11 +460,16 @@ async def test_a_paid_retry_ignores_same_terms_offers_whose_identity_rejects() -
 
 
 @pytest.mark.parametrize(
-    ("paid_by", "verified"),
-    [("0xABC", True), ("0xabc", True), (None, True), ("0xdef", False)],
+    ("paid_by", "rejected_with"),
+    [
+        ("0xABC", None),
+        ("0xabc", None),
+        (None, "The payment method did not report which account paid."),
+        ("0xdef", "The account that paid is not the one the identity check vetted."),
+    ],
 )
 async def test_the_account_that_paid_must_be_the_one_the_check_vetted(
-    paid_by: str | None, verified: bool
+    paid_by: str | None, rejected_with: str | None
 ) -> None:
     from dataclasses import replace as replace_receipt
 
@@ -483,14 +488,11 @@ async def test_the_account_that_paid_must_be_the_one_the_check_vetted(
     )
     [issued] = challenges(await handler(http_request()))
     result = await handler(paid(issued))
-    if verified:
+    if rejected_with is None:
         assert isinstance(result, PaymentVerified)
     else:
         code, rejected, body, _ = rejection(result)
-        assert (code, body) == (
-            403,
-            "The account that paid is not the one the identity check vetted.",
-        )
+        assert (code, body) == (403, rejected_with)
         assert rejected is not None and rejected.stage == "payment"
 
 

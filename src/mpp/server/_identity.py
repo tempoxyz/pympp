@@ -24,6 +24,7 @@ from mpp.identity import (
 from mpp.server.http import Response
 
 PAYER_MISMATCH = forbidden("The account that paid is not the one the identity check vetted.")
+PAYER_UNKNOWN = forbidden("The payment method did not report which account paid.")
 X402_REJECTED = invalid("This route's identity payment check does not accept x402 credentials.")
 
 
@@ -111,4 +112,10 @@ class IdentityContext:
         return outcome
 
 
-__all__ = ["PAYER_MISMATCH", "X402_REJECTED", "IdentityContext", "IdentityRejectedError"]
+__all__ = [
+    "PAYER_MISMATCH",
+    "PAYER_UNKNOWN",
+    "X402_REJECTED",
+    "IdentityContext",
+    "IdentityRejectedError",
+]

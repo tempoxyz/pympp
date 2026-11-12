@@ -276,8 +276,10 @@ class PaymentCheck(Generic[T]):
       with ``requires_auth=True``.
     - ``payer``: returns the account the check vetted from its value. After settlement the
       engine compares it with the account the payment method reports (``Receipt.payer``) and
-      rejects the request as ``forbidden`` when they differ, so a check cannot be satisfied with
-      one account and paid from another.
+      rejects the request as ``forbidden`` when they differ, or when the method reports none,
+      so a check cannot be satisfied with one account and paid from another. The payment has
+      settled by then: a check that names a payer should refuse, in ``verify``, intents whose
+      receipts name no payer.
 
     Raises:
         ValueError: If a requirement cannot be serialized.

@@ -30,6 +30,7 @@ from mpp.identity import _EMPTY_ROUTE, PaymentCheck, PaymentCheckInput, Rejected
 from mpp.identity import _requirements as identity_requirements
 from mpp.server._identity import (
     PAYER_MISMATCH,
+    PAYER_UNKNOWN,
     X402_REJECTED,
     IdentityContext,
     IdentityRejectedError,
@@ -322,7 +323,10 @@ class _Call:
             vetted = check.payer(outcome.value) if check.payer is not None else None
 
             def confirm(receipt: Receipt) -> None:
-                # The method reports who paid: it must be the account the check vetted.
+                # The account that paid must be the one the check vetted; a method that cannot
+                # say who paid cannot prove it was.
+                if vetted and not receipt.payer:
+                    raise IdentityRejectedError("payment", PAYER_UNKNOWN)
                 if vetted and receipt.payer and vetted.lower() != receipt.payer.lower():
                     raise IdentityRejectedError("payment", PAYER_MISMATCH)
 
