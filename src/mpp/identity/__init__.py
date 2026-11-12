@@ -487,7 +487,9 @@ class Prover:
     - ``scope``: the exact origins it runs for, such as ``("https://api.example",)``, or ``"*"``.
     - ``prove``: returns a copy of the request carrying the proof (see :func:`with_headers`).
     - ``headers``: sensitive headers it writes, never sent across origins on a redirect.
-    - ``prepare``: prepares a proof from a 402 before the paid retry.
+    - ``prepare``: prepares a proof from a 402 before the paid retry. The 402 is already
+      closed, so its headers are readable but its body is not, and the transport is free for
+      requests ``prepare`` makes itself.
     - ``retry``: given a rejected (non-402) response to an unpaid request, returns headers to
       resend it once with, or None. Payment credential headers it returns are ignored.
     """

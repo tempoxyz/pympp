@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
@@ -358,6 +358,45 @@ async def test_a_client_with_a_prover_pays_a_route_that_requires_identity() -> N
     unpaid, paid = transport.requests
     assert unpaid.headers["X-Nonce"] == "-"
     assert nonces == [paid.headers["X-Nonce"]], "the paid proof binds to the Challenge id"
+
+
+async def test_prepare_runs_after_the_402_releases_its_connection() -> None:
+    seen: list[tuple[bool, int]] = []
+
+    async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        return with_headers(request, {"X-Api-Key": "alice"})
+
+    async def prepare(response: httpx.Response, context: PrepareContext) -> None:
+        seen.append((response.is_closed, response.status_code))
+
+    mpp = Mpp(
+        methods=[paying_method()],
+        identity=[Prover(scope=(API,), prove=prove, prepare=prepare)],
+    )
+    mpp.payment_transport._inner = StreamingTransport(ServerTransport(key_server()))
+    async with mpp:
+        response = await mpp.fetch(f"{API}/paid")
+    assert response.status_code == 200
+    assert seen == [(True, 402)]
+
+
+class StreamingTransport(httpx.AsyncBaseTransport):
+    """Returns each response with an unread body, as a pooled connection does."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport) -> None:
+        self.inner = inner
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.inner.handle_async_request(request)
+        body = await response.aread()
+
+        class Body(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield body
+
+        return httpx.Response(
+            response.status_code, headers=response.headers, stream=Body(), request=request
+        )
 
 
 async def test_without_a_prover_the_rejection_reaches_the_caller() -> None:

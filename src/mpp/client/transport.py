@@ -532,10 +532,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                         "Use a buffered body for paid requests."
                     )
 
-                if self._identity is not None:
-                    # Provers prepare proofs for the selected Challenge before it is paid.
-                    await self._identity.prepare(response, challenge, request.url)
-
                 if sent is not None and _is_pushed(sent.credential):
                     # This 402 may be the final answer to a pushed payment:
                     # keep its body readable for the caller.
@@ -545,6 +541,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 # Release the pool connection before callbacks can make auxiliary requests.
                 with suppress(Exception):
                     await response.aclose()
+
+                if self._identity is not None:
+                    # Provers prepare proofs for the selected Challenge before it is paid, from
+                    # the 402's headers: its connection is free for any request they make.
+                    await self._identity.prepare(response, challenge, request.url)
 
                 reused: Credential | None = None
                 if sent is not None:
