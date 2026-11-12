@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 import re
 import time
 import weakref
@@ -350,7 +351,10 @@ class _Rules:
             return "The DPoP proof has no ID."
         if self.store is not None:
             key_id = f"mppx:tempo-id:dpop:{jwt.sha256(f'{jkt}:{jti}')}"
-            if not await self.store.put_if_absent_until(key_id, "1", max(expires, now + 1)):
+            # `now` is whole seconds, so the proof is accepted until the second after
+            # `expires` begins: the replay claim must last at least that long.
+            until = math.floor(expires) + 1
+            if not await self.store.put_if_absent_until(key_id, "1", until):
                 return "The DPoP proof was already used."
         return None
 

@@ -794,6 +794,23 @@ async def test_dpop_replay_claims_work_with_string_stores(issuer: Issuer) -> Non
     assert reason(await verifier.verify(replay)) == ("invalid", "The DPoP proof was already used.")
 
 
+async def test_a_used_proof_stays_claimed_for_as_long_as_it_is_accepted(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    verifier = tempo_id(issuer, store=MemoryStore()).verifier
+    request = dpop_request(token, key)
+    iat = int(time.time())
+    monkeypatch.setattr(time, "time", lambda: iat + 10.0)
+    assert isinstance(await verifier.verify(request), Valid)
+    # Just before the second in which the proof's age stops being accepted.
+    last = iat + tempo.PROOF_MAX_AGE + tempo.CLOCK_TOLERANCE + 0.9
+    monkeypatch.setattr(time, "time", lambda: last)
+    replay = dpop_request(token, key, proof=request.headers["DPoP"])
+    assert reason(await verifier.verify(replay)) == ("invalid", "The DPoP proof was already used.")
+
+
 def test_tempo_ids_payment_check_reads_authorization_and_names_the_payer(issuer: Issuer) -> None:
     check = tempo_id(issuer).payment_check
     assert check.authorization
