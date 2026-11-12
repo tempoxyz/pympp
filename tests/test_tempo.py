@@ -2320,9 +2320,10 @@ class TestChargeIntent:
         assert receipt.reference == _raw_transaction_hash("0xabcdef1234567890")
 
     @pytest.mark.asyncio
-    async def test_verify_transaction_accepts_plain_transfer_without_memo(
+    async def test_verify_undecodable_transaction_needs_a_bound_memo(
         self,
     ) -> None:
+        """A pull transaction that does not decode never settles on a plain transfer."""
         future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
         intent = ChargeIntent(rpc_url="https://rpc.test")
 
@@ -2331,7 +2332,7 @@ class TestChargeIntent:
         amount = 1000
 
         receipt_with_logs = {
-            "transactionHash": "0xtxhash123",
+            "transactionHash": _raw_transaction_hash("0xabcdef1234567890"),
             "status": "0x1",
             "logs": [
                 {
@@ -2362,9 +2363,9 @@ class TestChargeIntent:
             realm="api.example.com",
         )
 
-        # Without a memo the transfer passes attribution and reaches the receipt hash
-        # check, which this fixture's placeholder signature fails after broadcast.
-        with pytest.raises(InternalPaymentError) as raised:
+        # The placeholder bytes were never checked against the request, so the
+        # receipt's plain transfer cannot show it pays this Challenge.
+        with pytest.raises(VerificationError, match="memo is not bound") as raised:
             await intent.verify(
                 credential,
                 {
@@ -2373,7 +2374,7 @@ class TestChargeIntent:
                     "recipient": destination,
                 },
             )
-        assert "Receipt transaction hash" in str(raised.value.__cause__)
+        assert not isinstance(raised.value, InternalPaymentError)
 
     @pytest.mark.asyncio
     async def test_verify_transaction_rejects_wrong_challenge_bound_memo(self) -> None:
@@ -6101,6 +6102,34 @@ class TestCosignAsFeePayer:
             await intent.verify(credential, request)
         mock_client.post.assert_awaited()
         assert store._data == {}
+
+    def test_unsponsored_marker_expiry_caps_valid_before(self) -> None:
+        """A payer-chosen valid_before keeps a marker at most an hour past now."""
+        from mpp.methods.tempo import intents
+
+        now = 1_000_000.0
+        grace = intents._UNSPONSORED_MARKER_GRACE
+        cap = intents._UNSPONSORED_MARKER_TTL
+
+        def expiry(challenge_expires_at: float | None, valid_before: int | None) -> float:
+            with (
+                patch("mpp.methods.tempo.intents.time.time", return_value=now),
+                patch(
+                    "mpp.methods.tempo.intents._transaction_valid_before",
+                    return_value=valid_before,
+                ),
+            ):
+                return intents._unsponsored_marker_expiry(challenge_expires_at, "0x76")
+
+        # The later of the Challenge's expiry and valid_before.
+        assert expiry(now + 300, int(now) + 120) == now + 300 + grace
+        assert expiry(now + 120, int(now) + 300) == now + 300 + grace
+        # A far valid_before counts for at most the cap.
+        assert expiry(now + 300, int(now) + 10 * cap) == now + cap + grace
+        assert expiry(None, int(now) + 10 * cap) == now + cap + grace
+        assert expiry(None, None) == now + cap + grace
+        # A Challenge expiry the server set is kept even past the cap.
+        assert expiry(now + 2 * cap, None) == now + 2 * cap + grace
 
     @pytest.mark.parametrize(
         ("error", "refused"),
