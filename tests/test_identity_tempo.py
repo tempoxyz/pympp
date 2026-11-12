@@ -214,15 +214,18 @@ async def test_access_token_rejections(
 @pytest.mark.parametrize(
     "overrides",
     [
-        {},
-        {"aud": [ISSUER, f"{ISSUER}/oauth2/userinfo"]},
-        {"exp": int(time.time()) - 30},  # within clock tolerance
+        lambda: {},
+        lambda: {"aud": [ISSUER, f"{ISSUER}/oauth2/userinfo"]},
+        lambda: {"exp": int(time.time()) - 30},  # within clock tolerance
     ],
+    ids=["plain", "several audiences", "just expired"],
 )
 async def test_a_valid_bearer_token_names_the_caller(
-    issuer: Issuer, overrides: dict[str, Any]
+    issuer: Issuer, overrides: Callable[[], dict[str, Any]]
 ) -> None:
-    outcome = await tempo_id(issuer).verifier.verify(bearer(issuer.access_token(**overrides)))
+    # Built when the test runs: a time taken at collection would be stale by then.
+    token = issuer.access_token(**overrides())
+    outcome = await tempo_id(issuer).verifier.verify(bearer(token))
     assert isinstance(outcome, Valid)
     caller = outcome.value
     assert (caller.user_id, caller.client_id, caller.accounts) == (
