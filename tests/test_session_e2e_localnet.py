@@ -60,7 +60,7 @@ from tests.conftest import _fund_account  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = [pytest.mark.integration, INTEGRATION]
 
-SECRET_KEY = "session-e2e-localnet-secret"
+SECRET_KEY = "session-e2e-localnet-secret-0123456789abcdef0123456789abcdef"
 REALM = "session-e2e.test"
 PRICE = "0.00001"
 UNIT = 10  # PRICE in base units (6 decimals)

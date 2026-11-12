@@ -7988,7 +7988,7 @@ class TestSplitsWithFeePayer:
     ) -> None:
         from mpp.server import Mpp
 
-        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
         server = Mpp(
             methods=tempo_server.charge(
                 rpc_url="https://rpc.test",
@@ -8014,7 +8014,7 @@ class TestSponsoredChallengeLifetime:
     def _server(monkeypatch: pytest.MonkeyPatch):
         from mpp.server import Mpp
 
-        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+        monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
         return Mpp(
             methods=tempo_server.charge(
                 rpc_url="https://rpc.test",
@@ -8078,7 +8078,11 @@ class TestSponsorshipDefault:
         from mpp.server import Mpp
 
         async def run():
-            server = Mpp(methods=server_methods, realm="test.com", secret_key="k" * 32)
+            server = Mpp(
+                methods=server_methods,
+                realm="test.com",
+                secret_key="k-0123456789abcdef0123456789abcdef" * 32,
+            )
             return challenges(await server.charge(amount="1.00", **options)(http_request()))
 
         return run()
@@ -8780,7 +8784,7 @@ class TestTransactionCredentialPayer:
 async def test_server_rejects_fixed_attribution_before_issuing_challenge(monkeypatch, encoding):
     from mpp.server import Mpp
 
-    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
     server = Mpp(methods=tempo_server.charge(recipient="0x" + "11" * 20))
     memo = encode_attribution(challenge_id="other", server_id="api.example.com")
     if encoding == "bare":
@@ -8823,7 +8827,7 @@ async def test_verify_or_challenge_rejects_fixed_attribution_before_issuing():
             intent=ChargeIntent(),
             request=_fixed_attribution_request(),
             realm="api.example.com",
-            secret_key="test-secret-key",
+            secret_key="test-secret-key-0123456789abcdef0123456789abcdef",
             method="tempo",
         )
 
@@ -8836,7 +8840,7 @@ async def test_mcp_verify_or_challenge_rejects_fixed_attribution():
     server = Mpp(
         methods=tempo_server.charge(recipient="0x" + "11" * 20),
         realm="api.example.com",
-        secret_key="test-secret-key",
+        secret_key="test-secret-key-0123456789abcdef0123456789abcdef",
     )
     request = _fixed_attribution_request()
     with pytest.raises(ValueError, match="Fixed split memos"):

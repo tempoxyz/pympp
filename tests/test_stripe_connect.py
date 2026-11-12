@@ -115,7 +115,11 @@ async def test_server_charge_keeps_connect_out_of_challenge() -> None:
     method = stripe_server.charge(
         network_id="bn_test", client=client, currency="usd", connect=SETTLEMENT
     )
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = server.charge(amount="1.50")
     issued = challenge(await handler(http_request()))
     assert "acct" not in str(issued.request)
@@ -128,7 +132,11 @@ async def test_server_charge_keeps_connect_out_of_challenge() -> None:
 async def test_machine_payments_route_spt_and_recorded_payments() -> None:
     connect = ConnectSettlement(stripe_account="acct_seller")
     client, payments = make_payments(connect=connect)
-    server = Mpp(methods=payments.spt.charge(), realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=payments.spt.charge(),
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = server.charge(amount="1.00", recipient="bn_test")
     issued = challenge(await handler(http_request()))
     credential = Credential(challenge=issued.to_echo(), payload={"spt": "spt_test"})
@@ -221,7 +229,11 @@ async def test_recorded_tempo_hash_payment_is_accepted_after_settlement(
         connect=ConnectSettlement(application_fee_amount=101),
     )
     method = payments.tempo.charge()
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     issued = challenge(await server.charge(amount="1.00")(http_request()))
     payload = method.method.parse_payload({"type": "hash", "hash": "0x" + "ab" * 32})
     context = VerifyContext(
@@ -261,7 +273,11 @@ async def test_recorded_tempo_payment_validates_connect_before_settlement(
     )
     _, payments = make_payments(deposit_addresses={"tempo": "0x" + "1" * 40}, connect=settlement)
     method = payments.tempo.charge()
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     issued = challenge(await server.charge(amount="1.00")(http_request()))
     context = VerifyContext(
         credential=Credential(challenge=issued.to_echo(), payload={}), request={}, challenge=issued

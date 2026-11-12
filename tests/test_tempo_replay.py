@@ -24,7 +24,7 @@ pytest.importorskip("starlette")
 from starlette.responses import Response  # noqa: E402
 
 REALM = "api.example.com"
-SECRET = "test-secret"
+SECRET = "test-secret-0123456789abcdef0123456789abcdef"
 CURRENCY = "0x20c0000000000000000000000000000000000000"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 PAYER = "0x1234567890123456789012345678901234567890"

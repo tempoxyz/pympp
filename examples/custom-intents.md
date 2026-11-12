@@ -72,13 +72,15 @@ method = ServerMethod(method=charge, verify=verify, defaults={"currency": "usd"}
 ## Usage with Server
 
 ```python
+import os
+
 from fastapi import FastAPI, Request
 
 from mpp import Credential, Receipt
 from mpp.server import Mpp, pay
 
 app = FastAPI()
-server = Mpp(methods=[method], realm="api.example.com", secret_key="my-server-secret")
+server = Mpp(methods=[method], realm="api.example.com", secret_key=os.environ["MPP_SECRET_KEY"])
 
 
 @app.get("/resource")

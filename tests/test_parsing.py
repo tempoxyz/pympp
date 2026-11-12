@@ -168,7 +168,7 @@ class TestChallenge:
     def test_create_rejects_expires_the_parser_refuses(self, expires: str) -> None:
         with pytest.raises(ValueError, match="Invalid expires format"):
             Challenge.create(
-                secret_key="secret",
+                secret_key="secret-0123456789abcdef0123456789abcdef",
                 realm="api.example.com",
                 method="tempo",
                 intent="charge",
@@ -327,7 +327,7 @@ class TestChallenge:
 
     def test_www_authenticate_roundtrip_preserves_credential_header(self) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -340,11 +340,11 @@ class TestChallenge:
         assert 'header="Payment-Authorization"' in header
         assert parsed.header == "Payment-Authorization"
         assert parsed.credential_header == "Payment-Authorization"
-        assert parsed.verify("test-secret", "api.example.com")
+        assert parsed.verify("test-secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     def test_www_authenticate_omits_default_authorization_header(self) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -373,7 +373,7 @@ class TestCredential:
     )
     def test_description_survives_challenge_to_credential(self, description: str | None) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -395,7 +395,7 @@ class TestCredential:
 
         changed = replace(challenge, description="Different display text")
         assert changed.id == challenge.id
-        assert changed.verify("test-secret", "api.example.com")
+        assert changed.verify("test-secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     @pytest.mark.parametrize(
         "description", [None, "", "Test purchase", "Payment for caf\u00e9 \u2615"]
@@ -1106,14 +1106,16 @@ class TestOpaqueEcho:
 
         raw = base64.urlsafe_b64encode(b'{"route":"/v1/search","plan":"pro"}').rstrip(b"=")
         hmac_input = f"api.example.com|tempo|charge|e30|||{raw.decode()}"
-        mac = hmac.new(b"secret", hmac_input.encode(), hashlib.sha256).digest()
+        mac = hmac.new(
+            b"secret-0123456789abcdef0123456789abcdef", hmac_input.encode(), hashlib.sha256
+        ).digest()
         challenge_id = base64.urlsafe_b64encode(mac).rstrip(b"=").decode()
         header = (
             f'Payment id="{challenge_id}", realm="api.example.com", method="tempo", '
             f'intent="charge", request="e30", opaque="{raw.decode()}"'
         )
         challenge = Challenge.from_www_authenticate(header)
-        assert challenge.verify("secret", "api.example.com")
+        assert challenge.verify("secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
     def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
@@ -1231,7 +1233,7 @@ class TestOpaqueEcho:
         from mpp import Challenge, generate_challenge_id
 
         challenge = Challenge.create(
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -1239,7 +1241,7 @@ class TestOpaqueEcho:
             meta={"route": "/v1/search", "plan": "pro"},
         )
         assert challenge.id == generate_challenge_id(
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -1247,5 +1249,5 @@ class TestOpaqueEcho:
             opaque={"plan": "pro", "route": "/v1/search"},
         )
         parsed = Challenge.from_www_authenticate(challenge.to_www_authenticate("api.example.com"))
-        assert parsed.verify("secret", "api.example.com")
+        assert parsed.verify("secret-0123456789abcdef0123456789abcdef", "api.example.com")
         assert parsed.to_echo().opaque == challenge.to_echo().opaque

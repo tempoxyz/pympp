@@ -63,13 +63,13 @@ def _server(intent: VerifiableCharge | None = None) -> Mpp:
             request={"currency": CURRENCY, "recipient": RECIPIENT},
         ),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
     )
 
 
 def _bound(request: dict[str, Any] | None = None, **kwargs: Any) -> Credential:
     kwargs.setdefault("realm", "api.example.com")
-    kwargs.setdefault("secret_key", "test-secret")
+    kwargs.setdefault("secret_key", "test-secret-0123456789abcdef0123456789abcdef")
     return make_bound_credential(payload={}, request=_wire(request), **kwargs)
 
 
@@ -106,7 +106,9 @@ async def test_legacy_intent_falls_back_to_verify() -> None:
         return Receipt.success("legacy-reference")
 
     legacy = Mpp(
-        methods=server_method(verify=verify), realm="api.example.com", secret_key="test-secret"
+        methods=server_method(verify=verify),
+        realm="api.example.com",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
     )
     with pytest.raises(VerificationFailedError, match="non-mutating"):
         await legacy.validate_credential(_bound())
@@ -128,7 +130,7 @@ async def test_route_uses_verifiable_lifecycle() -> None:
         intent=intent,
         request=_wire(request),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
     )
 
     assert isinstance(result, tuple)
@@ -231,7 +233,7 @@ async def test_verified_payer_reaches_success_path(
         intent=intent,
         request=_wire(request),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
     )
     receipt = await server.broadcast_credential(credential, request=request)
 
@@ -447,7 +449,7 @@ async def test_mpp_rejects_missing_or_invalid_expiry(expires: str | None) -> Non
     # Challenge.create refuses a malformed expires, so bind one by hand as a peer could.
     challenge = Challenge(
         id=generate_challenge_id(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",

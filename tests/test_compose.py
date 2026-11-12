@@ -110,18 +110,26 @@ def test_multi_method_creation_validates_configuration() -> None:
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
     assert [method.key for method in server.methods] == ["first/charge", "second/charge"]
 
     with pytest.raises(ValueError, match="methods is required"):
-        Mpp(methods=[], realm="api.example.com", secret_key="secret")
+        Mpp(
+            methods=[],
+            realm="api.example.com",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
+        )
 
 
 def test_compose_validates_public_entries_at_configuration_time() -> None:
     method = MockMethod("first")
-    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method.server,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     [configured] = server.methods
 
     with pytest.raises(ValueError, match="at least one entry"):
@@ -145,7 +153,7 @@ async def test_explicit_compose_renders_all_offers_and_dispatches_one_payment() 
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
     successes: list[dict[str, Any]] = []
     server.on_payment_success(successes.append)
@@ -192,7 +200,9 @@ async def test_method_request_model_controls_wire_amount() -> None:
     decimal = DecimalAmountMethod("decimal")
     units = MockMethod("units")
     server = Mpp(
-        methods=[decimal.server, units.server], realm="api.example.com", secret_key="secret"
+        methods=[decimal.server, units.server],
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
     configured = server.compose(
         ("decimal/charge", {"amount": "0.50"}), ("units/charge", {"amount": "0.50"})
@@ -215,7 +225,11 @@ async def test_method_request_model_controls_wire_amount() -> None:
     )
     assert await endpoint(paid_request) == "decimal"
 
-    single = Mpp(methods=decimal.server, realm="api.example.com", secret_key="secret")
+    single = Mpp(
+        methods=decimal.server,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     unpaid = challenge(await single.charge(amount="0.50")(http_request()))
     assert unpaid.request["amount"] == "0.50"
 
@@ -225,7 +239,11 @@ async def test_method_request_model_controls_wire_amount() -> None:
 @pytest.mark.parametrize("entry", ["compose", "charge", "pay"])
 async def test_request_model_validates_route_input(amount: Any, entry: str) -> None:
     method = DecimalAmountMethod("decimal")
-    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method.server,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     with pytest.raises(ValueError):
         if entry == "compose":
             server.compose(("decimal/charge", {"amount": amount}))
@@ -247,7 +265,7 @@ async def test_implicit_charge_and_pay_are_composition_conveniences() -> None:
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
     handler = server.charge(amount="1.50")
@@ -280,7 +298,7 @@ async def test_implicit_charge_and_pay_are_composition_conveniences() -> None:
     only_charge = Mpp(
         methods=[MockMethod("charge").server, MockMethod("session", intent="session").server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
     challenge(await only_charge.charge(amount="1.00")(http_request()))
 
@@ -292,7 +310,7 @@ async def test_implicit_pay_supports_shared_non_charge_intents() -> None:
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
     @pay(server.session(amount="1.00"))
@@ -320,9 +338,24 @@ async def test_implicit_pay_supports_shared_non_charge_intents() -> None:
 @pytest.mark.parametrize(
     ("first_realm", "second_realm", "second_secret", "second_body"),
     [
-        ("first.example.com", "second.example.com", "first-secret", b"first"),
-        ("shared.example.com", "shared.example.com", "second-secret", b"first"),
-        ("shared.example.com", "shared.example.com", "first-secret", b"second"),
+        (
+            "first.example.com",
+            "second.example.com",
+            "first-secret-0123456789abcdef0123456789abcdef",
+            b"first",
+        ),
+        (
+            "shared.example.com",
+            "shared.example.com",
+            "second-secret-0123456789abcdef0123456789abcdef",
+            b"first",
+        ),
+        (
+            "shared.example.com",
+            "shared.example.com",
+            "first-secret-0123456789abcdef0123456789abcdef",
+            b"second",
+        ),
     ],
 )
 async def test_static_nested_compose_preserves_cross_instance_ownership(
@@ -336,7 +369,7 @@ async def test_static_nested_compose_preserves_cross_instance_ownership(
     first = Mpp(
         methods=first_method.server,
         realm=first_realm,
-        secret_key="first-secret",
+        secret_key="first-secret-0123456789abcdef0123456789abcdef",
     )
     second = Mpp(
         methods=second_method.server,
@@ -370,12 +403,12 @@ async def test_meta_disambiguates_wire_identical_cross_instance_offers() -> None
     first = Mpp(
         methods=first_method.server,
         realm="shared.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     second = Mpp(
         methods=second_method.server,
         realm="shared.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     configured = compose(
         first.compose(("shared/charge", {"amount": "1.00", "meta": {"plan": "first"}})),
@@ -404,12 +437,12 @@ async def test_wire_identical_cross_instance_offers_fail_closed() -> None:
     first = Mpp(
         methods=first_method.server,
         realm="shared.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     second = Mpp(
         methods=second_method.server,
         realm="shared.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     configured = compose(
         first.compose(("shared/charge", {"amount": "1.00"})),
@@ -443,7 +476,7 @@ async def test_stable_binding_offers_prefer_the_signed_offer_then_the_first() ->
             },
         ),
         realm="api.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     configured = server.compose(
         ("session/session", {"amount": "1.00"}),
@@ -472,7 +505,7 @@ async def test_composed_offer_rejects_tampered_opaque() -> None:
     server = Mpp(
         methods=method.server,
         realm="api.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     configured = server.compose(
         ("first/charge", {"amount": "1.00", "meta": {"plan": "original"}}),
@@ -480,7 +513,7 @@ async def test_composed_offer_rejects_tampered_opaque() -> None:
     issued = challenge(await configured(http_request()))
     tampered_opaque = (
         Challenge.create(
-            secret_key="shared-secret",
+            secret_key="shared-secret-0123456789abcdef0123456789abcdef",
             realm=issued.realm,
             method=issued.method,
             intent=issued.intent,
@@ -509,7 +542,7 @@ async def test_compose_rejects_unusable_authorization_without_settlement() -> No
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="shared-secret",
+        secret_key="shared-secret-0123456789abcdef0123456789abcdef",
     )
     configured = server.compose(
         ("first/charge", {"amount": "1.00"}),
@@ -521,7 +554,7 @@ async def test_compose_rejects_unusable_authorization_without_settlement() -> No
         "Payment not-base64!!",
         credential(
             Challenge.create(
-                secret_key="shared-secret",
+                secret_key="shared-secret-0123456789abcdef0123456789abcdef",
                 realm=first_challenge.realm,
                 method="unknown",
                 intent="charge",
@@ -531,7 +564,7 @@ async def test_compose_rejects_unusable_authorization_without_settlement() -> No
         ).to_authorization(),
         credential(
             Challenge.create(
-                secret_key="shared-secret",
+                secret_key="shared-secret-0123456789abcdef0123456789abcdef",
                 realm=first_challenge.realm,
                 method="first",
                 intent="refund",
@@ -552,7 +585,11 @@ async def test_compose_rejects_unusable_authorization_without_settlement() -> No
 @pytest.mark.asyncio
 async def test_repeated_offers_keep_body_hmac_and_route_scope_bindings() -> None:
     method = MockMethod("first")
-    server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method.server,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     failures: list[dict[str, Any]] = []
     server.on_payment_failed(failures.append)
     body_calls = 0
@@ -576,7 +613,7 @@ async def test_repeated_offers_keep_body_hmac_and_route_scope_bindings() -> None
 
     forged = Credential(
         challenge=Challenge.create(
-            secret_key="wrong-secret",
+            secret_key="wrong-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="first",
             intent="charge",
@@ -615,7 +652,7 @@ async def test_requires_auth_compose_advertises_and_accepts_payment_authorizatio
     server = Mpp(
         methods=[first.server, second.server],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         requires_auth=True,
     )
     configured = server.compose(

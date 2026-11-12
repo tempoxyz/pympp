@@ -21,7 +21,11 @@ def _client(calls, **options):
         return JSONResponse({"ok": True}, headers={"Cache-Control": "public, max-age=60"})
 
     inner = Starlette(routes=[Route("/items/{id}", echo, methods=["GET", "POST"])])
-    mpp = Mpp(methods=server_method(verify=_paid), realm="example.com", secret_key="secret")
+    mpp = Mpp(
+        methods=server_method(verify=_paid),
+        realm="example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     handler = mpp.charge(amount="1", **options.pop("charge", {}))
     return TestClient(PaymentMiddleware(inner, handler, **options))
 
@@ -87,7 +91,11 @@ async def test_non_http_scopes_pass_through():
     async def inner(scope, receive, send):
         seen.append(scope["type"])
 
-    mpp = Mpp(methods=server_method(verify=_paid), realm="example.com", secret_key="secret")
+    mpp = Mpp(
+        methods=server_method(verify=_paid),
+        realm="example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     middleware = PaymentMiddleware(inner, mpp.charge(amount="1"))
     await middleware({"type": "websocket"}, None, None)  # type: ignore[arg-type]
     assert seen == ["websocket"]
@@ -131,7 +139,11 @@ def _middleware(app=None, **charge):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok"})
 
-    mpp = Mpp(methods=server_method(verify=_paid), realm="example.com", secret_key="secret")
+    mpp = Mpp(
+        methods=server_method(verify=_paid),
+        realm="example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     return PaymentMiddleware(app or default, mpp.charge(amount="1", **charge))
 
 

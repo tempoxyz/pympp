@@ -1037,12 +1037,17 @@ class TestVerifyOrChallenge:
         challenge = _make_bound_mcp_challenge(
             request=request,
             realm="realm-A",
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(MockIntent(), request, realm="realm-B", secret_key="shared-key"),
+            _handler(
+                MockIntent(),
+                request,
+                realm="realm-B",
+                secret_key="shared-key-0123456789abcdef0123456789abcdef",
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )
@@ -1060,12 +1065,17 @@ class TestVerifyOrChallenge:
         request = {"amount": "1000"}
         challenge = _make_bound_mcp_challenge(
             request=request,
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(MockIntent(), request, secret_key="shared-key", name="stripe"),
+            _handler(
+                MockIntent(),
+                request,
+                secret_key="shared-key-0123456789abcdef0123456789abcdef",
+                name="stripe",
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )
@@ -1083,12 +1093,14 @@ class TestVerifyOrChallenge:
         request = {"amount": "1000"}
         challenge = _make_bound_mcp_challenge(
             request=request,
-            secret_key="shared-key",
+            secret_key="shared-key-0123456789abcdef0123456789abcdef",
         )
         cred = MCPCredential(challenge=challenge, payload={"sig": "0x"})
 
         result = await verify_or_challenge(
-            _handler(SessionIntent(), request, secret_key="shared-key"),
+            _handler(
+                SessionIntent(), request, secret_key="shared-key-0123456789abcdef0123456789abcdef"
+            ),
             tool="test-tool",
             meta=cred.to_meta(),
         )

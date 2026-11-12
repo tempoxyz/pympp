@@ -35,7 +35,9 @@ assert_type(methods, list[server_api.ServerMethod])
 method = methods[0]
 assert_type(method.can_offer, CanOfferFn | None)
 assert_type(method.on_payment_success, PaymentSuccessHandler | None)
-server = server_api.Mpp(methods=methods, realm="example.com", secret_key="secret")
+server = server_api.Mpp(
+    methods=methods, realm="example.com", secret_key="secret-0123456789abcdef0123456789abcdef"
+)
 handler = server.compose(("tempo/charge", {"amount": "1.00", "meta": {"plan": "pro"}}))
 assert_type(handler, server_api.ComposedHandler)
 assert_type(server_api.compose(handler), server_api.ComposedHandler)
@@ -67,7 +69,9 @@ machine_payments.spt.charge()
 machine_payments.tempo.charge()
 private_options: PaymentIntentInput = {"customer": "cus_test"}
 machine_server = server_api.Mpp(
-    methods=machine_payments.default_methods(), realm="example.com", secret_key="secret"
+    methods=machine_payments.default_methods(),
+    realm="example.com",
+    secret_key="secret-0123456789abcdef0123456789abcdef",
 )
 machine_server.compose(
     (machine_payments.spt.charge(), {"amount": "0.50", "payment_intent_options": private_options})
@@ -78,4 +82,8 @@ stripe_module.create(
 )
 
 stripe_server.charge(network_id="bn_test", unknown=True)  # pyright: ignore[reportCallIssue]
-server_api.Mpp(methods=machine_payments.default_methods(), realm="example.com", secret_key="secret")
+server_api.Mpp(
+    methods=machine_payments.default_methods(),
+    realm="example.com",
+    secret_key="secret-0123456789abcdef0123456789abcdef",
+)

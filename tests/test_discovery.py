@@ -52,7 +52,11 @@ def _session() -> ServerMethod:
 
 
 def _mpp(*methods: Any) -> Mpp:
-    return Mpp(methods=list(methods), realm="api.example.com", secret_key="s" * 32)
+    return Mpp(
+        methods=list(methods),
+        realm="api.example.com",
+        secret_key="s-0123456789abcdef0123456789abcdef" * 32,
+    )
 
 
 def _offers(document: dict[str, Any], path: str, method: str) -> list[dict[str, Any]]:

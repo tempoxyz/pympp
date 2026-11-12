@@ -155,6 +155,24 @@ def generate_challenge_id(
     )
 
 
+MIN_SECRET_KEY_BYTES = 32
+"""Minimum length in bytes (UTF-8) of the HMAC challenge-binding secret, per the core spec."""
+
+
+def check_secret_key(secret_key: str) -> None:
+    """Refuse an HMAC challenge-binding secret shorter than 32 bytes.
+
+    Raises:
+        ValueError: If ``secret_key`` is shorter than :data:`MIN_SECRET_KEY_BYTES`
+            in UTF-8. Generate one with ``openssl rand -base64 32``.
+    """
+    if len(secret_key.encode("utf-8")) < MIN_SECRET_KEY_BYTES:
+        raise ValueError(
+            f"secret_key must be at least {MIN_SECRET_KEY_BYTES} bytes; "
+            "generate one with: openssl rand -base64 32"
+        )
+
+
 def _challenge_id(
     *,
     secret_key: str,
@@ -168,6 +186,7 @@ def _challenge_id(
     header: str | None,
 ) -> str:
     """Compute the challenge ID over an already-encoded opaque parameter."""
+    check_secret_key(secret_key)
     request_b64 = canonical_b64url(request)
 
     hmac_parts = [
