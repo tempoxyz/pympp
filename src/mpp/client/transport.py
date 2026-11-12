@@ -22,7 +22,7 @@ import httpx
 
 from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _split_header_list
 from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
@@ -204,19 +204,26 @@ async def _buffer_error_body(response: httpx.Response) -> None:
 _INVALID_CHALLENGE_TYPE = "https://paymentauth.org/problems/invalid-challenge"
 
 
-async def _is_invalid_challenge(response: httpx.Response) -> bool:
-    """Whether a ``402`` carries the ``invalid-challenge`` problem type; keeps its body readable."""
+async def _paid_retry_is_final(response: httpx.Response, method: str = "GET") -> bool:
+    """Whether a ``402`` answering a sent credential is final; keeps its body readable.
+
+    An ``invalid-challenge`` problem (an unknown or already used challenge) is final,
+    as in mppx. So is a ``402`` that cannot say why the credential was rejected: the
+    answer to ``HEAD``, which has no body, or a problem document that is empty or does
+    not parse. Paying its fresh challenge could pay twice for one request.
+    """
+    if method.upper() == "HEAD":
+        return True
     media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if media_type != "application/problem+json":
         return False
-    with suppress(Exception):
+    try:
         await _buffer_error_body(response)
         await response.aread()
-    try:
         problem = response.json()
     except Exception:
-        return False
-    return is_dict(problem) and problem.get("type") == _INVALID_CHALLENGE_TYPE
+        return True
+    return not is_dict(problem) or problem.get("type") == _INVALID_CHALLENGE_TYPE
 
 
 def _is_pushed(credential: Credential) -> bool:
@@ -394,9 +401,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 if response.status_code != 402:
                     return response
                 # A sent credential answered with invalid-challenge (an unknown or already
-                # used challenge, such as a replay) is final: paying the fresh challenge
+                # used challenge, such as a replay), or that cannot say why (a HEAD
+                # response, an empty or unparseable problem), is final: paying the fresh challenge
                 # could pay twice for one request.
-                if retry > 0 and await _is_invalid_challenge(response):
+                if retry > 0 and await _paid_retry_is_final(response, request.method):
                     return response
                 # EIP-3009 authorizations remain spendable even after a 402 response.
                 if sent is not None and (
@@ -925,24 +933,9 @@ def _payment_challenges(value: str) -> list[str]:
     """Return Payment challenges, preserving quoted commas and escapes."""
     if len(value) > MAX_AUTHORIZATION_SIZE:
         return []
-    fields: list[str] = []
-    start = 0
-    quoted = escaped = False
-    for index, character in enumerate(value):
-        if escaped:
-            escaped = False
-        elif quoted and character == "\\":
-            escaped = True
-        elif character == '"':
-            quoted = not quoted
-        elif character == "," and not quoted:
-            fields.append(value[start:index])
-            start = index + 1
-    fields.append(value[start:])
-
     challenges: list[str] = []
     current: list[str] | None = None
-    for field in map(str.strip, fields):
+    for field in _split_header_list(value):
         scheme, _, remainder = field.partition(" ")
         if "=" not in scheme and not remainder.lstrip().startswith("="):
             if current:

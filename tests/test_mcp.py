@@ -1718,10 +1718,26 @@ async def test_replay_gets_a_fresh_mcp_challenge() -> None:
         tool="paid",
         meta=MCPCredential(challenge=challenge, payload={}).to_meta(),
     )
-    # An already-used challenge is answered with a fresh one (core spec).
+    # An already-used challenge is answered with a fresh one (core spec), and the
+    # -32042 carries the invalid-challenge problem so clients don't take it for a
+    # first payment request.
     assert isinstance(result, list)
     assert len(result) == 1
     assert result[0].id != challenge.id
+    data = PaymentRequiredError(challenges=result).to_jsonrpc_error()["data"]
+    assert data["problem"]["type"] == "https://paymentauth.org/problems/invalid-challenge"
+    assert data["challenges"] == [result[0].to_dict()]
+
+
+async def test_first_mcp_challenge_carries_no_problem() -> None:
+    from unittest.mock import AsyncMock
+
+    intent = AsyncMock(spec=["verify"])
+    intent.name = "charge"
+    handler = _handler(intent, name="stripe", realm="shared")
+    result = await verify_or_challenge(handler, tool="paid", meta=None)
+    assert isinstance(result, list)
+    assert "problem" not in PaymentRequiredError(challenges=result).to_jsonrpc_error()["data"]
 
 
 def test_unnamed_decorated_handlers_require_explicit_identity() -> None:

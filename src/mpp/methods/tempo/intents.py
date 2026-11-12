@@ -2722,6 +2722,18 @@ class ChargeIntent:
                         else time.time() + _UNSPONSORED_MARKER_TTL,
                         challenge_id,
                     )
+            # The awaits since the check above (budget transition, receipt lookup,
+            # marker write) can outlast the Challenge: check again with no await
+            # between this check and the send.
+            if expires is not None and _challenge_expired(expires):
+                if reconciling:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Earlier submission of this transaction has an unknown outcome"
+                    )
+                # Nothing was sent: drop the marker this attempt wrote, as for a send
+                # that never reached the node.
+                node_rejected = True
+                raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
             try:
