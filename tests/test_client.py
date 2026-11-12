@@ -3725,3 +3725,159 @@ def test_cancel_scope_during_hook_creation_under_any_backend(backend: str) -> No
         assert raised[0].transaction_hash == tx_hash
 
     anyio.run(run, backend=backend)
+
+
+@pytest.mark.parametrize("source", ["task", "scope"])
+async def test_cancellation_after_the_hook_returned_reaches_the_creation_once(source: str):
+    """A request cancelled after the hook returned cancels its creation once.
+
+    The method awaits twice while reporting its broadcast payment, as it does
+    without a hook, and the hash still reaches the caller.
+    """
+    import anyio
+
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e6" * 32
+    started = asyncio.Event()
+
+    async def create(challenge, authorization):
+        started.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+            raise PaymentOutcomeUnknownError(
+                challenge, RuntimeError("cancelled after broadcast"), transaction_hash=tx_hash
+            ) from None
+        return authorization
+
+    _, inner, method = _push_setup(tx_hash, create)
+
+    def hook(challenge: Challenge, context) -> bool | None:
+        # Scheduled without awaiting: the hook returns while the creation runs.
+        context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    scope = anyio.CancelScope()
+
+    async def request() -> None:
+        with scope:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+    task = asyncio.ensure_future(request())
+    await started.wait()
+    if source == "task":
+        task.cancel()
+    else:
+        scope.cancel()
+    with pytest.raises(PaymentOutcomeUnknownError) as excinfo:
+        await asyncio.wait_for(task, timeout=1)
+    assert excinfo.value.transaction_hash == tx_hash
+    assert len(inner.requests) == 1
+
+
+async def test_second_cancellation_after_the_hook_returned_reaches_the_creation():
+    """Every cancellation of the request reaches the creation once, after the hook too."""
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def create(challenge, authorization):
+        started.set()
+        try:
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(10)
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+        return authorization
+
+    _, inner, method = _push_setup("0x" + "e7" * 32, create)
+
+    def hook(challenge: Challenge, context) -> bool | None:
+        context.create_credential()
+        return None
+
+    transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+    task = asyncio.ensure_future(
+        transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+    )
+    await started.wait()
+    task.cancel()
+    await asyncio.sleep(0.01)
+    assert not task.done()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=0.5)
+    assert stopped.is_set()
+
+
+@pytest.mark.parametrize("backend", ["asyncio", "trio"])
+@pytest.mark.parametrize("awaited", [True, False])
+def test_cancel_scope_after_the_hook_returned_under_any_backend(
+    backend: str, awaited: bool
+) -> None:
+    """A creation cancelled after the hook returned reports its broadcast payment.
+
+    The method awaits twice while reporting it, shielded as anyio cancellation
+    requires under trio, where a cancelled scope cancels every await within it.
+    """
+    import anyio
+
+    from mpp.errors import PaymentOutcomeUnknownError
+
+    tx_hash = "0x" + "e8" * 32
+
+    async def run() -> None:
+        started = anyio.Event()
+        returned = anyio.Event()
+
+        async def create(challenge, authorization):
+            started.set()
+            try:
+                await anyio.sleep(10)
+            except anyio.get_cancelled_exc_class():
+                with anyio.CancelScope(shield=True):
+                    await anyio.sleep(0)
+                    await anyio.sleep(0.01)
+                raise PaymentOutcomeUnknownError(
+                    challenge, RuntimeError("cancelled after broadcast"), transaction_hash=tx_hash
+                ) from None
+            return authorization
+
+        _, inner, method = _push_setup(tx_hash, create)
+
+        async def hook(challenge: Challenge, context) -> bool | None:
+            context.create_credential()
+            if awaited:
+                await started.wait()
+            returned.set()
+            return None
+
+        transport = PaymentTransport(methods=[method], inner=inner, on_challenge=hook)
+        scope = anyio.CancelScope()
+        raised: list[BaseException] = []
+
+        async def cancel() -> None:
+            await started.wait()
+            await returned.wait()
+            scope.cancel()
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as group:
+                group.start_soon(cancel)
+                try:
+                    with scope:
+                        await transport.handle_async_request(
+                            httpx.Request("GET", "https://example.com")
+                        )
+                except PaymentOutcomeUnknownError as error:
+                    raised.append(error)
+        assert [type(error) for error in raised] == [PaymentOutcomeUnknownError]
+        assert cast("PaymentOutcomeUnknownError", raised[0]).transaction_hash == tx_hash
+        assert len(inner.requests) == 1
+
+    anyio.run(run, backend=backend)

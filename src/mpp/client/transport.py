@@ -1021,10 +1021,26 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         finished = anyio.Event()
         failures: list[BaseException] = []
         closed = False
-        # Under asyncio, the creation's own task, to forward a cancellation of this
-        # one exactly once (as task.cancel() delivers it), not at every await as a
-        # cancel scope would: a method may await while reporting a broadcast.
+        # Under asyncio, the creation runs shielded from the task group's cancel
+        # scope, and each cancellation of this request reaches it exactly once,
+        # through its own task (as task.cancel() delivers it without a hook), not
+        # at every await as a cancel scope would: a method may await while
+        # reporting a broadcast. Under trio, a cancelled scope cancels every await
+        # within it, with or without a hook, so the enclosing scope reaches it.
+        on_asyncio = False
+        with suppress(RuntimeError):
+            on_asyncio = asyncio.current_task() is not None
         creation_task: asyncio.Task[Any] | None = None
+        # A cancellation forwarded before the creation's task started.
+        cancel_pending = False
+
+        def forward_cancellation() -> None:
+            """Cancel the creation once, under asyncio."""
+            nonlocal cancel_pending
+            if creation_task is not None:
+                creation_task.cancel()
+            else:
+                cancel_pending = True
 
         async def release(attempt: PaymentAttempt) -> None:
             with anyio.CancelScope(shield=True):
@@ -1032,8 +1048,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
 
         async def create_once() -> None:
             nonlocal created, creation_task
-            with suppress(RuntimeError):
+            if on_asyncio:
                 creation_task = asyncio.current_task()
+                if cancel_pending:
+                    # Delivered at its first await, inside the shield below.
+                    assert creation_task is not None
+                    creation_task.cancel()
             attempt = PaymentAttempt()
             arguments: dict[str, Any] = {
                 "request": request,
@@ -1042,17 +1062,18 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             }
             keywords = self._credential_keywords
             try:
-                credential = await self._runtime.create_credential(
-                    challenge,
-                    method,
-                    event_payload={
-                        "challenges": challenges,
-                        "request": request,
-                        "response": response,
-                    },
-                    **{key: value for key, value in arguments.items() if key in keywords},
-                )
-                authorization = credential.to_authorization()
+                with anyio.CancelScope(shield=on_asyncio):
+                    credential = await self._runtime.create_credential(
+                        challenge,
+                        method,
+                        event_payload={
+                            "challenges": challenges,
+                            "request": request,
+                            "response": response,
+                        },
+                        **{key: value for key, value in arguments.items() if key in keywords},
+                    )
+                    created = (credential, credential.to_authorization(), attempt)
             except BaseException as error:
                 await release(attempt)
                 failures.append(
@@ -1065,7 +1086,6 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     # Cancellation (and KeyboardInterrupt) must propagate in the group.
                     raise
                 return
-            created = (credential, authorization, attempt)
             finished.set()
 
         async def wait_created() -> str:
@@ -1114,17 +1134,34 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     hook_error = error
                 finally:
                     closed = True
-                if hook_error is not None and not isinstance(hook_error, Exception):
+                forwarded = hook_error is not None and not isinstance(hook_error, Exception)
+                if forwarded:
                     # The hook was cancelled (or interrupted) along with this request:
-                    # forward it to the creation, then wait for it at the end of the
-                    # group. Under trio, the enclosing cancel scope already reached it.
-                    if creation_task is not None:
-                        creation_task.cancel()
+                    # forward it to the creation, then wait for it. Under trio, the
+                    # enclosing cancel scope already reached it.
+                    if on_asyncio:
+                        forward_cancellation()
                     else:
                         group.cancel_scope.cancel()
+                if on_asyncio:
+                    # Wait for the creation here rather than at the end of the group,
+                    # whose cancel scope would cancel it at every await, forwarding
+                    # each later cancellation of this request once, whether the hook
+                    # returned or not. Once one is forwarded, the wait is shielded so
+                    # a cancelled scope around the request does not forward it again;
+                    # task.cancel() still reaches it.
+                    while started and not finished.is_set():
+                        try:
+                            with anyio.CancelScope(shield=forwarded):
+                                await finished.wait()
+                        except cancelled as error:
+                            if hook_error is None:
+                                hook_error = error
+                            forward_cancellation()
+                            forwarded = True
         except BaseException as error:
-            # Cancelled (or interrupted) while the creation finished; the group
-            # waited for it, forwarding the cancellation.
+            # Cancelled (or interrupted) while the group waited for the creation
+            # (under trio, where the enclosing cancel scope reached it too).
             if hook_error is None or not isinstance(error, cancelled):
                 hook_error = error
         failure = failures[0] if failures else None
