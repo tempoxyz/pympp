@@ -629,18 +629,62 @@ def _is_undelivered_send_error(error: Exception) -> bool:
     return False
 
 
+# Message fragments of node validation errors that reject a transaction before
+# it enters the pool, as mpp-rs's ``broadcast_refused`` lists them.
+_NODE_REFUSAL_FRAGMENTS = (
+    "insufficient funds",
+    "insufficient balance",
+    "invalid signature",
+    "signature is invalid",
+    "intrinsic gas",
+    "gas limit too low",
+    "exceeds block gas limit",
+    "fee too low",
+    "underpriced",
+    "max fee per gas less than",
+    "fee cap",
+    "valid_before",
+    "validbefore",
+    "valid_after",
+    "validafter",
+    "transaction expired",
+    "transaction type not supported",
+    "invalid chain id",
+    "chain id mismatch",
+)
+
+# JSON-RPC parse error, invalid request and invalid params: the request was
+# refused before the transaction was looked at.
+_MALFORMED_REQUEST_CODES = frozenset({-32700, -32600, -32602})
+
+
 def _is_definite_node_rejection(result: dict[str, Any]) -> bool:
     """Return true when a JSON-RPC error shows the node refused the transaction.
 
-    EIP-7966 timeouts (code 4), internal errors (-32603) and messages that
-    mention a timeout leave the outcome open. Everything else, including
-    "already known" (someone else may have submitted the transaction), is a
-    refusal of this server's own submission.
+    Only an error that names a validation failure counts: a malformed request
+    or invalid params, insufficient funds or balance, a bad signature, too
+    little gas, a fee below what the node takes, an expired or out-of-range
+    ``valid_before``, or "already known" (the node already held the
+    transaction from another submission). Nonce errors (the nonce may have
+    been used by this very submission), EIP-7966 timeouts (code 4), internal
+    errors (-32603), messages that mention a timeout and any error the node
+    does not explain leave the outcome open, so the broadcast marker is kept
+    for a retry to reconcile.
     """
     rpc_error = result.get("error")
-    if is_dict(rpc_error) and rpc_error.get("code") in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603):
+    code = rpc_error.get("code") if is_dict(rpc_error) else None
+    message = _rpc_error_msg(result).lower()
+    if (
+        code in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603)
+        or "nonce" in message
+        or _TIMEOUT_MESSAGE_RE.search(message) is not None
+    ):
         return False
-    return _TIMEOUT_MESSAGE_RE.search(_rpc_error_msg(result)) is None
+    return (
+        code in _MALFORMED_REQUEST_CODES
+        or ALREADY_KNOWN_TRANSACTION_RE.search(message) is not None
+        or any(fragment in message for fragment in _NODE_REFUSAL_FRAGMENTS)
+    )
 
 
 def _encode_broadcast_marker(challenge_id: str, raw_tx: str) -> str:
