@@ -185,6 +185,8 @@ class KeySet:
             if (keys := self._cached(max_age)) is not None:
                 return keys
             self._attempted_at = time.monotonic()
+            # Cleared for this attempt, so one that is cancelled replays no older error.
+            self._error = None
             try:
                 self._keys = await self._load()
             except Exception as error:

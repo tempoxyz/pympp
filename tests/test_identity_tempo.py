@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import time
 from collections.abc import Callable
@@ -600,6 +601,23 @@ async def test_a_proof_id_with_a_lone_surrogate_is_malformed_not_a_store_outage(
     )
 
 
+async def test_a_request_url_with_no_ascii_form_fails_the_proof(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    request = dpop_request(token, key)
+
+    def broken(url: str) -> str:
+        raise UnicodeEncodeError("ascii", url, 0, 1, "not ASCII")
+
+    monkeypatch.setattr(jwt, "htu", broken)
+    assert reason(await tempo_id(issuer).verifier.verify(request)) == (
+        "invalid",
+        "The DPoP proof is for another request.",
+    )
+
+
 # --- Key set ------------------------------------------------------------------------------------
 
 
@@ -656,6 +674,31 @@ async def test_a_stale_set_that_expires_within_30_seconds_of_a_failure_does_not_
     with pytest.raises(RuntimeError, match="500"):
         await keys.get("key-1")
     assert issuer.fetches == fetches, "no fetch within 30 seconds of the failed one"
+
+
+async def test_a_cancelled_refetch_does_not_replay_an_older_error(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    keys = jwt.KeySet(ISSUER, issuer.http())
+    assert await keys.get("key-1") is not None
+    issuer.status = 500
+    now[0] += 3_000
+    assert await keys.get("key-1") is not None, "the stale set serves the failed refetch"
+    now[0] += 590
+
+    async def cancelled() -> dict[str, Any]:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(keys, "_load", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        await keys.get("unknown")
+    monkeypatch.undo()
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    issuer.status = 200
+    now[0] += 20
+    assert await keys.get("key-1") is not None, "the next request fetches again"
 
 
 async def test_a_remembered_key_set_error_does_not_grow_its_traceback(

@@ -351,7 +351,12 @@ class _Rules:
             return "The DPoP proof signature is invalid."
 
         claims = proof.claims
-        if claims.get("htm") != request.method or claims.get("htu") != jwt.htu(request.url):
+        try:
+            target = jwt.htu(request.url)
+        except (ValueError, httpx.InvalidURL):
+            # A request URL with no ASCII form can match no proof.
+            return "The DPoP proof is for another request."
+        if claims.get("htm") != request.method or claims.get("htu") != target:
             return "The DPoP proof is for another request."
         if claims.get("ath") != jwt.sha256(token):
             return "The DPoP proof is for another token."
