@@ -233,11 +233,9 @@ class _Rules:
         if dpop != (jkt is not None):
             return _invalid("The access token scheme does not match its binding.")
         if dpop:
-            try:
-                reason = await self._check_proof(request, jkt=str(jkt), now=now, token=token)
-            except Exception:
-                # A replay store that fails rejects, so a proof cannot be spent twice.
-                return unavailable("The DPoP replay store is unavailable.")
+            reason = await self._check_proof(request, jkt=str(jkt), now=now, token=token)
+            if isinstance(reason, Rejected):
+                return reason
             if reason is not None:
                 return _invalid(reason)
 
@@ -330,8 +328,10 @@ class _Rules:
             return (None, None)
         return (email.lower(), claims.get("email_verified") is True)
 
-    async def _check_proof(self, request: Request, *, jkt: str, now: int, token: str) -> str | None:
-        """Why a request's DPoP proof fails, or None."""
+    async def _check_proof(
+        self, request: Request, *, jkt: str, now: int, token: str
+    ) -> str | Rejected | None:
+        """Why a request's DPoP proof fails, or None; a rejection when the replay store fails."""
         proof = jwt.decode(request.headers.get("DPoP") or "")
         if (
             proof is None
@@ -365,11 +365,20 @@ class _Rules:
         if not isinstance(jti, str) or not jti:
             return "The DPoP proof has no ID."
         if self.store is not None:
-            key_id = f"mppx:tempo-id:dpop:{jwt.sha256(f'{jkt}:{jti}')}"
+            try:
+                key_id = f"mppx:tempo-id:dpop:{jwt.sha256(f'{jkt}:{jti}')}"
+            except UnicodeEncodeError:
+                # A lone surrogate decodes from JSON but has no UTF-8 form to hash.
+                return "The DPoP proof is malformed."
             # `now` is whole seconds, so the proof is accepted until the second after
             # `expires` begins: the replay claim must last at least that long.
             until = math.floor(expires) + 1
-            if not await self.store.put_if_absent_until(key_id, "1", until):
+            try:
+                fresh = await self.store.put_if_absent_until(key_id, "1", until)
+            except Exception:
+                # A replay store that fails rejects, so a proof cannot be spent twice.
+                return unavailable("The DPoP replay store is unavailable.")
+            if not fresh:
                 return "The DPoP proof was already used."
         return None
 

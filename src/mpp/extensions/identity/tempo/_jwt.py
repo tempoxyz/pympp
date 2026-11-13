@@ -188,9 +188,11 @@ class KeySet:
             try:
                 self._keys = await self._load()
             except Exception as error:
+                # Recorded even when the stale set serves this request, so the 30-second
+                # retry limit still holds once that set passes its hour.
+                self._error = error
                 if (stale := self._stale()) is not None:
                     return stale
-                self._error = error
                 raise
             self._loaded_at = time.monotonic()
             self._error = None
@@ -212,7 +214,9 @@ class KeySet:
             if (stale := self._stale()) is not None:
                 return stale
             if self._error is not None:
-                raise self._error
+                # Each raise appends the raiser's frames to the shared error's traceback;
+                # clearing it keeps rejected requests from piling up in memory.
+                raise self._error.with_traceback(None)
         return None
 
     def _stale(self) -> dict[str, rsa.RSAPublicKey] | None:
