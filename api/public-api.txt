@@ -392,7 +392,7 @@ module mpp.extensions.identity.tempo.server
         @dataclass(frozen=True, slots=True)
         field verifier: Verifier[Caller]
         field payment_check: PaymentCheck[Payer]
-    def create(*, client_id: str | Sequence[str], store: ExpiringStore | None = None, chain_id: int = 4217, audience: str | None = None, issuer: str = 'https://id.tempo.xyz', allow: Allow | None = None, http: httpx.AsyncClient | None = None) -> TempoId
+    def create(*, client_id: str | Sequence[str] | None = None, store: ExpiringStore | None = None, chain_id: int = 4217, audience: str | None = None, issuer: str = 'https://id.tempo.xyz', allow: Allow | None = None, http: httpx.AsyncClient | None = None) -> TempoId
 
 module mpp.extensions.mcp
     CODE_MALFORMED_CREDENTIAL = -32602
@@ -494,7 +494,7 @@ module mpp.identity
     _DEFAULT_REASONS: mappingproxy
     IDENTITY_REQUIRED_HEADER = 'Identity-Required'
     PRECEDENCE = ('forbidden', 'unavailable', 'invalid', 'missing')
-    REQUEST_HEADERS = ('identity-attestation', 'identity-presentation')
+    REQUEST_HEADERS = ('dpop', 'identity-attestation', 'identity-presentation', 'tempo-id-token')
     STATUS_CODES: mappingproxy
     class AnyOf(mpp.identity.Verifier[mpp.identity.AnyOfValue])
         @dataclass(frozen=True, slots=True)

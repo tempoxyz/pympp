@@ -197,6 +197,16 @@ TOKEN_CASES: list[tuple[str, Callable[[Issuer], Request], tuple[str, str]]] = [
         ("forbidden", "This app may not call this API."),
     ),
     (
+        "no app",
+        lambda i: bearer(i.access_token(client_id=None)),
+        ("forbidden", "This app may not call this API."),
+    ),
+    (
+        "no space",
+        lambda i: http_request(f"Bearer\t{i.access_token()}", url=API),
+        ("missing", "Sign in with Tempo ID."),
+    ),
+    (
         "bearer for a bound token",
         lambda i: bearer(i.access_token(DpopKey.generate())),
         ("invalid", "The access token scheme does not match its binding."),
@@ -536,6 +546,41 @@ def test_create_needs_an_app() -> None:
         create(client_id=[])
 
 
+@pytest.mark.parametrize(
+    ("client_id", "accepted"), [("app_1", True), ("app_2", True), (None, False), (7, False)]
+)
+async def test_without_client_id_any_apps_token_passes(
+    issuer: Issuer, client_id: Any, accepted: bool
+) -> None:
+    verifier = create(http=issuer.http()).verifier
+    outcome = await verifier.verify(bearer(issuer.access_token(client_id=client_id)))
+    if accepted:
+        assert isinstance(outcome, Valid) and outcome.value.client_id == client_id
+    else:
+        assert reason(outcome) == ("forbidden", "This app may not call this API.")
+
+
+@pytest.mark.parametrize("authorization", ["Bearer  {t}", "Bearer {t}  ", "bearer   {t} "])
+async def test_spaces_around_the_token_are_allowed(issuer: Issuer, authorization: str) -> None:
+    request = http_request(authorization.format(t=issuer.access_token()), url=API)
+    assert isinstance(await tempo_id(issuer).verifier.verify(request), Valid)
+
+
+class FailingStore(MemoryStore):
+    async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+        raise ConnectionError("store down")
+
+
+async def test_a_failing_replay_store_rejects_as_unavailable(issuer: Issuer) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    verifier = tempo_id(issuer, store=FailingStore()).verifier
+    assert reason(await verifier.verify(dpop_request(token, key))) == (
+        "unavailable",
+        "The DPoP replay store is unavailable.",
+    )
+
+
 # --- Key set ------------------------------------------------------------------------------------
 
 
@@ -556,6 +601,25 @@ async def test_keys_are_cached_and_unknown_ids_refetch_at_most_every_30_seconds(
     now[0] += 301
     issuer.status = 500
     assert await keys.get("key-1") is not None, "a failed refetch keeps the last set"
+
+
+async def test_a_loaded_key_set_serves_failed_refetches_for_an_hour_only(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    keys = jwt.KeySet(ISSUER, issuer.http())
+    assert await keys.get("key-1") is not None
+    issuer.status = 500
+    now[0] += 3_000
+    assert await keys.get("key-1") is not None, "a failed refetch keeps a set under an hour old"
+    now[0] += 601
+    with pytest.raises(RuntimeError, match="500"):
+        await keys.get("key-1")
+    fetches = issuer.fetches
+    with pytest.raises(RuntimeError, match="500"):
+        await keys.get("key-1")
+    assert issuer.fetches == fetches, "the failure is remembered for 30 seconds"
 
 
 async def test_a_key_set_that_never_loaded_raises_and_retries_at_most_every_30_seconds(
@@ -596,6 +660,16 @@ async def test_the_prover_sends_a_token_the_server_accepts(issuer: Issuer, bound
     request = Request("POST", API, headers=list(proved.headers.multi_items()))
     outcome = await tempo_id(issuer, store=MemoryStore()).verifier.verify(request)
     assert isinstance(outcome, Valid) and outcome.value.email == "alice@example.com"
+
+
+async def test_the_prover_refuses_to_replace_a_payment_credential_in_authorization() -> None:
+    tempo_prover = prover(access_token=lambda: "token", scope="*")
+    paid = httpx.Request("GET", API, headers={"Authorization": "Payment abc"})
+    with pytest.raises(TypeError, match="requires_auth=True"):
+        await tempo_prover.prove(paid, ProveContext.new())
+    other = httpx.Request("GET", API, headers={"Authorization": "Basic abc"})
+    proved = await tempo_prover.prove(other, ProveContext.new())
+    assert proved.headers["Authorization"] == "Bearer token"
 
 
 def test_dpop_keys_must_be_p256() -> None:

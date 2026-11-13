@@ -26,6 +26,9 @@ KEY_SET_MAX_AGE = 300.0
 KEY_SET_RETRY = 30.0
 """Seconds between fetches when a key ID is unknown or the issuer is unreachable."""
 KEY_SET_TIMEOUT = 5.0
+KEY_SET_STALE = 3_600.0
+"""Seconds a loaded key set keeps serving while refetches fail, so a removed key stops
+verifying within an hour even while the issuer is unreachable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,8 +56,10 @@ def encode(value: Any) -> str:
 
 def decode(token: str) -> Decoded | None:
     """Decode a compact JWS without verifying it, or None if it is malformed."""
+    if len(token) > MAX_TOKEN_LENGTH:
+        return None
     parts = token.split(".")
-    if len(token) > MAX_TOKEN_LENGTH or len(parts) != 3:
+    if len(parts) != 3:
         return None
     try:
         header = json.loads(b64url_decode(parts[0]))
@@ -149,8 +154,8 @@ class KeySet:
     """An issuer's RS256 keys by key ID, from ``<issuer>/oauth2/jwks``.
 
     The set is cached for five minutes, and an unknown key ID refetches it at most every 30
-    seconds. A failed fetch keeps the last set that loaded; without one, it raises, and keeps
-    raising that error without fetching again for 30 seconds.
+    seconds. A failed fetch keeps the last set that loaded for up to an hour after it loaded;
+    without one, it raises, and keeps raising that error without fetching again for 30 seconds.
     """
 
     def __init__(self, issuer: str, http: httpx.AsyncClient | None = None) -> None:
@@ -183,8 +188,8 @@ class KeySet:
             try:
                 self._keys = await self._load()
             except Exception as error:
-                if self._keys is not None:
-                    return self._keys
+                if (stale := self._stale()) is not None:
+                    return stale
                 self._error = error
                 raise
             self._loaded_at = time.monotonic()
@@ -198,19 +203,23 @@ class KeySet:
             Exception: The last fetch's error, when no set ever loaded and that fetch was
                 within the last 30 seconds.
         """
-        if self._usable(max_age):
+        now = time.monotonic()
+        if self._keys is not None and now - self._loaded_at < max_age:
             return self._keys
-        if self._keys is None and self._error is not None:
-            if time.monotonic() - self._attempted_at < KEY_SET_RETRY:
+        if now - self._attempted_at < KEY_SET_RETRY:
+            # Within 30 seconds of the last attempt: the last set while it isn't stale, else the
+            # last error, so an unreachable issuer gets at most one fetch each 30 seconds.
+            if (stale := self._stale()) is not None:
+                return stale
+            if self._error is not None:
                 raise self._error
         return None
 
-    def _usable(self, max_age: float) -> bool:
-        """Whether the cached set serves: fresh enough, or fetched within the last 30 seconds."""
-        if self._keys is None:
-            return False
-        now = time.monotonic()
-        return now - self._loaded_at < max_age or now - self._attempted_at < KEY_SET_RETRY
+    def _stale(self) -> dict[str, rsa.RSAPublicKey] | None:
+        """The last loaded set while it is younger than an hour, else None."""
+        if self._keys is not None and time.monotonic() - self._loaded_at < KEY_SET_STALE:
+            return self._keys
+        return None
 
     async def _load(self) -> dict[str, rsa.RSAPublicKey]:
         if self._http is None:

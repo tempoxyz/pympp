@@ -83,6 +83,13 @@ def prover(
     """
 
     async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        # The access token would replace a Payment Credential in Authorization; a server created
+        # with requires_auth=True takes the Credential in Payment-Authorization instead.
+        if request.headers.get("Authorization", "").lower().startswith("payment "):
+            raise TypeError(
+                "The Tempo ID access token needs Authorization, which holds the Payment "
+                "Credential: the server must set requires_auth=True."
+            )
         token = await _call(access_token)
         headers = {"Authorization": f"{'DPoP' if dpop else 'Bearer'} {token}"}
         if dpop is not None:
