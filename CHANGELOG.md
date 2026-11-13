@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.24.0 (2026-11-13)
+
+### Minor Changes
+
+- Added identity verification primitives (`mpp.identity`) and the Tempo ID provider (`mpp.extensions.identity.tempo`, installable via `pympp[tempo-id]`), enabling routes to require verified identity in addition to payment. Extended `PaymentTransport` and `Mpp` with an optional `identity` parameter for client-side provers, and added `identity` and `rejection` fields to `PaymentVerified` and `PaymentRequired` respectively. (by @brendanjryan, [#423](https://github.com/tempoxyz/pympp/pull/423))
+
+### Patch Changes
+
+- Made `client_id` optional in `tempo.server.create` (defaults to `None`, accepting any app's tokens). Added `'dpop'` and `'tempo-id-token'` to `REQUEST_HEADERS`. Also limited serving a stale key set to one hour after it loaded, accepted extra spaces in the `Authorization` header, rejected requests as unavailable when the DPoP replay store fails, and made the client prover leave a Payment Credential already in `Authorization` in place. (by @brendanjryan, [#425](https://github.com/tempoxyz/pympp/pull/425))
+- Fixed edge cases in Tempo ID token verification: a DPoP proof whose ID has a lone surrogate is rejected as malformed instead of as a replay store outage, only a failing replay store rejects as unavailable, the key set records a failed refetch even when it serves the stale set so the 30-second retry limit holds, and a remembered key set error no longer accumulates tracebacks. (by @brendanjryan, [#427](https://github.com/tempoxyz/pympp/pull/427))
+
 ## 0.23.0 (2026-11-10)
 
 ### Minor Changes
