@@ -69,7 +69,7 @@ class TempoId:
 
 def create(
     *,
-    client_id: str | Sequence[str],
+    client_id: str | Sequence[str] | None = None,
     store: ExpiringStore | None = None,
     chain_id: int = DEFAULT_CHAIN_ID,
     audience: str | None = None,
@@ -90,7 +90,8 @@ def create(
     settlement the account that paid must be that source.
 
     Args:
-        client_id: The app or apps whose tokens the API accepts.
+        client_id: The app or apps whose tokens the API accepts; None (the default) accepts
+            any app's, and ``allow`` can still decide by ``Caller.client_id``.
         store: Accepts each DPoP proof once.
         chain_id: The chain payments settle on.
         audience: The audience tokens must name; defaults to the issuer's origin.
@@ -109,14 +110,16 @@ def create(
         )
         mpp.charge(amount="0.01", identity=identity.Route(payment=tempo_id.payment_check))
     """
-    client_ids = (client_id,) if isinstance(client_id, str) else tuple(client_id)
-    if not client_ids:
-        raise ValueError("client_id must name at least one app")
+    client_ids: frozenset[str] | None = None
+    if client_id is not None:
+        client_ids = frozenset((client_id,) if isinstance(client_id, str) else client_id)
+        if not client_ids:
+            raise ValueError("client_id must name at least one app")
     origin = _origin(issuer)
     rules = _Rules(
         issuer=origin,
         audience=audience or origin,
-        client_ids=frozenset(client_ids),
+        client_ids=client_ids,
         chain_id=chain_id,
         store=store,
         keys=jwt.KeySet(origin, http),
@@ -181,13 +184,15 @@ class _Rules:
 
     issuer: str
     audience: str
-    client_ids: frozenset[str]
+    client_ids: frozenset[str] | None
     chain_id: int
     store: ExpiringStore | None
     keys: jwt.KeySet
 
     async def verify(self, request: Request) -> Verification[Caller]:
-        scheme, _, token = (request.headers.get("Authorization") or "").partition(" ")
+        # RFC 9110: one or more spaces separate the scheme and the token.
+        match = _AUTHORIZATION_RE.fullmatch(request.headers.get("Authorization") or "")
+        scheme, token = match.groups() if match else ("", "")
         dpop = scheme.lower() == "dpop"
         if not token or (not dpop and scheme.lower() != "bearer"):
             return missing("Sign in with Tempo ID.", CHALLENGE)
@@ -218,16 +223,21 @@ class _Rules:
         if not _valid_yet(claims.get("nbf"), now):
             return _invalid("The access token is not valid yet.")
         client_id = claims.get("client_id")
-        if client_id not in self.client_ids:
+        if not isinstance(client_id, str) or (
+            self.client_ids is not None and client_id not in self.client_ids
+        ):
             return forbidden("This app may not call this API.")
-        assert isinstance(client_id, str)
 
         # RFC 9449: a DPoP-bound token needs a proof from its key; a Bearer token takes none.
         jkt: object = _dict(claims.get("cnf")).get("jkt")
         if dpop != (jkt is not None):
             return _invalid("The access token scheme does not match its binding.")
         if dpop:
-            reason = await self._check_proof(request, jkt=str(jkt), now=now, token=token)
+            try:
+                reason = await self._check_proof(request, jkt=str(jkt), now=now, token=token)
+            except Exception:
+                # A replay store that fails rejects, so a proof cannot be spent twice.
+                return unavailable("The DPoP replay store is unavailable.")
             if reason is not None:
                 return _invalid(reason)
 
@@ -362,6 +372,9 @@ class _Rules:
             if not await self.store.put_if_absent_until(key_id, "1", until):
                 return "The DPoP proof was already used."
         return None
+
+
+_AUTHORIZATION_RE = re.compile(r"(\S+) +(\S+) *")
 
 
 def _invalid(reason: str) -> Rejected:

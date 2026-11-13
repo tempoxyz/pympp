@@ -83,6 +83,10 @@ def prover(
     """
 
     async def prove(request: httpx.Request, context: ProveContext) -> httpx.Request:
+        # Authorization holds the Payment Credential, which outranks the access token: a server
+        # that reads Tempo ID sets requires_auth=True and takes the Credential elsewhere.
+        if request.headers.get("Authorization", "").lower().startswith("payment "):
+            return request
         token = await _call(access_token)
         headers = {"Authorization": f"{'DPoP' if dpop else 'Bearer'} {token}"}
         if dpop is not None:

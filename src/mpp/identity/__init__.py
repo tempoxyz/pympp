@@ -75,7 +75,12 @@ _DEFAULT_REASONS: Mapping[RejectionStatus, str] = MappingProxyType(
 IDENTITY_REQUIRED_HEADER = _requirements.HEADER
 """The `402` response header listing the identities a payment check requires."""
 
-REQUEST_HEADERS: tuple[str, ...] = ("identity-attestation", "identity-presentation")
+REQUEST_HEADERS: tuple[str, ...] = (
+    "dpop",
+    "identity-attestation",
+    "identity-presentation",
+    "tempo-id-token",
+)
 """Bearer identity request headers, lowercased. The client never sends them across origins."""
 
 HeaderPairs: TypeAlias = tuple[tuple[str, str], ...]
