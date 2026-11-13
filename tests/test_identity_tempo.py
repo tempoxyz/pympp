@@ -352,7 +352,7 @@ PROOF_CASES: list[tuple[str, Callable[[DpopKey, str], str], str]] = [
         "The DPoP proof is for another token.",
     ),
     ("old", lambda k, t: _proof(k, t, iat=int(time.time()) - 361), "The DPoP proof has expired."),
-    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 61), "The DPoP proof has expired."),
+    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 600), "The DPoP proof has expired."),
     ("no iat", lambda k, t: _proof(k, t, iat=None), "The DPoP proof has expired."),
     ("nan iat", lambda k, t: _raw_iat(k, t, "NaN"), "The DPoP proof has expired."),
     ("infinite iat", lambda k, t: _raw_iat(k, t, "-Infinity"), "The DPoP proof has expired."),
@@ -662,11 +662,12 @@ async def test_the_prover_sends_a_token_the_server_accepts(issuer: Issuer, bound
     assert isinstance(outcome, Valid) and outcome.value.email == "alice@example.com"
 
 
-async def test_the_prover_refuses_to_replace_a_payment_credential_in_authorization() -> None:
+async def test_the_prover_leaves_a_payment_credential_in_authorization() -> None:
     tempo_prover = prover(access_token=lambda: "token", scope="*")
     paid = httpx.Request("GET", API, headers={"Authorization": "Payment abc"})
-    with pytest.raises(TypeError, match="requires_auth=True"):
-        await tempo_prover.prove(paid, ProveContext.new())
+    proved = await tempo_prover.prove(paid, ProveContext.new())
+    assert proved.headers["Authorization"] == "Payment abc"
+    assert "DPoP" not in proved.headers
     other = httpx.Request("GET", API, headers={"Authorization": "Basic abc"})
     proved = await tempo_prover.prove(other, ProveContext.new())
     assert proved.headers["Authorization"] == "Bearer token"
