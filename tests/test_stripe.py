@@ -116,7 +116,11 @@ def _make_challenge(**overrides: Any) -> Challenge:
 
 async def _wire(method: ServerMethod, **options: Any) -> dict[str, Any]:
     """Return the wire request of the challenge ``method`` issues for route ``options``."""
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     [issued] = challenges(await server.charge(**options)(http_request()))
     return issued.request
 

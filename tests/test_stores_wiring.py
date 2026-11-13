@@ -27,7 +27,7 @@ class TestMppStoreWiring:
                 store=store,
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         issued = challenge(await srv.charge(amount="0.50")(http_request()))
         credential = Credential(
@@ -48,7 +48,7 @@ class TestMppStoreWiring:
                 store=store,
             ),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         result = await srv.charge(amount="0.50")(http_request())
         assert isinstance(challenge(result), Challenge)
@@ -68,7 +68,12 @@ class TestMppSharedStore:
         store = MemoryStore()
         tx_hash = "0x" + "cd" * 32
         await store.put(f"mpp:charge:{tx_hash}", tx_hash)
-        srv = Mpp(methods=self._methods(), realm="test.com", secret_key="test-secret", store=store)
+        srv = Mpp(
+            methods=self._methods(),
+            realm="test.com",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
+            store=store,
+        )
         issued = challenge(await srv.charge(amount="0.50")(http_request()))
         credential = Credential(
             challenge=issued.to_echo(), payload={"type": "hash", "hash": tx_hash}
@@ -85,7 +90,7 @@ class TestMppSharedStore:
         srv = Mpp(
             methods=self._methods(store=own),
             realm="test.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             store=shared,
         )
         issued = challenge(await srv.charge(amount="0.50")(http_request()))

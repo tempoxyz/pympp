@@ -11,7 +11,7 @@ from mpp.server import PaymentRequired, Request
 from tests.network import TEMPO
 
 # Default secret used by tests when calling verify_or_challenge
-TEST_SECRET = "test-secret"
+TEST_SECRET = "test-secret-0123456789abcdef0123456789abcdef"
 TEST_REALM = "test.example.com"
 
 INTEGRATION = pytest.mark.skipif(

@@ -133,7 +133,7 @@ async def verify_or_challenge(
             intent=ChargeIntent(client),
             request={"amount": "1000", ...},
             realm="api.example.com",
-            secret_key="my-server-secret",  # Enables HMAC-bound IDs
+            secret_key=os.environ["MPP_SECRET_KEY"],  # Enables HMAC-bound IDs
         )
 
         if isinstance(result, Challenge):

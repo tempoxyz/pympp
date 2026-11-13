@@ -28,7 +28,12 @@ class _Paid:
 
 
 def _mpp(method, **kwargs):
-    return Mpp(methods=method, realm="example.com", secret_key="secret", **kwargs)
+    return Mpp(
+        methods=method,
+        realm="example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+        **kwargs,
+    )
 
 
 @pytest.mark.asyncio
@@ -72,7 +77,7 @@ async def test_fixed_expiry_nonce(meta):
         "intent": _Paid(),
         "request": {"amount": "100"},
         "realm": "example.com",
-        "secret_key": "secret",
+        "secret_key": "secret-0123456789abcdef0123456789abcdef",
         "expires": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         "meta": meta,
     }
@@ -110,7 +115,7 @@ def test_http_verbs_cannot_share_credential(configured_scope):
     server = Mpp(
         methods=server_method(verify=paid, request={"_mppx_scope": configured_scope}),
         realm="testserver",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
     @pay(server.charge(amount="100"))
@@ -134,7 +139,11 @@ async def test_nonce_bound_lifecycle_and_legacy_empty_metadata():
     from tests.test_lifecycle import VerifiableCharge, charge_method
 
     charge = VerifiableCharge()
-    payment = Mpp(methods=charge_method(charge), realm="api.example.com", secret_key="test-secret")
+    payment = Mpp(
+        methods=charge_method(charge),
+        realm="api.example.com",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
+    )
     request = {"amount": "1000"}
     for unique in [False, True]:
         issued = await verify_or_challenge(
@@ -191,7 +200,7 @@ async def test_transient_failure_reuses_authenticated_challenge():
         "intent": Unconfirmed(),
         "request": {"amount": "100"},
         "realm": "example.com",
-        "secret_key": "secret",
+        "secret_key": "secret-0123456789abcdef0123456789abcdef",
     }
     issued = await verify_or_challenge(authorization=None, **options)
     assert isinstance(issued, Challenge)
@@ -228,7 +237,11 @@ async def test_custom_business_scope_cannot_be_overwritten(key):
         calls.append(context.credential)
         return Receipt.success("paid")
 
-    server = Mpp(methods=server_method(verify=paid), realm="testserver", secret_key="secret")
+    server = Mpp(
+        methods=server_method(verify=paid),
+        realm="testserver",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
 
     def handler(account):
         return server.charge(amount="100", _mppx_scope={key: account})
