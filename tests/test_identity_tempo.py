@@ -352,7 +352,7 @@ PROOF_CASES: list[tuple[str, Callable[[DpopKey, str], str], str]] = [
         "The DPoP proof is for another token.",
     ),
     ("old", lambda k, t: _proof(k, t, iat=int(time.time()) - 361), "The DPoP proof has expired."),
-    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 600), "The DPoP proof has expired."),
+    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 90), "The DPoP proof has expired."),
     ("no iat", lambda k, t: _proof(k, t, iat=None), "The DPoP proof has expired."),
     ("nan iat", lambda k, t: _raw_iat(k, t, "NaN"), "The DPoP proof has expired."),
     ("infinite iat", lambda k, t: _raw_iat(k, t, "-Infinity"), "The DPoP proof has expired."),
