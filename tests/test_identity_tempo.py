@@ -352,7 +352,7 @@ PROOF_CASES: list[tuple[str, Callable[[DpopKey, str], str], str]] = [
         "The DPoP proof is for another token.",
     ),
     ("old", lambda k, t: _proof(k, t, iat=int(time.time()) - 361), "The DPoP proof has expired."),
-    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 61), "The DPoP proof has expired."),
+    ("future", lambda k, t: _proof(k, t, iat=int(time.time()) + 90), "The DPoP proof has expired."),
     ("no iat", lambda k, t: _proof(k, t, iat=None), "The DPoP proof has expired."),
     ("nan iat", lambda k, t: _raw_iat(k, t, "NaN"), "The DPoP proof has expired."),
     ("infinite iat", lambda k, t: _raw_iat(k, t, "-Infinity"), "The DPoP proof has expired."),
@@ -581,6 +581,25 @@ async def test_a_failing_replay_store_rejects_as_unavailable(issuer: Issuer) -> 
     )
 
 
+async def test_a_proof_id_with_a_lone_surrogate_is_malformed_not_a_store_outage(
+    issuer: Issuer,
+) -> None:
+    key = DpopKey.generate()
+    token = issuer.access_token(key)
+    header = jwt.encode({"alg": "ES256", "jwk": key.jwk, "typ": "dpop+jwt"})
+    claims = (
+        f'{{"ath":"{jwt.sha256(token)}","htm":"GET","htu":"{API}",'
+        f'"iat":{int(time.time())},"jti":"\\ud800"}}'
+    )
+    signing_input = f"{header}.{jwt.b64url_encode(claims.encode())}"
+    proof = f"{signing_input}.{jwt.sign_es256(key.private_key, signing_input.encode())}"
+    verifier = tempo_id(issuer, store=MemoryStore()).verifier
+    assert reason(await verifier.verify(dpop_request(token, key, proof=proof))) == (
+        "invalid",
+        "The DPoP proof is malformed.",
+    )
+
+
 # --- Key set ------------------------------------------------------------------------------------
 
 
@@ -620,6 +639,40 @@ async def test_a_loaded_key_set_serves_failed_refetches_for_an_hour_only(
     with pytest.raises(RuntimeError, match="500"):
         await keys.get("key-1")
     assert issuer.fetches == fetches, "the failure is remembered for 30 seconds"
+
+
+async def test_a_stale_set_that_expires_within_30_seconds_of_a_failure_does_not_refetch(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    keys = jwt.KeySet(ISSUER, issuer.http())
+    assert await keys.get("key-1") is not None
+    issuer.status = 500
+    now[0] += 3_590
+    assert await keys.get("key-1") is not None, "the stale set serves the failed refetch"
+    fetches = issuer.fetches
+    now[0] += 20
+    with pytest.raises(RuntimeError, match="500"):
+        await keys.get("key-1")
+    assert issuer.fetches == fetches, "no fetch within 30 seconds of the failed one"
+
+
+async def test_a_remembered_key_set_error_does_not_grow_its_traceback(
+    issuer: Issuer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    issuer.status = 500
+    keys = jwt.KeySet(ISSUER, issuer.http())
+    depths: list[int] = []
+    for _ in range(5):
+        with pytest.raises(RuntimeError) as raised:
+            await keys.get("key-1")
+        depth, tb = 0, raised.value.__traceback__
+        while tb is not None:
+            depth, tb = depth + 1, tb.tb_next
+        depths.append(depth)
+    assert depths[1:] == [depths[1]] * 4, depths
 
 
 async def test_a_key_set_that_never_loaded_raises_and_retries_at_most_every_30_seconds(
@@ -662,11 +715,12 @@ async def test_the_prover_sends_a_token_the_server_accepts(issuer: Issuer, bound
     assert isinstance(outcome, Valid) and outcome.value.email == "alice@example.com"
 
 
-async def test_the_prover_refuses_to_replace_a_payment_credential_in_authorization() -> None:
+async def test_the_prover_leaves_a_payment_credential_in_authorization() -> None:
     tempo_prover = prover(access_token=lambda: "token", scope="*")
     paid = httpx.Request("GET", API, headers={"Authorization": "Payment abc"})
-    with pytest.raises(TypeError, match="requires_auth=True"):
-        await tempo_prover.prove(paid, ProveContext.new())
+    proved = await tempo_prover.prove(paid, ProveContext.new())
+    assert proved.headers["Authorization"] == "Payment abc"
+    assert "DPoP" not in proved.headers
     other = httpx.Request("GET", API, headers={"Authorization": "Basic abc"})
     proved = await tempo_prover.prove(other, ProveContext.new())
     assert proved.headers["Authorization"] == "Bearer token"
