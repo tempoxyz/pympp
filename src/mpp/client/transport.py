@@ -207,7 +207,7 @@ async def _buffer_error_body(response: httpx.Response) -> None:
 def _is_pushed(credential: Credential) -> bool:
     """Whether the credential reports a payment the client already broadcast."""
     payload = credential.payload
-    return is_dict(payload) and payload.get("type") == "hash"
+    return is_dict(payload) and payload.get("type") in ("hash", "zone")
 
 
 def _transaction_hash(method: ClientMethod, credential: Credential) -> str | None:

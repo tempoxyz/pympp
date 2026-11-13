@@ -253,7 +253,8 @@ class PaymentRuntime:
             )
         except asyncio.CancelledError as error:
             tx_hash = credential.payload.get("hash")
-            if credential.payload.get("type") == "hash" and isinstance(tx_hash, str):
+            # Hash and Zone credentials both report a payment already on chain.
+            if credential.payload.get("type") in ("hash", "zone") and isinstance(tx_hash, str):
                 raise PaymentOutcomeUnknownError(
                     challenge,
                     error,
