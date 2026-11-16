@@ -1562,6 +1562,47 @@ class TestClientZoneCancelledAfterSettlement:
         assert calls.count("eth_sendRawTransactionSync") == 2
 
     @pytest.mark.asyncio
+    async def test_a_retry_of_a_resuming_challenge_never_withdraws_again(self) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settled = False
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])] if settled else []
+            raise AssertionError(method)
+
+        zone = preparing_zone(calls, send)
+        method = payer_method(replace(zone, settlement_timeout=0), rpc_client(tempo_l1))
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        second, _ = await issue(server)
+        with pytest.raises(ZoneSettlementPendingError):
+            await pay_over_http(method, first)
+        # A newly issued Challenge resumes the withdrawal, which still hasn't settled.
+        with pytest.raises(ZoneSettlementPendingError):
+            await pay_over_http(method, second)
+        # Retrying that Challenge resumes it again rather than withdrawing again.
+        method.zone = zone
+        settled = True
+        credential = await pay_over_http(method, second)
+        assert credential.challenge.id == first.id
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
     async def test_a_new_challenge_for_other_terms_withdraws_again(self) -> None:
         calls: list[str] = []
 

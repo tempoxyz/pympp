@@ -363,6 +363,9 @@ class _ZoneSend:
     redeemed_late: bool = False
     # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
     sender_tag: str | None = None
+    # IDs of the newly issued Challenges that resumed this withdrawal. A later attempt
+    # for one of them is the same request, even while it waits on the withdrawal itself.
+    resumed_by: set[str] = field(default_factory=lambda: set[str]())
 
 
 @dataclass
@@ -1480,6 +1483,10 @@ class TempoMethod:
                     challenge=earlier,
                     redeemed_late=True,
                 )
+            # A Challenge that resumed it before retries it again: its own attempt
+            # counts as a waiter, so ``wanted`` can't tell it apart.
+            if challenge.id in state.resumed_by:
+                return earlier_key
             # ``wanted`` is true while any caller still awaits the withdrawal: it is
             # another payment in flight, not one this Challenge retries.
             if not state.wanted():
@@ -1589,6 +1596,8 @@ class TempoMethod:
                     TransactionError("Zone withdrawal was cancelled after it was sent."),
                     transaction_hash=state.tx_hash,
                 )
+            if not same:
+                state.resumed_by.add(challenge.id)
             # Pay with the earlier withdrawal: its credential carries its own Challenge.
             challenge = earlier
             previous = state.wanted
