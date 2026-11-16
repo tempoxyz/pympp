@@ -616,7 +616,7 @@ async def verify(
         verifier: Optional ``(address, message, signature)`` check used instead of EOA
             recovery, such as for smart-wallet signatures.
         claim_nonce: Whether to record the nonce. Pass ``False`` to reserve it later with
-            :func:`claim` (and :func:`release` it if the wallet is not granted).
+            :func:`claim`, such as once every offer's checks have passed.
 
     Raises:
         InvalidProofError: With the spec's code, when the proof is rejected.
@@ -720,22 +720,6 @@ async def claim(*, store: Store, payload: Payload) -> None:
     """
     if not await _claim(store, _nonce_key(payload), _claim_expires(payload)):
         raise InvalidProofError("invalid_siwx_nonce")
-
-
-# How long before a claim expires :func:`release` leaves it to lapse instead.
-_RELEASE_MARGIN_SECONDS = 5
-
-
-async def release(*, store: Store, payload: Payload) -> None:
-    """Free a nonce :func:`claim` recorded, such as when ``grant`` declines the wallet.
-
-    Call it only for a claim this request made. Until that claim expires no other request
-    can claim the nonce, so the stored marker is still this request's own; close to expiry
-    it is left to lapse, since another request may hold the nonce by then.
-    """
-    if time.time() + _RELEASE_MARGIN_SECONDS >= _claim_expires(payload):
-        return
-    await store.delete(_nonce_key(payload))
 
 
 # ---------------------------------------------------------------------------
