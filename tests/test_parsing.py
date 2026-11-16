@@ -361,7 +361,8 @@ class TestChallenge:
         [
             (None, None),
             ('header="Payment-Authorization"', "Payment-Authorization"),
-            ('header="payment-authorization"', "Payment-Authorization"),
+            ('header="payment-authorization"', "payment-authorization"),
+            ('header="PAYMENT-AUTHORIZATION"', "PAYMENT-AUTHORIZATION"),
             ('header="Authorization"', ParseError),
             ('header=""', ParseError),
             ('header="X-Payment"', ParseError),
@@ -386,8 +387,15 @@ class TestChallenge:
             assert "X-Payment" not in str(info.value)
             return
         parsed = Challenge.from_www_authenticate(header)
+        # The parsed challenge keeps the issuer's spelling; only the field is canonical.
         assert parsed.header == expected
-        assert parsed.credential_header == (expected or "Authorization")
+        field = "Payment-Authorization" if expected else "Authorization"
+        assert parsed.credential_header == field
+        assert parsed.to_echo().header == expected
+        if expected is not None:
+            assert f'header="{expected}"' in parsed.to_www_authenticate("api.example.com")
+            echoed = Credential(challenge=parsed.to_echo(), payload={}).to_authorization()
+            assert Credential.from_authorization(echoed).challenge.header == expected
 
 
 class TestCredential:

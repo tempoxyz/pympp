@@ -20,7 +20,12 @@ from mpp import (
     _credential_expiry,
     generate_challenge_id,
 )
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    ParseError,
+    _b64_decode,
+    with_received_credential_header,
+)
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
@@ -551,7 +556,9 @@ def _challenge_from_echo(
     request: dict[str, Any],
     opaque: dict[str, str] | None,
 ) -> Challenge:
-    return Challenge(
+    # Keep the echoed spelling: this challenge can be re-issued for a retry, and its ID
+    # binds the header exactly as echoed.
+    challenge = Challenge(
         id=echo.id,
         realm=echo.realm,
         method=echo.method,
@@ -564,6 +571,7 @@ def _challenge_from_echo(
         header=echo.header,
         description=echo.description,
     )
+    return with_received_credential_header(challenge, echo.header)
 
 
 _PAYMENT_SCHEME_RE = re.compile(r"(?:^|,)[ \t]*payment ", re.IGNORECASE)

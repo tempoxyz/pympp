@@ -457,11 +457,13 @@ class TestEdgeCases:
 
         assert [challenge.id for challenge in parsed] == ["valid"]
 
-    def test_credential_accepts_valid_credential_header_name(self) -> None:
-        challenge = {**VALID_PARAMS, "header": "Payment-Authorization"}
+    @pytest.mark.parametrize("value", ["Payment-Authorization", "payment-authorization"])
+    def test_credential_accepts_valid_credential_header_name(self, value: str) -> None:
+        challenge = {**VALID_PARAMS, "header": value}
         header = f"Payment {b64({'challenge': challenge, 'payload': {}})}"
 
-        assert parse_authorization(header).challenge.header == "Payment-Authorization"
+        # The echoed spelling is kept as-is: the server binds it into the challenge ID.
+        assert parse_authorization(header).challenge.header == value
 
     @pytest.mark.parametrize("status", ["failed", "pending", "SUCCESS", "", None, True])
     def test_receipt_rejects_non_success_status(self, status: Any) -> None:

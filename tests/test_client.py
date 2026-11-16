@@ -1202,7 +1202,38 @@ class TestPaymentTransport:
         method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_handles_multiple_www_authenticate_headers(self) -> None:
+    async def test_credential_header_case_variant_is_echoed_unchanged(self) -> None:
+        """The field is canonical Payment-Authorization; the echo keeps the issuer's spelling."""
+        www_authenticate = (
+            'Payment id="lower", realm="example.com", method="tempo", '
+            'intent="charge", request="e30", header="payment-authorization"'
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(402, headers={"www-authenticate": www_authenticate}),
+                httpx.Response(200),
+            ]
+        )
+
+        async def create(params: CredentialParams) -> str:
+            return Credential(challenge=params.challenge.to_echo(), payload={}).to_authorization()
+
+        client = ClientMethod(
+            method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+            create_credential=create,
+        )
+        transport = PaymentTransport(methods=[client], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        retry = inner.requests[1]
+        assert "authorization" not in retry.headers
+        names = [name for name, _ in retry.headers.raw if name.lower() == b"payment-authorization"]
+        assert names == [b"Payment-Authorization"]
+        sent = Credential.from_authorization(retry.headers["payment-authorization"])
+        assert sent.challenge.header == "payment-authorization"
+
         """Should find matching method across multiple WWW-Authenticate headers."""
         tempo_challenge = Challenge(
             id="test-id",

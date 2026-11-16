@@ -15,6 +15,7 @@ from mpp import (
     Credential,
     Receipt,
     _b64url_encode,
+    generate_challenge_id,
 )
 from mpp.errors import (
     CredentialReplayedError,
@@ -2571,6 +2572,61 @@ class TestRequiresAuth:
         credential = Credential(challenge=challenge.to_echo(), payload={})
         result = await handler(MockRequest(payment_authorization=credential.to_authorization()))
         assert result == {"paid": True}
+
+    @pytest.mark.asyncio
+    async def test_echoed_header_spelling_is_bound_as_received(self) -> None:
+        """A challenge whose ID binds a case variant verifies only with that spelling echoed."""
+
+        class MockIntent:
+            name = "charge"
+
+            async def verify(self, credential: Credential, request: dict) -> Receipt:
+                return Receipt.success(reference="0xOK")
+
+        secret = "test-secret"
+        request = {"amount": "1000"}
+        expires = "2099-01-01T00:00:00Z"
+        challenge_id = generate_challenge_id(
+            secret_key=secret,
+            realm="r",
+            method="tempo",
+            intent="charge",
+            request=request,
+            expires=expires,
+            header="payment-authorization",
+        )
+        www_authenticate = (
+            f'Payment id="{challenge_id}", realm="r", method="tempo", intent="charge", '
+            f'request="{_b64url_encode(json.dumps(request))}", expires="{expires}", '
+            'header="payment-authorization"'
+        )
+
+        async def verify(credential: Credential) -> Challenge | tuple[Credential, Receipt]:
+            return await verify_or_challenge(
+                authorization=credential.to_authorization(),
+                intent=MockIntent(),
+                request=request,
+                realm="r",
+                method="tempo",
+                secret_key=secret,
+            )
+
+        parsed = Challenge.from_www_authenticate(www_authenticate)
+        assert parsed.header == "payment-authorization"
+        assert parsed.credential_header == PAYMENT_AUTHORIZATION_HEADER
+        echoed = Credential.from_authorization(
+            Credential(challenge=parsed.to_echo(), payload={}).to_authorization()
+        )
+        assert echoed.challenge.header == "payment-authorization"
+
+        result = await verify(echoed)
+        assert isinstance(result, tuple), "The echo binds the spelling the server issued"
+        assert result[1].reference == "0xOK"
+
+        rewritten = Credential(
+            challenge=replace(echoed.challenge, header=PAYMENT_AUTHORIZATION_HEADER), payload={}
+        )
+        assert isinstance(await verify(rewritten), Challenge)
 
 
 @pytest.mark.parametrize("description", ["x\ry", "x\ny", "x\r\ny", "x\x00y", "x\x1by", "x\x7fy"])

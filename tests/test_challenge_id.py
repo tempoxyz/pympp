@@ -597,27 +597,89 @@ class TestCredentialHeader:
         ("header", "expected"),
         [
             (None, None),
-            ("", None),
             ("Authorization", None),
             ("AUTHORIZATION", None),
             ("Payment-Authorization", "Payment-Authorization"),
             ("payment-authorization", "Payment-Authorization"),
+            ("PAYMENT-AUTHORIZATION", "Payment-Authorization"),
         ],
     )
     def test_constructed_header_is_canonical(
         self, header: str | None, expected: str | None
     ) -> None:
-        """Authorization is local shorthand for the default; it is never emitted."""
+        """A locally built challenge binds and emits the canonical spelling.
+
+        Authorization is local shorthand for the default; it is never emitted.
+        """
+        params = {
+            "secret_key": "test-secret",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": {"amount": "1000000"},
+        }
         challenge = Challenge(id="abc", method="tempo", intent="charge", request={}, header=header)
-        www_authenticate = challenge.to_www_authenticate("api.example.com")
+        created = Challenge.create(**params, header=header)
+        www_authenticate = created.to_www_authenticate("api.example.com")
 
         assert challenge.header == expected
-        assert advertised_credential_header(header) == expected
+        assert created.header == expected
+        assert created.id == generate_challenge_id(**params, header=expected)
         if expected is None:
             assert "header=" not in www_authenticate
         else:
             assert 'header="Payment-Authorization"' in www_authenticate
             assert Challenge.from_www_authenticate(www_authenticate).header == expected
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            (None, None),
+            ("Authorization", None),
+            ("authorization", None),
+            ("Payment-Authorization", "Payment-Authorization"),
+            ("payment-authorization", "payment-authorization"),
+        ],
+    )
+    def test_advertised_header_keeps_spelling(
+        self, header: str | None, expected: str | None
+    ) -> None:
+        """The value bound and echoed is the spelling given, not a rewrite of it."""
+        assert advertised_credential_header(header) == expected
+        echo = ChallengeEcho(
+            id="abc",
+            realm="api.example.com",
+            method="tempo",
+            intent="charge",
+            request="e30",
+            header=header,
+        )
+        assert echo.header == expected
+
+    def test_rejects_empty_header(self) -> None:
+        """An empty header is not the Authorization default (matches mppx)."""
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            advertised_credential_header("")
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            Challenge.create(
+                secret_key="test-secret",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request={"amount": "1000000"},
+                header="",
+            )
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            Challenge(id="abc", method="tempo", intent="charge", request={}, header="")
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            ChallengeEcho(
+                id="abc",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request="e30",
+                header="",
+            )
 
 
 class TestJcsChallengeEncoding:
