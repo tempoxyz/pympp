@@ -12,6 +12,7 @@ import math
 import re
 import time
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -349,12 +350,14 @@ class _ZoneSend:
     # The Challenge the withdrawal pays, so a retry under a newly issued Challenge for
     # the same payment can resume it instead of withdrawing again.
     challenge: Challenge | None = None
-    # Set once a wait ends without a caller taking the credential.
-    abandoned: bool = False
+    # Origin of the HTTP request that received the Challenge, when known. Only a retry
+    # to the same origin may resume the withdrawal, so its credential never reaches
+    # another server.
+    origin: str | None = None
 
     def resumable(self) -> bool:
-        """Whether every caller left before taking this withdrawal's credential."""
-        return self.sent and (self.abandoned or not self.wanted())
+        """Whether the withdrawal was sent and no caller is waiting for it now."""
+        return self.sent and not self.wanted()
 
 
 @dataclass
@@ -1425,6 +1428,11 @@ class TempoMethod:
         whose Challenge expired are dropped: their credential would be rejected, and
         their ``valid_before`` keeps them from settling later.
         """
+        origin = _ZONE_REQUEST_ORIGIN.get()
+        if origin is None:
+            # Without the request's origin, a match could hand one server's paid
+            # credential to another; the caller resumes with the original Challenge.
+            return None
         terms = _zone_terms_key(challenge)
         found: str | None = None
         for key, (task, state) in list(self._zone_withdrawals.items()):
@@ -1434,7 +1442,7 @@ class TempoMethod:
             if _zone_challenge_expired(earlier.expires):
                 del self._zone_withdrawals[key]
                 continue
-            if found is None and _zone_terms_key(earlier) == terms:
+            if found is None and state.origin == origin and _zone_terms_key(earlier) == terms:
                 found = key
         return found
 
@@ -1470,10 +1478,14 @@ class TempoMethod:
                 existing = self._zone_withdrawals[key]
                 assert existing[1].challenge is not None
                 challenge = existing[1].challenge
-                existing[1].abandoned = False
                 existing[1].wanted = wanted
         if existing is None:
-            state = _ZoneSend(wanted=wanted, on_submission=on_submission, challenge=challenge)
+            state = _ZoneSend(
+                wanted=wanted,
+                on_submission=on_submission,
+                challenge=challenge,
+                origin=_ZONE_REQUEST_ORIGIN.get(),
+            )
             new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
             self._zone_withdrawals[key] = (new_task, state)
 
@@ -1505,20 +1517,7 @@ class TempoMethod:
             # retry's wait still names the transaction that paid.
             if state.raw_tx is not None and on_submission is not None:
                 on_submission(state.raw_tx)
-        delivered = False
-        try:
-            credential = await self._settle_zone_withdrawal(
-                challenge, zone_id, key, task, state, wanted
-            )
-            delivered = wanted()
-            return credential
-        finally:
-            # A wait that ends without handing over the credential (it timed out, was
-            # cancelled, or nobody wanted it) leaves the withdrawal for a retry to resume.
-            if not delivered:
-                entry = self._zone_withdrawals.get(key)
-                if entry is not None and entry[0] is task:
-                    state.abandoned = True
+        return await self._settle_zone_withdrawal(challenge, zone_id, key, task, state, wanted)
 
     async def _settle_zone_withdrawal(
         self,
@@ -1820,6 +1819,21 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
         sort_keys=True,
         default=str,
     )
+
+
+_ZONE_REQUEST_ORIGIN: ContextVar[str | None] = ContextVar("_ZONE_REQUEST_ORIGIN", default=None)
+"""Origin of the HTTP request whose Challenge is being paid, set by the client method."""
+
+
+def _request_origin(request: Any) -> str | None:
+    """Return ``scheme://host:port`` of a request's URL, or ``None`` if it has none."""
+    url = getattr(request, "url", None)
+    scheme = getattr(url, "scheme", None)
+    host = getattr(url, "host", None)
+    if not isinstance(scheme, str) or not isinstance(host, str) or not scheme or not host:
+        return None
+    port = getattr(url, "port", None)
+    return f"{scheme.lower()}://{host.lower()}:{port if isinstance(port, int) else ''}"
 
 
 def _zone_terms_key(challenge: Challenge) -> str:
@@ -2412,7 +2426,11 @@ def _client_method(method: TempoMethod) -> ClientMethod:
     pinned = {pin.lower() for pin in method._pinned_currencies()}
 
     async def create_credential(params: CredentialParams) -> str:
-        return (await method.create_credential(params.challenge)).to_authorization()
+        token = _ZONE_REQUEST_ORIGIN.set(_request_origin(params.request))
+        try:
+            return (await method.create_credential(params.challenge)).to_authorization()
+        finally:
+            _ZONE_REQUEST_ORIGIN.reset(token)
 
     def can_handle_challenge(challenge: Challenge) -> bool:
         currency = challenge.request.get("currency")

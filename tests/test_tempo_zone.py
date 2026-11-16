@@ -283,7 +283,11 @@ class TestServerZoneCredentials:
         issued, memo = await issue(server)
         fixture[:] = [Fixture(TAG_A, memo)]
         validation = await server.validate_credential(zone_credential(issued, TAG_A))
-        assert validation.details == {"mode": "push"}
+        assert validation.details == {
+            "mode": "push",
+            "payer_verified": False,
+            "transaction_hash": None,
+        }
         await server.broadcast_credential(zone_credential(issued, TAG_A))
         with pytest.raises(CredentialReplayedError, match="Zone withdrawal has already been used"):
             await server.validate_credential(zone_credential(issued, TAG_A))
@@ -515,6 +519,20 @@ async def zone_challenge(zones: list[int] | Literal[True], **request: Any) -> Ch
     server = setup_any_zone() if zones is True else setup(zones=zones)
     issued, _ = await issue(server, **request)
     return issued
+
+
+async def pay_over_http(
+    method: Any, challenge: Challenge, origin: str = "https://api.example.com"
+) -> Credential:
+    """Pay through the client method, as the HTTP transport does for a request to origin."""
+    from mpp.runtime import CredentialParams
+
+    client_method = tempo_client._client_method(method)
+    request = httpx.Request("GET", origin + "/resource")
+    serialized = await client_method.create_credential(
+        CredentialParams(challenge=challenge, request=request)
+    )
+    return Credential.from_authorization(serialized)
 
 
 async def error_of(awaitable: Any) -> BaseException:
@@ -1335,7 +1353,7 @@ class TestClientZoneCancelledAfterSettlement:
         first, _ = await issue(server)
         retried, _ = await issue(server)
         assert first.id != retried.id
-        caller = asyncio.ensure_future(method.create_credential(first))
+        caller = asyncio.ensure_future(pay_over_http(method, first))
         await settling.wait()
         caller.cancel()
         assert isinstance(await error_of(caller), PaymentOutcomeUnknownError)
@@ -1343,9 +1361,9 @@ class TestClientZoneCancelledAfterSettlement:
             release.set()
             for _ in range(50):
                 await asyncio.sleep(0)
-            credential = await method.create_credential(retried)
+            credential = await pay_over_http(method, retried)
         else:
-            retry = asyncio.ensure_future(method.create_credential(retried))
+            retry = asyncio.ensure_future(pay_over_http(method, retried))
             for _ in range(20):
                 await asyncio.sleep(0)
             release.set()
@@ -1354,6 +1372,127 @@ class TestClientZoneCancelledAfterSettlement:
         # The earlier withdrawal pays: its credential names its own Challenge.
         assert credential.challenge.id == first.id
         assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["other_origin", "no_origin", "live_waiter"])
+    async def test_a_new_challenge_does_not_take_a_withdrawal_it_must_not(self, case: str) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settling = asyncio.Event()
+        release = asyncio.Event()
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])]
+            raise AssertionError(method)
+
+        l1 = rpc_client(tempo_l1)
+        original_post = l1.post
+
+        async def slow_post(*args: Any, **kwargs: Any) -> httpx.Response:
+            if kwargs["json"]["method"] == "eth_getLogs":
+                settling.set()
+                await release.wait()
+            return await original_post(*args, **kwargs)
+
+        l1.post = slow_post  # type: ignore[method-assign]
+        method = payer_method(preparing_zone(calls, send), l1)
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        second, _ = await issue(server)
+        caller = asyncio.ensure_future(pay_over_http(method, first))
+        await settling.wait()
+        caller.cancel()
+        assert isinstance(await error_of(caller), PaymentOutcomeUnknownError)
+        waiting = None
+        if case == "live_waiter":
+            # The first Challenge's retry is waiting for its withdrawal again.
+            waiting = asyncio.ensure_future(pay_over_http(method, first))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            other = asyncio.ensure_future(pay_over_http(method, second))
+        elif case == "other_origin":
+            other = asyncio.ensure_future(pay_over_http(method, second, "https://evil.example"))
+        else:
+            other = asyncio.ensure_future(method.create_credential(second))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        release.set()
+        credential = await other
+        assert credential.challenge.id == second.id
+        assert calls.count("eth_sendRawTransactionSync") == 2
+        if waiting is not None:
+            assert (await waiting).challenge.id == first.id
+
+    @pytest.mark.asyncio
+    async def test_a_new_challenge_leaves_a_timed_out_withdrawal_its_retry_waits_on(
+        self,
+    ) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settled = False
+        release = asyncio.Event()
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])] if settled else []
+            raise AssertionError(method)
+
+        l1 = rpc_client(tempo_l1)
+        original_post = l1.post
+
+        async def slow_post(*args: Any, **kwargs: Any) -> httpx.Response:
+            if settled and kwargs["json"]["method"] == "eth_getLogs":
+                await release.wait()
+            return await original_post(*args, **kwargs)
+
+        l1.post = slow_post  # type: ignore[method-assign]
+        zone = preparing_zone(calls, send)
+        method = payer_method(replace(zone, settlement_timeout=0), l1)
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        second, _ = await issue(server)
+        with pytest.raises(ZoneSettlementPendingError):
+            await pay_over_http(method, first)
+        # The app retries the first Challenge, as the error says, and waits longer.
+        method.zone = zone
+        settled = True
+        waiting = asyncio.ensure_future(pay_over_http(method, first))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        other = asyncio.ensure_future(pay_over_http(method, second))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        release.set()
+        assert (await waiting).challenge.id == first.id
+        assert (await other).challenge.id == second.id
+        assert calls.count("eth_sendRawTransactionSync") == 2
 
     @pytest.mark.asyncio
     async def test_a_new_challenge_for_other_terms_withdraws_again(self) -> None:

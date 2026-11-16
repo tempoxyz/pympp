@@ -232,6 +232,8 @@ def _payload_details(payload: Any) -> dict[str, Any]:
         }
     if kind == "proof":
         return {"mode": "proof", "payer_verified": False}
+    if kind == "zone":
+        return {"mode": "push", "payer_verified": False, "transaction_hash": None}
     return {"payer_verified": False}
 
 

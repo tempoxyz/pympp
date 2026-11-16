@@ -1183,7 +1183,9 @@ class ChargeIntent:
             - ``transaction_hash`` (push and pull): the hash the chain records,
               the same in both modes, so one transfer has one key. ``None`` for a
               pull-mode transaction a fee payer co-signs, whose final hash is
-              known only once it is broadcast.
+              known only once it is broadcast, and for a ``zone`` credential: one
+              portal settlement transaction settles many withdrawals, so its hash
+              is not a per-payment key (the receipt's ``reference`` still names it).
             - ``valid_before`` (pull): the transaction's ``valid_before``
               Unix timestamp, or ``None`` when it has none.
 
@@ -1214,7 +1216,8 @@ class ChargeIntent:
             )
             return Validation(
                 credential=credential,
-                details={"mode": "push"},
+                # The payer is encrypted on the Zone, so it is neither named nor verified.
+                details={"mode": "push", "payer_verified": False, "transaction_hash": None},
                 intent=self.name,
                 request=dict(request),
                 payer=None,
