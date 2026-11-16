@@ -398,6 +398,47 @@ async def test_meta_disambiguates_wire_identical_cross_instance_offers() -> None
 
 
 @pytest.mark.asyncio
+async def test_reserved_route_meta_does_not_break_offer_binding() -> None:
+    first_method = MockMethod("shared", reference="first")
+    second_method = MockMethod("shared", reference="second")
+    first = Mpp(
+        methods=first_method.server,
+        realm="shared.example.com",
+        secret_key="shared-secret",
+    )
+    second = Mpp(
+        methods=second_method.server,
+        realm="shared.example.com",
+        secret_key="shared-secret",
+    )
+    # Issuance drops an application copy of the reserved expiry grace key, so the offer
+    # still binds by the rest of its metadata.
+    configured = compose(
+        first.compose(("shared/charge", {"amount": "1.00", "meta": {"plan": "first"}})),
+        second.compose(
+            (
+                "shared/charge",
+                {"amount": "1.00", "meta": {"plan": "second", "_mppx_expiry_grace": "1"}},
+            )
+        ),
+    )
+
+    unpaid = challenges(await configured(http_request()))
+    assert [
+        {k: v for k, v in (item.opaque or {}).items() if k != "_mpp_nonce"} for item in unpaid
+    ] == [
+        {"plan": "first"},
+        {"plan": "second"},
+    ]
+
+    paid = await configured(http_request(credential(unpaid[1]).to_authorization()))
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.reference == "second"
+    assert first_method.settlements == 0
+    assert second_method.settlements == 1
+
+
+@pytest.mark.asyncio
 async def test_wire_identical_cross_instance_offers_fail_closed() -> None:
     first_method = MockMethod("shared", reference="first")
     second_method = MockMethod("shared", reference="second")

@@ -2259,8 +2259,9 @@ class TestClientZoneLateCredentialAccepted:
             assert (result.receipt is not None) is (outcome == "accepted")
         assert len(paid) == 1
         assert calls.count("eth_sendRawTransactionSync") == 1
-        # Only a result the server returned for the credential frees its terms.
-        kept = outcome != "accepted"
+        # The server verifies a credential before it runs the tool, so any result it
+        # returned for the credential, even a tool error, frees its terms.
+        kept = outcome == "refused"
         assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
 
 

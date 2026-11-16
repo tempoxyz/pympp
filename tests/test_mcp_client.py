@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -22,7 +23,7 @@ from mpp.extensions.mcp import (
 from mpp.extensions.mcp.client import _extract_challenges, _is_payment_required_error
 from mpp.extensions.mcp.types import MCPChallenge, MCPReceipt
 from mpp.methods import Method
-from mpp.runtime import ChallengeCandidate, ClientMethod, CredentialParams
+from mpp.runtime import AttemptOutcome, ChallengeCandidate, ClientMethod, CredentialParams
 
 
 def test_outcome_unknown_error_is_shared() -> None:
@@ -659,6 +660,179 @@ class TestMcpClientPaidTool:
             assert META_CREDENTIAL in session.call_tool.call_args.kwargs["meta"]
 
         anyio.run(run, backend=backend)
+
+
+# ---------------------------------------------------------------------------
+# Paid retry outcomes reported to the method
+# ---------------------------------------------------------------------------
+
+
+def _payment_required_error(challenge: dict[str, Any] | None = None) -> Exception:
+    exceptions = pytest.importorskip("mcp.shared.exceptions")
+    types = pytest.importorskip("mcp.types")
+    return exceptions.McpError(
+        types.ErrorData(
+            code=-32042,
+            message="Payment Required",
+            data={"challenges": [challenge or _make_challenge_dict()]},
+        )
+    )
+
+
+class _Interrupted(BaseException):
+    """A non-Exception interruption, such as a cancellation, after signing."""
+
+
+def settling_method(
+    outcomes: list[AttemptOutcome],
+    *,
+    settle_result: bool = True,
+    settle_error: Exception | None = None,
+    error: BaseException | None = None,
+) -> ClientMethod:
+    """A method that keeps state for its credential until it learns the outcome."""
+
+    async def create(params: CredentialParams) -> str:
+        assert params.attempt is not None
+
+        async def settle(outcome: AttemptOutcome) -> bool:
+            outcomes.append(outcome)
+            if settle_error is not None:
+                raise settle_error
+            return settle_result
+
+        params.attempt.settle = settle
+        if error is not None:
+            raise error
+        return _credential().to_authorization()
+
+    return fake_method(create_credential=create)
+
+
+class TestMcpClientAttemptSettlement:
+    @pytest.mark.asyncio
+    async def test_payment_required_retry_settles_with_its_challenges(self) -> None:
+        replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), _payment_required_error(replacement)]
+        )
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes)])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
+
+    @pytest.mark.asyncio
+    async def test_other_retry_failure_settles_without_challenges(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), TimeoutError("timed out")]
+        )
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes)])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        assert outcomes == [AttemptOutcome(status="rejected")]
+
+    @pytest.mark.asyncio
+    async def test_tool_error_result_settles_as_accepted(self) -> None:
+        tool_error = FakeCallToolResult(content=[{"type": "text", "text": "tool failed"}])
+        tool_error.isError = True  # type: ignore[attr-defined]
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error(), tool_error])
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes)])
+
+        result = await client.call_tool("premium_tool", {})
+
+        assert result.result is tool_error
+        assert result.receipt is None
+        assert outcomes == [AttemptOutcome(status="accepted")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [RuntimeError("handler failed"), _Interrupted()])
+    async def test_failure_before_send_settles_as_rejected(self, error: BaseException) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error()])
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes, error=error)])
+
+        with pytest.raises(type(error)):
+            await client.call_tool("premium_tool", {})
+
+        assert outcomes == [AttemptOutcome(status="rejected")]
+        session.call_tool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failing_accepted_settle_still_returns_result(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        retry_result = FakeCallToolResult(meta=_make_receipt_meta())
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error(), retry_result])
+        outcomes: list[AttemptOutcome] = []
+        method = settling_method(outcomes, settle_error=RuntimeError("0xsecret"))
+        client = McpClient(session, methods=[method])
+
+        with caplog.at_level(logging.WARNING, logger="mpp.extensions.mcp.client"):
+            result = await client.call_tool("premium_tool", {})
+
+        assert result.result is retry_result
+        assert result.receipt is not None
+        assert outcomes == [AttemptOutcome(status="accepted")]
+        assert "RuntimeError" in caplog.text
+        assert "0xsecret" not in caplog.text
+        assert "0xabc" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_failing_fallback_settle_still_returns_result(self) -> None:
+        retry_result = FakeCallToolResult(meta=_make_receipt_meta())
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error(), retry_result])
+        outcomes: list[AttemptOutcome] = []
+        calls = 0
+
+        async def create(params: CredentialParams) -> str:
+            assert params.attempt is not None
+
+            async def settle(outcome: AttemptOutcome) -> bool:
+                nonlocal calls
+                calls += 1
+                outcomes.append(outcome)
+                if outcome.status == "rejected":
+                    raise RuntimeError("release failed")
+                return False
+
+            params.attempt.settle = settle
+            return _credential().to_authorization()
+
+        client = McpClient(session, methods=[fake_method(create_credential=create)])
+        result = await client.call_tool("premium_tool", {})
+
+        assert result.result is retry_result
+        assert [outcome.status for outcome in outcomes] == ["accepted", "rejected"]
+
+    @pytest.mark.asyncio
+    async def test_failing_rejected_settle_keeps_the_original_error(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), TimeoutError("timed out")]
+        )
+        outcomes: list[AttemptOutcome] = []
+        method = settling_method(outcomes, settle_error=RuntimeError("release failed"))
+        client = McpClient(session, methods=[method])
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await client.call_tool("premium_tool", {})
+
+        assert isinstance(raised.value.__cause__, TimeoutError)
+        assert outcomes == [AttemptOutcome(status="rejected")]
 
 
 class TestMcpClientMethodMatching:
