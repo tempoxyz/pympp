@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -764,3 +765,57 @@ class TestSiwxTransportEdgeCases:
     async def test_uses_a_default_inner_transport(self) -> None:
         transport = siwx.SiwxTransport(account=ACCOUNT)
         await transport.aclose()
+
+
+class TestReviewFixes:
+    """Cases from review: body-reading grants, IPv6 origins, nested JSON, streams."""
+
+    @pytest.mark.parametrize("reads_body", [False, True])
+    def test_a_body_reading_grant_makes_the_route_load_the_body(self, reads_body: bool) -> None:
+        options = siwx.SiwxOptions(
+            origin=ORIGIN, store=MemoryStore(), grant=lambda *_: True, body=reads_body
+        )
+        server = Mpp(
+            methods=evm(
+                currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=settle_ok, siwx=options
+            ),
+            secret_key=SECRET_KEY,
+            realm="api.example.com",
+        )
+        assert server.charge(amount="0.25").needs_request_body is reads_body
+
+    @pytest.mark.parametrize("origin", ["http://[::1]:8080", "https://[2001:db8::1]"])
+    async def test_an_ipv6_origin_signs_in(self, origin: str) -> None:
+        store = MemoryStore()
+        extension = siwx.create_extension(chain_id=84532, origin=origin, url=f"{origin}/x")
+        unsigned = unsigned_of(extension)
+        payload = siwx.decode(
+            siwx.encode({**unsigned, "signature": siwx._sign(ACCOUNT, siwx.to_message(unsigned))})
+        )
+        verified = await siwx.verify(chain_id=84532, origin=origin, store=store, payload=payload)
+        assert verified.address == ACCOUNT.address
+
+    @pytest.mark.parametrize("domain", ["[::1", "[zz::1]:80", "[]"])
+    def test_rejects_a_malformed_ipv6_domain(self, domain: str) -> None:
+        with pytest.raises(ValueError):
+            siwx.to_message({**fresh_payload(), "domain": domain})
+
+    def test_decode_rejects_deeply_nested_json(self) -> None:
+        nested = "[" * 5000 + "]" * 5000
+        value = base64.b64encode(f'{{"x":{nested}}}'.encode()).decode()
+        with pytest.raises(siwx.InvalidProofError) as error:
+            siwx.decode(value)
+        assert error.value.code == "invalid_siwx_payload"
+
+    async def test_passes_a_streaming_body_through_without_signing(self) -> None:
+        server = ServerTransport(Route())
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield b'{"task":'
+            yield b"1}"
+
+        async with client_for(server) as client:
+            response = await client.post(URL, content=chunks())
+        assert response.status_code == 402
+        assert len(server.requests) == 1
+        assert server.bodies == [b'{"task":1}']

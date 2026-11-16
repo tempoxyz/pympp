@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from mpp.store import ExpiringStore
-from mpp.x402._header import decode_payment_required
+from mpp.x402._header import MAX_HEADER_SIZE, decode_payment_required
 from mpp.x402._types import PAYMENT_REQUIRED_HEADER
 
 if TYPE_CHECKING:
@@ -199,12 +199,15 @@ class SiwxOptions:
         verifier: Verifies ``(address, message, signature)`` in place of EOA signature
             recovery, such as smart-wallet (EIP-1271 and EIP-6492) signatures with an
             RPC call. Without it, only EOA signatures verify.
+        body: Set when ``grant`` reads the request body (such as ``await
+            request.json()``), so the ASGI middleware and ``@pay`` load it first.
     """
 
     origin: str
     store: Store
     grant: GrantFn
     verifier: SignatureVerifier | None = None
+    body: bool = False
 
     def __post_init__(self) -> None:
         if _url(self.origin) is None:
@@ -237,6 +240,7 @@ _IP_RE = re.compile(
     r"(:[0-9]{1,5})?$"
 )
 _LOCALHOST_RE = re.compile(r"^localhost(:[0-9]{1,5})?$")
+_IPV6_RE = re.compile(r"^\[([0-9a-fA-F:.]+)\](:[0-9]{1,5})?$")
 _NONCE_RE = re.compile(r"^[a-zA-Z0-9]{8,}$")
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]+$")
@@ -303,6 +307,20 @@ def _chain_id_of(value: str) -> int:
     return int(match.group(1))
 
 
+def _is_ipv6_authority(domain: str) -> bool:
+    """Whether ``domain`` is a bracketed IPv6 host with an optional port, as ``URL.host``."""
+    import ipaddress
+
+    match = _IPV6_RE.fullmatch(domain)
+    if match is None:
+        return False
+    try:
+        ipaddress.IPv6Address(match.group(1))
+    except ValueError:
+        return False
+    return True
+
+
 def to_message(payload: Mapping[str, Any]) -> str:
     """Build the EIP-4361 (SIWE) message a payload signs.
 
@@ -317,16 +335,21 @@ def to_message(payload: Mapping[str, Any]) -> str:
     from eth_utils.address import to_checksum_address
 
     address_value = payload["address"]
-    if not isinstance(address_value, str) or not _ADDRESS_RE.match(address_value):
+    if not isinstance(address_value, str) or not _ADDRESS_RE.fullmatch(address_value):
         raise ValueError(f"Invalid SIWE message field address: {address_value!r}")
     address = to_checksum_address(address_value)
     chain_id = _chain_id_of(payload["chainId"])
     domain: str = payload["domain"]
     nonce: str = payload["nonce"]
     uri: str = payload["uri"]
-    if not (_DOMAIN_RE.match(domain) or _IP_RE.match(domain) or _LOCALHOST_RE.match(domain)):
+    if not (
+        _DOMAIN_RE.fullmatch(domain)
+        or _IP_RE.fullmatch(domain)
+        or _LOCALHOST_RE.fullmatch(domain)
+        or _is_ipv6_authority(domain)
+    ):
         raise ValueError(f"Invalid SIWE message field domain: {domain!r}")
-    if not _NONCE_RE.match(nonce):
+    if not _NONCE_RE.fullmatch(nonce):
         raise ValueError(f"Invalid SIWE message field nonce: {nonce!r}")
     if not _is_uri(uri):
         raise ValueError(f"Invalid SIWE message field uri: {uri!r}")
@@ -432,11 +455,14 @@ def decode(value: str) -> Payload:
     Raises:
         InvalidProofError: ``invalid_siwx_payload`` when it is malformed.
     """
+    if len(value) > MAX_HEADER_SIZE:
+        raise InvalidProofError("invalid_siwx_payload")
     try:
         raw = value.strip().replace("-", "+").replace("_", "/")
         data = base64.b64decode(raw + "=" * (-len(raw) % 4), validate=True)
         parsed = json.loads(data.decode())
-    except (binascii.Error, ValueError, UnicodeDecodeError) as error:
+    except (binascii.Error, ValueError, UnicodeDecodeError, RecursionError) as error:
+        # RecursionError: deeply nested JSON, as the x402 header decoder handles it.
         raise InvalidProofError("invalid_siwx_payload") from error
     payload = _parse_payload(parsed)
     if payload is None:
@@ -547,7 +573,8 @@ async def _claim(store: Store, key: str, expires_at: float) -> bool:
     """Claim ``key`` once until ``expires_at`` (mppx ``Store.tryClaim``)."""
     if expires_at <= time.time():
         return False
-    marker = {"expires": int(expires_at * 1000), "type": "mppx:replay"}
+    # A string, as other replay claims store: Redis and SQL stores reject a dict.
+    marker = json.dumps({"expires": int(expires_at * 1000), "type": "mppx:replay"})
     if isinstance(store, ExpiringStore):
         claimed = await store.put_if_absent_until(key, marker, expires_at)
     else:
@@ -619,14 +646,14 @@ async def verify(
     if proof_chain_id != chain_id:
         raise InvalidProofError("invalid_siwx_unsupported_chain")
     # EIP-4361 nonces are at least 8 alphanumeric characters.
-    if not _NONCE_RE.match(payload["nonce"]):
+    if not _NONCE_RE.fullmatch(payload["nonce"]):
         raise InvalidProofError("invalid_siwx_nonce")
 
-    if not _ADDRESS_RE.match(payload["address"]):
+    if not _ADDRESS_RE.fullmatch(payload["address"]):
         raise InvalidProofError("invalid_siwx_payload")
     address = to_checksum_address(payload["address"])
     signature = payload["signature"]
-    if not _SIGNATURE_RE.match(signature):
+    if not _SIGNATURE_RE.fullmatch(signature):
         raise InvalidProofError("invalid_siwx_signature")
     try:
         message = to_message(payload)
@@ -701,11 +728,18 @@ class SiwxTransport(httpx.AsyncBaseTransport):
         self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        # Keep the body so it can be sent again with the proof.
-        body = await request.aread()
+        # As PaymentTransport: an async streaming body passes through unbuffered and
+        # can't be sent again, so its 402 is returned unsigned.
+        replayable = not (
+            isinstance(request.stream, httpx.AsyncByteStream)
+            and not isinstance(request.stream, httpx.SyncByteStream)
+        )
+        # Keep a replayable body so it can be sent again with the proof.
+        body = await request.aread() if replayable else b""
         response = await self._inner.handle_async_request(request)
         if (
-            response.status_code != 402
+            not replayable
+            or response.status_code != 402
             or HEADER in request.headers
             or not callable(getattr(self._account, "sign_message", None))
         ):

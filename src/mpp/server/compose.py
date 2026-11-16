@@ -519,6 +519,8 @@ class ComposedHandler:
             or offer.method.needs_request_body
             # An identity verifier or payment check that reads the body (body=True).
             or offer.identity.body
+            # An x402 sign-in-with-x grant that reads the body (SiwxOptions.body).
+            or _siwx_reads_body(offer.method)
             for offer in self._offers
         )
 
@@ -1058,6 +1060,12 @@ def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | No
         ):
             return prepared.intent.x402_requirements(challenge.request)
     return None
+
+
+def _siwx_reads_body(method: Any) -> bool:
+    """Whether a method's x402 ``sign-in-with-x`` grant reads the request body."""
+    options = getattr(getattr(method, "x402", None), "siwx", None)
+    return bool(getattr(options, "body", False))
 
 
 def _siwx_offer(offer: _PreparedOffer) -> tuple[SiwxOptions, int] | None:

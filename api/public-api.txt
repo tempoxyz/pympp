@@ -1834,6 +1834,7 @@ module mpp.x402.siwx
         field kw_only store: Store
         field kw_only grant: GrantFn
         field kw_only verifier: SignatureVerifier | None = None
+        field kw_only body: bool = False
     class SiwxTransport(httpx.AsyncBaseTransport)
         def __init__(self, *, account: Any, inner: httpx.AsyncBaseTransport | None = None) -> None
         async def aclose(self) -> None
