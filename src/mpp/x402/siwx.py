@@ -294,11 +294,15 @@ def _iso(seconds: float) -> str:
     return f"{moment.strftime('%Y-%m-%dT%H:%M:%S')}.{milliseconds % 1000:03d}Z"
 
 
+# An RFC 3339 date-time, as SIWE timestamps are.
+_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})")
+
+
 def _message_time(value: str, field: str) -> str:
-    seconds = _parse_time(value)
-    if seconds is None:
+    """A timestamp as it is signed: exactly as the payload carries it, as the x402 reference."""
+    if not _TIMESTAMP_RE.fullmatch(value) or _parse_time(value) is None:
         raise ValueError(f"Invalid SIWE message field {field}: {value!r}")
-    return _iso(seconds)
+    return value
 
 
 def _chain_id_of(value: str) -> int:
@@ -325,7 +329,8 @@ def _is_ipv6_authority(domain: str) -> bool:
 def to_message(payload: Mapping[str, Any]) -> str:
     """Build the EIP-4361 (SIWE) message a payload signs.
 
-    The text is byte-identical to viem's ``createSiweMessage``, which mppx uses.
+    The layout is viem's ``createSiweMessage``, as mppx's, and timestamps are signed exactly
+    as the payload carries them (RFC 3339), as the x402 reference does.
     ``payload`` is a :class:`Payload` without its ``signature``.
 
     Raises:
@@ -376,6 +381,8 @@ def to_message(payload: Mapping[str, Any]) -> str:
     if not_before := payload.get("notBefore"):
         lines.append(f"Not Before: {_message_time(not_before, 'notBefore')}")
     if request_id := payload.get("requestId"):
+        if "\n" in request_id:
+            raise ValueError("Invalid SIWE message field requestId: it must not include a newline")
         lines.append(f"Request ID: {request_id}")
     resources = payload.get("resources")
     if resources is not None:

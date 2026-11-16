@@ -438,15 +438,15 @@ INTEROP_VECTORS: dict[str, Any] = {
         "Chain ID: 8453\n"
         "Nonce: 0123456789abcdef0123456789abcdef\n"
         "Issued At: 2026-01-02T03:04:05.678Z\n"
-        "Expiration Time: 2026-01-02T03:09:05.000Z\n"
-        "Not Before: 2026-01-02T03:04:05.000Z\n"
+        "Expiration Time: 2026-01-02T03:09:05Z\n"
+        "Not Before: 2026-01-02T03:04:05.000+00:00\n"
         "Request ID: req-1\n"
         "Resources:\n"
         "- https://api.example.com/a\n"
         "- ipfs://bafy",
         "signature": (
-            "0x46934800624dae5098fbe24e0c7a2a80c1f1fead0bbf27088e82f14b9412a4c8"
-            "74b186f50894009ba5dd429e00e25007f5990d6554f3c780c93928e7685ee77b1b"
+            "0x4074615658de779ab2ca52da36894b1b91a936553daa563023869cf2499d35fe"
+            "4942aa84929b35270e4731347ac7398ca4fd25f104a0a6a6c143c7bf9d325f051b"
         ),
     },
 }
@@ -569,6 +569,12 @@ class TestEdgeCases:
         with pytest.raises(ValueError):
             siwx.to_message(self.base(**overrides))
 
+    def test_to_message_signs_timestamps_as_sent(self) -> None:
+        message = siwx.to_message(self.base(issuedAt="2026-01-02T04:04:05+01:00"))
+        assert "\nIssued At: 2026-01-02T04:04:05+01:00\n" in message + "\n"
+        with pytest.raises(ValueError):
+            siwx.to_message(self.base(issuedAt="2026-01-02"))
+
     def test_to_message_rejects_a_non_eip155_chain(self) -> None:
         with pytest.raises(siwx.InvalidProofError) as error:
             siwx.to_message(self.base(chainId="eip155:abc"))
@@ -580,9 +586,9 @@ class TestEdgeCases:
     def test_to_message_accepts_ip_localhost_and_idn_domains(self, domain: str) -> None:
         assert siwx.to_message(self.base(domain=domain)).startswith(domain)
 
-    def test_offsetless_times_are_utc(self) -> None:
-        message = siwx.to_message(self.base(issuedAt="2026-01-02T03:04:05"))
-        assert "Issued At: 2026-01-02T03:04:05.000Z" in message
+    def test_offsetless_times_are_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            siwx.to_message(self.base(issuedAt="2026-01-02T03:04:05"))
 
     @pytest.mark.parametrize(
         "value",
@@ -907,6 +913,29 @@ class TestReviewFixes:
             await siwx.verify(chain_id=84532, origin=ORIGIN, store=store, payload=payload)
         assert error.value.code == "invalid_siwx_nonce"
         assert await store.get("mppx:x402:siwx:" + "a" * 129) is None
+
+    async def test_a_proof_every_offer_declined_is_spent(self) -> None:
+        approved: list[str] = []
+        options = siwx.SiwxOptions(
+            origin=ORIGIN, store=MemoryStore(), grant=lambda address, *_: address in approved
+        )
+        server = Mpp(
+            methods=evm(
+                currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=settle_ok, siwx=options
+            ),
+            secret_key=SECRET_KEY,
+        )
+        handler = server.charge(amount="0.25")
+        result = await handler(Request("GET", URL))
+        assert isinstance(result, PaymentRequired)
+        extension = siwx.from_payment_required(read_challenge(result.challenge))
+        assert extension is not None
+        proof = sign(extension)
+        assert isinstance(await handler(with_proof(proof)), PaymentRequired)
+        approved.append(ACCOUNT.address)
+        replay = await handler(with_proof(proof))
+        assert isinstance(replay, PaymentRequired)
+        assert "invalid_siwx_nonce" in read_challenge(replay.challenge)["error"]
 
     async def test_an_oversized_chain_id_is_a_proof_error(self) -> None:
         route = Route()

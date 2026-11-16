@@ -822,7 +822,7 @@ class ComposedHandler:
         rejection: siwx.InvalidProofError | None = None
         verified = False
         granted_offer: tuple[_PreparedOffer, siwx.VerifiedProof] | None = None
-        for candidate, (options, chain_id) in candidates:
+        for index, (candidate, (options, chain_id)) in enumerate(candidates):
             try:
                 proof = await siwx.verify(
                     chain_id=chain_id,
@@ -833,8 +833,7 @@ class ComposedHandler:
                     claim_nonce=False,
                 )
                 verified = True
-                # Reserve the nonce before grant, so a replayed proof never reaches grant,
-                # and release it when grant declines, so a later offer can still accept it.
+                # Reserve the nonce before grant, so a replayed proof never reaches grant.
                 await siwx.claim(store=options.store, payload=payload)
             except siwx.InvalidProofError as error:
                 if error.code == "invalid_siwx_nonce" and verified:
@@ -848,7 +847,10 @@ class ComposedHandler:
                     result = await result
                 granted = result is True
             finally:
-                if not granted:
+                # Free the nonce only for the next offer to claim. Once every offer has
+                # declined, the claim stays, so a declined proof can't be replayed later
+                # when grant would approve the wallet; clients sign a fresh one each time.
+                if not granted and index < len(candidates) - 1:
                     await siwx.release(store=options.store, payload=payload)
             if granted:
                 granted_offer = (candidate, proof)
