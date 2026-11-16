@@ -333,6 +333,20 @@ class TestServerZoneCredentials:
         await server.broadcast_credential(zone_credential(b, TAG_B))
 
     @pytest.mark.asyncio
+    async def test_rejects_a_zone_settlement_presented_as_a_hash_credential(self) -> None:
+        fixture: list[Fixture] = []
+        server = setup(lambda: fixture)
+        issued, memo = await issue(server)
+        fixture[:] = [Fixture(TAG_A, memo)]
+        hash_credential = Credential(
+            challenge=issued.to_echo(), payload={"type": "hash", "hash": SETTLEMENT_HASH}
+        )
+        with pytest.raises(VerificationError, match="must be paid with a zone credential"):
+            await server.broadcast_credential(hash_credential)
+        # The withdrawal is still claimable once, as a zone credential.
+        await server.broadcast_credential(zone_credential(issued, TAG_A))
+
+    @pytest.mark.asyncio
     async def test_rejects_a_withdrawal_bound_to_another_challenge(self) -> None:
         fixture: list[Fixture] = []
         server = setup(lambda: fixture)
@@ -1277,6 +1291,102 @@ class TestClientZoneCancelledAfterSettlement:
         credential = await method.create_credential(issued)
         assert credential.payload["type"] == "zone"
         assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("settled_first", [True, False])
+    async def test_a_retry_under_a_new_challenge_resumes_an_abandoned_withdrawal(
+        self, settled_first: bool
+    ) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settling = asyncio.Event()
+        release = asyncio.Event()
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])]
+            raise AssertionError(method)
+
+        l1 = rpc_client(tempo_l1)
+        original_post = l1.post
+
+        async def slow_post(*args: Any, **kwargs: Any) -> httpx.Response:
+            if kwargs["json"]["method"] == "eth_getLogs":
+                settling.set()
+                await release.wait()
+            return await original_post(*args, **kwargs)
+
+        l1.post = slow_post  # type: ignore[method-assign]
+        method = payer_method(preparing_zone(calls, send), l1)
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        retried, _ = await issue(server)
+        assert first.id != retried.id
+        caller = asyncio.ensure_future(method.create_credential(first))
+        await settling.wait()
+        caller.cancel()
+        assert isinstance(await error_of(caller), PaymentOutcomeUnknownError)
+        if settled_first:
+            release.set()
+            for _ in range(50):
+                await asyncio.sleep(0)
+            credential = await method.create_credential(retried)
+        else:
+            retry = asyncio.ensure_future(method.create_credential(retried))
+            for _ in range(20):
+                await asyncio.sleep(0)
+            release.set()
+            credential = await retry
+        assert credential.payload["type"] == "zone"
+        # The earlier withdrawal pays: its credential names its own Challenge.
+        assert credential.challenge.id == first.id
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_new_challenge_for_other_terms_withdraws_again(self) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return []
+            raise AssertionError(method)
+
+        zone = replace(preparing_zone(calls, send), settlement_timeout=0)
+        method = payer_method(zone, rpc_client(tempo_l1))
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        other, _ = await issue(server, description="another resource")
+        with pytest.raises(ZoneSettlementPendingError):
+            await method.create_credential(first)
+        with pytest.raises(ZoneSettlementPendingError):
+            await method.create_credential(other)
+        assert calls.count("eth_sendRawTransactionSync") == 2
 
 
 class TestZoneCoverage:

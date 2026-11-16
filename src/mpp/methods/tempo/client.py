@@ -346,6 +346,15 @@ class _ZoneSend:
     on_submission: Callable[[str], None] | None = None
     # First Tempo block its settlement search covered, so later searches start there.
     search_from: int | None = None
+    # The Challenge the withdrawal pays, so a retry under a newly issued Challenge for
+    # the same payment can resume it instead of withdrawing again.
+    challenge: Challenge | None = None
+    # Set once a wait ends without a caller taking the credential.
+    abandoned: bool = False
+
+    def resumable(self) -> bool:
+        """Whether every caller left before taking this withdrawal's credential."""
+        return self.sent and (self.abandoned or not self.wanted())
 
 
 @dataclass
@@ -1398,11 +1407,36 @@ class TempoMethod:
             raise ValueError("Challenge has no expiry, so it can't be paid from a Zone.")
         # A withdrawal can't be undone, so start one only when it can settle before
         # the challenge expires; an expired challenge would invite another payment.
-        if _zone_withdrawal_key(challenge) not in self._zone_withdrawals and not (
-            _zone_settles_before_expiry(challenge.expires, zone.settlement_timeout)
+        if (
+            _zone_withdrawal_key(challenge) not in self._zone_withdrawals
+            and self._resumable_zone_withdrawal(challenge) is None
+            and not _zone_settles_before_expiry(challenge.expires, zone.settlement_timeout)
         ):
             return None
         return zone_id
+
+    def _resumable_zone_withdrawal(self, challenge: Challenge) -> str | None:
+        """Return the key of a sent withdrawal no caller took that pays the same terms.
+
+        A caller that is cancelled or stops waiting leaves its withdrawal in flight, and
+        retrying the request gets a newly issued Challenge. Paying that one would
+        withdraw a second time, so the retry resumes the earlier withdrawal and presents
+        its credential, which stays valid until its own Challenge expires. Withdrawals
+        whose Challenge expired are dropped: their credential would be rejected, and
+        their ``valid_before`` keeps them from settling later.
+        """
+        terms = _zone_terms_key(challenge)
+        found: str | None = None
+        for key, (task, state) in list(self._zone_withdrawals.items()):
+            earlier = state.challenge
+            if earlier is None or task.cancelled() or not state.resumable():
+                continue
+            if _zone_challenge_expired(earlier.expires):
+                del self._zone_withdrawals[key]
+                continue
+            if found is None and _zone_terms_key(earlier) == terms:
+                found = key
+        return found
 
     async def _create_zone_credential(
         self,
@@ -1425,12 +1459,21 @@ class TempoMethod:
                 to the payer's Zone balance.
         """
         assert self.zone is not None
-        zone = self.zone
-        request = challenge.request
         key = _zone_withdrawal_key(challenge)
         existing = self._zone_withdrawals.get(key)
         if existing is None:
-            state = _ZoneSend(wanted=wanted, on_submission=on_submission)
+            resumed = self._resumable_zone_withdrawal(challenge)
+            if resumed is not None:
+                # Pay with the earlier withdrawal: its credential carries its own
+                # Challenge, which the server still accepts for this request.
+                key = resumed
+                existing = self._zone_withdrawals[key]
+                assert existing[1].challenge is not None
+                challenge = existing[1].challenge
+                existing[1].abandoned = False
+                existing[1].wanted = wanted
+        if existing is None:
+            state = _ZoneSend(wanted=wanted, on_submission=on_submission, challenge=challenge)
             new_task = asyncio.ensure_future(self._request_zone_withdrawal(challenge, state))
             self._zone_withdrawals[key] = (new_task, state)
 
@@ -1462,6 +1505,34 @@ class TempoMethod:
             # retry's wait still names the transaction that paid.
             if state.raw_tx is not None and on_submission is not None:
                 on_submission(state.raw_tx)
+        delivered = False
+        try:
+            credential = await self._settle_zone_withdrawal(
+                challenge, zone_id, key, task, state, wanted
+            )
+            delivered = wanted()
+            return credential
+        finally:
+            # A wait that ends without handing over the credential (it timed out, was
+            # cancelled, or nobody wanted it) leaves the withdrawal for a retry to resume.
+            if not delivered:
+                entry = self._zone_withdrawals.get(key)
+                if entry is not None and entry[0] is task:
+                    state.abandoned = True
+
+    async def _settle_zone_withdrawal(
+        self,
+        challenge: Challenge,
+        zone_id: int,
+        key: str,
+        task: asyncio.Task[str],
+        state: _ZoneSend,
+        wanted: Callable[[], bool],
+    ) -> Credential:
+        """Wait for a sent Zone withdrawal to settle and return its credential."""
+        assert self.zone is not None
+        zone = self.zone
+        request = challenge.request
         sender_tag = await asyncio.shield(task)
 
         def searched_from(block: int) -> None:
@@ -1745,6 +1816,28 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
             challenge.digest,
             challenge.description,
             challenge.opaque,
+        ],
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _zone_terms_key(challenge: Challenge) -> str:
+    """Key what a Challenge asks to be paid, leaving out what each issuance changes
+    (its ID, expiry and opaque ``_mpp_nonce``), so a retry's newly issued Challenge
+    matches. The request keeps its ``_mppx_scope``, so another route never does."""
+    opaque = challenge.opaque
+    if is_dict(opaque):
+        opaque = {k: v for k, v in opaque.items() if k != "_mpp_nonce"}
+    return json.dumps(
+        [
+            challenge.realm,
+            challenge.method,
+            challenge.intent,
+            challenge.request,
+            challenge.digest,
+            challenge.description,
+            opaque,
         ],
         sort_keys=True,
         default=str,

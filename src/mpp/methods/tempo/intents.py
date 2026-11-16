@@ -419,6 +419,34 @@ def get_transfers(
     return transfers
 
 
+def _reject_zone_settlement(receipt_data: dict[str, Any]) -> None:
+    """Refuse a hash credential for a Zone portal's settlement transaction.
+
+    A settled Zone withdrawal is claimed by its portal and sender tag (a ``zone``
+    credential). Accepting the same settlement as a ``hash`` credential would let
+    one withdrawal pay twice, since the two credentials reserve different replay
+    keys. One ``processWithdrawals`` transaction settles many withdrawals, so the
+    zone path cannot reserve the hash; the hash path refuses it instead.
+    """
+    from mpp.methods.tempo._zone import WITHDRAWAL_PROCESSED_TOPIC
+
+    logs = receipt_data.get("logs")
+    if not is_list(logs):
+        return
+    for log in logs:
+        topics = log.get("topics") if is_dict(log) else None
+        if (
+            is_list(topics)
+            and topics
+            and isinstance(topics[0], str)
+            and topics[0].lower() == WITHDRAWAL_PROCESSED_TOPIC
+        ):
+            raise VerificationError(
+                "Payment verification failed: "
+                "a Zone settlement must be paid with a zone credential."
+            )
+
+
 def _match_single_transfer_calldata(
     call_data_hex: str,
     recipient: str,
@@ -1682,6 +1710,7 @@ class ChargeIntent:
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
         client = await self._get_client()
         receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
+        _reject_zone_settlement(receipt_data)
         matched_logs = self._verify_receipt_transfers(
             receipt_data,
             request,
