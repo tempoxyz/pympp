@@ -48,7 +48,7 @@ from tests.session_interop import run_mppx_session_client
 
 pytestmark = [pytest.mark.integration, INTEGRATION]
 
-SECRET_KEY = "session-server-localnet-secret"
+SECRET_KEY = "session-server-localnet-secret-0123456789abcdef0123456789abcdef"
 REALM = "session.test"
 
 

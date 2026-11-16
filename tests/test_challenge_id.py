@@ -21,7 +21,7 @@ class TestGenerateChallengeId:
     def test_basic_charge(self) -> None:
         """Basic charge challenge ID generation."""
         result = generate_challenge_id(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -31,12 +31,12 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "XmJ98SdsAdzwP9Oa-8In322Uh6yweMO6rywdomWk_V4"
+        assert result == "m8mrc6t8uLSUxcqesz2jtMthpD0ivyCnbK-lg4_zRXE"
 
     def test_with_expires(self) -> None:
         """Challenge ID with expires field included in HMAC."""
         result = generate_challenge_id(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -47,12 +47,12 @@ class TestGenerateChallengeId:
             },
             expires="2026-01-29T12:00:00Z",
         )
-        assert result == "EvqUWMPJjqhoVJVG3mhTYVqCa3Mk7bUVd_OjeJGek1A"
+        assert result == "8OuZibfFVcuPWgILV2lL671aDcbRl3YNT8Yz_tC_AzM"
 
     def test_with_digest(self) -> None:
         """Challenge ID with digest field included in HMAC."""
         result = generate_challenge_id(
-            secret_key="my-server-secret",
+            secret_key="my-server-secret-0123456789abcdef0123456789abcdef",
             realm="payments.example.org",
             method="tempo",
             intent="charge",
@@ -63,12 +63,12 @@ class TestGenerateChallengeId:
             },
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=",
         )
-        assert result == "qcJUPoapy4bFLznQjQUutwPLyXW7FvALrWA_sMENgAY"
+        assert result == "7kYnKyAFHN_dhbDOJ7lqmty-A1lM4gIgCONyTSlU1jU"
 
     def test_full_challenge(self) -> None:
         """Challenge ID with all optional fields."""
         result = generate_challenge_id(
-            secret_key="production-secret-abc123",
+            secret_key="production-secret-abc123-0123456789abcdef0123456789abcdef",
             realm="api.tempo.xyz",
             method="tempo",
             intent="charge",
@@ -82,12 +82,12 @@ class TestGenerateChallengeId:
             expires="2026-02-01T00:00:00Z",
             digest="sha-256=abc123def456",
         )
-        assert result == "J6w7zq6nHLnchss3AYbLxNirdpuaV8_Msn37DQSz6Bw"
+        assert result == "vxJp5ad4nO_-hphRer-SP6gQEzxnv9h-o1zBNmY-2pw"
 
     def test_different_secret_different_id(self) -> None:
         """Same parameters with different secret produces different ID."""
         result = generate_challenge_id(
-            secret_key="different-secret-key",
+            secret_key="different-secret-key-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -97,23 +97,23 @@ class TestGenerateChallengeId:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert result == "_o55RP0duNvJYtw9PXnf44mGyY5ajV_wwGzoGdTFuNs"
+        assert result == "NDJnC5py7_13-fLDx1PXTNp_tsEB97ow3Q7HZf8p-Rg"
 
     def test_empty_request(self) -> None:
         """Challenge ID with empty request object."""
         result = generate_challenge_id(
-            secret_key="test-key",
+            secret_key="test-key-0123456789abcdef0123456789abcdef",
             realm="test.example.com",
             method="tempo",
             intent="authorize",
             request={},
         )
-        assert result == "MYEC2oq3_B3cHa_My1Lx3NQKn_iUiMfsns6361N0SX0"
+        assert result == "wqZU412VvDQJM-ZRuPgSAM0zN6bhuJwzl_JTr8GN6Sc"
 
     def test_unicode_in_description(self) -> None:
         """Request with unicode characters."""
         result = generate_challenge_id(
-            secret_key="unicode-test-key",
+            secret_key="unicode-test-key-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -124,12 +124,12 @@ class TestGenerateChallengeId:
                 "description": "Payment for café ☕",
             },
         )
-        assert result == "1_GKJqATKvVnIUY3f8MFq48bMs18JHz_3CBK8pu52yA"
+        assert result == "HlSPrgwxn0AriC4GiSH5CiollhkScgn6I953ftyz90M"
 
     def test_nested_method_details(self) -> None:
         """Request with nested methodDetails object."""
         result = generate_challenge_id(
-            secret_key="nested-test-key",
+            secret_key="nested-test-key-0123456789abcdef0123456789abcdef",
             realm="api.tempo.xyz",
             method="tempo",
             intent="charge",
@@ -140,21 +140,21 @@ class TestGenerateChallengeId:
                 "methodDetails": {"chainId": 42431, "feePayer": True},
             },
         )
-        assert result == "VkSq83C7vQFvdX3MqHM7s-N1QOo2nae4F1iHmbV5pgg"
+        assert result == "7Nrr8XWBM0OwN3FXIPc1XemPDJhjcMslg1Qd3fqrUGg"
 
 
 class TestGoldenVectors:
     """Cross-SDK golden vectors (shared with mppx and mpp-rs).
 
     HMAC input: realm | method | intent | base64url(canonicalize(request)) | expires | digest
-    HMAC key:   UTF-8 bytes of secret_key ("test-vector-secret")
+    HMAC key:   UTF-8 bytes of secret_key ("mpp-hmac-test-vector-secret-32by")
     Output:     base64url(HMAC-SHA256(key, input), no padding)
 
     These vectors cover every combination of optional HMAC fields (expires, digest)
     and variations in each required field (realm, method, intent, request).
     """
 
-    SECRET = "test-vector-secret"
+    SECRET = "mpp-hmac-test-vector-secret-32by"
 
     def test_required_fields_only(self) -> None:
         result = generate_challenge_id(
@@ -164,7 +164,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "X6v1eo7fJ76gAxqY0xN9Jd__4lUyDDYmriryOM-5FO4"
+        assert result == "2S2NsFcCINq8QUKV8OZHdRm_JhhbJf5X8Cii4gZ_UyI"
 
     def test_with_expires(self) -> None:
         result = generate_challenge_id(
@@ -175,7 +175,7 @@ class TestGoldenVectors:
             request={"amount": "1000000"},
             expires="2025-01-06T12:00:00Z",
         )
-        assert result == "ChPX33RkKSZoSUyZcu8ai4hhkvjZJFkZVnvWs5s0iXI"
+        assert result == "1si1-uE-QSDpwpnj7NxpFy7Gu6Z4YPWr_1FGsLYq0J4"
 
     def test_with_digest(self) -> None:
         result = generate_challenge_id(
@@ -186,7 +186,7 @@ class TestGoldenVectors:
             request={"amount": "1000000"},
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
         )
-        assert result == "JHB7EFsPVb-xsYCo8LHcOzeX1gfXWVoUSzQsZhKAfKM"
+        assert result == "pgE6btlzFLJKudYJ4stj7HI4ocTeTJCFI6GA9tPxxyI"
 
     def test_with_expires_and_digest(self) -> None:
         result = generate_challenge_id(
@@ -198,7 +198,7 @@ class TestGoldenVectors:
             expires="2025-01-06T12:00:00Z",
             digest="sha-256=X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE",
         )
-        assert result == "m39jbWWCIfmfJZSwCfvKFFtBl0Qwf9X4nOmDb21peLA"
+        assert result == "HzjZEJWOhKwlDG8okZ2JBJQyI-h9XGvdE_HClrkM8NI"
 
     def test_description_not_in_hmac(self) -> None:
         """description is not part of HMAC input, so ID matches 'required fields only'."""
@@ -209,7 +209,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert with_desc == "X6v1eo7fJ76gAxqY0xN9Jd__4lUyDDYmriryOM-5FO4"
+        assert with_desc == "2S2NsFcCINq8QUKV8OZHdRm_JhhbJf5X8Cii4gZ_UyI"
 
     def test_multi_field_request(self) -> None:
         result = generate_challenge_id(
@@ -219,7 +219,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000", "currency": "0x1234", "recipient": "0xabcd"},
         )
-        assert result == "_H5TOnnlW0zduQ5OhQ3EyLVze_TqxLDPda2CGZPZxOc"
+        assert result == "F1RuEjUwsTn6bW6_RJPzi6DTOGCHrL1SJ4khSWkleHs"
 
     def test_nested_method_details(self) -> None:
         result = generate_challenge_id(
@@ -233,7 +233,7 @@ class TestGoldenVectors:
                 "methodDetails": {"chainId": 42431},
             },
         )
-        assert result == "TqujwpuDDg_zsWGINAd5XObO2rRe6uYufpqvtDmr6N8"
+        assert result == "3Y4Qq7DfGEcsYA4X6Xp7T7SF5ndxdg1iT-UB_lSKQl8"
 
     def test_empty_request(self) -> None:
         result = generate_challenge_id(
@@ -243,7 +243,7 @@ class TestGoldenVectors:
             intent="charge",
             request={},
         )
-        assert result == "yLN7yChAejW9WNmb54HpJIWpdb1WWXeA3_aCx4dxmkU"
+        assert result == "W8iN9dn5VBsfN18snJ7sfeQB1UW7lulIOy82KJenUmg"
 
     def test_different_realm(self) -> None:
         result = generate_challenge_id(
@@ -253,7 +253,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "3F5bOo2a9RUihdwKk4hGRvBvzQmVPBMDvW0YM-8GD00"
+        assert result == "DM5Lst2rlNZc5IZ82wbbX05B-oUYz4sT05hXlShlhgY"
 
     def test_different_method(self) -> None:
         result = generate_challenge_id(
@@ -263,7 +263,7 @@ class TestGoldenVectors:
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert result == "o0ra2sd7HcB4Ph0Vns69gRDUhSj5WNOnUopcDqKPLz4"
+        assert result == "LHQojyqF50s6xsRCuMVA1XUvXidusjxKN_SJLzHWEVg"
 
     def test_different_intent(self) -> None:
         result = generate_challenge_id(
@@ -273,7 +273,7 @@ class TestGoldenVectors:
             intent="session",
             request={"amount": "1000000"},
         )
-        assert result == "aAY7_IEDzsznNYplhOSE8cERQxvjFcT4Lcn-7FHjLVE"
+        assert result == "NUFQUW9kSnrCVGMGHUdSfRUh6hEYBfZxasg7LtGeU4k"
 
 
 class TestChallengeCreate:
@@ -282,7 +282,7 @@ class TestChallengeCreate:
     def test_creates_challenge_with_hmac_id(self) -> None:
         """Challenge.create() should use HMAC-bound ID."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -292,14 +292,14 @@ class TestChallengeCreate:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert challenge.id == "XmJ98SdsAdzwP9Oa-8In322Uh6yweMO6rywdomWk_V4"
+        assert challenge.id == "m8mrc6t8uLSUxcqesz2jtMthpD0ivyCnbK-lg4_zRXE"
         assert challenge.method == "tempo"
         assert challenge.intent == "charge"
 
     def test_create_with_optional_fields(self) -> None:
         """Challenge.create() should handle optional fields."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -311,7 +311,7 @@ class TestChallengeCreate:
             expires="2026-01-29T12:00:00Z",
             description="Test payment",
         )
-        assert challenge.id == "EvqUWMPJjqhoVJVG3mhTYVqCa3Mk7bUVd_OjeJGek1A"
+        assert challenge.id == "8OuZibfFVcuPWgILV2lL671aDcbRl3YNT8Yz_tC_AzM"
         assert challenge.expires == "2026-01-29T12:00:00Z"
         assert challenge.description == "Test payment"
 
@@ -322,7 +322,7 @@ class TestChallengeVerify:
     def test_verify_valid_challenge(self) -> None:
         """Challenge.verify() should return True for valid HMAC."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -332,34 +332,40 @@ class TestChallengeVerify:
                 "recipient": "0x1234567890abcdef1234567890abcdef12345678",
             },
         )
-        assert challenge.verify("test-secret-key-12345", "api.example.com")
+        assert challenge.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
 
     def test_verify_invalid_secret(self) -> None:
         """Challenge.verify() should return False for wrong secret."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert not challenge.verify("wrong-secret", "api.example.com")
+        assert not challenge.verify(
+            "wrong-secret-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
 
     def test_verify_invalid_realm(self) -> None:
         """Challenge.verify() should return False for wrong realm."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
             request={"amount": "1000000"},
         )
-        assert not challenge.verify("test-secret-key-12345", "wrong.realm.com")
+        assert not challenge.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "wrong.realm.com"
+        )
 
     def test_verify_tampered_challenge(self) -> None:
         """Challenge.verify() should return False if challenge was tampered."""
         original = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -372,19 +378,23 @@ class TestChallengeVerify:
             intent=original.intent,
             request={"amount": "9999999"},  # Tampered amount
         )
-        assert not tampered.verify("test-secret-key-12345", "api.example.com")
+        assert not tampered.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
 
     def test_verify_with_expires(self) -> None:
         """Challenge.verify() should include expires in HMAC."""
         challenge = Challenge.create(
-            secret_key="test-secret-key-12345",
+            secret_key="test-secret-key-12345-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
             request={"amount": "5000000"},
             expires="2026-01-29T12:00:00Z",
         )
-        assert challenge.verify("test-secret-key-12345", "api.example.com")
+        assert challenge.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
 
         # Tampering expires should fail
         tampered = Challenge(
@@ -394,7 +404,9 @@ class TestChallengeVerify:
             request=challenge.request,
             expires="2099-12-31T23:59:59Z",  # Tampered
         )
-        assert not tampered.verify("test-secret-key-12345", "api.example.com")
+        assert not tampered.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
 
 
 class TestOpaque:
@@ -402,7 +414,7 @@ class TestOpaque:
 
     def test_meta_sets_opaque_on_challenge(self) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -413,7 +425,7 @@ class TestOpaque:
 
     def test_opaque_is_none_when_no_meta(self) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -423,7 +435,7 @@ class TestOpaque:
 
     def test_opaque_affects_challenge_id(self) -> None:
         with_meta = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -431,7 +443,7 @@ class TestOpaque:
             meta={"pi": "pi_3abc123XYZ"},
         )
         without_meta = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -441,7 +453,7 @@ class TestOpaque:
 
     def test_different_opaque_different_ids(self) -> None:
         meta1 = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -449,7 +461,7 @@ class TestOpaque:
             meta={"pi": "pi_111"},
         )
         meta2 = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -460,7 +472,7 @@ class TestOpaque:
 
     def test_same_opaque_same_id(self) -> None:
         c1 = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -468,7 +480,7 @@ class TestOpaque:
             meta={"pi": "pi_3abc123XYZ"},
         )
         c2 = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -479,18 +491,18 @@ class TestOpaque:
 
     def test_verify_succeeds_with_opaque(self) -> None:
         challenge = Challenge.create(
-            secret_key="my-secret",
+            secret_key="my-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
             request={"amount": "1000000"},
             meta={"pi": "pi_3abc123XYZ"},
         )
-        assert challenge.verify("my-secret", "api.example.com")
+        assert challenge.verify("my-secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     def test_verify_detects_tampered_opaque(self) -> None:
         challenge = Challenge.create(
-            secret_key="my-secret",
+            secret_key="my-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -500,11 +512,11 @@ class TestOpaque:
         from dataclasses import replace
 
         tampered = replace(challenge, opaque={"pi": "pi_TAMPERED"})
-        assert not tampered.verify("my-secret", "api.example.com")
+        assert not tampered.verify("my-secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     def test_empty_meta_produces_opaque(self) -> None:
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -519,7 +531,7 @@ class TestCredentialHeader:
 
     def test_authorization_header_does_not_change_challenge_id(self) -> None:
         params = {
-            "secret_key": "test-secret-key-12345",
+            "secret_key": "test-secret-key-12345-0123456789abcdef0123456789abcdef",
             "realm": "api.example.com",
             "method": "tempo",
             "intent": "charge",
@@ -536,7 +548,7 @@ class TestCredentialHeader:
 
     def test_payment_authorization_header_is_bound_into_id(self) -> None:
         params = {
-            "secret_key": "test-secret-key-12345",
+            "secret_key": "test-secret-key-12345-0123456789abcdef0123456789abcdef",
             "realm": "api.example.com",
             "method": "tempo",
             "intent": "charge",
@@ -547,13 +559,15 @@ class TestCredentialHeader:
 
         assert implicit.id != advertised.id
         assert advertised.header == "Payment-Authorization"
-        assert advertised.verify("test-secret-key-12345", "api.example.com")
+        assert advertised.verify(
+            "test-secret-key-12345-0123456789abcdef0123456789abcdef", "api.example.com"
+        )
         assert 'header="Payment-Authorization"' in advertised.to_www_authenticate("api.example.com")
 
     def test_header_sits_before_opaque_in_hmac(self) -> None:
         """Header is inserted immediately before the final opaque slot."""
         params = {
-            "secret_key": "test-secret",
+            "secret_key": "test-secret-0123456789abcdef0123456789abcdef",
             "realm": "api.example.com",
             "method": "tempo",
             "intent": "charge",
@@ -567,12 +581,12 @@ class TestCredentialHeader:
 
         assert with_header.id != with_both.id
         assert with_both.id != with_opaque.id
-        assert with_both.verify("test-secret", "api.example.com")
+        assert with_both.verify("test-secret-0123456789abcdef0123456789abcdef", "api.example.com")
 
     def test_rejects_invalid_header_name(self) -> None:
         with pytest.raises(ValueError, match="Invalid HTTP header name"):
             Challenge.create(
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
                 realm="api.example.com",
                 method="tempo",
                 intent="charge",
@@ -627,7 +641,7 @@ class TestJcsChallengeEncoding:
         request = {"description": "Payment for café ☕", "amount": "1000000"}
         opaque = {"\U00010000": "supplementary", "\ue000": "private"}
         challenge = Challenge.create(
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -653,7 +667,11 @@ class TestJcsChallengeEncoding:
         )
         expected_id = (
             base64.urlsafe_b64encode(
-                hmac.new(b"test-secret", hmac_input.encode(), hashlib.sha256).digest()
+                hmac.new(
+                    b"test-secret-0123456789abcdef0123456789abcdef",
+                    hmac_input.encode(),
+                    hashlib.sha256,
+                ).digest()
             )
             .decode()
             .rstrip("=")
@@ -666,5 +684,5 @@ class TestJcsChallengeEncoding:
         assert challenge.to_echo().opaque == opaque_b64
 
         parsed = Challenge.from_www_authenticate(header)
-        assert parsed.verify("test-secret", "api.example.com")
+        assert parsed.verify("test-secret-0123456789abcdef0123456789abcdef", "api.example.com")
         assert parsed.to_www_authenticate(parsed.realm) == header

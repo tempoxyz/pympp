@@ -642,7 +642,7 @@ async def test_routes_advertise_hosted_sponsorship(
 ) -> None:
     from mpp.server import Mpp
 
-    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key")
+    monkeypatch.setenv("MPP_SECRET_KEY", "test-secret-key-0123456789abcdef0123456789abcdef")
     server = Mpp(
         methods=tempo_server.charge(recipient=RECIPIENT, currencies=[CURRENCY], fee_payer=fee_payer)
     )

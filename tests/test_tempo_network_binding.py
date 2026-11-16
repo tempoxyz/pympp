@@ -53,7 +53,7 @@ async def test_charge_rejects_settlement_on_other_chain(credential_type: str) ->
                 http_client=client,
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         options = {"amount": "0.000001", "chain_id": CHAIN_ID}
         handler = server.charge(**options)

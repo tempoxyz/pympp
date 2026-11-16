@@ -19,7 +19,7 @@ from mpp.methods.evm import BASE_USDC  # noqa: E402
 from mpp.methods.evm import server as evm  # noqa: E402
 
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
-SECRET = "test-secret"
+SECRET = "test-secret-0123456789abcdef0123456789abcdef"
 PRODUCTION = [
     ("AWS_LAMBDA_FUNCTION_NAME", "handler"),
     ("DYNO", "web.1"),

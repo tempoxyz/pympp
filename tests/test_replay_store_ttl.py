@@ -23,7 +23,7 @@ REQUEST = {
     "recipient": "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00",
 }
 REALM = "api.example.com"
-SECRET = "local-regression-test-only"
+SECRET = "local-regression-test-only-0123456789abcdef0123456789abcdef"
 
 
 @pytest.mark.parametrize("ttl", [None, 1])

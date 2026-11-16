@@ -68,7 +68,9 @@ async def signed(server: Mpp, resource_url: str | None = URL) -> str:
 
 class TestCharge:
     async def test_pays_with_payment_signature(self) -> None:
-        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         signature = await signed(server)
 
         result = await server.charge(amount="0.01")(x402_request(signature))
@@ -80,18 +82,24 @@ class TestCharge:
         assert payment_response_header(credential, receipt) is not None
 
     async def test_payment_signature_needs_the_resource_url(self) -> None:
-        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         result = await server.charge(amount="0.01")(x402_request("abc", url="/paid"))
         challenge(result)
         assert payment_required(result) is None
 
     async def test_ignores_payment_signature_without_x402_context(self) -> None:
-        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         result = await server.charge(amount="0.01")(http_request())
         challenge(result)
 
     async def test_mismatched_payment_raises_with_a_retry_challenge(self) -> None:
-        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         signature = await signed(server)
         result = await server.charge(amount="0.02")(x402_request(signature))
         assert challenge(result).request["amount"] == "20000"
@@ -100,7 +108,11 @@ class TestCharge:
         assert "does not match" in decode_payment_required(header).get("error", "")
 
     async def test_composed_server_routes_payment_signature_to_evm(self) -> None:
-        server = Mpp(methods=[tempo_method(), evm_method()], realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=[tempo_method(), evm_method()],
+            realm=REALM,
+            secret_key="k-0123456789abcdef0123456789abcdef",
+        )
         handler = server.charge(amount="0.01")
         unpaid = await handler(x402_request())
         assert "evm" in [c.method for c in challenges(unpaid)]
@@ -121,7 +133,7 @@ class TestCharge:
         server = Mpp(
             methods=[tempo_method(), evm_method()],
             realm=REALM,
-            secret_key="k",
+            secret_key="k-0123456789abcdef0123456789abcdef",
             select_offers=lambda offers, _context: [
                 offer for offer in offers if allow_evm or offer.method.name != "evm"
             ],
@@ -147,7 +159,7 @@ class TestCharge:
         server = Mpp(
             methods=[evm_method(max_timeout_seconds=60), evm_method(max_timeout_seconds=120)],
             realm=REALM,
-            secret_key="k",
+            secret_key="k-0123456789abcdef0123456789abcdef",
             select_offers=lambda offers, _context: offers[1:],
         )
         handler = server.charge(amount="0.01")
@@ -165,7 +177,11 @@ class TestCharge:
         assert isinstance(await handler(x402_request(signature)), PaymentVerified)
 
     async def test_composed_server_reports_a_malformed_payment(self) -> None:
-        server = Mpp(methods=[tempo_method(), evm_method()], realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=[tempo_method(), evm_method()],
+            realm=REALM,
+            secret_key="k-0123456789abcdef0123456789abcdef",
+        )
         handler = server.charge(amount="0.01")
         result = await handler(x402_request("%%%"))
         assert "evm" in [c.method for c in challenges(result)]
@@ -178,7 +194,11 @@ class TestCharge:
         )
 
     async def test_x402_payment_required_forms(self) -> None:
-        server = Mpp(methods=[tempo_method(), evm_method()], realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=[tempo_method(), evm_method()],
+            realm=REALM,
+            secret_key="k-0123456789abcdef0123456789abcdef",
+        )
         unpaid = await server.charge(amount="0.01")(x402_request())
         assert payment_required(unpaid) is not None
 
@@ -199,7 +219,9 @@ class TestVerifyOrChallenge:
         assert method.resolve_request is not None
         request = method.resolve_request(RequestContext(request={"amount": "0.01"}))
         assert isinstance(request, dict) and intent is not None
-        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         signature = sign_x402_payment(PAYER, await accepted(server), URL)
         events = EventDispatcher()
         failures: list[Any] = []
@@ -211,7 +233,7 @@ class TestVerifyOrChallenge:
                 intent=intent,
                 request=request,
                 realm=REALM,
-                secret_key="k",
+                secret_key="k-0123456789abcdef0123456789abcdef",
                 method="evm",
                 events=events,
                 x402=X402Input(resource_url=URL, payment_signature=signature),
@@ -225,7 +247,7 @@ class TestVerifyOrChallenge:
             intent=TempoChargeIntent(),
             request={"amount": "1", "currency": "0x" + "aa" * 20, "recipient": RECIPIENT},
             realm=REALM,
-            secret_key="k",
+            secret_key="k-0123456789abcdef0123456789abcdef",
             x402=X402Input(resource_url=URL, payment_signature="anything"),
         )
         assert isinstance(result, Challenge)
@@ -264,7 +286,7 @@ async def test_plain_data_is_left_to_the_framework(caplog: pytest.LogCaptureFixt
 
 
 async def test_charge_rejects_a_payment_without_route_metadata() -> None:
-    server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+    server = Mpp(methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef")
     signature = sign_x402_payment(PAYER, await accepted(server), None)
     result = await server.charge(amount="0.01")(x402_request(signature))
     assert isinstance(result, PaymentRequired)
@@ -272,7 +294,7 @@ async def test_charge_rejects_a_payment_without_route_metadata() -> None:
 
 
 async def test_charge_advertises_the_http_method() -> None:
-    server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+    server = Mpp(methods=evm_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef")
     handler = server.charge(amount="0.01")
     header = payment_required(await handler(x402_request(method="POST")))
     assert header is not None

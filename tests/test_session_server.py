@@ -1305,7 +1305,9 @@ def make_server(life: Lifecycle, **options: Any) -> Mpp:
         store=life.raw,
         **options,
     )
-    return Mpp(methods=[method], realm="api.test", secret_key="secret")
+    return Mpp(
+        methods=[method], realm="api.test", secret_key="secret-0123456789abcdef0123456789abcdef"
+    )
 
 
 def handler_for(life: Lifecycle, amount: str = "0.0001", **options: Any) -> Any:
@@ -1345,7 +1347,12 @@ class TestSessionMethod:
             method = tempo_server.session(
                 account=PAYEE, currency=CURRENCY, rpc_url=RPC, http_client=life.rpc.client
             )
-            server = Mpp(methods=[method], realm="api.test", secret_key="secret", store=life.raw)
+            server = Mpp(
+                methods=[method],
+                realm="api.test",
+                secret_key="secret-0123456789abcdef0123456789abcdef",
+                store=life.raw,
+            )
             handler = server.session(amount="0.0001", unit_type="request")
         life.rpc.logs = [opened_log(life.descriptor, life.channel_id)]
         result = await pay(handler, life.open_payload(100))
@@ -1539,9 +1546,9 @@ class TestSessionMethod:
 
     async def test_needs_a_recipient(self) -> None:
         method = tempo_server.session(chain_id=CHAIN_ID, rpc_url=RPC, store=MemoryStore())
-        handler = Mpp(methods=[method], realm="api.test", secret_key="s").session(
-            amount="1", unit_type="request"
-        )
+        handler = Mpp(
+            methods=[method], realm="api.test", secret_key="s-0123456789abcdef0123456789abcdef"
+        ).session(amount="1", unit_type="request")
         with pytest.raises(ValueError, match="needs a recipient"):
             await handler(Request("GET", URL))
 
@@ -1556,9 +1563,9 @@ class TestSessionMethod:
         request = {"amount": "1", "methodDetails": {"chainId": 1, "sessionSnapshot": {"a": 1}}}
         assert method.stable_binding(request) == {"amount": "1", "methodDetails": {"chainId": 1}}
         assert method.stable_binding({"amount": "1"}) == {"amount": "1"}
-        handler = Mpp(methods=[method], realm="api.test", secret_key="s").session(
-            amount="1", unit_type="request"
-        )
+        handler = Mpp(
+            methods=[method], realm="api.test", secret_key="s-0123456789abcdef0123456789abcdef"
+        ).session(amount="1", unit_type="request")
         assert handler.needs_request_body
         assert callable(session_server.charge) and callable(session_server.supervise_closes)
 

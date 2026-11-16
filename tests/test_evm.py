@@ -254,18 +254,28 @@ class TestConfiguration:
     def test_mpp_wires_its_store(self) -> None:
         store = MemoryStore()
         method = server_method()
-        Mpp(methods=method, realm=REALM, secret_key="k", store=store)
+        Mpp(
+            methods=method,
+            realm=REALM,
+            secret_key="k-0123456789abcdef0123456789abcdef",
+            store=store,
+        )
         assert charge_intent(method)._store is store
 
     def test_mpp_store_does_not_replace_its_own(self) -> None:
         own = MemoryStore()
         method = server_method(store=own)
-        Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        Mpp(
+            methods=method,
+            realm=REALM,
+            secret_key="k-0123456789abcdef0123456789abcdef",
+            store=MemoryStore(),
+        )
         assert charge_intent(method)._store is own
 
     def test_without_a_store_claims_stay_in_process(self) -> None:
         method = server_method()
-        Mpp(methods=method, realm=REALM, secret_key="k")
+        Mpp(methods=method, realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef")
         assert charge_intent(method)._store is None
 
 
@@ -310,7 +320,9 @@ class TestRequestShape:
     # As in mppx, fee_payer is a Tempo option: an EVM offer composed with sponsored
     # Tempo offers ignores it, and external_id reaches the wire request.
     async def test_mpp_ignores_fee_payer_and_carries_external_id(self) -> None:
-        server = Mpp(methods=server_method(), realm=REALM, secret_key="k")
+        server = Mpp(
+            methods=server_method(), realm=REALM, secret_key="k-0123456789abcdef0123456789abcdef"
+        )
         result = await server.charge(amount="0.01", fee_payer=True, external_id="order-1")(
             http_request()
         )
@@ -788,7 +800,7 @@ class TestClient:
         req = {**request(), **request_overrides}
         expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
         return Challenge.create(
-            secret_key="k",
+            secret_key="k-0123456789abcdef0123456789abcdef",
             realm=REALM,
             method="evm",
             intent="charge",

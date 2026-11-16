@@ -33,7 +33,7 @@ payments = Mpp(
         recipient=recipient,
         relay=relay,
     ),
-    secret_key=os.environ.get("MPP_SECRET_KEY", "local-relay-example-secret"),
+    secret_key=os.environ.get("MPP_SECRET_KEY", "local-relay-example-secret-not-for-production"),
 )
 
 

@@ -61,7 +61,7 @@ from tests import (
 from tests import server_method as raw_server_method
 
 REALM = "api.example.com"
-SECRET = "test-secret"
+SECRET = "test-secret-0123456789abcdef0123456789abcdef"
 RECIPIENT = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
 OTHER_TOKEN = "0x20c0000000000000000000000000000000000001"
 TEST_PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

@@ -59,7 +59,7 @@ from mpp.server import (
 )
 
 REALM = "contract.example.com"
-SECRET = "contract-secret"
+SECRET = "contract-secret-0123456789abcdef0123456789abcdef"
 PROBLEMS = "https://paymentauth.org/problems"
 URL = "https://contract.example.com/paid"
 
@@ -417,7 +417,11 @@ class TestChallengeBinding:
         method = ContractMethod()
         server = make_server(method)
         events = record(server)
-        other = Mpp(methods=ContractMethod().server[0], realm=REALM, secret_key="other-secret")
+        other = Mpp(
+            methods=ContractMethod().server[0],
+            realm=REALM,
+            secret_key="other-secret-0123456789abcdef0123456789abcdef",
+        )
         foreign = await issue(other.charge(amount="1"))
         result = await server.charge(amount="1")(engine_request(authorization(foreign)))
         assert offers(result)
@@ -598,8 +602,16 @@ class TestComposedOffers:
 
     async def test_static_compose_keeps_each_server(self) -> None:
         first, second = ContractMethod("first"), ContractMethod("second")
-        one = Mpp(methods=first.server[0], realm="one.example.com", secret_key="one")
-        two = Mpp(methods=second.server[0], realm="two.example.com", secret_key="two")
+        one = Mpp(
+            methods=first.server[0],
+            realm="one.example.com",
+            secret_key="one-0123456789abcdef0123456789abcdef",
+        )
+        two = Mpp(
+            methods=second.server[0],
+            realm="two.example.com",
+            secret_key="two-0123456789abcdef0123456789abcdef",
+        )
         handler = compose(
             one.compose((first.server[0], {"amount": "1"})),
             two.compose((second.server[0], {"amount": "2"})),

@@ -63,7 +63,7 @@ def create_server(*methods: ServerMethod) -> Mpp:
     return Mpp(
         methods=list(methods),
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
     )
 
 
@@ -159,7 +159,11 @@ async def test_can_offer_checks_repeated_offers_but_not_direct_handlers_or_redem
         return request["amount"] == "200"
 
     method = third_party_method("only", can_offer=can_offer)
-    server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
+    server = Mpp(
+        methods=method,
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
 
     challenge(await server.charge(amount="1.00")(http_request()))
     assert amounts == []
@@ -250,12 +254,12 @@ async def test_static_composition_uses_only_the_owning_method_success_hook() -> 
     first = Mpp(
         methods=first_method,
         realm="api.example.com",
-        secret_key="first-secret",
+        secret_key="first-secret-0123456789abcdef0123456789abcdef",
     )
     second = Mpp(
         methods=second_method,
         realm="api.example.com",
-        secret_key="second-secret",
+        secret_key="second-secret-0123456789abcdef0123456789abcdef",
     )
     configured = compose(
         first.compose(("shared/charge", {"amount": "1.00"})),
@@ -336,7 +340,7 @@ async def test_select_offers_narrows_composed_offers_in_order() -> None:
     server = Mpp(
         methods=[first, second, third, unavailable],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         select_offers=select,
     )
     challenged: list[str] = []
@@ -364,7 +368,11 @@ async def test_select_offers_narrows_composed_offers_in_order() -> None:
 
     # A credential for an offer the selector drops still pays: selection only shapes challenges.
     unselected = third_party_method("second")
-    issuer = Mpp(methods=[first, unselected], realm="api.example.com", secret_key="secret")
+    issuer = Mpp(
+        methods=[first, unselected],
+        realm="api.example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
     offered = challenges(await issuer.charge(amount="1.00")(http_request()))
     paid = await server.charge(amount="1.00")(
         http_request(credential(offered[1]).to_authorization())
@@ -386,7 +394,7 @@ async def test_select_offers_skips_direct_handlers_and_keeps_nested_groups() -> 
     single = Mpp(
         methods=third_party_method("only"),
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         select_offers=select,
     )
     challenge(await single.charge(amount="1.00")(http_request()))
@@ -396,7 +404,7 @@ async def test_select_offers_skips_direct_handlers_and_keeps_nested_groups() -> 
     selecting = Mpp(
         methods=[third_party_method("third"), third_party_method("fourth")],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         select_offers=select,
     )
     configured = compose(
@@ -416,7 +424,7 @@ async def test_select_offers_accepts_any_sequence() -> None:
     server = Mpp(
         methods=[third_party_method("first"), third_party_method("second")],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         select_offers=lambda offers, _context: UserList(offers[1:]),
     )
 
@@ -442,7 +450,7 @@ async def test_select_offers_rejects_invalid_selections(
     server = Mpp(
         methods=[third_party_method("first"), third_party_method("second")],
         realm="api.example.com",
-        secret_key="secret",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
         select_offers=lambda offers, _context: choose(offers),
     )
     with pytest.raises(error, match=match):
@@ -454,6 +462,6 @@ def test_select_offers_must_be_callable() -> None:
         Mpp(
             methods=third_party_method("only"),
             realm="api.example.com",
-            secret_key="secret",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
             select_offers=cast(Any, object()),
         )

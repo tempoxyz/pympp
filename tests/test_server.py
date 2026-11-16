@@ -89,7 +89,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -120,7 +120,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
 
@@ -140,7 +140,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -158,7 +158,7 @@ class TestVerifyOrChallenge:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         auth_header = credential.to_authorization()
 
@@ -167,7 +167,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, tuple)
@@ -188,7 +188,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             body=body,
         )
 
@@ -208,7 +208,7 @@ class TestVerifyOrChallenge:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             digest=BodyDigest.compute(body),
         )
 
@@ -217,7 +217,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             body=body,
         )
 
@@ -238,7 +238,7 @@ class TestVerifyOrChallenge:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             digest=BodyDigest.compute(b'{"query":"paid"}'),
         )
 
@@ -247,7 +247,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             body=b'{"query":"tampered"}',
         )
 
@@ -265,7 +265,7 @@ class TestVerifyOrChallenge:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             digest=BodyDigest.compute(b'{"query":"paid"}'),
         )
 
@@ -274,7 +274,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -300,7 +300,7 @@ class TestVerifyOrChallenge:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         result = await verify_or_challenge(
@@ -308,7 +308,7 @@ class TestVerifyOrChallenge:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
 
@@ -331,7 +331,7 @@ class TestClassBasedIntent:
             payload={},
             request={},
             realm="test",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             method="custompay",
             intent="custom",
         )
@@ -342,7 +342,7 @@ class TestClassBasedIntent:
             intent=MyIntent(),
             request={},
             realm="test",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             method="custompay",
         )
 
@@ -365,7 +365,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -395,7 +395,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="test",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, Challenge)
 
@@ -423,7 +423,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -449,7 +449,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
 
@@ -479,7 +479,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
 
@@ -508,7 +508,7 @@ class TestVerificationError:
                 intent=test_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
                 events=dispatcher,
             )
             assert isinstance(result, Challenge)
@@ -519,7 +519,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
         assert isinstance(result, Challenge)
@@ -543,7 +543,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="wrong-secret",
+            secret_key="wrong-secret-0123456789abcdef0123456789abcdef",
         )
 
         result = await verify_or_challenge(
@@ -551,7 +551,7 @@ class TestVerificationError:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             events=dispatcher,
         )
 
@@ -582,7 +582,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         with pytest.raises(type(error)) as raised:
@@ -591,7 +591,7 @@ class TestVerificationError:
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
 
         assert raised.value is error
@@ -617,7 +617,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         credential = replace(
             credential, challenge=replace(credential.challenge, description=description)
@@ -628,7 +628,7 @@ class TestVerificationError:
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
                 events=dispatcher,
             )
         retry = raised.value.retry_challenge
@@ -664,7 +664,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         with pytest.raises(VerificationError, match="Payment verification failed"):
@@ -673,7 +673,7 @@ class TestVerificationError:
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
                 events=dispatcher,
             )
 
@@ -697,7 +697,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         with pytest.raises(VerificationFailedError) as raised:
@@ -706,7 +706,7 @@ class TestVerificationError:
                 intent=failing_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
                 events=dispatcher,
             )
 
@@ -727,7 +727,7 @@ class TestVerificationError:
             payload={},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         auth_header = credential.to_authorization()
 
@@ -736,7 +736,7 @@ class TestVerificationError:
             intent=success_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, tuple)
@@ -758,7 +758,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="2020-01-01T00:00:00Z",
         )
         auth_header = credential.to_authorization()
@@ -768,7 +768,7 @@ class TestChallengeExpiryEnforcement:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -788,7 +788,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires=future,
         )
         auth_header = credential.to_authorization()
@@ -798,7 +798,7 @@ class TestChallengeExpiryEnforcement:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, tuple)
@@ -826,7 +826,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="2030-01-01T00:00:00Z",
         )
 
@@ -836,7 +836,7 @@ class TestChallengeExpiryEnforcement:
                 intent=test_intent,
                 request={"amount": "1000"},
                 realm="api.example.com",
-                secret_key="test-secret",
+                secret_key="test-secret-0123456789abcdef0123456789abcdef",
             )
 
         assert isinstance(result, Challenge)
@@ -854,7 +854,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="",  # empty string to force falsy expires
         )
         auth_header = credential.to_authorization()
@@ -864,7 +864,7 @@ class TestChallengeExpiryEnforcement:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -881,7 +881,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="not-a-date",
         )
         auth_header = credential.to_authorization()
@@ -891,7 +891,7 @@ class TestChallengeExpiryEnforcement:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -918,7 +918,7 @@ class TestChallengeExpiryEnforcement:
             payload={"hash": "0xabc"},
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires=expires,
         )
 
@@ -927,7 +927,7 @@ class TestChallengeExpiryEnforcement:
             intent=test_intent,
             request={"amount": "1000"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -951,7 +951,7 @@ class TestCrossEndpointReplay:
             payload={"hash": "0xabc"},
             request={"amount": "100"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             intent="session",
         )
         auth_header = credential.to_authorization()
@@ -962,7 +962,7 @@ class TestCrossEndpointReplay:
             intent=charge_intent,
             request={"amount": "100"},
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         assert isinstance(result, Challenge)
@@ -991,7 +991,7 @@ def _intent_server(payment_intent, *, name: str = "tempo", requires_auth: bool =
             name=name, request={"amount": "1000"}, verify=_verify_hook(payment_intent)
         ),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
         requires_auth=requires_auth,
     )
 
@@ -1459,7 +1459,7 @@ def _make_server(test_intent, *, requires_auth: bool = False, **defaults: Any) -
             defaults={key: value for key, value in defaults.items() if value is not None},
         ),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
         requires_auth=requires_auth,
     )
 
@@ -1473,7 +1473,7 @@ def _transform_server(test_intent, transform: Callable[[RequestContext], dict]) 
             resolve_request=transform,
         ),
         realm="api.example.com",
-        secret_key="test-secret",
+        secret_key="test-secret-0123456789abcdef0123456789abcdef",
     )
 
 
@@ -1880,7 +1880,7 @@ class TestMppPay:
                 verify=_verify_hook(session_intent),
             ),
             realm="api.example.com",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         @pay(server.session(amount="0.000075"))
@@ -2211,7 +2211,7 @@ class TestMalformedEchoedFields:
             intent=MockIntent(),
             request={"amount": "1000"},
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, Challenge)
 
@@ -2241,7 +2241,7 @@ class TestMalformedEchoedFields:
             intent=MockIntent(),
             request={"amount": "1000"},
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, Challenge)
 
@@ -2264,7 +2264,7 @@ class TestExpiresEnforcement:
             payload={"sig": "0x"},
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="2020-01-01T00:00:00.000Z",
         )
 
@@ -2273,7 +2273,7 @@ class TestExpiresEnforcement:
             intent=MockIntent(),
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, Challenge), "Should reject expired credential"
 
@@ -2292,7 +2292,7 @@ class TestExpiresEnforcement:
             payload={"sig": "0x"},
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             expires="2099-01-01T00:00:00.000Z",
         )
 
@@ -2301,7 +2301,7 @@ class TestExpiresEnforcement:
             intent=MockIntent(),
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, tuple), "Should accept non-expired credential"
 
@@ -2324,7 +2324,7 @@ class TestRequestSubstitutionPrevention:
             payload={"sig": "0x"},
             request=cheap_request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         expensive_request = {"amount": "999999", "currency": "0xUSD", "recipient": "0xR"}
@@ -2333,7 +2333,7 @@ class TestRequestSubstitutionPrevention:
             intent=MockIntent(),
             request=expensive_request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         assert isinstance(result, Challenge), "Should reject credential for different amount"
 
@@ -2352,7 +2352,7 @@ class TestRequestSubstitutionPrevention:
             payload={"sig": "0x"},
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
 
         result = await verify_or_challenge(
@@ -2360,7 +2360,7 @@ class TestRequestSubstitutionPrevention:
             intent=MockIntent(),
             request=request,
             realm="r",
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             meta={"tier": "premium"},
         )
         assert isinstance(result, Challenge), "Should reject credential with wrong opaque"
@@ -2379,7 +2379,7 @@ class TestCrossRealmPrevention:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        shared_secret = "shared-key"
+        shared_secret = "shared-key-0123456789abcdef0123456789abcdef"
         request = {"amount": "1000"}
 
         credential = make_bound_credential(
@@ -2408,7 +2408,7 @@ class TestCrossRealmPrevention:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        secret = "test-secret"
+        secret = "test-secret-0123456789abcdef0123456789abcdef"
         request = {"amount": "1000"}
 
         credential = make_bound_credential(
@@ -2439,7 +2439,7 @@ class TestCrossRealmPrevention:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success(reference="0x123")
 
-        secret = "test-secret"
+        secret = "test-secret-0123456789abcdef0123456789abcdef"
         request = {"amount": "1000"}
 
         credential = make_bound_credential(
@@ -2469,7 +2469,7 @@ class TestCrossRealmPrevention:
             async def verify(self, credential: Credential, request: dict) -> Receipt:
                 return Receipt.success(reference="0xOK")
 
-        secret = "test-secret"
+        secret = "test-secret-0123456789abcdef0123456789abcdef"
         request = {"amount": "1000"}
 
         credential = make_bound_credential(

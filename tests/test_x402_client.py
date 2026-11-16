@@ -94,7 +94,7 @@ async def sign(challenge: Challenge, client: ClientMethod | None = None) -> dict
 
 def native_challenge(asset: EvmAsset = BASE_SEPOLIA_USDC) -> Challenge:
     return Challenge.create(
-        secret_key="unit-secret-key",
+        secret_key="unit-secret-key-0123456789abcdef0123456789abcdef",
         realm="api.example.com",
         method="evm",
         intent="charge",
@@ -428,7 +428,7 @@ class TestTransport:
 
     async def test_unpayable_native_challenge_falls_back_to_x402(self) -> None:
         tempo = Challenge.create(
-            secret_key="unit-secret-key",
+            secret_key="unit-secret-key-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",
@@ -445,7 +445,7 @@ class TestTransport:
 
     async def test_payable_native_tempo_challenge_wins_over_x402(self) -> None:
         tempo = Challenge.create(
-            secret_key="unit-secret-key",
+            secret_key="unit-secret-key-0123456789abcdef0123456789abcdef",
             realm="api.example.com",
             method="tempo",
             intent="charge",

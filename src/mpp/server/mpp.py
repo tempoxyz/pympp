@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
+from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, check_secret_key
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
@@ -220,7 +220,8 @@ class Mpp:
                 each method's ``can_offer`` applies; a single method's handler offers it
                 directly.
             realm: Server realm. Auto-detected from the environment if omitted.
-            secret_key: HMAC secret. Required unless ``MPP_SECRET_KEY`` is set.
+            secret_key: HMAC secret of at least 32 bytes. Required unless ``MPP_SECRET_KEY``
+                is set; generate one with ``openssl rand -base64 32``.
             store: Replay store shared by every method configured without its own, such
                 as a Tempo or EVM charge built without ``store=``. Without either, such a
                 method falls back to an in-memory store, logging a warning; in production
@@ -253,6 +254,7 @@ class Mpp:
                 check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
+        check_secret_key(self.secret_key)
         self.unique_challenges = unique_challenges
         if select_offers is not None and not callable(select_offers):
             raise ValueError("select_offers must be callable")

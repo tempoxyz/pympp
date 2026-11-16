@@ -49,7 +49,7 @@ from tests.test_tempo_integration import _send_transfer
 pytestmark = [pytest.mark.integration, INTEGRATION]
 
 REDIS_URL = os.environ.get("REDIS_URL")
-SECRET_KEY = "e2e-localnet-secret-key"
+SECRET_KEY = "e2e-localnet-secret-key-0123456789abcdef0123456789abcdef"
 REALM = "e2e.test"
 # A second localnet TIP-20 token (AlphaUSD); tempo_fundAddress funds it too.
 ALPHA_USD = "0x20c0000000000000000000000000000000000001"

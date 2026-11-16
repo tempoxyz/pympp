@@ -359,7 +359,7 @@ class TestProofVerification:
                 currencies=[PATH_USD],
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
             store=MemoryStore(),
         )
         handler = server.charge(amount="0")
@@ -400,7 +400,7 @@ class TestSupportedModes:
                 supported_modes=["push"],
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         default = challenge(await server.charge(amount="1")(http_request()))
         route = challenge(
@@ -424,7 +424,7 @@ class TestSupportedModes:
                 fee_payer=OTHER,
             ),
             realm=REALM,
-            secret_key="test-secret",
+            secret_key="test-secret-0123456789abcdef0123456789abcdef",
         )
         expires = (datetime.now(UTC) + timedelta(seconds=5)).isoformat()
         for options in ({"amount": "0"}, {"amount": "1", "supported_modes": ["push"]}):

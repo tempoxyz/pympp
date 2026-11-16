@@ -30,7 +30,7 @@ CURRENCY = os.environ.get("TEMPO_CURRENCY", PATH_USD)
 DEV_SECRETS = {
     "PAYEE_KEY": "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
     "SPONSOR_KEY": "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdcab365",
-    "MPP_SECRET_KEY": "session-metered-api-dev-secret",
+    "MPP_SECRET_KEY": "session-metered-api-dev-secret-localnet-only",
 }
 STORE_PATH = os.environ.get("STORE_PATH", "sessions.db")
 PORT = int(os.environ.get("PORT", "8000"))

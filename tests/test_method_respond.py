@@ -40,7 +40,11 @@ def _management(context: RespondContext) -> Response | None:
 
 def _server(**hooks: Any) -> Mpp:
     hooks.setdefault("verify", _paid)
-    return Mpp(methods=server_method(**hooks), realm="example.com", secret_key="secret")
+    return Mpp(
+        methods=server_method(**hooks),
+        realm="example.com",
+        secret_key="secret-0123456789abcdef0123456789abcdef",
+    )
 
 
 def _authorization(issued: Challenge) -> str:

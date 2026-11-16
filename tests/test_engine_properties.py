@@ -29,7 +29,7 @@ from mpp.server import Mpp, PaymentRequired, PaymentVerified, compose
 from tests import challenge, challenges, http_request, server_method
 
 REALM = "api.example.com"
-SECRET = "property-secret"
+SECRET = "property-secret-0123456789abcdef0123456789abcdef"
 
 # Small budgets keep this file fast; no example database is written to the repository.
 ENGINE = settings(max_examples=25, deadline=None, database=None)
@@ -147,7 +147,7 @@ def _mutations(issued: Challenge, other_meta: dict[str, str]) -> dict[str, Crede
         "opaque-removed": echoed(opaque=None),
         "header": echoed(header="Payment-Authorization"),
         # A valid HMAC over different terms still has to match the route.
-        "wrong-secret": signed(secret="another-secret"),
+        "wrong-secret": signed(secret="another-secret-0123456789abcdef0123456789abcdef"),
         "signed-request": signed(request=tampered),
         "signed-scope": signed(request=other_scope),
         "signed-meta": signed(meta={**other_meta, "_mpp_nonce": nonce}),

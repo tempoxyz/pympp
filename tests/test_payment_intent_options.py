@@ -78,7 +78,15 @@ def payment(request, monkeypatch):
         deposit_addresses={"tempo": TEMPO_ADDRESS}, metadata={"configured": "yes"}
     )
     method = payments.spt.charge() if request.param == "stripe" else payments.tempo.charge()
-    return Mpp(methods=method, realm="example.com", secret_key="secret"), client, rail
+    return (
+        Mpp(
+            methods=method,
+            realm="example.com",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
+        ),
+        client,
+        rail,
+    )
 
 
 def credential(challenge: Challenge, **payload: Any) -> Credential:
@@ -196,7 +204,9 @@ async def test_crypto_fallback_is_once_and_only_for_optional_field_rejection(
     settle_tempo_with(monkeypatch, validate=rail.validate, broadcast=rail.broadcast)
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
     method = payments.tempo.charge()
-    server = Mpp(methods=method, realm="example.com", secret_key="secret")
+    server = Mpp(
+        methods=method, realm="example.com", secret_key="secret-0123456789abcdef0123456789abcdef"
+    )
     calls = []
 
     async def create(params, *, options):
@@ -250,7 +260,11 @@ async def test_raw_http_spt_supports_options_without_owning_injected_client():
         method = stripe_server.charge(
             secret_key="sk_test", http_client=http, network_id="bn_test", currency="usd"
         )
-        server = Mpp(methods=method, realm="example.com", secret_key="secret")
+        server = Mpp(
+            methods=method,
+            realm="example.com",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
+        )
         challenge = await issue(server, OPTIONS)
         await pay(server, credential(challenge).to_authorization(), OPTIONS)
         assert "hooks%5Binputs%5D%5Btax%5D%5Bcalculation%5D=taxcalc_test" in calls[0]
@@ -268,7 +282,11 @@ async def test_raw_http_spt_failure_does_not_expose_private_options():
         method = stripe_server.charge(
             secret_key="sk_test", http_client=http, network_id="bn_test", currency="usd"
         )
-        server = Mpp(methods=method, realm="example.com", secret_key="secret")
+        server = Mpp(
+            methods=method,
+            realm="example.com",
+            secret_key="secret-0123456789abcdef0123456789abcdef",
+        )
         challenge = await issue(server, OPTIONS)
         result = await pay(server, credential(challenge).to_authorization(), OPTIONS)
         assert isinstance(result, PaymentRequired)
@@ -285,7 +303,9 @@ async def test_legacy_crypto_rail_remains_supported(monkeypatch):
     settle_tempo_with(monkeypatch, verify=verify)
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
     method = payments.tempo.charge()
-    server = Mpp(methods=method, realm="example.com", secret_key="secret")
+    server = Mpp(
+        methods=method, realm="example.com", secret_key="secret-0123456789abcdef0123456789abcdef"
+    )
 
     def resolver(context):
         calls.append("resolve")
@@ -306,7 +326,9 @@ async def test_replacing_the_existing_tempo_callback_preserves_event_behavior(mo
     client, payments = make_payments(deposit_addresses={"tempo": TEMPO_ADDRESS})
     method, callback = payments.tempo.charge(), AsyncMock()
     method = replace(method, on_payment_success=callback)
-    server = Mpp(methods=method, realm="example.com", secret_key="secret")
+    server = Mpp(
+        methods=method, realm="example.com", secret_key="secret-0123456789abcdef0123456789abcdef"
+    )
     challenge = await issue(server, {"metadata": {"order": "123"}})
     await pay(server, credential(challenge).to_authorization(), {"metadata": {"order": "123"}})
     callback.assert_awaited_once()
