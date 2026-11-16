@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp import Challenge as CoreChallenge
+from mpp._parsing import is_payment_authorization_header
 from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
 from mpp.errors import NoMethodFoundError
@@ -94,6 +95,15 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
 
     if not isinstance(raw_challenge.get("request"), dict):
         logger.warning("Ignoring malformed MCP challenge: invalid request")
+        return None
+
+    # A challenge may only select Payment-Authorization; any other header makes it
+    # unrecognized, so it gets no credential (https://paymentauth.org).
+    if "header" in raw_challenge and not (
+        isinstance(raw_challenge["header"], str)
+        and is_payment_authorization_header(raw_challenge["header"])
+    ):
+        logger.warning("Ignoring MCP challenge: unsupported credential header")
         return None
 
     try:

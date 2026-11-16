@@ -11,7 +11,7 @@ import hmac
 import pytest
 import rfc8785
 
-from mpp import Challenge, generate_challenge_id
+from mpp import Challenge, ChallengeEcho, advertised_credential_header, generate_challenge_id
 from mpp._canonical import canonical_b64url
 
 
@@ -569,16 +569,55 @@ class TestCredentialHeader:
         assert with_both.id != with_opaque.id
         assert with_both.verify("test-secret", "api.example.com")
 
-    def test_rejects_invalid_header_name(self) -> None:
-        with pytest.raises(ValueError, match="Invalid HTTP header name"):
+    @pytest.mark.parametrize("header", ["Payment Authorization", "X-Payment", "Payment"])
+    def test_rejects_unsupported_header(self, header: str) -> None:
+        """Servers must not advertise any field but Payment-Authorization."""
+        with pytest.raises(ValueError, match="Unsupported credential header"):
             Challenge.create(
                 secret_key="test-secret",
                 realm="api.example.com",
                 method="tempo",
                 intent="charge",
                 request={"amount": "1000000"},
-                header="Payment Authorization",
+                header=header,
             )
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            Challenge(id="abc", method="tempo", intent="charge", request={}, header=header)
+        with pytest.raises(ValueError, match="Unsupported credential header"):
+            ChallengeEcho(
+                id="abc",
+                realm="api.example.com",
+                method="tempo",
+                intent="charge",
+                request="e30",
+                header=header,
+            )
+
+    @pytest.mark.parametrize(
+        ("header", "expected"),
+        [
+            (None, None),
+            ("", None),
+            ("Authorization", None),
+            ("AUTHORIZATION", None),
+            ("Payment-Authorization", "Payment-Authorization"),
+            ("payment-authorization", "Payment-Authorization"),
+        ],
+    )
+    def test_constructed_header_is_canonical(
+        self, header: str | None, expected: str | None
+    ) -> None:
+        """Authorization is local shorthand for the default; it is never emitted."""
+        challenge = Challenge(id="abc", method="tempo", intent="charge", request={}, header=header)
+        www_authenticate = challenge.to_www_authenticate("api.example.com")
+
+        assert challenge.header == expected
+        assert advertised_credential_header(header) == expected
+        if expected is None:
+            assert "header=" not in www_authenticate
+        else:
+            assert 'header="Payment-Authorization"' in www_authenticate
+            assert Challenge.from_www_authenticate(www_authenticate).header == expected
 
 
 class TestJcsChallengeEncoding:

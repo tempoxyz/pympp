@@ -8,6 +8,7 @@ values survive a serialize/parse roundtrip.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 from datetime import UTC
 from typing import Any
@@ -184,7 +185,7 @@ class TestRoundtrip:
         expires=st.none() | rfc3339_datetimes,
         digest=st.none() | quoted_field.map(lambda value: f"sha-256={value}"),
         opaque=st.none() | st.dictionaries(st.text(), st.text(), max_size=3),
-        header=st.sampled_from([None, "Payment-Authorization", "X-Pay"]),
+        header=st.sampled_from([None, "Payment-Authorization"]),
     )
     def test_challenge(
         self,
@@ -433,16 +434,28 @@ class TestEdgeCases:
         parsed = parse_www_authenticate(www_authenticate())
         assert (parsed.intent, parsed.request) == ("charge", {})
 
-    def test_challenge_rejects_invalid_credential_header_name(self) -> None:
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
-            parse_www_authenticate(www_authenticate(header="Bad Header"))
+    @pytest.mark.parametrize("value", ["Bad Header", "Authorization", "X-Payment", ""])
+    def test_challenge_rejects_unsupported_credential_header(self, value: str) -> None:
+        with pytest.raises(ParseError, match="Unsupported credential header"):
+            parse_www_authenticate(www_authenticate(header=value))
 
-    def test_credential_rejects_invalid_credential_header_name(self) -> None:
-        challenge = {**VALID_PARAMS, "header": "Bad Header"}
+    @pytest.mark.parametrize("value", ["Bad Header", "Authorization", "X-Payment", "", None, 1])
+    def test_credential_rejects_unsupported_credential_header(self, value: Any) -> None:
+        challenge = {**VALID_PARAMS, "header": value}
         header = f"Payment {b64({'challenge': challenge, 'payload': {}})}"
 
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
+        with pytest.raises(ParseError, match="Unsupported credential header"):
             parse_authorization(header)
+
+    def test_list_skips_unsupported_credential_header(self) -> None:
+        unsupported = www_authenticate(id="unsupported", header="Authorization")
+        valid = www_authenticate(id="valid")
+        parsed: list[Challenge] = []
+        for field in _payment_challenges(f"{unsupported}, {valid}"):
+            with contextlib.suppress(ParseError):
+                parsed.append(parse_www_authenticate(field))
+
+        assert [challenge.id for challenge in parsed] == ["valid"]
 
     def test_credential_accepts_valid_credential_header_name(self) -> None:
         challenge = {**VALID_PARAMS, "header": "Payment-Authorization"}

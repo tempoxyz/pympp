@@ -748,6 +748,19 @@ class TestMcpClientMethodMatching:
 
         assert challenges == [_make_challenge()]
 
+    @pytest.mark.parametrize("header", ["Authorization", "X-Payment", "", None])
+    def test_extract_challenges_skips_unsupported_credential_header(
+        self, header: str | None
+    ) -> None:
+        """A challenge may only select Payment-Authorization; others get no credential."""
+        unsupported = {**_make_challenge_dict(), "id": "unsupported", "header": header}
+        supported = {**_make_challenge_dict(), "header": "payment-authorization"}
+        err = FakeMcpError(-32042, data={"challenges": [unsupported, supported]})
+
+        challenges = _extract_challenges(err)
+
+        assert [challenge.id for challenge in challenges] == [_make_challenge().id]
+
 
 class TestMcpClientReceiptExtraction:
     """Tests for receipt extraction from _meta."""

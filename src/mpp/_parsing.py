@@ -47,6 +47,33 @@ class ParseError(Exception):
     """
 
 
+_PAYMENT_AUTHORIZATION = "Payment-Authorization"
+
+
+def is_payment_authorization_header(header: str | None) -> bool:
+    """Whether ``header`` is ``Payment-Authorization``, compared ASCII case-insensitively."""
+    return (
+        header is not None and header.isascii() and header.lower() == _PAYMENT_AUTHORIZATION.lower()
+    )
+
+
+def _received_credential_header(header: object, *, present: bool) -> str | None:
+    """Validate the raw ``header`` auth-param of a received challenge or its echo.
+
+    Per https://paymentauth.org, omitting ``header`` selects ``Authorization``, and a
+    present ``header`` must be ``Payment-Authorization``. Any other value, including
+    ``Authorization`` and the empty string, makes the challenge unrecognized, so no
+    credential is sent for it. The raw value is not echoed into the error.
+    """
+    if not present:
+        return None
+    if isinstance(header, str) and is_payment_authorization_header(header):
+        return _PAYMENT_AUTHORIZATION
+    raise ParseError(
+        "Unsupported credential header: challenges may only select Payment-Authorization"
+    )
+
+
 # RFC 3339 date-time with a timezone, as mppx's `z.datetime()` accepts.
 _DATETIME_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
@@ -239,7 +266,7 @@ def parse_www_authenticate(header: str) -> Challenge:
 
     Optional parameters: digest, expires, description, header, opaque
     """
-    from mpp import Challenge, advertised_credential_header
+    from mpp import Challenge
 
     if len(header) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("WWW-Authenticate header exceeds maximum size")
@@ -282,10 +309,10 @@ def parse_www_authenticate(header: str) -> Challenge:
     if opaque_b64:
         opaque = _b64_decode(opaque_b64)
 
-    try:
-        credential_header = advertised_credential_header(params.get("header"))
-    except ValueError as error:
-        raise ParseError(str(error)) from error
+    # Validate the raw value: an explicit Authorization or empty header is not the default.
+    credential_header = _received_credential_header(
+        params.get("header"), present="header" in params
+    )
 
     # Match mppx's Challenge schema: `digest` is `sha-256=...` and `expires` is RFC 3339.
     digest = params.get("digest")
@@ -363,7 +390,7 @@ def parse_authorization(header: str) -> Credential:
         - payload: Method-specific credential data
         - source: Optional payer DID
     """
-    from mpp import ChallengeEcho, Credential, advertised_credential_header
+    from mpp import ChallengeEcho, Credential
 
     if len(header) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authorization header exceeds maximum size")
@@ -390,12 +417,9 @@ def parse_authorization(header: str) -> Credential:
     method = str(challenge_data.get("method", ""))
     _validate_payment_method_id(method)
 
-    try:
-        credential_header = advertised_credential_header(
-            str(challenge_data["header"]) if challenge_data.get("header") else None
-        )
-    except ValueError as error:
-        raise ParseError(str(error)) from error
+    credential_header = _received_credential_header(
+        challenge_data.get("header"), present="header" in challenge_data
+    )
 
     description = (
         str(challenge_data["description"])

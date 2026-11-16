@@ -1151,6 +1151,57 @@ class TestPaymentTransport:
         method.create_credential.assert_not_called()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("header", ["Authorization", "X-Payment", ""])
+    async def test_unsupported_credential_header_challenge_is_skipped(self, header: str) -> None:
+        """A challenge selecting any field but Payment-Authorization gets no credential."""
+        valid = Challenge(id="valid", method="tempo", intent="charge", request={"amount": "1"})
+        unsupported = (
+            'Payment id="unsupported", realm="example.com", method="tempo", '
+            f'intent="charge", request="e30", header="{header}"'
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402,
+                    headers=[
+                        ("www-authenticate", unsupported),
+                        ("www-authenticate", valid.to_www_authenticate("example.com")),
+                    ],
+                ),
+                httpx.Response(200),
+            ]
+        )
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method.client], inner=inner)
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert response.status_code == 200
+        method.create_credential.assert_called_once()
+        assert method.create_credential.call_args.args[0].id == "valid"
+        assert "authorization" in inner.requests[1].headers
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("header", ["Authorization", "X-Payment"])
+    async def test_only_unsupported_credential_header_challenge_is_not_paid(
+        self, header: str
+    ) -> None:
+        unsupported = (
+            'Payment id="unsupported", realm="example.com", method="tempo", '
+            f'intent="charge", request="e30", header="{header}"'
+        )
+        inner = MockTransport([httpx.Response(402, headers={"www-authenticate": unsupported})])
+        method = MockMethod()
+        transport = PaymentTransport(methods=[method.client], inner=inner)
+
+        with pytest.raises(NoMethodFoundError) as info:
+            await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        assert isinstance(info.value.__cause__, ParseError)
+        assert len(inner.requests) == 1
+        method.create_credential.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_handles_multiple_www_authenticate_headers(self) -> None:
         """Should find matching method across multiple WWW-Authenticate headers."""
         tempo_challenge = Challenge(

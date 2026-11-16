@@ -9,7 +9,6 @@ import base64
 import hashlib
 import hmac
 import math
-import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -22,6 +21,7 @@ from mpp._parsing import (
     format_authorization,
     format_payment_receipt,
     format_www_authenticate,
+    is_payment_authorization_header,
     parse_authorization,
     parse_payment_receipt,
     parse_www_authenticate,
@@ -59,26 +59,36 @@ from mpp.events import (
 
 AUTHORIZATION_HEADER = "Authorization"
 PAYMENT_AUTHORIZATION_HEADER = "Payment-Authorization"
-_HTTP_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 
 def is_default_credential_header(header: str | None) -> bool:
-    """True when the credential header is omitted or is the implicit Authorization default."""
+    """True when the credential header is omitted or is the implicit Authorization default.
+
+    This is the local configuration shorthand: a challenge received with an explicit
+    ``header="Authorization"`` or ``header=""`` is rejected by the parser instead.
+    """
     return header is None or header == "" or header.lower() == AUTHORIZATION_HEADER.lower()
 
 
 def advertised_credential_header(header: str | None) -> str | None:
     """Return an advertised credential header, or None for the Authorization default.
 
-    ``Authorization`` is the implicit protocol default and is intentionally not
-    advertised on the wire. This preserves the legacy challenge binding.
+    ``Authorization`` (or an empty or missing value) is the implicit protocol default
+    and is intentionally not advertised on the wire, preserving the legacy challenge
+    binding. The only other field a challenge may select is ``Payment-Authorization``,
+    returned in its canonical spelling.
+
+    Raises:
+        ValueError: For any other value: servers must not advertise it
+            (https://paymentauth.org).
     """
     if is_default_credential_header(header):
         return None
-    name = str(header)
-    if not _HTTP_HEADER_NAME_RE.fullmatch(name):
-        raise ValueError("Invalid HTTP header name")
-    return name
+    if is_payment_authorization_header(header):
+        return PAYMENT_AUTHORIZATION_HEADER
+    raise ValueError(
+        "Unsupported credential header: challenges may only select Payment-Authorization"
+    )
 
 
 def _b64url_encode(data: str) -> str:  # pyright: ignore[reportUnusedFunction]  # used by tests
