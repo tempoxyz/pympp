@@ -2153,6 +2153,51 @@ class TestClientZoneStalledWithdrawals:
         assert asyncio.get_running_loop().time() - started < 1
 
 
+class TestClientZoneLateCredentialAccepted:
+    """A late credential the server accepted paid once, so its terms are free again."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status", "kept"), [(200, False), (403, True)])
+    async def test_an_accepted_late_credential_frees_its_terms(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, kept: bool
+    ) -> None:
+        from mpp.client.transport import PaymentTransport
+
+        settled = False
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
+        paid: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if "authorization" in request.headers:
+                paid.append(request)
+                return httpx.Response(status)
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": issued.to_www_authenticate(REALM)}
+            )
+
+        transport = PaymentTransport(
+            [tempo_client._client_method(method)], inner=httpx.MockTransport(respond)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get(f"https://{REALM}/paid")
+        assert response.status_code == status
+        assert len(paid) == 1
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # Until the server accepts it, the server may have redeemed or refused it, so
+        # a Challenge with its terms still fails closed.
+        assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
+
+
 class TestWaitForSettlementFromBlock:
     @pytest.mark.asyncio
     async def test_pages_from_the_given_block(self, monkeypatch: pytest.MonkeyPatch) -> None:

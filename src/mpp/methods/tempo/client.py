@@ -357,9 +357,9 @@ class _ZoneSend:
     # can't be read, in which case no other Challenge resumes this withdrawal.
     terms: str | None = None
     # Whether its credential was returned after its Challenge expired. Only a retry of
-    # that Challenge may get the credential again; until its redemption window ends, a
-    # Challenge with the same terms fails closed, since the server may have redeemed or
-    # refused it (mppx).
+    # that Challenge may get the credential again; until a server accepts it or its
+    # redemption window ends, a Challenge with the same terms fails closed, since the
+    # server may have redeemed or refused it (mppx).
     redeemed_late: bool = False
     # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
     sender_tag: str | None = None
@@ -1485,6 +1485,23 @@ class TempoMethod:
                 return earlier_key
         return None
 
+    def _late_zone_withdrawal(self, credential: Credential) -> str | None:
+        """Return the key of the kept withdrawal whose credential is ``credential`` and
+        was returned after its Challenge expired, if any."""
+        payload = credential.payload
+        if not isinstance(payload, dict) or payload.get("type") != "zone":
+            return None
+        sender_tag = payload.get("senderTag")
+        for key, (_, state) in self._zone_withdrawals.items():
+            if (
+                state.redeemed_late
+                and state.challenge is not None
+                and state.challenge.id == credential.challenge.id
+                and state.sender_tag == sender_tag
+            ):
+                return key
+        return None
+
     async def _create_zone_credential(
         self,
         challenge: Challenge,
@@ -1641,7 +1658,8 @@ class TempoMethod:
         # later Challenge with the same terms is a new payment. One taken after its
         # Challenge expired is accepted only by a server that grants a grace, so it stays
         # for a retry of its own Challenge, which would otherwise pay again on Tempo, and
-        # blocks other Challenges with its terms until its redemption window ends (mppx).
+        # blocks other Challenges with its terms until a server accepts it or its
+        # redemption window ends.
         # With every caller gone, it stays too, so a retry finds it settled instead of
         # withdrawing again.
         if entry is not None and entry[0] is task and wanted():
@@ -2503,13 +2521,27 @@ def _client_method(method: TempoMethod) -> ClientMethod:
     Challenges in currencies other than the pinned ones are not selected.
     """
     from mpp.methods.tempo.schemas import charge as definition
-    from mpp.runtime import ClientMethod, CredentialParams
+    from mpp.runtime import AttemptOutcome, ClientMethod, CredentialParams
 
     pinned = {pin.lower() for pin in method._pinned_currencies()}
 
     async def create_credential(params: CredentialParams) -> str:
         origin = _request_origin(params.request)
-        return (await method.create_credential(params.challenge, origin=origin)).to_authorization()
+        credential = await method.create_credential(params.challenge, origin=origin)
+        attempt = params.attempt
+        if attempt is not None and method._late_zone_withdrawal(credential) is not None:
+            # Same-terms Challenges stay blocked while the outcome is unknown. Once the
+            # server accepts the late credential, the withdrawal has paid once, so the
+            # next Challenge with its terms is a new payment.
+            async def settle(outcome: AttemptOutcome) -> bool:
+                if outcome.status == "accepted":
+                    key = method._late_zone_withdrawal(credential)
+                    if key is not None:
+                        del method._zone_withdrawals[key]
+                return True
+
+            attempt.settle = settle
+        return credential.to_authorization()
 
     def can_handle_challenge(challenge: Challenge) -> bool:
         currency = challenge.request.get("currency")
