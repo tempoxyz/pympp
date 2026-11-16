@@ -48,6 +48,7 @@ from mpp.x402._types import (
     _json_equal,
     requirements_match,
 )
+from mpp.x402.siwx import EXTENSION_KEY as SIWX_EXTENSION
 
 if TYPE_CHECKING:
     from mpp import Receipt
@@ -328,14 +329,20 @@ def challenges_payment_required_header(
     resource_url: str,
     http_method: str,
     error: str | None = None,
+    siwx_for: Callable[[Any], Mapping[str, Any] | None] | None = None,
 ) -> str | None:
     """Build ``PAYMENT-REQUIRED`` for issued challenges, with their route binding.
 
     Offers whose route bindings differ can't share one header; like mppx, the
     first one is kept and the error says why the rest were dropped.
+
+    ``siwx_for`` returns an offer's ``sign-in-with-x`` extension, if it accepts SIWX.
+    Like mppx, offers' SIWX extensions merge into the first one with every offer's
+    chains, since a nonce isn't tied to the offer that issued it.
     """
     accepts: list[PaymentRequirements] = []
     extensions: dict[str, Any] | None = None
+    siwx: dict[str, Any] | None = None
     mismatch = False
     for challenge in challenges:
         accepted = accepts_for(challenge)
@@ -348,12 +355,25 @@ def challenges_payment_required_header(
             mismatch = True
             continue
         accepts.append(accepted)
+        offered = siwx_for(challenge) if siwx_for is not None else None
+        if offered is None:
+            continue
+        if siwx is None:
+            siwx = {**offered, "supportedChains": []}
+        for chain in offered["supportedChains"]:
+            if not any(
+                known["chainId"] == chain["chainId"] and known["type"] == chain["type"]
+                for known in siwx["supportedChains"]
+            ):
+                siwx["supportedChains"].append(chain)
     if mismatch:
         error = "; ".join(
             part
             for part in (error, "Cannot merge x402 payment requirements with different routes.")
             if part
         )
+    if siwx is not None and extensions is not None:
+        extensions = {**extensions, SIWX_EXTENSION: siwx}
     return payment_required_header(accepts, resource_url, error, extensions)
 
 

@@ -54,6 +54,7 @@ from mpp.server.verify import (
     _requests_match,
     verify_or_challenge,
 )
+from mpp.x402 import siwx
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
 from mpp.x402._server import X402Input, challenges_payment_required_header
 from mpp.x402._types import (
@@ -66,6 +67,7 @@ from mpp.x402._types import (
 
 if TYPE_CHECKING:
     from mpp.server.mpp import Mpp
+    from mpp.x402.siwx import SiwxOptions
 
 BodyType = str | bytes | dict[str, Any]
 BodyParamsType = BodyType | Callable[[Request], BodyType | Awaitable[BodyType]] | None
@@ -174,6 +176,20 @@ class _X402MethodIntent(_MethodIntent):
     ) -> tuple[dict[str, Any], str | None]:
         assert self._method.x402 is not None
         return self._method.x402.x402_credential_payload(payment, request)
+
+    @property
+    def siwx(self) -> SiwxOptions | None:
+        """The method's x402 ``sign-in-with-x`` options, when it accepts SIWX."""
+        return getattr(self._method.x402, "siwx", None)
+
+    @staticmethod
+    def siwx_chain_id(request: Mapping[str, Any]) -> int | None:
+        """EVM chain ID that SIWX proofs for this offer are signed for."""
+        details = request.get("methodDetails")
+        chain_id = details.get("chainId") if is_mapping(details) else None
+        if isinstance(chain_id, bool) or not isinstance(chain_id, int):
+            return None
+        return chain_id
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -676,6 +692,7 @@ class ComposedHandler:
                 request.url,
                 request.method,
                 str(error) if error is not None else None,
+                lambda challenge: _x402_siwx(call, challenge, request.url),
             )
             if x402 is not None:
                 headers.append((PAYMENT_REQUIRED_HEADER, x402))
@@ -738,14 +755,88 @@ class ComposedHandler:
         prepared = await self._identified(
             [await _prepare_offer(offer, request, None, call) for offer in self._offers], call
         )
+        advertised = await self._advertised(prepared, request, call)
+        siwx_error: Exception | None = None
+        if credential is None:
+            signed_in = await self._sign_in(request, advertised, call)
+            if isinstance(signed_in, Exception):
+                siwx_error = signed_in
+            elif signed_in is not None:
+                return signed_in
         challenges: list[Challenge] = []
-        for prepared_offer in await self._advertised(prepared, request, call):
+        for prepared_offer in advertised:
             result = await prepared_offer.verify(authorization)
             if not isinstance(result, Challenge):
                 call.settled = prepared_offer
                 return result
             challenges.append(result)
-        return ComposedChallenges(tuple(challenges))
+        if siwx_error is not None and challenges:
+            # Report the rejected proof like a rejected Payment credential, as mppx does.
+            reporter = next(offer for offer in advertised if _siwx_offer(offer) is not None)
+            await reporter.offer.server._events.emit(
+                PAYMENT_FAILED,
+                {
+                    "challenge": challenges[0],
+                    "credential": None,
+                    "error": siwx_error,
+                    "intent": reporter.intent.name,
+                    "method": reporter.offer.method.name,
+                    "request": reporter.request,
+                },
+            )
+        return ComposedChallenges(tuple(challenges), error=siwx_error)
+
+    @staticmethod
+    async def _sign_in(
+        request: Request, advertised: Sequence[_PreparedOffer], call: _Call
+    ) -> tuple[Credential, Receipt] | Exception | None:
+        """Grant a request with a valid x402 ``SIGN-IN-WITH-X`` proof (mppx ``authorize``).
+
+        Returns the credential and receipt of a granted wallet, nothing for a request
+        without a proof or one ``grant`` refuses (it gets the route's 402), and the error
+        for an invalid proof, whose 402 carries the spec's code.
+        """
+        header = request.headers.get(siwx.HEADER)
+        if not header or request.url.startswith(MCP_URL_PREFIX):
+            return None
+        offers = [
+            (offer, accepted)
+            for offer in advertised
+            if (accepted := _siwx_offer(offer)) is not None
+        ]
+        if not offers:
+            return None
+        try:
+            payload = siwx.decode(header)
+            # A proof is checked by the offer on its chain, or else by the first offer,
+            # which rejects it as an unsupported chain.
+            offer, (options, chain_id) = next(
+                (entry for entry in offers if payload["chainId"] == f"eip155:{entry[1][1]}"),
+                offers[0],
+            )
+            proof = await siwx.verify(
+                chain_id=chain_id,
+                origin=options.origin,
+                store=options.store,
+                payload=payload,
+                verifier=options.verifier,
+            )
+        except siwx.InvalidProofError as error:
+            return VerificationFailedError(error.code)
+        granted = options.grant(proof.address, proof.chain_id, request)
+        if inspect.isawaitable(granted):
+            granted = await granted
+        if granted is not True:
+            return None
+        challenge = await offer.verify(None)
+        if not isinstance(challenge, Challenge):
+            raise RuntimeError("offer without a credential returned a receipt")
+        call.settled = offer
+        receipt = Receipt.success(
+            reference=f"did:pkh:eip155:{proof.chain_id}:{proof.address}",
+            method=offer.offer.method.name,
+        )
+        return Credential(challenge=challenge.to_echo(), payload={}), receipt
 
     @staticmethod
     async def _identified(prepared: Sequence[_PreparedOffer], call: _Call) -> list[_PreparedOffer]:
@@ -966,6 +1057,32 @@ def _x402_accepts(call: _Call, challenge: Challenge) -> PaymentRequirements | No
             and prepared.offer.identity.payment is None
         ):
             return prepared.intent.x402_requirements(challenge.request)
+    return None
+
+
+def _siwx_offer(offer: _PreparedOffer) -> tuple[SiwxOptions, int] | None:
+    """An offer's SIWX options and chain, when it accepts x402 ``sign-in-with-x``.
+
+    Like mppx, an offer whose route has a payment check doesn't: a proof carries no
+    Credential the check could vet.
+    """
+    intent = offer.intent
+    if not isinstance(intent, _X402MethodIntent) or offer.offer.identity.payment is not None:
+        return None
+    options = intent.siwx
+    chain_id = intent.siwx_chain_id(offer.request)
+    if options is None or chain_id is None:
+        return None
+    return options, chain_id
+
+
+def _x402_siwx(call: _Call, challenge: Challenge, url: str) -> siwx.Extension | None:
+    """Return the x402 ``sign-in-with-x`` extension of the offer that issued a challenge."""
+    for prepared in _issuers(call, (challenge,)):
+        accepted = _siwx_offer(prepared)
+        if accepted is not None:
+            options, chain_id = accepted
+            return siwx.create_extension(chain_id=chain_id, origin=options.origin, url=url)
     return None
 
 

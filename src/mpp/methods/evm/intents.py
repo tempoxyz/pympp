@@ -51,6 +51,7 @@ from mpp.x402._types import (
     parse_eip3009_payload,
 )
 from mpp.x402.facilitator import Facilitator, FacilitatorError
+from mpp.x402.siwx import SiwxOptions
 
 if TYPE_CHECKING:
     from mpp.store import Store
@@ -281,6 +282,8 @@ class ChargeIntent:
             credentials may also run to their challenge's expiry.
         store: Optional store that claims each authorization before
             settlement so concurrent requests can't settle it twice.
+        siwx: Optional x402 ``sign-in-with-x`` options: wallets that prove their
+            address and that ``grant`` approves get the resource without paying.
     """
 
     name = "charge"
@@ -296,6 +299,7 @@ class ChargeIntent:
         route_binding: RouteBinding = "required",
         store: Store | None = None,
         max_validity_seconds: int = 3600,
+        siwx: SiwxOptions | None = None,
     ) -> None:
         if facilitator is None and settle is None:
             raise ValueError("EVM charge requires a facilitator or a settle hook")
@@ -319,6 +323,9 @@ class ChargeIntent:
         self.settle = settle
         self.max_timeout_seconds = max_timeout_seconds
         self._store = store
+        if siwx is not None and not isinstance(siwx, SiwxOptions):
+            raise ValueError("siwx must be mpp.x402.siwx.SiwxOptions")
+        self.siwx = siwx
 
     # -- request helpers -------------------------------------------------
 
