@@ -331,13 +331,17 @@ def _tempo_can_offer(connect: ConnectSettlement | None) -> CanOfferFn:
     return can_offer
 
 
+_SETTLED_PAYLOADS = ("hash", "zone")
+"""Tempo credential types whose transfer settled on-chain before the client sent them."""
+
+
 def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) -> ServerMethod:
     """Reject a Tempo payment whose recording would fail Stripe Connect validation.
 
     Recording happens after on-chain settlement, so check the settlement against
-    the cents-denominated recording PaymentIntent before settling. A ``hash``
-    credential's transfer is already on-chain, so it is accepted and only its
-    recording can fail.
+    the cents-denominated recording PaymentIntent before settling. A ``hash`` or
+    ``zone`` credential's transfer is already on-chain before the client sends it,
+    so it is accepted and only its recording can fail.
     """
     from dataclasses import replace
 
@@ -347,7 +351,7 @@ def _validate_connect_first(method: ServerMethod, connect: ConnectSettlement) ->
     def guard(terminal: Any) -> Any:
         async def run(context: Any) -> Any:
             cents = recorded_cents("tempo", context.challenge.request)
-            if cents >= 1 and _payload_type(context.credential.payload) != "hash":
+            if cents >= 1 and _payload_type(context.credential.payload) not in _SETTLED_PAYLOADS:
                 validate_settlement(connect, cents)
             return await terminal(context)
 

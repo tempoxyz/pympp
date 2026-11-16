@@ -17,6 +17,7 @@ from mpp import (
     Receipt,
     _body_digest,
     _constant_time_equal,
+    _credential_expiry,
     generate_challenge_id,
 )
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
@@ -336,7 +337,9 @@ async def verify_or_challenge(
         # it to an aware "now" raises TypeError. Reject it like any other
         # unparseable value so the route still fails closed.
         return await fail(InvalidChallengeError(echo.id, "invalid expires"), credential)
-    if expires_dt <= datetime.now(UTC):
+    if _credential_expiry.is_expired(
+        expires_dt, datetime.now(UTC), _credential_expiry.grace_of(intent, credential)
+    ):
         return await fail(PaymentExpiredError(echo.expires), credential)
 
     submitted_challenge = _challenge_from_echo(echo, echo_request, echo_opaque)

@@ -104,6 +104,7 @@ class _MethodIntent:
     ) -> None:
         self.name = method.intent
         self._method = method
+        self._credential_grace = method._credential_grace
         self._input = input
         self._http_request = http_request
         # The route's identity payment check, run after authentication and before settlement.

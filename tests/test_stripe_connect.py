@@ -200,9 +200,19 @@ def test_tempo_is_not_offered_when_connect_cannot_record_the_amount() -> None:
     assert can_offer({"amount": "1000000"}) is False
 
 
-async def test_recorded_tempo_hash_payment_is_accepted_after_settlement(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "raw_payload",
+    [
+        {"type": "hash", "hash": "0x" + "ab" * 32},
+        {"type": "zone", "hash": "0x" + "ab" * 32, "senderTag": "0x" + "cd" * 32, "zoneId": 3},
+    ],
+    ids=["hash", "zone"],
+)
+async def test_recorded_tempo_settled_payment_is_accepted_after_settlement(
+    monkeypatch: pytest.MonkeyPatch, raw_payload: dict[str, Any]
 ) -> None:
+    # Hash and Zone payments settled on Tempo before the client sent them, so a
+    # Connect amount the recording can't carry fails only their recording.
     import mpp.methods.stripe.payment_intent_method as payment_intent_method
 
     settled: list[VerifyContext] = []
@@ -223,7 +233,7 @@ async def test_recorded_tempo_hash_payment_is_accepted_after_settlement(
     method = payments.tempo.charge()
     server = Mpp(methods=method, realm="api.example.com", secret_key="secret")
     issued = challenge(await server.charge(amount="1.00")(http_request()))
-    payload = method.method.parse_payload({"type": "hash", "hash": "0x" + "ab" * 32})
+    payload = method.method.parse_payload(raw_payload)
     context = VerifyContext(
         credential=Credential(challenge=issued.to_echo(), payload=payload),
         request={},

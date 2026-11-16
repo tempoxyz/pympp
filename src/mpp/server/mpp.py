@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt
+from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _credential_expiry
 from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
@@ -415,7 +415,11 @@ class Mpp:
             expires = _parse_timestamp(echo.expires)
         except ParseError as error:
             raise PaymentExpiredError(echo.expires) from error
-        if expires.tzinfo is None or expires <= datetime.now(UTC):
+        # A method may accept some credentials past expiry; it checks them again itself.
+        grace = max(_credential_expiry.grace_of(candidate, credential) for candidate in candidates)
+        if expires.tzinfo is None or _credential_expiry.is_expired(
+            expires, datetime.now(UTC), grace
+        ):
             raise PaymentExpiredError(echo.expires)
         if http_request is not None and not _route_scope_matches(http_request, echoed_request):
             raise InvalidChallengeError(echo.id, "credential route does not match")

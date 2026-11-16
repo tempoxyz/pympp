@@ -201,10 +201,14 @@ class PaymentRuntime:
         request: Any = None,
         fetch: Callable[[Any], Awaitable[Any]] | None = None,
         attempt: PaymentAttempt | None = None,
+        check_expiry: bool = True,
     ) -> Credential:
         """Create a credential and emit its lifecycle events.
 
         ``request`` and ``fetch`` are passed to the method in :class:`CredentialParams`.
+        ``check_expiry`` set to ``False`` skips the expired-challenge check, for a retry
+        resuming a payment the method already started for this challenge: the method then
+        decides whether it can still be redeemed, and starts no new payment once it expired.
         """
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
@@ -214,7 +218,7 @@ class PaymentRuntime:
             )
         if method.can_handle_challenge is not None and not method.can_handle_challenge(challenge):
             raise ValueError(f"Method {method.key!r} does not accept this challenge")
-        if challenge.expires is not None:
+        if check_expiry and challenge.expires is not None:
             try:
                 expires = datetime.fromisoformat(challenge.expires)
             except (TypeError, ValueError) as error:
@@ -253,7 +257,8 @@ class PaymentRuntime:
             )
         except asyncio.CancelledError as error:
             tx_hash = credential.payload.get("hash")
-            if credential.payload.get("type") == "hash" and isinstance(tx_hash, str):
+            # Hash and Zone credentials both report a payment already on chain.
+            if credential.payload.get("type") in ("hash", "zone") and isinstance(tx_hash, str):
                 raise PaymentOutcomeUnknownError(
                     challenge,
                     error,

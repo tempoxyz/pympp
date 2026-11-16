@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp import Challenge as CoreChallenge
+from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
 from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
@@ -40,6 +41,9 @@ from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import ChallengeCandidate, ClientMethod, OrderChallenges, PaymentRuntime
 
 logger = logging.getLogger(__name__)
+
+# Credential creations per paid call while a Zone withdrawal settles, as mppx's McpClient.
+_MAX_PAYMENT_ATTEMPTS = 3
 
 
 def _error_code(error: Exception) -> int | None:
@@ -234,7 +238,15 @@ class McpClient:
             candidates = await self._runtime.order_challenges(cores, self._order_challenges)
             challenge, method = self._match_challenge(usable, candidates)
 
-            core_credential = await self._runtime.create_credential(challenge.to_core(), method)
+            # A Zone withdrawal still settling is resumed for this same Challenge
+            # rather than paid again under a new one (mppx).
+            core_challenge = challenge.to_core()
+            core_credential = await resume_pending_settlement(
+                lambda check_expiry: self._runtime.create_credential(
+                    core_challenge, method, check_expiry=check_expiry
+                ),
+                _MAX_PAYMENT_ATTEMPTS,
+            )
             mcp_credential = MCPCredential.from_core(core_credential, challenge)
 
             retry_meta = dict(meta) if meta else {}
