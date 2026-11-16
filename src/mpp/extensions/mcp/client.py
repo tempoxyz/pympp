@@ -36,7 +36,12 @@ from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
 from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
-from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
+from mpp.extensions.mcp.constants import (
+    CODE_PAYMENT_REQUIRED,
+    CODE_PAYMENT_VERIFICATION_FAILED,
+    META_CREDENTIAL,
+    META_RECEIPT,
+)
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
 from mpp.runtime import (
     AttemptOutcome,
@@ -363,8 +368,13 @@ def _core_challenges(challenges: Sequence[MCPChallenge]) -> tuple[CoreChallenge,
 
 
 def _error_challenges(error: BaseException) -> tuple[CoreChallenge, ...]:
-    """The challenges of a ``-32042`` payment required error, else none."""
-    if not isinstance(error, Exception) or not _is_payment_required_error(error):
+    """The challenges of a ``-32042`` payment required or ``-32043`` verification
+    failed error, else none: the server sends fresh challenges with either."""
+    if not isinstance(error, Exception):
+        return ()
+    if not _is_payment_required_error(error) and _error_code(error) != (
+        CODE_PAYMENT_VERIFICATION_FAILED
+    ):
         return ()
     return _core_challenges(_extract_challenges(error))
 

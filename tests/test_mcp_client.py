@@ -667,12 +667,14 @@ class TestMcpClientPaidTool:
 # ---------------------------------------------------------------------------
 
 
-def _payment_required_error(challenge: dict[str, Any] | None = None) -> Exception:
+def _payment_required_error(
+    challenge: dict[str, Any] | None = None, *, code: int = -32042
+) -> Exception:
     exceptions = pytest.importorskip("mcp.shared.exceptions")
     types = pytest.importorskip("mcp.types")
     return exceptions.McpError(
         types.ErrorData(
-            code=-32042,
+            code=code,
             message="Payment Required",
             data={"challenges": [challenge or _make_challenge_dict()]},
         )
@@ -716,6 +718,25 @@ class TestMcpClientAttemptSettlement:
         session = AsyncMock()
         session.call_tool = AsyncMock(
             side_effect=[_payment_required_error(), _payment_required_error(replacement)]
+        )
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes)])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
+
+    @pytest.mark.asyncio
+    async def test_verification_failed_retry_settles_with_its_challenges(self) -> None:
+        replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[
+                _payment_required_error(),
+                _payment_required_error(replacement, code=-32043),
+            ]
         )
         outcomes: list[AttemptOutcome] = []
         client = McpClient(session, methods=[settling_method(outcomes)])

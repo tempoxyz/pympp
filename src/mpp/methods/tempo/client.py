@@ -1478,6 +1478,7 @@ class TempoMethod:
                     sender_tag=state.sender_tag or _zone_sender_tag(task),
                     zone_id=zone_id,
                     challenge=earlier,
+                    redeemed_late=True,
                 )
             # ``wanted`` is true while any caller still awaits the withdrawal: it is
             # another payment in flight, not one this Challenge retries.

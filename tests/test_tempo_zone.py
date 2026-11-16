@@ -2638,6 +2638,7 @@ class TestClientZoneOneWithdrawalPerIntent:
         assert isinstance(error, ZoneSettlementPendingError)
         assert error.challenge_id == first.id
         assert error.sender_tag is None
+        assert not error.redeemed_late
         assert "withdrawal for challenge" in str(error)
         assert calls == before
 
@@ -2696,6 +2697,8 @@ class TestClientZoneOneWithdrawalPerIntent:
         assert error.challenge_id == first.id
         assert error.sender_tag == late.payload["senderTag"]
         assert str(late.payload["senderTag"]) in str(error)
+        assert error.redeemed_late
+        assert "settled, and its credential was returned after" in str(error)
         # A retry of its own Challenge gets the same credential again.
         assert (await method.create_credential(first, origin=ORIGIN)).payload == late.payload
         assert calls.count("eth_sendRawTransactionSync") == 1
