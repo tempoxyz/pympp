@@ -192,7 +192,10 @@ class SiwxOptions:
             request headers such as ``Host``, which a caller controls.
         store: Store that records used nonces, so each proof is accepted once. A store
             with ``put_if_absent_until`` (:class:`~mpp.store.ExpiringStore`) lets the
-            claims expire once their proofs could no longer verify.
+            claims expire once their proofs could no longer verify. In a composed route,
+            give offers that share a backend the same store object: each store object
+            records the nonce on its own, so two objects over one backend refuse a later
+            offer.
         grant: Decides whether a wallet that proved its address gets the resource
             without paying, given ``(address, chain_id, request)``. Return ``False`` to
             answer 402 so it pays. May be sync or async.
