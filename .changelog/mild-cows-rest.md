@@ -1,5 +1,5 @@
 ---
-pympp: major
+pympp: patch
 ---
 
-Restricted the accepted credential header to `Payment-Authorization` only, rejecting any other non-default header with a `ValueError`/`ParseError` (previously any valid HTTP header name was accepted). Updated `advertised_credential_header`, `parse_www_authenticate`, `parse_authorization`, and the MCP client challenge parser to enforce this constraint, and introduced the `is_payment_authorization_header` helper for case-insensitive comparisons.
+Challenges whose `header` auth-param is anything other than `Payment-Authorization` (including an explicit `Authorization` or empty value) are now rejected and get no credential, while other challenges in the same 402 are still used. Constructing a challenge with a custom credential header name now raises `ValueError`.
