@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.0 (2026-11-16)
+
+### Minor Changes
+
+- Added x402 Sign-In with X (SIWX) support, allowing wallets that prove their address to access resources without payment. Introduced the new `mpp.x402.siwx` module with `SiwxOptions`, `SiwxTransport`, `VerifiedProof`, and related types/functions, and added an optional `siwx` parameter to `mpp.methods.evm.server.charge` and `ChargeIntent`. (by @brendanjryan, [#430](https://github.com/tempoxyz/pympp/pull/430))
+
 ## 0.24.0 (2026-11-16)
 
 ### Minor Changes
