@@ -822,7 +822,10 @@ class ComposedHandler:
         rejection: siwx.InvalidProofError | None = None
         verified = False
         granted_offer: tuple[_PreparedOffer, siwx.VerifiedProof] | None = None
-        for index, (candidate, (options, chain_id)) in enumerate(candidates):
+        # Stores this request already claimed the nonce in: offers sharing a store share the
+        # claim, so a later offer can still grant the wallet, and no claim is ever released.
+        claimed: list[object] = []
+        for candidate, (options, chain_id) in candidates:
             try:
                 proof = await siwx.verify(
                     chain_id=chain_id,
@@ -834,24 +837,18 @@ class ComposedHandler:
                 )
                 verified = True
                 # Reserve the nonce before grant, so a replayed proof never reaches grant.
-                await siwx.claim(store=options.store, payload=payload)
+                if not any(store is options.store for store in claimed):
+                    await siwx.claim(store=options.store, payload=payload)
+                    claimed.append(options.store)
             except siwx.InvalidProofError as error:
                 if error.code == "invalid_siwx_nonce" and verified:
                     return VerificationFailedError(error.code)
                 rejection = rejection or error
                 continue
-            granted = False
-            try:
-                result = options.grant(proof.address, proof.chain_id, request)
-                if inspect.isawaitable(result):
-                    result = await result
-                granted = result is True
-            finally:
-                # Free the nonce only for the next offer to claim. Once every offer has
-                # declined, the claim stays, so a declined proof can't be replayed later
-                # when grant would approve the wallet; clients sign a fresh one each time.
-                if not granted and index < len(candidates) - 1:
-                    await siwx.release(store=options.store, payload=payload)
+            result = options.grant(proof.address, proof.chain_id, request)
+            if inspect.isawaitable(result):
+                result = await result
+            granted = result is True
             if granted:
                 granted_offer = (candidate, proof)
                 break
