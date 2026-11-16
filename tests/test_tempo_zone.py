@@ -2197,6 +2197,72 @@ class TestClientZoneLateCredentialAccepted:
         # a Challenge with its terms still fails closed.
         assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["accepted", "tool error", "refused"])
+    async def test_an_accepted_late_credential_frees_its_terms_over_mcp(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        from mcp.shared.exceptions import McpError
+        from mcp.types import CallToolResult, ErrorData
+
+        from mpp.extensions.mcp import McpClient, PaymentOutcomeUnknownError
+        from mpp.extensions.mcp.constants import META_CREDENTIAL, META_RECEIPT
+        from mpp.extensions.mcp.types import MCPChallenge
+
+        settled = False
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
+        offered = MCPChallenge.from_core(issued, REALM, expires=issued.expires).to_dict()
+        paid: list[dict[str, Any]] = []
+
+        class Session:
+            async def call_tool(
+                self, name: str, arguments: Any, meta: dict[str, Any] | None = None
+            ) -> CallToolResult:
+                if not meta or META_CREDENTIAL not in meta:
+                    raise McpError(
+                        ErrorData(
+                            code=-32042,
+                            message="Payment Required",
+                            data={"httpStatus": 402, "challenges": [offered]},
+                        )
+                    )
+                paid.append(meta)
+                if outcome == "refused":
+                    raise McpError(ErrorData(code=-32043, message="Payment verification failed"))
+                if outcome == "tool error":
+                    return CallToolResult(content=[], isError=True)
+                receipt = {
+                    "status": "success",
+                    "challengeId": issued.id,
+                    "method": "tempo",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "reference": "0xabc",
+                }
+                return CallToolResult(content=[], _meta={META_RECEIPT: receipt})
+
+        client = McpClient(Session(), methods=[tempo_client._client_method(method)])
+        if outcome == "refused":
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await client.call_tool("paid", {})
+        else:
+            result = await client.call_tool("paid", {})
+            assert (result.receipt is not None) is (outcome == "accepted")
+        assert len(paid) == 1
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # Only a result the server returned for the credential frees its terms.
+        kept = outcome != "accepted"
+        assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
+
 
 class TestWaitForSettlementFromBlock:
     @pytest.mark.asyncio

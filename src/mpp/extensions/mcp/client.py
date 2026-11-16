@@ -38,7 +38,14 @@ from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpp.runtime import ChallengeCandidate, ClientMethod, OrderChallenges, PaymentRuntime
+from mpp.runtime import (
+    AttemptOutcome,
+    ChallengeCandidate,
+    ClientMethod,
+    OrderChallenges,
+    PaymentAttempt,
+    PaymentRuntime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,9 +248,10 @@ class McpClient:
             # A Zone withdrawal still settling is resumed for this same Challenge
             # rather than paid again under a new one (mppx).
             core_challenge = challenge.to_core()
+            attempt = PaymentAttempt()
             core_credential = await resume_pending_settlement(
                 lambda check_expiry: self._runtime.create_credential(
-                    core_challenge, method, check_expiry=check_expiry
+                    core_challenge, method, attempt=attempt, check_expiry=check_expiry
                 ),
                 _MAX_PAYMENT_ATTEMPTS,
             )
@@ -256,12 +264,19 @@ class McpClient:
             if timeout is not None:
                 retry_kwargs["read_timeout_seconds"] = timeout
 
+            # The method may keep state for this credential until it learns the outcome,
+            # as over HTTP: only a tool result the server returned counts as accepted.
             try:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
             except (Exception, get_cancelled_exc_class()) as exc:
+                await _settle_attempt(attempt, accepted=False)
                 raise PaymentOutcomeUnknownError(challenge, exc) from exc
 
             receipt = self._extract_receipt(retry_result)
+            await _settle_attempt(
+                attempt,
+                accepted=receipt is not None or not getattr(retry_result, "isError", False),
+            )
             return McpToolResult(result=retry_result, receipt=receipt)
 
     def _match_challenge(
@@ -325,3 +340,18 @@ class McpClient:
         except (KeyError, TypeError):
             logger.warning("Failed to parse receipt from _meta")
             return None
+
+
+async def _settle_attempt(attempt: PaymentAttempt, *, accepted: bool) -> None:
+    """Report a paid retry's outcome to the method that created its credential.
+
+    A tool call has no redirect or resend, so an outcome the method doesn't settle as
+    accepted is settled as rejected, which releases whatever it kept for the credential.
+    """
+    settle = attempt.settle
+    if settle is None:
+        return
+    attempt.settle = None
+    if accepted and await settle(AttemptOutcome(status="accepted")):
+        return
+    await settle(AttemptOutcome(status="rejected"))
