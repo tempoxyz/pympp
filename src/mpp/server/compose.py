@@ -825,10 +825,21 @@ class ComposedHandler:
             )
         except siwx.InvalidProofError as error:
             return VerificationFailedError(error.code)
-        granted = options.grant(proof.address, proof.chain_id, request)
-        if inspect.isawaitable(granted):
-            granted = await granted
-        if granted is not True:
+        # Every offer the verified proof also satisfies (same chain and origin) gets its
+        # grant asked, in order, so a later offer's policy can still grant the wallet.
+        candidates = [
+            entry
+            for entry in offers
+            if entry[1][1] == chain_id and entry[1][0].origin == options.origin
+        ]
+        for candidate, (candidate_options, _) in candidates:
+            granted = candidate_options.grant(proof.address, proof.chain_id, request)
+            if inspect.isawaitable(granted):
+                granted = await granted
+            if granted is True:
+                offer = candidate
+                break
+        else:
             return None
         challenge = await offer.verify(None)
         if not isinstance(challenge, Challenge):

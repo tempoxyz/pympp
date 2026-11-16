@@ -244,7 +244,8 @@ _IPV6_RE = re.compile(r"^\[([0-9a-fA-F:.]+)\](:[0-9]{1,5})?$")
 _NONCE_RE = re.compile(r"^[a-zA-Z0-9]{8,}$")
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _SIGNATURE_RE = re.compile(r"^0x[0-9a-fA-F]+$")
-_CHAIN_ID_RE = re.compile(r"^eip155:(\d+)$")
+# A chain ID is at most a uint256 (78 digits), which keeps int() far below its digit limit.
+_CHAIN_ID_RE = re.compile(r"^eip155:(\d{1,78})$")
 _URI_RE = re.compile(r"(?:([^:/?#]+):)?(?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?")
 
 

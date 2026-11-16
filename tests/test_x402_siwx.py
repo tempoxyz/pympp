@@ -819,3 +819,37 @@ class TestReviewFixes:
         assert response.status_code == 402
         assert len(server.requests) == 1
         assert server.bodies == [b'{"task":1}']
+
+    async def test_a_later_same_chain_offer_can_grant(self) -> None:
+        store = MemoryStore()
+        refuse = siwx.SiwxOptions(origin=ORIGIN, store=store, grant=lambda *_: False)
+        allow = siwx.SiwxOptions(origin=ORIGIN, store=store, grant=lambda *_: True)
+        server = Mpp(
+            methods=[
+                evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=settle_ok, siwx=refuse),
+                evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=Account.create().address,
+                    settle=settle_ok,
+                    siwx=allow,
+                ),
+            ],
+            secret_key=SECRET_KEY,
+        )
+        handler = server.charge(amount="0.25")
+        result = await handler(Request("GET", URL))
+        assert isinstance(result, PaymentRequired)
+        extension = siwx.from_payment_required(read_challenge(result.challenge))
+        assert extension is not None
+        granted = await handler(with_proof(sign(extension)))
+        assert isinstance(granted, PaymentVerified)
+
+    async def test_an_oversized_chain_id_is_a_proof_error(self) -> None:
+        route = Route()
+        payload = {
+            **unsigned_of(await challenge(route)),
+            "signature": "0x00",
+            "chainId": "eip155:" + "9" * 4301,
+        }
+        response = await route(with_proof(siwx.encode(payload)))
+        assert "invalid_siwx_chain_id" in read_challenge(response)["error"]
