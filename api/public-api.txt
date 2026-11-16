@@ -1848,4 +1848,4 @@ module mpp.x402.siwx
     def encode(payload: Mapping[str, Any]) -> str
     def from_payment_required(payment_required: Mapping[str, Any]) -> Extension | None
     def to_message(payload: Mapping[str, Any]) -> str
-    async def verify(*, chain_id: int, origin: str, store: Store, payload: Payload, verifier: SignatureVerifier | None = None) -> VerifiedProof
+    async def verify(*, chain_id: int, origin: str, store: Store, payload: Payload, verifier: SignatureVerifier | None = None, claim_nonce: bool = True) -> VerifiedProof

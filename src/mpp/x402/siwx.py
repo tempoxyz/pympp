@@ -591,6 +591,7 @@ async def verify(
     store: Store,
     payload: Payload,
     verifier: SignatureVerifier | None = None,
+    claim_nonce: bool = True,
 ) -> VerifiedProof:
     """Verify a SIWX proof against the server's origin and chain, then record its nonce.
 
@@ -604,6 +605,8 @@ async def verify(
         payload: The decoded proof.
         verifier: Optional ``(address, message, signature)`` check used instead of EOA
             recovery, such as for smart-wallet signatures.
+        claim_nonce: Whether to record the nonce. Pass ``False`` to reserve it later with
+            :func:`claim` (and :func:`release` it if the wallet is not granted).
 
     Raises:
         InvalidProofError: With the spec's code, when the proof is rejected.
@@ -677,14 +680,46 @@ async def verify(
         raise InvalidProofError("invalid_siwx_signature")
 
     # Claim the nonce last, so a proof that fails verification cannot burn another's nonce.
-    claimed = await _claim(
-        store,
-        f"mppx:x402:siwx:{payload['nonce']}",
-        issued_at + TTL_SECONDS + _CLOCK_SKEW_SECONDS,
-    )
-    if not claimed:
-        raise InvalidProofError("invalid_siwx_nonce")
+    if claim_nonce:
+        await claim(store=store, payload=payload)
     return VerifiedProof(address=address, chain_id=proof_chain_id)
+
+
+def _nonce_key(payload: Payload) -> str:
+    return f"mppx:x402:siwx:{payload['nonce']}"
+
+
+def _claim_expires(payload: Payload) -> float:
+    issued_at = _parse_time(payload["issuedAt"])
+    if issued_at is None:
+        raise InvalidProofError("invalid_siwx_issued_at")
+    return issued_at + TTL_SECONDS + _CLOCK_SKEW_SECONDS
+
+
+async def claim(*, store: Store, payload: Payload) -> None:
+    """Record a verified proof's nonce so it is accepted once.
+
+    Raises:
+        InvalidProofError: With ``invalid_siwx_nonce`` when the nonce was already used.
+    """
+    if not await _claim(store, _nonce_key(payload), _claim_expires(payload)):
+        raise InvalidProofError("invalid_siwx_nonce")
+
+
+# How long before a claim expires :func:`release` leaves it to lapse instead.
+_RELEASE_MARGIN_SECONDS = 5
+
+
+async def release(*, store: Store, payload: Payload) -> None:
+    """Free a nonce :func:`claim` recorded, such as when ``grant`` declines the wallet.
+
+    Call it only for a claim this request made. Until that claim expires no other request
+    can claim the nonce, so the stored marker is still this request's own; close to expiry
+    it is left to lapse, since another request may hold the nonce by then.
+    """
+    if time.time() + _RELEASE_MARGIN_SECONDS >= _claim_expires(payload):
+        return
+    await store.delete(_nonce_key(payload))
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +728,15 @@ async def verify(
 
 
 _SIWX_ORIGIN_EXTENSION = "mpp.siwx.original_origin"
+# The first origin PaymentTransport records on the request it was given, before identity
+# provers copy it: a SiwxTransport inside it sees only those copies.
+_PAYMENT_ORIGIN_EXTENSION = "mpp.original_origin"
+
+
+def _transport_origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    """A URL's origin as PaymentTransport records it."""
+    port = url.port if url.port is not None else {"http": 80, "https": 443}.get(url.scheme)
+    return (url.scheme, url.raw_host.decode("ascii"), port)
 
 
 class SiwxTransport(httpx.AsyncBaseTransport):
@@ -766,6 +810,9 @@ class SiwxTransport(httpx.AsyncBaseTransport):
         # As PaymentTransport: httpx carries a request's extensions across redirects, so
         # a hop to another origin than the first request's is never signed for.
         if request.extensions.get(_SIWX_ORIGIN_EXTENSION) != _origin_of(str(request.url)):
+            return response
+        payment_origin = request.extensions.get(_PAYMENT_ORIGIN_EXTENSION)
+        if payment_origin is not None and payment_origin != _transport_origin(request.url):
             return response
 
         # A challenge naming another site must never get this wallet's signature.

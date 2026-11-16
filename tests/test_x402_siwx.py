@@ -18,7 +18,9 @@ from eth_account import Account
 
 from mpp import Receipt
 from mpp.client import PaymentTransport
+from mpp.errors import PaymentError
 from mpp.events import PAYMENT_FAILED
+from mpp.identity import Prover, with_headers
 from mpp.methods.evm import BASE_SEPOLIA_USDC, BASE_USDC, evm
 from mpp.methods.evm import client as evm_client
 from mpp.server import Mpp, PaymentRequired, PaymentVerified
@@ -844,6 +846,58 @@ class TestReviewFixes:
         granted = await handler(with_proof(sign(extension)))
         assert isinstance(granted, PaymentVerified)
 
+    async def test_each_offer_checks_the_proof_with_its_own_verifier(self) -> None:
+        store = MemoryStore()
+        refuse = siwx.SiwxOptions(origin=ORIGIN, store=store, grant=lambda *_: False)
+        allow = siwx.SiwxOptions(
+            origin=ORIGIN, store=store, grant=lambda *_: True, verifier=lambda *_: False
+        )
+        server = Mpp(
+            methods=[
+                evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=settle_ok, siwx=refuse),
+                evm(
+                    currency=BASE_SEPOLIA_USDC,
+                    recipient=Account.create().address,
+                    settle=settle_ok,
+                    siwx=allow,
+                ),
+            ],
+            secret_key=SECRET_KEY,
+        )
+        handler = server.charge(amount="0.25")
+        result = await handler(Request("GET", URL))
+        assert isinstance(result, PaymentRequired)
+        extension = siwx.from_payment_required(read_challenge(result.challenge))
+        assert extension is not None
+        refused = await handler(with_proof(sign(extension)))
+        assert isinstance(refused, PaymentRequired)
+
+    async def test_a_replayed_proof_never_reaches_grant(self) -> None:
+        grants: list[str] = []
+
+        def grant(address: str, *_: object) -> bool:
+            grants.append(address)
+            return True
+
+        options = siwx.SiwxOptions(origin=ORIGIN, store=MemoryStore(), grant=grant)
+        server = Mpp(
+            methods=evm(
+                currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=settle_ok, siwx=options
+            ),
+            secret_key=SECRET_KEY,
+        )
+        handler = server.charge(amount="0.25")
+        result = await handler(Request("GET", URL))
+        assert isinstance(result, PaymentRequired)
+        extension = siwx.from_payment_required(read_challenge(result.challenge))
+        assert extension is not None
+        proof = sign(extension)
+        assert isinstance(await handler(with_proof(proof)), PaymentVerified)
+        replay = await handler(with_proof(proof))
+        assert isinstance(replay, PaymentRequired)
+        assert "invalid_siwx_nonce" in read_challenge(replay.challenge)["error"]
+        assert grants == [ACCOUNT.address]
+
     async def test_an_oversized_chain_id_is_a_proof_error(self) -> None:
         route = Route()
         payload = {
@@ -870,3 +924,28 @@ class TestReviewFixes:
             response = await client.get("https://start.example/go")
         assert response.status_code == 402
         assert [siwx.HEADER in request.headers for request in server.requests] == [False]
+
+    async def test_never_signs_after_a_cross_origin_redirect_under_identity(self) -> None:
+        # Identity provers hand SiwxTransport a copy of each request, so the first origin
+        # comes from the one PaymentTransport recorded.
+        server = ServerTransport(Route())
+
+        class Redirecting(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.host == "start.example":
+                    return httpx.Response(302, headers={"location": URL})
+                return await server.handle_async_request(request)
+
+        async def prove(request: httpx.Request, _context: object) -> httpx.Request:
+            return with_headers(request, {"X-Id": "alice"})
+
+        transport = PaymentTransport(
+            [evm_client.charge(currency=BASE_SEPOLIA_USDC, account=ACCOUNT)],
+            identity=[Prover(scope="*", prove=prove, headers=("X-Id",))],
+            inner=siwx.SiwxTransport(account=ACCOUNT, inner=Redirecting()),
+        )
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            # PaymentTransport then refuses to pay across the redirect too.
+            with pytest.raises(PaymentError):
+                await client.get("https://start.example/go")
+        assert not any(siwx.HEADER in request.headers for request in server.requests)

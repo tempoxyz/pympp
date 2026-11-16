@@ -810,37 +810,54 @@ class ComposedHandler:
             return None
         try:
             payload = siwx.decode(header)
-            # A proof is checked by the offer on its chain, or else by the first offer,
-            # which rejects it as an unsupported chain.
-            offer, (options, chain_id) = next(
-                (entry for entry in offers if payload["chainId"] == f"eip155:{entry[1][1]}"),
-                offers[0],
-            )
-            proof = await siwx.verify(
-                chain_id=chain_id,
-                origin=options.origin,
-                store=options.store,
-                payload=payload,
-                verifier=options.verifier,
-            )
         except siwx.InvalidProofError as error:
             return VerificationFailedError(error.code)
-        # Every offer the verified proof also satisfies (same chain and origin) gets its
-        # grant asked, in order, so a later offer's policy can still grant the wallet.
+        # Every offer on the proof's chain checks it with its own options, in order: its
+        # verifier and origin, then its nonce store, then its grant, so a later offer's
+        # policy can still grant the wallet. With none on that chain, the first offer
+        # rejects the proof as an unsupported chain.
         candidates = [
-            entry
-            for entry in offers
-            if entry[1][1] == chain_id and entry[1][0].origin == options.origin
-        ]
-        for candidate, (candidate_options, _) in candidates:
-            granted = candidate_options.grant(proof.address, proof.chain_id, request)
-            if inspect.isawaitable(granted):
-                granted = await granted
-            if granted is True:
-                offer = candidate
+            entry for entry in offers if payload["chainId"] == f"eip155:{entry[1][1]}"
+        ] or offers[:1]
+        rejection: siwx.InvalidProofError | None = None
+        verified = False
+        granted_offer: tuple[_PreparedOffer, siwx.VerifiedProof] | None = None
+        for candidate, (options, chain_id) in candidates:
+            try:
+                proof = await siwx.verify(
+                    chain_id=chain_id,
+                    origin=options.origin,
+                    store=options.store,
+                    payload=payload,
+                    verifier=options.verifier,
+                    claim_nonce=False,
+                )
+                verified = True
+                # Reserve the nonce before grant, so a replayed proof never reaches grant,
+                # and release it when grant declines, so a later offer can still accept it.
+                await siwx.claim(store=options.store, payload=payload)
+            except siwx.InvalidProofError as error:
+                if error.code == "invalid_siwx_nonce" and verified:
+                    return VerificationFailedError(error.code)
+                rejection = rejection or error
+                continue
+            granted = False
+            try:
+                result = options.grant(proof.address, proof.chain_id, request)
+                if inspect.isawaitable(result):
+                    result = await result
+                granted = result is True
+            finally:
+                if not granted:
+                    await siwx.release(store=options.store, payload=payload)
+            if granted:
+                granted_offer = (candidate, proof)
                 break
-        else:
+        if granted_offer is None:
+            if not verified and rejection is not None:
+                return VerificationFailedError(rejection.code)
             return None
+        offer, proof = granted_offer
         challenge = await offer.verify(None)
         if not isinstance(challenge, Challenge):
             raise RuntimeError("offer without a credential returned a receipt")
