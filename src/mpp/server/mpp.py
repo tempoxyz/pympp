@@ -415,11 +415,7 @@ class Mpp:
             expires = _parse_timestamp(echo.expires)
         except ParseError as error:
             raise PaymentExpiredError(echo.expires) from error
-        # A method may accept some credentials past expiry; it checks them again itself.
-        grace = max(_credential_expiry.grace_of(candidate, credential) for candidate in candidates)
-        if expires.tzinfo is None or _credential_expiry.is_expired(
-            expires, datetime.now(UTC), grace
-        ):
+        if expires.tzinfo is None:
             raise PaymentExpiredError(echo.expires)
         if http_request is not None and not _route_scope_matches(http_request, echoed_request):
             raise InvalidChallengeError(echo.id, "credential route does not match")
@@ -480,6 +476,12 @@ class Mpp:
                 expected_scope, echoed_request.get("_mppx_scope"), wire=wire_scope
             ):
                 raise InvalidChallengeError(echo.id, "credential scope does not match")
+        # Checked against the method that matched: only it knows how long after expiry it
+        # accepts the credential, and it checks a late one again itself (mppx).
+        if _credential_expiry.is_expired(
+            expires, datetime.now(UTC), _credential_expiry.grace_of(method, credential)
+        ):
+            raise PaymentExpiredError(echo.expires)
         unsupported = sorted(set(method_options or {}) - set(method.credential_options))
         if unsupported:
             raise TypeError(f"unsupported method option: {unsupported[0]}")
@@ -487,7 +489,7 @@ class Mpp:
         if request is not None or meta is not _CONTEXT_UNSET or body is not _CONTEXT_UNSET:
             expected_meta = None if meta is _CONTEXT_UNSET else meta
             expected_body = None if body is _CONTEXT_UNSET else body
-            if _application_meta(echoed_opaque) != (expected_meta or None):
+            if _application_meta(echoed_opaque) != _application_meta(expected_meta):
                 raise InvalidChallengeError(echo.id, "credential opaque does not match")
             if digest_error := _body_digest_error(echo.digest, expected_body):
                 raise InvalidChallengeError(echo.id, digest_error)

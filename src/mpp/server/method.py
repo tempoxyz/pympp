@@ -162,6 +162,9 @@ class ServerMethod:
     # credential (see ``mpp._credential_expiry``), so the generic expiry checks leave it
     # room to; the method enforces its own proof. ``None`` gives none.
     _credential_grace: Callable[[Credential], float] | None = None
+    # Internal: whether the challenges this method issues carry the expiry grace marker,
+    # without which ``_credential_grace`` gives none.
+    _issue_expiry_grace: bool = False
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None

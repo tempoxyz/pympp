@@ -17,6 +17,7 @@ import functools
 import inspect
 from contextlib import suppress
 from dataclasses import dataclass
+from dataclasses import replace as _replace_dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -25,10 +26,11 @@ from mpp import (
     AUTHORIZATION_HEADER,
     PAYMENT_AUTHORIZATION_HEADER,
     Challenge,
+    ChallengeEcho,
     Credential,
 )
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError
+from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
 from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict
 from mpp.client._identity import IdentityClient
@@ -698,8 +700,12 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                 retry_request.extensions[_PAYMENT_ATTEMPTED_EXTENSION] = True
                 try:
+                    # Identity proofs bind to the Challenge the credential pays, which is
+                    # an earlier one when a Zone withdrawal was resumed (mppx).
                     payment_response, _ = await self._send(
-                        retry_request, challenge=challenge, carried=carried
+                        retry_request,
+                        challenge=_credential_challenge(credential, challenge),
+                        carried=carried,
                     )
                     response = payment_response
                     if payment_response.is_server_error:
@@ -832,6 +838,30 @@ class _SentCredential:
     method: ClientMethod
     credential: Credential
     attempt: PaymentAttempt
+
+
+def _credential_challenge(credential: Credential, selected: Challenge) -> Challenge:
+    """The Challenge ``credential`` pays: ``selected``, or the earlier Challenge a method
+    resumed a payment for, keeping ``selected``'s credential header (mppx)."""
+    echo = getattr(credential, "challenge", None)
+    if not isinstance(echo, ChallengeEcho) or echo.id == selected.id:
+        return selected
+    try:
+        request = _b64_decode(echo.request)
+        opaque = _b64_decode(echo.opaque) if echo.opaque else None
+    except (ParseError, ValueError, TypeError):
+        return selected
+    if not isinstance(request, dict) or (opaque is not None and not isinstance(opaque, dict)):
+        return selected
+    return _replace_dataclass(
+        selected,
+        id=echo.id,
+        realm=echo.realm,
+        request=request,
+        expires=echo.expires,
+        digest=echo.digest,
+        opaque=cast("dict[str, str] | None", opaque),
+    )
 
 
 async def _settle_attempt(attempt: PaymentAttempt, outcome: AttemptOutcome) -> bool:

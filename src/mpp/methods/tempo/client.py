@@ -356,6 +356,13 @@ class _ZoneSend:
     # What ``challenge`` asks to be paid (:func:`_zone_terms`), or ``None`` when it
     # can't be read, in which case no other Challenge resumes this withdrawal.
     terms: str | None = None
+    # Whether its credential was returned after its Challenge expired. Only a retry of
+    # that Challenge may get the credential again; until its redemption window ends, a
+    # Challenge with the same terms fails closed, since the server may have redeemed or
+    # refused it (mppx).
+    redeemed_late: bool = False
+    # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
+    sender_tag: str | None = None
 
 
 @dataclass
@@ -1441,7 +1448,15 @@ class TempoMethod:
         payment intent. One that another caller still waits on belongs to that caller's
         request, so a concurrent request with the same terms pays its own (mppx). An entry
         stays until a caller takes its credential, so a late retry fails closed instead of
-        paying again.
+        paying again. It stops paying other Challenges once its own can no longer be
+        redeemed, and is then dropped.
+
+        Raises:
+            ZoneSettlementPendingError: If a withdrawal for these terms returned its
+                credential after its Challenge expired and that Challenge can still be
+                redeemed: the server may have accepted or refused it, so neither sending it
+                again nor withdrawing again is safe. The error names the Challenge the
+                withdrawal paid, whose retry gets its credential.
         """
         key = _zone_withdrawal_key(challenge)
         if key in self._zone_withdrawals:
@@ -1449,9 +1464,24 @@ class TempoMethod:
         terms = _zone_terms(challenge, zone_id)
         if terms is None:
             return None
-        for earlier_key, (_task, state) in self._zone_withdrawals.items():
-            # ``wanted`` is true while any caller still awaits the withdrawal.
-            if state.terms == terms and not state.wanted():
+        for earlier_key, (task, state) in list(self._zone_withdrawals.items()):
+            if state.terms != terms:
+                continue
+            earlier = state.challenge
+            # No server accepts its credential any more, so it can't pay this Challenge.
+            if earlier is None or _zone_past_redemption(earlier.expires):
+                del self._zone_withdrawals[earlier_key]
+                continue
+            if state.redeemed_late:
+                raise ZoneSettlementPendingError(
+                    challenge_id=earlier.id,
+                    sender_tag=state.sender_tag or _zone_sender_tag(task),
+                    zone_id=zone_id,
+                    challenge=earlier,
+                )
+            # ``wanted`` is true while any caller still awaits the withdrawal: it is
+            # another payment in flight, not one this Challenge retries.
+            if not state.wanted():
                 return earlier_key
         return None
 
@@ -1608,12 +1638,18 @@ class TempoMethod:
                 challenge=challenge,
             )
         # Forget the withdrawal once a caller takes its credential: it pays once, so a
-        # later Challenge with the same terms is a new payment. That holds after the
-        # Challenge expired too, whether a server's grace accepts the credential or not;
-        # keeping it would block those terms for good (mppx). With every caller gone, it
-        # stays, so a retry finds it settled instead of withdrawing again.
+        # later Challenge with the same terms is a new payment. One taken after its
+        # Challenge expired is accepted only by a server that grants a grace, so it stays
+        # for a retry of its own Challenge, which would otherwise pay again on Tempo, and
+        # blocks other Challenges with its terms until its redemption window ends (mppx).
+        # With every caller gone, it stays too, so a retry finds it settled instead of
+        # withdrawing again.
         if entry is not None and entry[0] is task and wanted():
-            del self._zone_withdrawals[key]
+            if _zone_challenge_expired(challenge.expires):
+                state.redeemed_late = True
+                state.sender_tag = sender_tag
+            else:
+                del self._zone_withdrawals[key]
         return Credential(
             challenge=challenge.to_echo(),
             payload={
@@ -1859,7 +1895,8 @@ def _zone_terms(challenge: Challenge, zone_id: int) -> str | None:
 
     The JCS of the Zone ID, realm, method, intent, request, digest and route
     metadata: the opaque metadata without the issuance nonces (``_mppx_nonce``,
-    ``_mpp_nonce``), keeping ``_mppx_scope``, so another route never matches. The ID
+    ``_mpp_nonce``) and the expiry grace marker (``_mppx_expiry_grace``), keeping
+    ``_mppx_scope``, so another route never matches. The ID
     and expiry each issuance changes are left out, so a retry's newly issued
     Challenge for the same payment matches.
     """
@@ -1869,7 +1906,7 @@ def _zone_terms(challenge: Challenge, zone_id: int) -> str | None:
     meta = {
         key: value
         for key, value in (opaque or {}).items()
-        if key not in ("_mppx_nonce", "_mpp_nonce")
+        if key not in ("_mppx_nonce", "_mpp_nonce", "_mppx_expiry_grace")
     }
     terms: dict[str, Any] = {
         "zoneId": zone_id,
@@ -2492,11 +2529,15 @@ def _request_origin(request: Any) -> str | None:
     """The origin of the HTTP request that received a challenge, or ``None`` when unknown.
 
     Over HTTP ``request`` is an ``httpx.Request``; other transports (MCP) pass none.
+    Only an HTTP(S) URL has an origin that tells two servers apart: every other scheme
+    has the opaque origin ``"null"``, so it never counts as known (mppx).
     """
     url = getattr(request, "url", None)
     scheme = getattr(url, "scheme", None)
     host = getattr(url, "host", None)
-    if not isinstance(scheme, str) or not isinstance(host, str) or not scheme or not host:
+    if not isinstance(scheme, str) or not isinstance(host, str) or not host:
+        return None
+    if scheme.lower() not in ("http", "https"):
         return None
     port = getattr(url, "port", None)
     netloc = f"[{host}]" if ":" in host else host
