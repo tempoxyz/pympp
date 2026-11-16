@@ -544,6 +544,45 @@ class TestMcpClientPaidTool:
                 else:
                     sys.modules[mod_name] = orig
 
+    @pytest.mark.parametrize("header", ["Authorization", "X-Payment"])
+    async def test_only_unsupported_credential_header_challenges_are_not_paid(
+        self, header: str
+    ) -> None:
+        """Dropping every challenge for its header is "no supported challenge", not malformed."""
+        session = AsyncMock()
+
+        import sys
+        from unittest.mock import MagicMock
+
+        mcp_mock = MagicMock()
+        mcp_mock.shared.exceptions.McpError = FakeMcpError
+        original_modules = {}
+        for mod_name in ["mcp", "mcp.shared", "mcp.shared.exceptions"]:
+            original_modules[mod_name] = sys.modules.get(mod_name)
+        sys.modules["mcp"] = mcp_mock
+        sys.modules["mcp.shared"] = mcp_mock.shared
+        sys.modules["mcp.shared.exceptions"] = mcp_mock.shared.exceptions
+
+        try:
+            payment_error = FakeMcpError(
+                -32042,
+                data={"challenges": [{**_make_challenge_dict(), "header": header}]},
+            )
+            session.call_tool = AsyncMock(side_effect=payment_error)
+            create_credential = AsyncMock()
+            client = McpClient(session, methods=[fake_method(create_credential=create_credential)])
+
+            with pytest.raises(NoMethodFoundError, match="unsupported credential header"):
+                await client.call_tool("tool", {})
+            create_credential.assert_not_called()
+            assert session.call_tool.await_count == 1
+        finally:
+            for mod_name, orig in original_modules.items():
+                if orig is None:
+                    sys.modules.pop(mod_name, None)
+                else:
+                    sys.modules[mod_name] = orig
+
     @pytest.mark.asyncio
     async def test_unconvertible_challenge_does_not_block_a_payable_one(self) -> None:
         """A challenge whose request can't be canonicalized is unpayable on its own."""

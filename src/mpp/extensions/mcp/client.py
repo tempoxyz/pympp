@@ -97,12 +97,7 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
         logger.warning("Ignoring malformed MCP challenge: invalid request")
         return None
 
-    # A challenge may only select Payment-Authorization; any other header makes it
-    # unrecognized, so it gets no credential (https://paymentauth.org).
-    if "header" in raw_challenge and not (
-        isinstance(raw_challenge["header"], str)
-        and is_payment_authorization_header(raw_challenge["header"])
-    ):
+    if _has_unsupported_credential_header(raw_challenge):
         logger.warning("Ignoring MCP challenge: unsupported credential header")
         return None
 
@@ -111,6 +106,28 @@ def _parse_challenge(raw_challenge: Any) -> MCPChallenge | None:
     except (KeyError, TypeError, ValueError):
         logger.warning("Ignoring malformed MCP challenge payload", exc_info=True)
         return None
+
+
+def _has_unsupported_credential_header(raw_challenge: object) -> bool:
+    """Whether a raw challenge selects a credential header other than Payment-Authorization.
+
+    Such a challenge is unrecognized and gets no credential (https://paymentauth.org).
+    """
+    if not is_dict(raw_challenge) or "header" not in raw_challenge:
+        return False
+    header = raw_challenge["header"]
+    return not (isinstance(header, str) and is_payment_authorization_header(header))
+
+
+def _only_unsupported_credential_headers(error: Exception) -> bool:
+    """Whether every offered challenge was dropped for an unsupported credential header."""
+    data = _error_data(error)
+    raw_challenges = data.get("challenges") if is_dict(data) else None
+    return (
+        is_list(raw_challenges)
+        and len(raw_challenges) > 0
+        and all(_has_unsupported_credential_header(raw) for raw in raw_challenges)
+    )
 
 
 def _extract_challenges(error: Exception) -> list[MCPChallenge]:
@@ -232,6 +249,16 @@ class McpClient:
                 raise
 
             challenges = _extract_challenges(e)
+            if not challenges and _only_unsupported_credential_headers(e):
+                # Well-formed but unsupported challenges: nothing this client may pay.
+                raise NoMethodFoundError(
+                    (),
+                    self._runtime.methods,
+                    message=(
+                        "No supported payment challenge: every challenge selects an "
+                        "unsupported credential header"
+                    ),
+                ) from e
             if not challenges:
                 raise ValueError("Server returned malformed payment challenges") from e
 
