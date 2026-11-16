@@ -853,3 +853,20 @@ class TestReviewFixes:
         }
         response = await route(with_proof(siwx.encode(payload)))
         assert "invalid_siwx_chain_id" in read_challenge(response)["error"]
+
+    async def test_never_signs_after_a_cross_origin_redirect(self) -> None:
+        server = ServerTransport(Route())
+
+        class Redirecting(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                if request.url.host == "start.example":
+                    return httpx.Response(302, headers={"location": URL})
+                return await server.handle_async_request(request)
+
+        async with httpx.AsyncClient(
+            transport=siwx.SiwxTransport(account=ACCOUNT, inner=Redirecting()),
+            follow_redirects=True,
+        ) as client:
+            response = await client.get("https://start.example/go")
+        assert response.status_code == 402
+        assert [siwx.HEADER in request.headers for request in server.requests] == [False]

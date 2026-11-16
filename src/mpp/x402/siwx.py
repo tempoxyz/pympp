@@ -692,6 +692,9 @@ async def verify(
 # ---------------------------------------------------------------------------
 
 
+_SIWX_ORIGIN_EXTENSION = "mpp.siwx.original_origin"
+
+
 class SiwxTransport(httpx.AsyncBaseTransport):
     """httpx transport that answers a 402 offering SIWX once, before any payment.
 
@@ -703,7 +706,7 @@ class SiwxTransport(httpx.AsyncBaseTransport):
     :class:`~mpp.client.PaymentTransport` around it pays as usual.
 
     It signs only when the challenge's ``domain`` and ``uri`` origin match the URL that
-    returned the 402.
+    returned the 402, and never after a redirect to another origin.
 
     Example::
 
@@ -735,6 +738,7 @@ class SiwxTransport(httpx.AsyncBaseTransport):
             isinstance(request.stream, httpx.AsyncByteStream)
             and not isinstance(request.stream, httpx.SyncByteStream)
         )
+        request.extensions.setdefault(_SIWX_ORIGIN_EXTENSION, _origin_of(str(request.url)))
         # Keep a replayable body so it can be sent again with the proof.
         body = await request.aread() if replayable else b""
         response = await self._inner.handle_async_request(request)
@@ -757,6 +761,11 @@ class SiwxTransport(httpx.AsyncBaseTransport):
             None,
         )
         if chain is None:
+            return response
+
+        # As PaymentTransport: httpx carries a request's extensions across redirects, so
+        # a hop to another origin than the first request's is never signed for.
+        if request.extensions.get(_SIWX_ORIGIN_EXTENSION) != _origin_of(str(request.url)):
             return response
 
         # A challenge naming another site must never get this wallet's signature.
