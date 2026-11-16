@@ -898,6 +898,16 @@ class TestReviewFixes:
         assert "invalid_siwx_nonce" in read_challenge(replay.challenge)["error"]
         assert grants == [ACCOUNT.address]
 
+    async def test_an_oversized_nonce_is_rejected_before_it_is_stored(self) -> None:
+        store = MemoryStore()
+        extension = siwx.create_extension(chain_id=84532, origin=ORIGIN, url=URL)
+        extension["info"]["nonce"] = "a" * 129
+        payload = siwx.decode(sign(extension))
+        with pytest.raises(siwx.InvalidProofError) as error:
+            await siwx.verify(chain_id=84532, origin=ORIGIN, store=store, payload=payload)
+        assert error.value.code == "invalid_siwx_nonce"
+        assert await store.get("mppx:x402:siwx:" + "a" * 129) is None
+
     async def test_an_oversized_chain_id_is_a_proof_error(self) -> None:
         route = Route()
         payload = {

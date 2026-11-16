@@ -649,8 +649,10 @@ async def verify(
     proof_chain_id = _chain_id_of(payload["chainId"])
     if proof_chain_id != chain_id:
         raise InvalidProofError("invalid_siwx_unsupported_chain")
-    # EIP-4361 nonces are at least 8 alphanumeric characters.
-    if not _NONCE_RE.fullmatch(payload["nonce"]):
+    # EIP-4361 nonces are at least 8 alphanumeric characters. The nonce becomes a store key,
+    # so it is also capped: servers issue 32 characters.
+    nonce = payload["nonce"]
+    if len(nonce) > _MAX_NONCE_LENGTH or not _NONCE_RE.fullmatch(nonce):
         raise InvalidProofError("invalid_siwx_nonce")
 
     if not _ADDRESS_RE.fullmatch(payload["address"]):
@@ -683,6 +685,10 @@ async def verify(
     if claim_nonce:
         await claim(store=store, payload=payload)
     return VerifiedProof(address=address, chain_id=proof_chain_id)
+
+
+# The longest nonce :func:`verify` accepts, which bounds each claim's store key.
+_MAX_NONCE_LENGTH = 128
 
 
 def _nonce_key(payload: Payload) -> str:
