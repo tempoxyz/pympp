@@ -242,7 +242,9 @@ class McpClient:
             # rather than paid again under a new one (mppx).
             core_challenge = challenge.to_core()
             core_credential = await resume_pending_settlement(
-                lambda: self._runtime.create_credential(core_challenge, method),
+                lambda check_expiry: self._runtime.create_credential(
+                    core_challenge, method, check_expiry=check_expiry
+                ),
                 _MAX_PAYMENT_ATTEMPTS,
             )
             mcp_credential = MCPCredential.from_core(core_credential, challenge)

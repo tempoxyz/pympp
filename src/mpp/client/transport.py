@@ -325,7 +325,7 @@ class PaymentTransport(httpx.AsyncBaseTransport):
         self._paid_retry_timeout = paid_retry_timeout
         self._order_challenges = order_challenges
         self._credential_keywords = _accepted_keywords(
-            self._runtime.create_credential, ("request", "fetch", "attempt")
+            self._runtime.create_credential, ("request", "fetch", "attempt", "check_expiry")
         )
 
     def on(self, name: str, handler: EventHandler) -> Unsubscribe:
@@ -557,13 +557,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             for key, value in arguments.items()
                             if key in self._credential_keywords
                         }
+                        # Runtimes overriding ``create_credential`` without ``check_expiry``
+                        # check expiry on every attempt, as before.
+                        expiry_keyword = "check_expiry" in self._credential_keywords
                         event_payload: dict[str, Any] = {
                             "challenges": challenges,
                             "request": request,
                             "response": response,
                         }
-                        create = cast(
-                            "Callable[[], Awaitable[Credential]]",
+                        base = cast(
+                            "Callable[..., Awaitable[Credential]]",
                             functools.partial(
                                 self._runtime.create_credential,
                                 challenge,
@@ -572,6 +575,16 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                                 **keywords,
                             ),
                         )
+
+                        def create(
+                            check_expiry: bool,
+                            base: Callable[..., Awaitable[Credential]] = base,
+                            expiry_keyword: bool = expiry_keyword,
+                        ) -> Awaitable[Credential]:
+                            if expiry_keyword:
+                                return base(check_expiry=check_expiry)
+                            return base()
+
                         try:
                             # A Zone withdrawal still settling is resumed for this same
                             # Challenge rather than paid again under a new one (mppx).

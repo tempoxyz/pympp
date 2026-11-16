@@ -427,17 +427,15 @@ class TempoMethod:
     # client then pays on the chain each challenge names, as mppx does. A
     # directly constructed method stays pinned to its own chain.
     _follow_challenge_chain: bool = field(default=False, init=False, repr=False)
-    _signing: dict[tuple[str, str, str | None], tuple[asyncio.Task[Credential], list[str]]] = field(
-        default_factory=dict[
-            tuple[str, str, str | None], tuple[asyncio.Task[Credential], list[str]]
-        ],
+    _signing: dict[tuple[str, str], tuple[asyncio.Task[Credential], list[str]]] = field(
+        default_factory=dict[tuple[str, str], tuple[asyncio.Task[Credential], list[str]]],
         init=False,
         repr=False,
     )
     # Callers still awaiting each in-flight signing: a push payment is not
     # broadcast once every caller has been cancelled.
-    _signing_waiters: dict[tuple[str, str, str | None], int] = field(
-        default_factory=dict[tuple[str, str, str | None], int], init=False, repr=False
+    _signing_waiters: dict[tuple[str, str], int] = field(
+        default_factory=dict[tuple[str, str], int], init=False, repr=False
     )
 
     @property
@@ -800,8 +798,9 @@ class TempoMethod:
         self._check_charge_policy(challenge.request, await self._resolve_expected_chain_id())
 
         # Share an in-flight signing so concurrent calls for one challenge cannot
-        # yield two independently settleable transactions.
-        key = ((self.root_account or self.account.address).lower(), challenge.id, origin)
+        # yield two independently settleable transactions. The key leaves out
+        # ``origin``: calls for one Challenge from two origins must not each pay it.
+        key = ((self.root_account or self.account.address).lower(), challenge.id)
         attempt = self._signing.get(key)
         if attempt is None:
             submitted: list[str] = []
@@ -899,6 +898,11 @@ class TempoMethod:
                     wanted=wanted,
                     on_submission=on_submission,
                 )
+
+        # Only a Zone withdrawal already started may still be redeemed after expiry
+        # (resumed above); never start a new payment for an expired challenge.
+        if _zone_challenge_expired(challenge.expires):
+            raise PaymentExpiredError(challenge.expires or "")
 
         mode = self._resolve_mode(method_details)
         use_fee_payer = (
@@ -1432,10 +1436,12 @@ class TempoMethod:
         """Return the key of the withdrawal that pays a challenge, if one was started.
 
         That is the withdrawal for this very Challenge, else one for a Challenge with the
-        same terms (:func:`_zone_terms`): retrying a request gets a newly issued
-        Challenge, and paying that one would withdraw a second time for one payment
-        intent. Entries are not dropped when their Challenge expires, so a late retry
-        fails closed instead of paying again.
+        same terms (:func:`_zone_terms`) that nobody waits on now: retrying a request gets
+        a newly issued Challenge, and paying that one would withdraw a second time for one
+        payment intent. One that another caller still waits on belongs to that caller's
+        request, so a concurrent request with the same terms pays its own (mppx). An entry
+        stays until a caller takes its credential, so a late retry fails closed instead of
+        paying again.
         """
         key = _zone_withdrawal_key(challenge)
         if key in self._zone_withdrawals:
@@ -1444,7 +1450,8 @@ class TempoMethod:
         if terms is None:
             return None
         for earlier_key, (_task, state) in self._zone_withdrawals.items():
-            if state.terms == terms:
+            # ``wanted`` is true while any caller still awaits the withdrawal.
+            if state.terms == terms and not state.wanted():
                 return earlier_key
         return None
 
@@ -1600,16 +1607,12 @@ class TempoMethod:
                 zone_id=zone_id,
                 challenge=challenge,
             )
-        # Forget the withdrawal only when a caller takes the credential before the
-        # Challenge expires. One made later (a server may accept it within its grace
-        # period) keeps it, so later Challenges for these terms fail closed instead of
-        # paying again; with every caller gone, a retry finds it settled.
-        if (
-            entry is not None
-            and entry[0] is task
-            and wanted()
-            and not _zone_challenge_expired(challenge.expires)
-        ):
+        # Forget the withdrawal once a caller takes its credential: it pays once, so a
+        # later Challenge with the same terms is a new payment. That holds after the
+        # Challenge expired too, whether a server's grace accepts the credential or not;
+        # keeping it would block those terms for good (mppx). With every caller gone, it
+        # stays, so a retry finds it settled instead of withdrawing again.
+        if entry is not None and entry[0] is task and wanted():
             del self._zone_withdrawals[key]
         return Credential(
             challenge=challenge.to_echo(),

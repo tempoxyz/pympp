@@ -1490,19 +1490,20 @@ class TestClientZoneCancelledAfterSettlement:
             await asyncio.sleep(0)
         release.set()
         if case == "live_waiter":
-            # The same origin resumes the withdrawal, waiter or not (mppx).
-            assert (await other).challenge.id == first.id
+            # A withdrawal another caller still waits on belongs to that request: a
+            # concurrent request with the same terms pays its own (mppx).
+            assert (await other).challenge.id == second.id
         else:
             # Another or an unknown origin can't redeem it: fail closed (mppx).
             error = await error_of(other)
             assert isinstance(error, ZoneSettlementPendingError)
             assert error.challenge_id == first.id
-        assert calls.count("eth_sendRawTransactionSync") == 1
+        assert calls.count("eth_sendRawTransactionSync") == (2 if case == "live_waiter" else 1)
         if waiting is not None:
             assert (await waiting).challenge.id == first.id
 
     @pytest.mark.asyncio
-    async def test_a_new_challenge_shares_a_timed_out_withdrawal_its_retry_waits_on(
+    async def test_a_new_challenge_does_not_share_a_withdrawal_its_retry_waits_on(
         self,
     ) -> None:
         calls: list[str] = []
@@ -1555,8 +1556,10 @@ class TestClientZoneCancelledAfterSettlement:
             await asyncio.sleep(0)
         release.set()
         assert (await waiting).challenge.id == first.id
-        assert (await other).challenge.id == first.id
-        assert calls.count("eth_sendRawTransactionSync") == 1
+        # The first Challenge's retry still waits on its withdrawal, so this concurrent
+        # request pays its own instead of presenting one credential twice (mppx).
+        assert (await other).challenge.id == second.id
+        assert calls.count("eth_sendRawTransactionSync") == 2
 
     @pytest.mark.asyncio
     async def test_a_new_challenge_for_other_terms_withdraws_again(self) -> None:
@@ -2101,12 +2104,13 @@ class TestClientZoneStalledWithdrawals:
         )
         settled = True
         monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
-        # A server may still accept it within its grace period, so it is returned, but
-        # the withdrawal is kept: later Challenges for these terms fail closed.
+        # A server may still accept it within its grace period, so it is returned. It
+        # pays once either way, so it is forgotten: keeping it would block these terms
+        # for good (mppx).
         credential = await method.create_credential(issued)
         assert credential.challenge.id == issued.id
         assert calls.count("eth_sendRawTransactionSync") == 1
-        assert len(method._zone_withdrawals) == 1  # pyright: ignore[reportPrivateUsage]
+        assert not method._zone_withdrawals  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.asyncio
     async def test_a_withdrawal_cancelled_after_it_was_sent_is_not_sent_again(self) -> None:

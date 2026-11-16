@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import suppress
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,7 +14,7 @@ import pytest
 from mpp import Challenge
 from mpp._pending_settlement import resume
 from mpp.client.transport import PaymentTransport
-from mpp.errors import ZoneSettlementPendingError
+from mpp.errors import PaymentExpiredError, ZoneSettlementPendingError
 from mpp.extensions.mcp.client import McpClient
 from mpp.methods import Method
 from mpp.runtime import ClientMethod, CredentialParams
@@ -32,6 +33,8 @@ class TestResume:
         create = AsyncMock(side_effect=[pending(), pending(), "credential"])
         assert await resume(create, 3) == "credential"
         assert create.await_count == 3
+        # Only the first attempt checks expiry: later ones resume a payment already made.
+        assert [call.args for call in create.await_args_list] == [(True,), (False,), (False,)]
 
     @pytest.mark.asyncio
     async def test_raises_the_pending_error_after_the_last_attempt(self) -> None:
@@ -52,7 +55,7 @@ class TestResume:
         attempts = 0
         started = asyncio.Event()
 
-        async def create() -> str:
+        async def create(check_expiry: bool) -> str:
             nonlocal attempts
             attempts += 1
             if attempts == 1:
@@ -126,6 +129,77 @@ class TestTransportRetriesTheSameChallenge:
             await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
         assert create.await_count == 2
         assert len(inner.requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_resumes_an_expired_challenge_after_the_first_attempt(self) -> None:
+        issued = Challenge(
+            id="zone-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires="2000-01-01T00:00:00Z",
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402, headers={"www-authenticate": issued.to_www_authenticate("example.com")}
+                ),
+                httpx.Response(200),
+            ]
+        )
+        runtime_checks: list[bool] = []
+        method = ClientMethod(
+            method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+            create_credential=AsyncMock(),
+        )
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        async def create_credential(*args: Any, check_expiry: bool = True, **kwargs: Any) -> Any:
+            runtime_checks.append(check_expiry)
+            if len(runtime_checks) == 1:
+                raise pending()
+            return make_credential({"hash": "0xabc"}, challenge_id=issued.id)
+
+        transport._runtime.create_credential = create_credential  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+        transport._credential_keywords = frozenset({"check_expiry"})  # pyright: ignore[reportPrivateUsage]
+
+        response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+        # The retry resumes the withdrawal the method started: the method, not the
+        # runtime's expiry check, decides whether it can still be redeemed.
+        assert response.status_code == 200
+        assert runtime_checks == [True, False]
+
+    @pytest.mark.asyncio
+    async def test_an_expired_challenge_is_never_paid(self) -> None:
+        issued = Challenge(
+            id="zone-id",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1000"},
+            expires="2000-01-01T00:00:00Z",
+        )
+        inner = MockTransport(
+            [
+                httpx.Response(
+                    402, headers={"www-authenticate": issued.to_www_authenticate("example.com")}
+                )
+            ]
+        )
+        create = AsyncMock(side_effect=pending())
+        method = ClientMethod(
+            method=Method(name="tempo", intent="charge", request_model=dict, payload_model=dict),
+            create_credential=create,
+        )
+        transport = PaymentTransport(methods=[method], inner=inner)
+
+        # An expired Challenge is never paid: it is refused before the method runs.
+        with suppress(PaymentExpiredError):
+            response = await transport.handle_async_request(
+                httpx.Request("GET", "https://example.com")
+            )
+            assert response.status_code == 402
+        assert create.await_count == 0
 
 
 class TestMcpClientRetriesTheSameChallenge:

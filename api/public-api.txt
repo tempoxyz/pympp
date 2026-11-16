@@ -1259,7 +1259,7 @@ module mpp.runtime
     class PaymentRuntime
         def __init__(self, methods: Sequence[ClientMethod | Sequence[ClientMethod]] = (), *, events: EventDispatcher | None = None) -> None
         def challenge_candidates(self, challenges: Sequence[Challenge]) -> list[ChallengeCandidate]
-        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None) -> Credential
+        async def create_credential(self, challenge: Challenge, method: ClientMethod, *, event_payload: dict[str, Any] | None = None, request: Any = None, fetch: Callable[[Any], Awaitable[Any]] | None = None, attempt: PaymentAttempt | None = None, check_expiry: bool = True) -> Credential
         def match_challenge(self, challenges: Sequence[Challenge]) -> tuple[Challenge, ClientMethod]
         async def order_challenges(self, challenges: Sequence[Challenge], order: OrderChallenges | None = None) -> list[ChallengeCandidate]
 
