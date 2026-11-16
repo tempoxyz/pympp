@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from mpp.methods.evm.assets import EvmAsset
     from mpp.store import Store
     from mpp.x402._server import RouteBinding
+    from mpp.x402.siwx import SiwxOptions
 
 __all__ = ["charge"]
 
@@ -53,6 +54,7 @@ def charge(
     route_binding: RouteBinding = "required",
     max_validity_seconds: int = 3600,
     store: Store | None = None,
+    siwx: SiwxOptions | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
 ) -> ServerMethod:
@@ -84,6 +86,11 @@ def charge(
             by every worker and replica. Without one (or ``Mpp(store=...)``), claims
             are kept in this process only, which raises in production or on a
             multi-instance platform; pass ``MemoryStore()`` to accept that there.
+        siwx: Optional x402 ``sign-in-with-x`` (SIWX) options
+            (:class:`~mpp.x402.siwx.SiwxOptions`). The x402 402 then offers the
+            ``sign-in-with-x`` extension, and a request with a valid ``SIGN-IN-WITH-X``
+            proof from a wallet ``grant`` approves succeeds without payment, with a
+            ``did:pkh:eip155:<chain>:<address>`` receipt reference.
         can_offer: Optional callback deciding whether to offer a request.
         on_payment_success: Optional callback for this method's payments.
     """
@@ -103,6 +110,7 @@ def charge(
         route_binding=route_binding,
         store=store,
         max_validity_seconds=max_validity_seconds,
+        siwx=siwx,
     )
 
     def use_store(store: Store) -> None:

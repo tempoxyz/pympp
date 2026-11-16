@@ -679,7 +679,7 @@ module mpp.methods.evm.intents
         model_config = {'populate_by_name': True, 'extra': 'forbid'}
     charge: mpp.methods.Method
     class ChargeIntent
-        def __init__(self, *, name: str, version: str, facilitator: Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', store: Store | None = None, max_validity_seconds: int = 3600) -> None
+        def __init__(self, *, name: str, version: str, facilitator: Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', store: Store | None = None, max_validity_seconds: int = 3600, siwx: SiwxOptions | None = None) -> None
         async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
         name = 'charge'
         async def validate(self, credential: Credential, request: dict[str, Any]) -> Validation
@@ -687,7 +687,7 @@ module mpp.methods.evm.intents
         def x402_requirements(self, request: dict[str, Any]) -> PaymentRequirements
 
 module mpp.methods.evm.server
-    def charge(*, currency: EvmAsset | str, recipient: str, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
+    def charge(*, currency: EvmAsset | str, recipient: str, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, siwx: SiwxOptions | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
 
 module mpp.methods.stripe
     StripeMethod -> mpp.methods.stripe.client.StripeMethod
@@ -1783,3 +1783,69 @@ module mpp.x402.facilitator
 
 module mpp.x402.fastapi
     def payment_middleware(routes: RoutesConfig, server: x402ResourceServer, *, secret_key: str, realm: str | None = None, paywall_config: PaywallConfig | None = None, paywall_provider: PaywallProvider | None = None, store: Store | None = None) -> Middleware
+
+module mpp.x402.siwx
+    EXTENSION_KEY = 'sign-in-with-x'
+    HEADER = 'SIGN-IN-WITH-X'
+    PAYLOAD_JSON_SCHEMA: dict
+    TTL_SECONDS = 300
+    class Chain(TypedDict)
+        chainId: str
+        type: str
+        signatureScheme: NotRequired[str]
+    ErrorCode = typing.Literal['invalid_siwx_payload', 'invalid_siwx_domain_mismatch', 'invalid_siwx_uri_mismatch', 'invalid_siwx_issued_at', 'invalid_siwx_issued_at_too_old', 'invalid_siwx_issued_at_in_future', 'invalid_siwx_expiration_time', 'invalid_siwx_expired', 'invalid_siwx_not_before', 'invalid_siwx_not_yet_valid', 'invalid_siwx_nonce', 'invalid_siwx_signature', 'invalid_siwx_chain_id', 'invalid_siwx_unsupported_chain', 'invalid_siwx_verifier_error']
+    class Extension(TypedDict)
+        info: Info
+        schema: dict[str, Any]
+        supportedChains: list[Chain]
+    class Info(TypedDict)
+        domain: str
+        issuedAt: str
+        nonce: str
+        uri: str
+        version: str
+        expirationTime: NotRequired[str]
+        notBefore: NotRequired[str]
+        requestId: NotRequired[str]
+        resources: NotRequired[list[str]]
+        statement: NotRequired[str]
+    class InvalidProofError(Exception)
+        code: ErrorCode
+        def __init__(self, code: ErrorCode) -> None
+    class Payload(mpp.x402.siwx.Info)
+        domain: str
+        issuedAt: str
+        nonce: str
+        uri: str
+        version: str
+        expirationTime: NotRequired[str]
+        notBefore: NotRequired[str]
+        requestId: NotRequired[str]
+        resources: NotRequired[list[str]]
+        statement: NotRequired[str]
+        address: str
+        chainId: str
+        signature: str
+        type: str
+        signatureScheme: NotRequired[str]
+    class SiwxOptions
+        @dataclass(frozen=True, slots=True)
+        field kw_only origin: str
+        field kw_only store: Store
+        field kw_only grant: GrantFn
+        field kw_only verifier: SignatureVerifier | None = None
+        field kw_only body: bool = False
+    class SiwxTransport(httpx.AsyncBaseTransport)
+        def __init__(self, *, account: Any, inner: httpx.AsyncBaseTransport | None = None) -> None
+        async def aclose(self) -> None
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response
+    class VerifiedProof
+        @dataclass(frozen=True, slots=True)
+        field address: str
+        field chain_id: int
+    def create_extension(*, chain_id: int, origin: str, url: str) -> Extension
+    def decode(value: str) -> Payload
+    def encode(payload: Mapping[str, Any]) -> str
+    def from_payment_required(payment_required: Mapping[str, Any]) -> Extension | None
+    def to_message(payload: Mapping[str, Any]) -> str
+    async def verify(*, chain_id: int, origin: str, store: Store, payload: Payload, verifier: SignatureVerifier | None = None, claim_nonce: bool = True) -> VerifiedProof
