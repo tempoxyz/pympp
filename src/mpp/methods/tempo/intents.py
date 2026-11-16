@@ -13,7 +13,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
 from eth_abi.abi import decode
@@ -419,32 +419,19 @@ def get_transfers(
     return transfers
 
 
-def _reject_zone_settlement(receipt_data: dict[str, Any]) -> None:
-    """Refuse a hash credential for a Zone portal's settlement transaction.
+def _is_zone_settlement_transfer(from_address: str) -> bool:
+    """Whether a transfer is a Zone portal paying out a Zone withdrawal.
 
-    A settled Zone withdrawal is claimed by its portal and sender tag (a ``zone``
-    credential). Accepting the same settlement as a ``hash`` credential would let
-    one withdrawal pay twice, since the two credentials reserve different replay
-    keys. One ``processWithdrawals`` transaction settles many withdrawals, so the
-    zone path cannot reserve the hash; the hash path refuses it instead.
+    A settled withdrawal is claimed by its portal and sender tag (a ``zone``
+    credential). Matching the same transfer for a ``hash`` or ``transaction``
+    credential would let one withdrawal pay twice, since the two credentials reserve
+    different replay keys, so transfer matching skips it, whatever the credential's
+    source or ``validate_sender`` says. One portal transaction settles many
+    withdrawals, so the zone path can't reserve the transaction hash instead (mppx).
     """
-    from mpp.methods.tempo._zone import WITHDRAWAL_PROCESSED_TOPIC
+    from mpp.methods.tempo._zone import is_portal_address
 
-    logs = receipt_data.get("logs")
-    if not is_list(logs):
-        return
-    for log in logs:
-        topics = log.get("topics") if is_dict(log) else None
-        if (
-            is_list(topics)
-            and topics
-            and isinstance(topics[0], str)
-            and topics[0].lower() == WITHDRAWAL_PROCESSED_TOPIC
-        ):
-            raise VerificationError(
-                "Payment verification failed: "
-                "a Zone settlement must be paid with a zone credential."
-            )
+    return is_portal_address(from_address)
 
 
 def _match_single_transfer_calldata(
@@ -969,6 +956,7 @@ class ChargeIntent:
         fee_token: str | None = None,
         allowed_fee_tokens: Sequence[str] | None = None,
         sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None,
+        zone_credential_grace: float = 0.0,
     ) -> None:
         """Initialize the charge intent.
 
@@ -1007,7 +995,29 @@ class ChargeIntent:
             sponsor_budget: Caps the fees ``fee_payer`` has in flight (default:
                 :class:`~mpp.methods.tempo.sponsor_budget.SponsorBudget` on the
                 replay store). Pass ``False`` only when it is enforced elsewhere.
+            zone_credential_grace: Seconds after its challenge expires that a ``zone``
+                credential is still accepted (default: 0, at most 300), when its
+                withdrawal settled on Tempo before the expiry: a client that waited for
+                a slow settlement can still redeem it. No other credential gets a grace.
+                Equivalent to mppx's ``zoneCredentialGraceMs``.
+
+        Raises:
+            ValueError: If ``zone_credential_grace`` is not a finite number of seconds
+                from 0 to 300.
         """
+        from mpp.methods.tempo._zone import REDEMPTION_GRACE
+
+        if (
+            isinstance(zone_credential_grace, bool)
+            or not isinstance(zone_credential_grace, (int, float))
+            or not math.isfinite(zone_credential_grace)
+            or not 0 <= zone_credential_grace <= REDEMPTION_GRACE
+        ):
+            raise ValueError(
+                "zone_credential_grace must be a finite number of seconds "
+                f"from 0 to {REDEMPTION_GRACE:g}."
+            )
+        self._zone_credential_grace = float(zone_credential_grace)
         if sponsor_budget is not None and sponsor_budget is not False:
             if not isinstance(sponsor_budget, _sponsor_budget.SponsorBudget):
                 raise TypeError("sponsor_budget must be a SponsorBudget, False or None")
@@ -1033,6 +1043,25 @@ class ChargeIntent:
             None if sponsor_budget is False else sponsor_budget or _sponsor_budget.SponsorBudget()
         )
         self._sponsor_budget_shared = True
+
+    def _credential_grace(self, credential: Credential) -> float:
+        """Seconds past its challenge's expiry this intent accepts ``credential``.
+
+        Only a ``zone`` credential gets ``zone_credential_grace``: its settlement block
+        proves the payment completed before the expiry (:meth:`_validate_zone`).
+        """
+        payload = credential.payload
+        if is_dict(payload) and payload.get("type") == "zone":
+            return self._zone_credential_grace
+        return 0.0
+
+    def _challenge_expired(self, credential: Credential, expires: str) -> bool:
+        """Whether a challenge expired, past any grace its credential gets."""
+        grace = self._credential_grace(credential)
+        if not grace:
+            return _challenge_expired(expires)
+        expires_at = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+        return datetime.now(UTC) >= expires_at + timedelta(seconds=grace)
 
     async def __aenter__(self) -> ChargeIntent:
         """Enter async context, creating HTTP client if needed."""
@@ -1091,7 +1120,7 @@ class ChargeIntent:
         challenge_expires = credential.challenge.expires
         if not challenge_expires:
             raise VerificationError("Request has expired (no expires)")
-        if _challenge_expired(challenge_expires):
+        if self._challenge_expired(credential, challenge_expires):
             raise VerificationError("Request has expired")
 
         payload_data = credential.payload
@@ -1213,6 +1242,7 @@ class ChargeIntent:
                 req,
                 challenge_id=credential.challenge.id,
                 realm=credential.challenge.realm,
+                expires=credential.challenge.expires,
             )
             return Validation(
                 credential=credential,
@@ -1314,6 +1344,7 @@ class ChargeIntent:
                     req,
                     challenge_id=credential.challenge.id,
                     realm=credential.challenge.realm,
+                    expires=credential.challenge.expires,
                 )
             except (Exception, asyncio.CancelledError):
                 if store_key is not None and self._store is not None:
@@ -1442,6 +1473,7 @@ class ChargeIntent:
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        expires: str | None = None,
     ) -> str:
         """Verify a Zone withdrawal that settled on Tempo and return the settlement hash.
 
@@ -1449,6 +1481,13 @@ class ChargeIntent:
         settled, and the withdrawal in the ``processWithdrawals`` calldata must pay
         the request's amount of its currency to its recipient, with no callback,
         under a memo bound to this challenge (the event carries no memo).
+
+        A credential presented after its challenge's ``expires`` (within
+        ``zone_credential_grace``) must have settled in a block from before it.
+
+        Raises:
+            PaymentExpiredError: If the challenge expired and the withdrawal settled
+                at or after its expiry.
         """
         from mpp.methods.tempo import _zone
 
@@ -1509,8 +1548,28 @@ class ChargeIntent:
             challenge_id=challenge_id,
             realm=realm,
         )
+        # Presented after expiry, within the grace: only a settlement from before the
+        # expiry pays this challenge.
+        if expires is not None and _challenge_expired(expires):
+            await self._assert_settled_before(client, receipt, expires)
         tx_hash = receipt.get("transactionHash")
         return tx_hash if isinstance(tx_hash, str) else payload.hash
+
+    async def _assert_settled_before(
+        self, client: httpx.AsyncClient, receipt: dict[str, Any], expires: str
+    ) -> None:
+        """Refuse a settlement whose block is not from before a challenge's expiry."""
+        expires_ms = datetime.fromisoformat(expires.replace("Z", "+00:00")).timestamp() * 1000
+        block_number = receipt.get("blockNumber")
+        try:
+            block = await _rpc_call(
+                self._get_rpc_url(), "eth_getBlockByNumber", [block_number, False], client=client
+            )
+            timestamp = int(block["timestamp"], 16)
+        except Exception as error:
+            raise InternalPaymentError() from error
+        if timestamp * 1000 >= expires_ms:
+            raise PaymentExpiredError(expires)
 
     def _proof_store(self) -> Store | None:
         """The store proofs are claimed in: only one configured explicitly (as mppx).
@@ -1713,7 +1772,6 @@ class ChargeIntent:
         await self._assert_rpc_chain_id(request.methodDetails.chainId)
         client = await self._get_client()
         receipt_data = await self._fetch_transaction_receipt(client, payload.hash)
-        _reject_zone_settlement(receipt_data)
         matched_logs = self._verify_receipt_transfers(
             receipt_data,
             request,
@@ -1997,6 +2055,10 @@ class ChargeIntent:
             from_address = "0x" + topics[1][-40:]
             to_address = "0x" + topics[2][-40:]
 
+            # A transfer from a Zone portal settles a Zone withdrawal, which only its
+            # zone credential redeems (mppx); see _is_zone_settlement_transfer.
+            if _is_zone_settlement_transfer(from_address):
+                continue
             if to_address.lower() != recipient.lower():
                 continue
 
@@ -2189,6 +2251,8 @@ class ChargeIntent:
                 from_addr = "0x" + topics[1][-40:]
                 to_addr = "0x" + topics[2][-40:]
 
+                if _is_zone_settlement_transfer(from_addr):
+                    continue
                 if to_addr.lower() != transfer.recipient.lower():
                     continue
 

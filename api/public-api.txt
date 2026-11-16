@@ -190,7 +190,7 @@ module mpp.errors
         title = 'Payment Outcome Unknown'
         type = 'https://paymentauth.org/problems/payment-outcome-unknown'
     class ZoneSettlementPendingError(mpp.errors.PaymentError, RuntimeError)
-        def __init__(self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None) -> None
+        def __init__(self, *, challenge_id: str, sender_tag: str | None = None, zone_id: int, challenge: Any = None) -> None
         title = 'Zone Settlement Pending'
         type = 'https://paymentauth.org/problems/zone-settlement-pending'
     class ZoneWithdrawalBouncedError(mpp.errors.PaymentError, RuntimeError)
@@ -795,7 +795,7 @@ module mpp.methods.tempo.client
         field kw_only http_client: httpx.AsyncClient | None = None
         field kw_only zone: Zone | None = None
         def can_handle_challenge(self, challenge: Challenge) -> bool
-        async def create_credential(self, challenge: Challenge) -> Credential
+        async def create_credential(self, challenge: Challenge, *, origin: str | None = None) -> Credential
         def transaction_hash(self, credential: Credential) -> str | None
     def charge(*, account: TempoAccount, chain_id: int | None | object = <object object>, rpc_url: str | None = None, root_account: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, client_id: str | None = None, max_atomic_amount: int | str | None = None, max_amount: str | Decimal | None = None, max_amount_decimals: int | None = None, expected_recipients: Sequence[str] | None = None, allowed_chain_ids: Sequence[int] | None = None, auto_swap: bool | AutoSwap = False, mode: ChargeMode | None = None, fee_token: str | None = None, fee_policy: Mapping[str, int] | None = None, http_client: httpx.AsyncClient | None = None, zone: Zone | None = None) -> ClientMethod
 
@@ -860,7 +860,7 @@ module mpp.methods.tempo.intents
         field source: str | None
     ValidateSender = collections.abc.Callable[[mpp.methods.tempo.intents.SenderValidation], bool]
     class ChargeIntent
-        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None) -> None
+        def __init__(self, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, store: Store | None = None, validate_sender: ValidateSender | None = None, confirmation_timeout: float = 30.0, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: _sponsor_budget.SponsorBudget | Literal[False] | None = None, zone_credential_grace: float = 0.0) -> None
         async def aclose(self) -> None
         async def broadcast(self, credential: Credential, request: dict[str, Any]) -> Receipt
         name = 'charge'
@@ -957,7 +957,7 @@ module mpp.methods.tempo.schemas
     charge: mpp.methods.Method
 
 module mpp.methods.tempo.server
-    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, supported_modes: Sequence[ChargeMode] | None = None, machine_token_enabled: bool = False, zones: Sequence[int] | Literal[True] | None = None) -> list[ServerMethod]
+    def charge(*, recipient: str | None = None, chain_id: int | None | object = <object object>, rpc_url: str | None = None, currency: str | None = None, currencies: Sequence[str] | None = None, decimals: int = 6, fee_payer: TempoAccount | RemoteFeePayer | Mapping[str, Any] | str | None = None, fee_token: str | None = None, allowed_fee_tokens: Sequence[str] | None = None, sponsor_budget: SponsorBudget | Literal[False] | None = None, store: Store | None = None, validate_sender: ValidateSender | None = None, http_client: httpx.AsyncClient | None = None, timeout: float = 30.0, confirmation_timeout: float = 30.0, relay: Relay | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, supported_modes: Sequence[ChargeMode] | None = None, machine_token_enabled: bool = False, zones: Sequence[int] | Literal[True] | None = None, zone_credential_grace_ms: float = 0) -> list[ServerMethod]
     def session(*, account: TempoAccount | None = None, recipient: str | None = None, currency: str | None = None, decimals: int = 6, chain_id: int | None = None, rpc_url: str | None = None, http_client: httpx.AsyncClient | None = None, escrow_contract: str | None = None, store: Store | None = None, fee_payer: TempoAccount | Literal[True] | None = None, fee_payer_policy: Mapping[str, int] | None = None, top_up_sponsorship_limit: SessionSponsorshipLimit | None = None, fee_token: str | None = None, min_voucher_delta: str | None = None, settlement_schedule: SettlementSchedule | None = None, on_session_settlement: OnSessionSettlement | None = None, on_session_settlement_failure: OnSessionSettlementFailure | None = None, channel_state_ttl: int = 5000, reusable_challenges: bool = False, voucher_state_max_age: int = 0, charge_on_acceptance: bool = False, sponsorship_limit: SponsorshipLimit | None = None, amount: str | None = None, unit_type: str | None = None, suggested_deposit: str | None = None, operator: str | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None, resolve_channel_id: ResolveSessionChannelId | None = None, bootstrap: bool = False) -> ServerMethod
 
 module mpp.methods.tempo.session

@@ -32,6 +32,14 @@ POLLING_INTERVAL = 0.5
 FIRST_SCAN_TIMEOUT = 10.0
 """Seconds the first search for a settled Zone withdrawal may take, whatever the timeout."""
 
+REDEMPTION_GRACE = 300.0
+"""Most seconds after its Challenge expires that a server accepts a ``zone`` credential.
+
+The upper bound of the Tempo charge server's ``zone_credential_grace_ms`` (mppx
+``Zone.redemptionGraceMs``). Past it no server redeems a withdrawal, so a client never
+resumes waiting for one.
+"""
+
 ZONE_OUTBOX = "0x1c00000000000000000000000000000000000002"
 """The ZoneOutbox predeploy on every Zone, which takes withdrawal requests."""
 
@@ -195,7 +203,24 @@ def portal_address(zone_id: int) -> str:
     legacy = _LEGACY_PORTALS.get(zone_id)
     if legacy is not None:
         return legacy
-    return "0x5ad000000000000000000000" + f"{zone_id:016x}"
+    return _PORTAL_PREFIX + f"{zone_id:016x}"
+
+
+_PORTAL_PREFIX = "0x5ad000000000000000000000"
+"""Every deterministic Zone portal address is this prefix and an 8-byte Zone ID."""
+
+
+def is_portal_address(address: str) -> bool:
+    """Return whether an address is a Zone portal on Tempo.
+
+    That is any deterministic portal (:func:`portal_address` of a Zone ID) or a legacy
+    one. Portals pay out Zone withdrawals, so a transfer from one is a Zone settlement
+    (mppx ``isPortalAddress``).
+    """
+    lowered = address.lower()
+    if lowered.startswith(_PORTAL_PREFIX) and len(lowered) == 42:
+        return True
+    return any(lowered == legacy.lower() for legacy in _LEGACY_PORTALS.values())
 
 
 def id_from_chain_id(chain_id: int) -> int:

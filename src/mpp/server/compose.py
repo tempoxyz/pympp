@@ -88,6 +88,7 @@ class _MethodIntent:
     ) -> None:
         self.name = method.intent
         self._method = method
+        self._credential_grace = method._credential_grace
         self._input = input
         self._http_request = http_request
         # The management response the method's ``respond`` hook returned, if any.

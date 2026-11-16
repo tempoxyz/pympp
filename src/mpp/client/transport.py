@@ -13,6 +13,7 @@ Implements automatic 402 Payment Required handling by:
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 from contextlib import suppress
 from dataclasses import dataclass
@@ -20,9 +21,15 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
-from mpp import AUTHORIZATION_HEADER, PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential
+from mpp import (
+    AUTHORIZATION_HEADER,
+    PAYMENT_AUTHORIZATION_HEADER,
+    Challenge,
+    Credential,
+)
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError
+from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict
 from mpp.errors import (
     InvalidChallengeError,
@@ -545,20 +552,27 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             "fetch": self._send_auxiliary,
                             "attempt": attempt,
                         }
+                        keywords = {
+                            key: value
+                            for key, value in arguments.items()
+                            if key in self._credential_keywords
+                        }
                         try:
-                            credential = await self._runtime.create_credential(
-                                challenge,
-                                matched_method,
-                                event_payload={
-                                    "challenges": challenges,
-                                    "request": request,
-                                    "response": response,
-                                },
-                                **{
-                                    key: value
-                                    for key, value in arguments.items()
-                                    if key in self._credential_keywords
-                                },
+                            # A Zone withdrawal still settling is resumed for this same
+                            # Challenge rather than paid again under a new one (mppx).
+                            credential: Credential = await resume_pending_settlement(
+                                functools.partial(
+                                    self._runtime.create_credential,
+                                    challenge,
+                                    matched_method,
+                                    event_payload={
+                                        "challenges": challenges,
+                                        "request": request,
+                                        "response": response,
+                                    },
+                                    **keywords,
+                                ),
+                                self._max_payment_retries,
                             )
                         except BaseException:
                             # A credential that never reaches the server is rejected, so the

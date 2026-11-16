@@ -158,6 +158,10 @@ class ServerMethod:
     # multi-instance platform when it returns False, rather than let the method fall back
     # to an in-memory store.
     _has_store: Callable[[], bool] | None = None
+    # Internal: seconds after its challenge expires that the method still accepts a
+    # credential (see ``mpp._credential_expiry``), so the generic expiry checks leave it
+    # room to; the method enforces its own proof. ``None`` gives none.
+    _credential_grace: Callable[[Credential], float] | None = None
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None

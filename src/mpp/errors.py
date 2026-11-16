@@ -114,25 +114,34 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
 
     The withdrawal cannot be undone and may still settle. Retry with
     ``challenge``: passing it to the same Tempo charge client method's
-    ``create_credential`` resumes waiting without withdrawing again. A new
-    request gets a newly issued challenge, and paying that one withdraws again.
+    ``create_credential`` resumes waiting without withdrawing again. A newly
+    issued challenge for the same payment never starts a second withdrawal: from
+    the origin that issued ``challenge_id`` it resumes this withdrawal and returns a
+    credential for that challenge; otherwise it raises this error again.
     The settlement can also be found by ``sender_tag`` on the Zone's portal.
     The error that ended the wait is its ``__cause__``.
     """
 
     def __init__(
-        self, *, challenge_id: str, sender_tag: str, zone_id: int, challenge: Any = None
+        self,
+        *,
+        challenge_id: str,
+        sender_tag: str | None = None,
+        zone_id: int,
+        challenge: Any = None,
     ) -> None:
         self.challenge = challenge
         """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
         self.challenge_id = challenge_id
         """ID of the challenge the withdrawal pays."""
         self.sender_tag = sender_tag
-        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it."""
+        """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it,
+        or ``None`` when not yet read."""
         self.zone_id = zone_id
         """ID of the Zone the withdrawal left."""
+        withdrawal = f"{sender_tag} " if sender_tag else ""
         super().__init__(
-            f"Zone {zone_id} withdrawal {sender_tag} for challenge {challenge_id!r} has not "
+            f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} has not "
             "settled on Tempo yet. Retry with this error's challenge to resume waiting "
             "instead of paying again."
         )
