@@ -66,7 +66,7 @@ from mpp.x402._types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 
 _DEFAULT_MAX_PAYMENT_RETRIES = 3
@@ -557,22 +557,26 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                             for key, value in arguments.items()
                             if key in self._credential_keywords
                         }
+                        event_payload: dict[str, Any] = {
+                            "challenges": challenges,
+                            "request": request,
+                            "response": response,
+                        }
+                        create = cast(
+                            "Callable[[], Awaitable[Credential]]",
+                            functools.partial(
+                                self._runtime.create_credential,
+                                challenge,
+                                matched_method,
+                                event_payload=event_payload,
+                                **keywords,
+                            ),
+                        )
                         try:
                             # A Zone withdrawal still settling is resumed for this same
                             # Challenge rather than paid again under a new one (mppx).
-                            credential: Credential = await resume_pending_settlement(
-                                functools.partial(
-                                    self._runtime.create_credential,
-                                    challenge,
-                                    matched_method,
-                                    event_payload={
-                                        "challenges": challenges,
-                                        "request": request,
-                                        "response": response,
-                                    },
-                                    **keywords,
-                                ),
-                                self._max_payment_retries,
+                            credential = await resume_pending_settlement(
+                                create, self._max_payment_retries
                             )
                         except BaseException:
                             # A credential that never reaches the server is rejected, so the
