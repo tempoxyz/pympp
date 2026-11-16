@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.25.1 (2026-11-16)
+
+### Patch Changes
+
+- Released version `0.25.0` by updating the changelog and bumping the package version in `pyproject.toml`. (by @tempo-github-sts[bot], [#433](https://github.com/tempoxyz/pympp/pull/433))
+
 ## 0.25.0 (2026-11-16)
 
 ### Minor Changes
