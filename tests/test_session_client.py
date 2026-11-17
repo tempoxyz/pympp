@@ -1528,11 +1528,16 @@ class _ToolResult:
     content: list[Any] = []
 
 
-def _mcp_client(session: _McpSession, method: SessionMethod) -> Any:
+def _mcp_client(session: _McpSession, method: SessionMethod, order: Any = None) -> Any:
     pytest.importorskip("mcp")
     from mpp.extensions.mcp import McpClient
 
-    return McpClient(session, methods=[method.client_method()], trusted_tempo_realms=["api.test"])
+    return McpClient(
+        session,
+        methods=[method.client_method()],
+        trusted_tempo_realms=["api.test"],
+        order_challenges=order,
+    )
 
 
 class TestMcpSameChallenge:
@@ -1590,6 +1595,90 @@ class TestMcpSameChallenge:
         entry = stored(method)
         assert entry is not None and entry.channel_id == first["payload"]["channelId"]
         assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+
+class TestMcpSelectionFailure:
+    """A new round's selection failing still settles the deferred open it answers."""
+
+    @staticmethod
+    def _failing_on_second_call(hook: Callable[[], Awaitable[None]]) -> Any:
+        calls: list[int] = []
+
+        async def order(candidates: Any) -> Any:
+            calls.append(1)
+            if len(calls) == 2:
+                await hook()
+            return candidates
+
+        return order
+
+    @staticmethod
+    async def _pays_again(method: SessionMethod) -> None:
+        # A leaked scope lock would make this payment wait forever.
+        session = _McpSession(make_challenge(suggested_deposit="1000"), _ToolResult())
+        await asyncio.wait_for(_mcp_client(session, method).call_tool("premium", {}), 5)
+        assert session.credentials[0]["payload"]["action"] == "open"
+        assert stored(method) is not None
+
+    async def test_hook_error_settles_and_reports_unknown_outcome(self, fake_chain: Calls) -> None:
+        async def fail() -> None:
+            raise RuntimeError("order hook failed")
+
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method, self._failing_on_second_call(fail))
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        # Settled as rejected: the open is dropped and the scope lock released.
+        assert len(session.credentials) == 1
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        await self._pays_again(method)
+
+    async def test_cancelled_selection_settles_and_propagates(self, fake_chain: Calls) -> None:
+        entered = asyncio.Event()
+
+        async def hang() -> None:
+            entered.set()
+            await asyncio.Event().wait()
+
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method, self._failing_on_second_call(hang))
+        call = asyncio.ensure_future(client.call_tool("premium", {}))
+        await asyncio.wait_for(entered.wait(), 5)
+
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        await self._pays_again(method)
+
+    async def test_http_selection_failure_settles_the_open(self, fake_chain: Calls) -> None:
+        async def fail() -> None:
+            raise RuntimeError("order hook failed")
+
+        method = SessionMethod(account=ACCOUNT)
+        server = Server()
+        server.script.append(required(server.challenge))
+        transport = PaymentTransport(
+            methods=[method.client_method()],
+            inner=httpx.MockTransport(server.handler),
+            order_challenges=self._failing_on_second_call(fail),
+        )
+
+        # Over HTTP the open is settled on every exit too, and the hook's error propagates.
+        with pytest.raises(RuntimeError, match="order hook failed"):
+            await get(transport)
+
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+        response = await asyncio.wait_for(get(transport_for(Server(), method)), 5)
+        assert response.status_code == 200
 
 
 class TestTransportCompatibility:

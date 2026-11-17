@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -902,6 +903,42 @@ class TestMcpClientAttemptSettlement:
             await client.call_tool("premium_tool", {})
 
         # The channel is gone: no new credential, though its challenges still settle.
+        assert session.call_tool.await_count == 2
+        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("failure", "raised"),
+        [
+            (RuntimeError("order hook failed"), PaymentOutcomeUnknownError),
+            (TimeoutError(), PaymentOutcomeUnknownError),
+            (asyncio.CancelledError(), asyncio.CancelledError),
+        ],
+    )
+    async def test_failed_new_round_selection_settles_rejected(
+        self, failure: BaseException, raised: type[BaseException]
+    ) -> None:
+        replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), _payment_required_error(replacement)]
+        )
+        outcomes: list[AttemptOutcome] = []
+        orders: list[int] = []
+
+        async def order(candidates: Any) -> Any:
+            orders.append(1)
+            if len(orders) == 2:
+                raise failure
+            return candidates
+
+        client = McpClient(session, methods=[settling_method(outcomes)], order_challenges=order)
+
+        with pytest.raises(raised):
+            await client.call_tool("premium_tool", {})
+
+        # The credential is settled before the failure propagates, with what replaced it.
         assert session.call_tool.await_count == 2
         assert [outcome.status for outcome in outcomes] == ["rejected"]
         assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]

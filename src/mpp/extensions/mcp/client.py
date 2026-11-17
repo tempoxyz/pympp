@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -282,7 +281,7 @@ class McpClient:
         same Challenge (by id) resends the same credential unless its method reports the
         attempt settled. A call sends at most ``_MAX_PAYMENT_ATTEMPTS`` credentials.
         """
-        from anyio import get_cancelled_exc_class
+        from anyio import CancelScope, get_cancelled_exc_class
 
         challenge, method = await self._select_challenge(error)
         sends = 0
@@ -339,8 +338,25 @@ class McpClient:
                         # refusal: paying a new challenge could pay twice (as over HTTP).
                         and not _stays_spendable(core_challenge)
                     ):
-                        with suppress(NoMethodFoundError, ValueError):
+                        try:
                             selected = await self._select_challenge(exc)
+                        except (NoMethodFoundError, ValueError):
+                            pass
+                        except Exception as selection_error:
+                            # A failing order hook ends the call like no payable challenge.
+                            logger.warning(
+                                "Selecting a new payment round failed (%s)",
+                                type(selection_error).__name__,
+                            )
+                        except BaseException:
+                            # Cancelled while selecting: release what the credential holds
+                            # (such as a deferred open's scope lock), then propagate.
+                            with CancelScope(shield=True):
+                                await _settle_attempt(
+                                    attempt,
+                                    AttemptOutcome(status="rejected", challenges=replacements),
+                                )
+                            raise
                     if selected is None:
                         # No payable challenge: the server's final answer to this credential.
                         await _settle_attempt(
