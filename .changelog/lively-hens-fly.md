@@ -1,5 +1,5 @@
 ---
-pympp: patch
+pympp: minor
 ---
 
-Fixed payment method ID validation to restrict to lowercase letters only (`1*LOWERALPHA`), aligning with the spec grammar instead of the previously over-permissive regex that also accepted digits, hyphens, underscores, and colons. Added validation to `format_www_authenticate` so invalid method IDs are caught on output as well as input.
+Payment method names are now limited to lowercase letters (a-z), as the spec requires: parsing and formatting a Challenge reject any other name, and `Mpp` refuses one at startup. Rename custom methods that use digits, hyphens, underscores, colons or capitals.
