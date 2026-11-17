@@ -887,6 +887,18 @@ class TestReceipt:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Receipt.from_payment_receipt(b64)
 
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_format_rejects_invalid_method_id(self, method: str) -> None:
+        receipt = Receipt(
+            status="success",
+            timestamp=datetime(2024, 1, 20, 12, 0, tzinfo=UTC),
+            reference="0xabc",
+            method=method,
+        )
+
+        with pytest.raises(ParseError, match="Invalid payment method id"):
+            receipt.to_payment_receipt()
+
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
 @pytest.mark.parametrize("field", ["id", "realm", "intent", "expires", "digest", "opaque"])

@@ -550,6 +550,8 @@ def format_payment_receipt(receipt: Receipt) -> str:
     Output format:
         <base64-receipt>
     """
+    _validate_payment_method_id(receipt.method)
+
     timestamp = receipt.timestamp
     # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets
     # (such as ones with seconds) don't fit the receipt schema. A naive datetime is UTC.
