@@ -356,15 +356,46 @@ class TestChallenge:
         assert "header=" not in header
         assert challenge.header is None
 
-    def test_parse_www_authenticate_rejects_invalid_header_name(self) -> None:
+    @pytest.mark.parametrize(
+        ("header_param", "expected"),
+        [
+            (None, None),
+            ('header="Payment-Authorization"', "Payment-Authorization"),
+            ('header="payment-authorization"', "payment-authorization"),
+            ('header="PAYMENT-AUTHORIZATION"', "PAYMENT-AUTHORIZATION"),
+            ('header="Authorization"', ParseError),
+            ('header=""', ParseError),
+            ('header="X-Payment"', ParseError),
+            ('header="not a header"', ParseError),
+        ],
+    )
+    def test_parse_www_authenticate_credential_header(
+        self, header_param: str | None, expected: str | type[ParseError] | None
+    ) -> None:
+        """A received challenge may only omit header or select Payment-Authorization."""
         request_b64 = _b64_json({"amount": "1000000"})
         header = (
             'Payment id="abc", realm="api.example.com", method="tempo", '
-            f'intent="charge", request="{request_b64}", header="not a header"'
+            f'intent="charge", request="{request_b64}"'
         )
+        if header_param is not None:
+            header += f", {header_param}"
 
-        with pytest.raises(ParseError, match="Invalid HTTP header name"):
-            Challenge.from_www_authenticate(header)
+        if expected is ParseError:
+            with pytest.raises(ParseError, match="Unsupported credential header") as info:
+                Challenge.from_www_authenticate(header)
+            assert "X-Payment" not in str(info.value)
+            return
+        parsed = Challenge.from_www_authenticate(header)
+        # The parsed challenge keeps the issuer's spelling; only the field is canonical.
+        assert parsed.header == expected
+        field = "Payment-Authorization" if expected else "Authorization"
+        assert parsed.credential_header == field
+        assert parsed.to_echo().header == expected
+        if expected is not None:
+            assert f'header="{expected}"' in parsed.to_www_authenticate("api.example.com")
+            echoed = Credential(challenge=parsed.to_echo(), payload={}).to_authorization()
+            assert Credential.from_authorization(echoed).challenge.header == expected
 
 
 class TestCredential:

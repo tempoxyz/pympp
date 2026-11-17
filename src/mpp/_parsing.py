@@ -47,6 +47,49 @@ class ParseError(Exception):
     """
 
 
+_PAYMENT_AUTHORIZATION = "Payment-Authorization"
+
+
+def is_payment_authorization_header(header: str | None) -> bool:
+    """Whether ``header`` is ``Payment-Authorization``, compared ASCII case-insensitively."""
+    return (
+        header is not None and header.isascii() and header.lower() == _PAYMENT_AUTHORIZATION.lower()
+    )
+
+
+def _received_credential_header(header: object, *, present: bool) -> str | None:
+    """Validate the raw ``header`` auth-param of a received challenge or its echo.
+
+    Per https://paymentauth.org, omitting ``header`` selects ``Authorization``, and a
+    present ``header`` must be ``Payment-Authorization``. Any other value, including
+    ``Authorization`` and the empty string, makes the challenge unrecognized, so no
+    credential is sent for it. The raw value is not echoed into the error.
+
+    A valid value is returned in the spelling received: clients echo it unchanged, and
+    the challenge ID may bind that exact spelling.
+    """
+    if not present:
+        return None
+    if isinstance(header, str) and is_payment_authorization_header(header):
+        return header
+    raise ParseError(
+        "Unsupported credential header: challenges may only select Payment-Authorization"
+    )
+
+
+def with_received_credential_header(challenge: Challenge, header: str | None) -> Challenge:
+    """Give a challenge built from received values the credential header as received.
+
+    Constructing a ``Challenge`` canonicalizes ``header``. A received challenge keeps the
+    issuer's spelling instead, so its credential echoes it unchanged and the challenge ID
+    still verifies. ``header`` must already be absent or a ``Payment-Authorization``
+    spelling.
+    """
+    if header is not None and challenge.header != header:
+        object.__setattr__(challenge, "header", header)
+    return challenge
+
+
 # RFC 3339 date-time with a timezone, as mppx's `z.datetime()` accepts.
 _DATETIME_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})"
@@ -239,7 +282,7 @@ def parse_www_authenticate(header: str) -> Challenge:
 
     Optional parameters: digest, expires, description, header, opaque
     """
-    from mpp import Challenge, advertised_credential_header
+    from mpp import Challenge
 
     if len(header) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("WWW-Authenticate header exceeds maximum size")
@@ -282,10 +325,10 @@ def parse_www_authenticate(header: str) -> Challenge:
     if opaque_b64:
         opaque = _b64_decode(opaque_b64)
 
-    try:
-        credential_header = advertised_credential_header(params.get("header"))
-    except ValueError as error:
-        raise ParseError(str(error)) from error
+    # Validate the raw value: an explicit Authorization or empty header is not the default.
+    credential_header = _received_credential_header(
+        params.get("header"), present="header" in params
+    )
 
     # Match mppx's Challenge schema: `digest` is `sha-256=...` and `expires` is RFC 3339.
     digest = params.get("digest")
@@ -298,7 +341,7 @@ def parse_www_authenticate(header: str) -> Challenge:
         except ValueError:
             raise ParseError("Invalid expires format") from None
 
-    return Challenge(
+    challenge = Challenge(
         id=id_,
         method=method,
         intent=intent,
@@ -314,6 +357,7 @@ def parse_www_authenticate(header: str) -> Challenge:
         # echoing or re-formatting it cannot inject header parameters.
         _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
     )
+    return with_received_credential_header(challenge, credential_header)
 
 
 def format_www_authenticate(challenge: Challenge, realm: str) -> str:
@@ -322,6 +366,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     Output format (per IETF draft-ietf-httpauth-payment):
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
+    from mpp import advertised_credential_header
+
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
 
@@ -341,8 +387,10 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
     if challenge.description:
         parts.append(f'description="{_escape_quoted(challenge.description)}"')
-    if challenge.header:
-        parts.append(f'header="{_escape_quoted(challenge.header)}"')
+    # Emit the challenge's own spelling: a received challenge keeps the issuer's.
+    credential_header = advertised_credential_header(challenge.header)
+    if credential_header:
+        parts.append(f'header="{_escape_quoted(credential_header)}"')
     opaque_b64 = challenge._encoded_opaque()
     if opaque_b64 is not None:
         parts.append(f'opaque="{opaque_b64}"')
@@ -363,7 +411,7 @@ def parse_authorization(header: str) -> Credential:
         - payload: Method-specific credential data
         - source: Optional payer DID
     """
-    from mpp import ChallengeEcho, Credential, advertised_credential_header
+    from mpp import ChallengeEcho, Credential
 
     if len(header) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authorization header exceeds maximum size")
@@ -390,12 +438,9 @@ def parse_authorization(header: str) -> Credential:
     method = str(challenge_data.get("method", ""))
     _validate_payment_method_id(method)
 
-    try:
-        credential_header = advertised_credential_header(
-            str(challenge_data["header"]) if challenge_data.get("header") else None
-        )
-    except ValueError as error:
-        raise ParseError(str(error)) from error
+    credential_header = _received_credential_header(
+        challenge_data.get("header"), present="header" in challenge_data
+    )
 
     description = (
         str(challenge_data["description"])
@@ -453,6 +498,7 @@ def format_authorization(credential: Credential) -> str:
         challenge_dict["expires"] = credential.challenge.expires
     if credential.challenge.digest:
         challenge_dict["digest"] = credential.challenge.digest
+    # Echo the challenge's spelling unchanged: the challenge ID binds it.
     if credential.challenge.header:
         challenge_dict["header"] = credential.challenge.header
     if credential.challenge.opaque is not None:
