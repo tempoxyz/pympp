@@ -95,6 +95,7 @@ __all__ = [
     "CredentialContext",
     "CredentialValidation",
     "assert_credential_source_can_spend",
+    "assert_credential_source_is_payer",
     "assert_open_credential_covers_request",
     "assert_same_descriptor",
     "assert_voucher_amounts",
@@ -111,6 +112,7 @@ __all__ = [
 
 
 from mpp.methods.tempo.fee_payer_policy import get_policy
+from mpp.methods.tempo.session.server._sponsorship_limit import verified_payer
 from mpp.methods.tempo.session.server.sponsorship_limit import (
     SessionSponsorshipLimit,
     reserve_top_up,
@@ -213,6 +215,121 @@ def assert_credential_source_can_spend(
     raise VerificationFailedError(
         "credential source does not match channel payer or authorized signer"
     )
+
+
+async def assert_credential_source_is_payer(
+    *,
+    source: str | None,
+    chain_id: int,
+    payer: str,
+    serialized_transaction: str,
+    rpc_url: str,
+    client: httpx.AsyncClient | None = None,
+) -> None:
+    """Bind an opening credential's source to the payer its signed transaction authenticates.
+
+    A credential without a source is accepted. Otherwise the source must be the transaction's
+    payer, proven by its signature: a direct signature by the payer, an access key the
+    transaction itself authorizes for the payer (for this chain and unexpired), or an access key
+    the payer authorized earlier that is neither revoked nor expired on chain.
+    """
+    if source is None:
+        return
+    if not _same(_read_source_address(source, chain_id), payer):
+        raise VerificationFailedError("credential source does not match transaction payer")
+    try:
+        valid = await _signature_authenticates_payer(
+            chain_id=chain_id,
+            payer=payer,
+            serialized_transaction=serialized_transaction,
+            rpc_url=rpc_url,
+            client=client,
+        )
+    except Exception:
+        # Unavailable authorization state cannot authenticate a claimed identity.
+        valid = False
+    if not valid:
+        raise VerificationFailedError(
+            "credential source is not authenticated by transaction signature"
+        )
+
+
+async def _signature_authenticates_payer(
+    *,
+    chain_id: int,
+    payer: str,
+    serialized_transaction: str,
+    rpc_url: str,
+    client: httpx.AsyncClient | None,
+) -> bool:
+    from mpp._typing import is_list
+    from mpp.methods.tempo.intents import (
+        _decode_signed_transaction,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    signer = verified_payer(serialized_transaction)
+    if signer is None:
+        return False
+    decoded = _decode_signed_transaction(bytes.fromhex(serialized_transaction[2:]))
+    if decoded is None:
+        return False
+    fields, signature, _ = decoded
+    if signature[0] not in (0x03, 0x04) or len(signature) == 65:
+        return _same(signer, payer)
+    if not _same("0x" + signature[1:21].hex(), payer):
+        return False
+    now = time.time()
+    if len(fields) == 15:
+        # verified_payer keys an inline authorization on the account that signed it.
+        authorization = fields[13]
+        if not is_list(authorization) or len(authorization) != 2:
+            return False
+        items = authorization[0]
+        if not is_list(items) or len(items) < 3:
+            return False
+        key_chain_id = _rlp_uint(items[0])
+        expiry = _rlp_uint(items[3]) if len(items) > 3 else 0
+        return (
+            _same(signer, payer) and key_chain_id in (0, chain_id) and (expiry == 0 or expiry > now)
+        )
+    return await _is_active_access_key(
+        rpc_url, account=payer, access_key=signer, client=client, now=now
+    )
+
+
+def _rlp_uint(value: Any) -> int:
+    if not isinstance(value, bytes):
+        raise ValueError("expected an RLP integer")
+    return int.from_bytes(value, "big")
+
+
+async def _is_active_access_key(
+    rpc_url: str,
+    *,
+    account: str,
+    access_key: str,
+    client: httpx.AsyncClient | None,
+    now: float,
+) -> bool:
+    """Whether the access key is an unrevoked, unexpired key of the account on chain."""
+    from eth_abi.abi import decode
+
+    from mpp.methods.tempo.intents import ACCOUNT_KEYCHAIN, GET_KEY_SELECTOR
+
+    data = (
+        "0x"
+        + GET_KEY_SELECTOR
+        + account.lower().removeprefix("0x").zfill(64)
+        + access_key.lower().removeprefix("0x").zfill(64)
+    )
+    result = await chain._rpc(  # pyright: ignore[reportPrivateUsage]
+        rpc_url, "eth_call", [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"], client
+    )
+    _, _, expiry, _, revoked = decode(
+        ["uint8", "address", "uint64", "bool", "bool"],
+        bytes.fromhex(str(result).removeprefix("0x")),
+    )
+    return not revoked and expiry > int(now)
 
 
 # --------------------------------------------------------------------------------------------
@@ -689,8 +806,9 @@ async def _validate_open(context: CredentialContext, payload: OpenPayload) -> No
         allowed_fee_tokens=_allowed_fee_tokens(request.currency, context.fee_token),
         challenge_expires=context.challenge.expires,
     )
-    _check_open_voucher(
+    await _check_open_voucher(
         context,
+        transaction=payload.transaction,
         channel_id=channel_id,
         cumulative=cumulative,
         signature=payload.signature,
@@ -706,9 +824,10 @@ async def _validate_open(context: CredentialContext, payload: OpenPayload) -> No
     )
 
 
-def _check_open_voucher(
+async def _check_open_voucher(
     context: CredentialContext,
     *,
+    transaction: str,
     channel_id: str,
     cumulative: int,
     signature: str,
@@ -722,6 +841,14 @@ def _check_open_voucher(
         request_amount=request_amount,
     )
     assert_same_descriptor(validated.descriptor, descriptor)
+    await assert_credential_source_is_payer(
+        source=context.credential_source,
+        chain_id=context.chain_id,
+        payer=validated.descriptor.payer,
+        serialized_transaction=transaction,
+        rpc_url=context.rpc_url,
+        client=context.http_client,
+    )
     if cumulative > validated.open_deposit:
         raise AmountExceedsDepositError("voucher amount exceeds open deposit")
     voucher = SignedVoucher(
@@ -944,9 +1071,10 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
         operator,
     )
 
-    def before_broadcast(prepared: chain.ValidatedOpenTransaction) -> None:
-        _check_open_voucher(
+    async def before_broadcast(prepared: chain.ValidatedOpenTransaction) -> None:
+        await _check_open_voucher(
             context,
+            transaction=payload.transaction,
             channel_id=channel_id,
             cumulative=cumulative,
             signature=payload.signature,
