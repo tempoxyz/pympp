@@ -29,6 +29,7 @@ from mpp import (
     ChallengeEcho,
     Credential,
 )
+from mpp._challenge_identity import same_challenge
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
 from mpp._pending_settlement import resume as resume_pending_settlement
@@ -563,11 +564,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 reused: Credential | None = None
                 if sent is not None:
                     previous, sent = sent, None
-                    # Only a method that tracks its credential can have it resent.
-                    same = (
-                        previous.attempt.settle is not None
-                        and previous.method is matched_method
-                        and previous.challenge == challenge
+                    # The same Challenge resends the credential unless the method settled
+                    # it; a method without a settle hook keeps no state, so its credential
+                    # stays unsettled (mppx canReusePrevious).
+                    same = previous.method is matched_method and same_challenge(
+                        challenge, previous.challenge
                     )
                     settled = await _settle_attempt(
                         previous.attempt,

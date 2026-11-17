@@ -8,6 +8,7 @@ round, bounded by its retry limit, with every selection check applied again.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -286,12 +287,15 @@ async def test_same_challenge_offered_again_is_bounded_by_retry_limit() -> None:
     charge_offer = offer("charge-1")
     server = Server(lambda _, __: payment_required(charge_offer))
 
-    response = await fetch(server, Wallet(), max_payment_retries=3)
+    wallet = Wallet()
+    response = await fetch(server, wallet, max_payment_retries=3)
 
-    # As mppx Fetch, a refused pull credential may be signed again for the same
-    # Challenge, but never past the retry limit, and the last 402 is the answer.
+    # As mppx Fetch, the same Challenge resends the same Credential, signed once, never
+    # past the retry limit, and the last 402 is the answer.
     assert response.status_code == 402
     assert server.paid_ids == ["charge-1"] * 3
+    assert wallet.signed_ids == ["charge-1"]
+    assert len({r.headers["authorization"] for r in server.requests[1:]}) == 1
 
 
 @pytest.mark.asyncio
@@ -411,24 +415,22 @@ async def test_each_round_resends_the_same_request() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _mcp_error(*challenges: Challenge, code: int = -32042) -> Exception:
+def _mcp_error(
+    *challenges: Challenge, code: int = -32042, http_status: int | None = None
+) -> Exception:
     exceptions = pytest.importorskip("mcp.shared.exceptions")
     types = pytest.importorskip("mcp.types")
     from mpp.extensions.mcp.types import MCPChallenge
 
-    return exceptions.McpError(
-        types.ErrorData(
-            code=code,
-            message="Payment Required",
-            data={
-                "challenges": [
-                    MCPChallenge.from_core(c, c.realm or REALM, c.expires).to_dict()
-                    for c in challenges
-                ],
-                "problem": CREDIT_INSUFFICIENT,
-            },
-        )
-    )
+    data: dict[str, Any] = {
+        "challenges": [
+            MCPChallenge.from_core(c, c.realm or REALM, c.expires).to_dict() for c in challenges
+        ],
+        "problem": CREDIT_INSUFFICIENT,
+    }
+    if http_status is not None:
+        data["httpStatus"] = http_status
+    return exceptions.McpError(types.ErrorData(code=code, message="Payment Required", data=data))
 
 
 class ToolResult:
@@ -467,12 +469,16 @@ class McpServer:
         ]
 
 
-def mcp_proof_then_charge(*, credit: bool, code: int = -32042) -> McpHandler:
+def mcp_proof_then_charge(
+    *, credit: bool, code: int = -32042, http_status: int | None = None
+) -> McpHandler:
     def handle(credential: dict[str, Any] | None, _: int) -> Any:
         if credential is None:
             return _mcp_error(offer("proof-1", "0"), offer("charge-1"))
         if credential["payload"]["type"] == "proof":
-            return ToolResult() if credit else _mcp_error(offer("charge-2"), code=code)
+            if credit:
+                return ToolResult()
+            return _mcp_error(offer("charge-2"), code=code, http_status=http_status)
         if credential["challenge"]["id"] in ("charge-1", "charge-2"):
             return ToolResult()
         return _mcp_error(offer("charge-3"))
@@ -489,9 +495,11 @@ def _mcp_client(server: McpServer, wallet: Wallet, **options: Any) -> Any:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", [-32042, -32043])
-async def test_mcp_pays_real_charge_after_proof_refused(code: int) -> None:
-    server = McpServer(mcp_proof_then_charge(credit=False, code=code))
+@pytest.mark.parametrize(
+    ("code", "http_status"), [(-32042, None), (-32042, 402), (-32043, None), (-32043, 402)]
+)
+async def test_mcp_pays_real_charge_after_proof_refused(code: int, http_status: int | None) -> None:
+    server = McpServer(mcp_proof_then_charge(credit=False, code=code, http_status=http_status))
     wallet = Wallet()
 
     result = await _mcp_client(server, wallet).call_tool(
@@ -507,6 +515,20 @@ async def test_mcp_pays_real_charge_after_proof_refused(code: int) -> None:
         assert call["arguments"] == {"q": "1"}
         assert call["meta"]["trace"] == "t-1"
     assert [call.get("read_timeout_seconds") for call in server.calls[1:]] == [12.0, 12.0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_status", [403, 410])
+async def test_mcp_verification_failure_other_than_402_is_final(http_status: int) -> None:
+    server = McpServer(mcp_proof_then_charge(credit=False, code=-32043, http_status=http_status))
+    wallet = Wallet()
+
+    # As over HTTP, only a 402 starts a new round: a channel gone (410) is final.
+    with pytest.raises(PaymentOutcomeUnknownError):
+        await _mcp_client(server, wallet).call_tool("premium", {})
+
+    assert server.paid_ids == ["proof-1"]
+    assert wallet.signed_ids == ["proof-1"]
 
 
 @pytest.mark.asyncio
@@ -574,13 +596,40 @@ async def test_mcp_new_challenges_forever_stop_at_three_credentials() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_same_challenge_offered_again_is_bounded() -> None:
-    server = McpServer(lambda _, __: _mcp_error(offer("charge-1")))
+async def test_mcp_same_challenge_offered_again_resends_the_credential() -> None:
+    charge_offer = offer("charge-1")
+    server = McpServer(lambda _, __: _mcp_error(charge_offer))
+    wallet = Wallet()
 
+    # As mppx Fetch: the same Challenge resends the same Credential, signed once, up to
+    # the attempt limit; the last refusal is the answer.
     with pytest.raises(PaymentOutcomeUnknownError):
-        await _mcp_client(server, Wallet()).call_tool("premium", {})
+        await _mcp_client(server, wallet).call_tool("premium", {})
 
     assert server.paid_ids == ["charge-1"] * 3
+    assert wallet.signed_ids == ["charge-1"]
+    sent = [call["meta"] for call in server.calls if call.get("meta")]
+    assert all(meta == sent[0] for meta in sent)
+
+
+@pytest.mark.asyncio
+async def test_mcp_same_challenge_with_new_description_is_the_same() -> None:
+    charge_offer = offer("charge-1")
+    described = dataclasses.replace(charge_offer, description="Premium tool")
+
+    def handle(credential: dict[str, Any] | None, _: int) -> Any:
+        if credential is None:
+            return _mcp_error(charge_offer)
+        return ToolResult() if len(server.paid_ids) == 2 else _mcp_error(described)
+
+    server = McpServer(handle)
+    wallet = Wallet()
+
+    await _mcp_client(server, wallet).call_tool("premium", {})
+
+    # A display field is not part of the Challenge's identity: nothing is signed again.
+    assert server.paid_ids == ["charge-1", "charge-1"]
+    assert wallet.signed_ids == ["charge-1"]
 
 
 @pytest.mark.asyncio

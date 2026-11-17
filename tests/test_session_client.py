@@ -1483,6 +1483,115 @@ class TestDeferredOpen:
         assert not store_lock(method.store, f"channel:{KEY}").locked()
 
 
+# ── MCP: an identical Challenge offered again (mppx McpClient, Fetch.ts) ─
+
+
+class _McpSession:
+    """An MCP session that answers each paid call with ``script``'s next result.
+
+    Unpaid calls, and paid ones past the script or scripted ``"refuse"``, get a ``-32042``
+    error offering the same Challenge again.
+    """
+
+    def __init__(self, challenge: Challenge, *script: Any) -> None:
+        self.challenge = challenge
+        self.script = list(script)
+        self.credentials: list[dict[str, Any]] = []
+
+    def error(self) -> Exception:
+        exceptions = pytest.importorskip("mcp.shared.exceptions")
+        types = pytest.importorskip("mcp.types")
+        from mpp.extensions.mcp.types import MCPChallenge
+
+        offered = MCPChallenge.from_core(self.challenge, "api.test", self.challenge.expires)
+        return exceptions.McpError(
+            types.ErrorData(
+                code=-32042, message="Payment Required", data={"challenges": [offered.to_dict()]}
+            )
+        )
+
+    async def call_tool(self, name: str, arguments: Any = None, **kwargs: Any) -> Any:
+        from mpp.extensions.mcp import META_CREDENTIAL
+
+        credential = (kwargs.get("meta") or {}).get(META_CREDENTIAL)
+        if credential is None:
+            raise self.error()
+        self.credentials.append(credential)
+        result = self.script.pop(0) if self.script else "refuse"
+        if result == "refuse":
+            raise self.error()
+        return result
+
+
+class _ToolResult:
+    meta = None
+    content: list[Any] = []
+
+
+def _mcp_client(session: _McpSession, method: SessionMethod) -> Any:
+    pytest.importorskip("mcp")
+    from mpp.extensions.mcp import McpClient
+
+    return McpClient(session, methods=[method.client_method()], trusted_tempo_realms=["api.test"])
+
+
+class TestMcpSameChallenge:
+    async def test_voucher_is_resent_not_signed_again(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        session = _McpSession(make_challenge())
+        client = _mcp_client(session, method)
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        # One voucher, sent once per round: the cumulative is raised once, not per refusal.
+        assert len(session.credentials) == 3
+        assert all(c == session.credentials[0] for c in session.credentials)
+        assert session.credentials[0]["payload"]["cumulativeAmount"] == "200"
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+
+    async def test_voucher_resent_then_accepted(self) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        method.store.set(entry_for(cumulative=100))
+        session = _McpSession(make_challenge(), "refuse", _ToolResult())
+
+        await _mcp_client(session, method).call_tool("premium", {})
+
+        assert [c["payload"]["cumulativeAmount"] for c in session.credentials] == ["200", "200"]
+        entry = stored(method)
+        assert entry is not None and entry.cumulative_amount == 200
+
+    async def test_deferred_open_is_resent_not_opened_again(self, fake_chain: Calls) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"))
+        client = _mcp_client(session, method)
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium", {})
+
+        assert len(fake_chain["open"]) == 1
+        assert len(session.credentials) == 3
+        assert all(c == session.credentials[0] for c in session.credentials)
+        # Never accepted: the open is dropped and the scope lock released.
+        assert stored(method) is None
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+    async def test_deferred_open_resent_then_accepted(self, fake_chain: Calls) -> None:
+        method = SessionMethod(account=ACCOUNT)
+        session = _McpSession(make_challenge(suggested_deposit="1000"), "refuse", _ToolResult())
+
+        await _mcp_client(session, method).call_tool("premium", {})
+
+        assert len(fake_chain["open"]) == 1
+        first, second = session.credentials
+        assert first == second and first["payload"]["action"] == "open"
+        entry = stored(method)
+        assert entry is not None and entry.channel_id == first["payload"]["channelId"]
+        assert not store_lock(method.store, f"channel:{KEY}").locked()
+
+
 class TestTransportCompatibility:
     async def test_runtime_with_old_create_credential_signature(self) -> None:
         class OldRuntime(PaymentRuntime):

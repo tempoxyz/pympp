@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -790,6 +790,120 @@ class TestMcpClientAttemptSettlement:
             await client.call_tool("premium_tool", {})
 
         assert [outcome.status for outcome in outcomes] == ["rejected", "rejected"]
+        assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
+
+    @pytest.mark.asyncio
+    async def test_same_challenge_resends_while_the_method_keeps_its_state(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[
+                _payment_required_error(),
+                _payment_required_error(),
+                FakeCallToolResult(content=[]),
+            ]
+        )
+        outcomes: list[AttemptOutcome] = []
+        signed: list[CredentialParams] = []
+        method = settling_method(outcomes, settle_result=False)
+        create = method.create_credential
+
+        async def counting(params: CredentialParams) -> str:
+            signed.append(params)
+            return await create(params)
+
+        client = McpClient(session, methods=[replace(method, create_credential=counting)])
+
+        await client.call_tool("premium_tool", {})
+
+        # One credential, sent twice: the pending outcome kept its state.
+        assert len(signed) == 1
+        first, second = (call.kwargs["meta"] for call in session.call_tool.call_args_list[1:])
+        assert first == second
+        assert [outcome.status for outcome in outcomes] == ["pending", "accepted", "rejected"]
+
+    @pytest.mark.asyncio
+    async def test_same_challenge_settled_by_its_method_is_signed_again(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[
+                _payment_required_error(),
+                _payment_required_error(),
+                FakeCallToolResult(content=[]),
+            ]
+        )
+        outcomes: list[AttemptOutcome] = []
+        signed: list[CredentialParams] = []
+        method = settling_method(outcomes, settle_result=True)
+        create = method.create_credential
+
+        async def counting(params: CredentialParams) -> str:
+            signed.append(params)
+            return await create(params)
+
+        client = McpClient(session, methods=[replace(method, create_credential=counting)])
+
+        await client.call_tool("premium_tool", {})
+
+        # mppx canReusePrevious: only an attempt its method reports settled is signed again.
+        assert len(signed) == 2
+        assert [outcome.status for outcome in outcomes] == ["pending", "accepted"]
+
+    @pytest.mark.asyncio
+    async def test_same_challenge_whose_settle_fails_is_final(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), _payment_required_error()]
+        )
+        outcomes: list[AttemptOutcome] = []
+        method = settling_method(outcomes, settle_error=RuntimeError("settle failed"))
+        client = McpClient(session, methods=[method])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        # The method's state is unknown: neither resent nor signed again.
+        assert session.call_tool.await_count == 2
+        assert [outcome.status for outcome in outcomes] == ["pending"]
+
+    @pytest.mark.asyncio
+    async def test_same_challenge_without_settle_hook_resends_up_to_the_limit(self) -> None:
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error()] * 4)
+        signed: list[CredentialParams] = []
+
+        async def counting(params: CredentialParams) -> str:
+            signed.append(params)
+            return _credential().to_authorization()
+
+        client = McpClient(session, methods=[fake_method(create_credential=counting)])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        # One Credential, sent three times: the call's whole budget.
+        assert len(signed) == 1
+        metas = [call.kwargs["meta"] for call in session.call_tool.call_args_list[1:]]
+        assert len(metas) == 3 and all(meta == metas[0] for meta in metas)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("http_status", [410, "402", True])
+    async def test_verification_failed_other_than_402_starts_no_round(
+        self, http_status: object
+    ) -> None:
+        replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
+        error = _payment_required_error(replacement, code=-32043)
+        error.error.data["httpStatus"] = http_status  # pyright: ignore[reportAttributeAccessIssue,reportOptionalSubscript,reportIndexIssue]
+        session = AsyncMock()
+        session.call_tool = AsyncMock(side_effect=[_payment_required_error(), error])
+        outcomes: list[AttemptOutcome] = []
+        client = McpClient(session, methods=[settling_method(outcomes)])
+
+        with pytest.raises(PaymentOutcomeUnknownError):
+            await client.call_tool("premium_tool", {})
+
+        # The channel is gone: no new credential, though its challenges still settle.
+        assert session.call_tool.await_count == 2
+        assert [outcome.status for outcome in outcomes] == ["rejected"]
         assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
 
     @pytest.mark.asyncio
