@@ -29,6 +29,7 @@ from mpp import (
     ChallengeEcho,
     Credential,
 )
+from mpp._challenge_identity import same_challenge
 from mpp._defaults import DEFAULT_PAID_RETRY_TIMEOUT
 from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
 from mpp._pending_settlement import resume as resume_pending_settlement
@@ -305,6 +306,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             trusted_tempo_realms: Explicit origin-to-realm pins for zero-amount
                 Tempo charges and Tempo session payments when a server uses a realm
                 other than its hostname.
+            max_payment_retries: Credentials sent per request at most. A ``402``
+                answering a credential with a payable challenge, such as the real charge
+                after a zero-amount proof, is paid as a new round (mppx Fetch); one with
+                no payable challenge is returned as the server's answer.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
@@ -559,11 +564,11 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                 reused: Credential | None = None
                 if sent is not None:
                     previous, sent = sent, None
-                    # Only a method that tracks its credential can have it resent.
-                    same = (
-                        previous.attempt.settle is not None
-                        and previous.method is matched_method
-                        and previous.challenge == challenge
+                    # The same Challenge resends the credential unless the method settled
+                    # it; a method without a settle hook keeps no state, so its credential
+                    # stays unsettled (mppx canReusePrevious).
+                    same = previous.method is matched_method and same_challenge(
+                        challenge, previous.challenge
                     )
                     settled = await _settle_attempt(
                         previous.attempt,

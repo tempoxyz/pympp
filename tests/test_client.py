@@ -1022,10 +1022,12 @@ class TestPaymentTransport:
         final, so the client must not sign and broadcast a second payment."""
         challenge = Challenge(id="test-id", method="tempo", intent="charge", request={})
         offer = {"www-authenticate": challenge.to_www_authenticate("example.com")}
+        fresh = Challenge(id="fresh-id", method="tempo", intent="charge", request={})
+        new_offer = {"www-authenticate": fresh.to_www_authenticate("example.com")}
         inner = MockTransport(
             [
                 httpx.Response(402, headers=offer),
-                httpx.Response(402, headers=offer, content=b"payment refused"),
+                httpx.Response(402, headers=new_offer, content=b"payment refused"),
             ]
         )
         method = MockMethod()
@@ -1725,7 +1727,9 @@ class TestPaymentTransport:
 
         assert response.status_code == 200
         assert len(inner.requests) == 4
-        assert method.create_credential.await_count == 3
+        # The same Challenge resends the same credential, signed once (mppx Fetch).
+        assert method.create_credential.await_count == 1
+        assert len({r.headers["authorization"] for r in inner.requests[1:]}) == 1
 
     @pytest.mark.asyncio
     async def test_retries_payment_for_fresh_402_challenge(self) -> None:
