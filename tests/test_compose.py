@@ -119,6 +119,12 @@ def test_multi_method_creation_validates_configuration() -> None:
         Mpp(methods=[], realm="api.example.com", secret_key="secret")
 
 
+@pytest.mark.parametrize("name", ["tempo-v2", "tempo2", "Tempo", "vendor:method"])
+def test_creation_rejects_invalid_method_names(name: str) -> None:
+    with pytest.raises(ValueError, match="Invalid payment method name"):
+        Mpp(methods=[MockMethod(name).server], realm="api.example.com", secret_key="secret")
+
+
 def test_compose_validates_public_entries_at_configuration_time() -> None:
     method = MockMethod("first")
     server = Mpp(methods=method.server, realm="api.example.com", secret_key="secret")
