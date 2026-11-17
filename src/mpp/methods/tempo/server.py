@@ -134,7 +134,7 @@ def charge(
 
     Raises:
         ValueError: If ``zone_credential_grace_ms`` is not a finite number from 0 to
-            300000.
+            300000, or is set together with ``relay``.
     """
     from mpp.methods.tempo._zone import REDEMPTION_GRACE
 
@@ -148,6 +148,9 @@ def charge(
             "zone_credential_grace_ms must be a finite number of milliseconds "
             f"from 0 to {REDEMPTION_GRACE * 1000:g}."
         )
+    if relay is not None and zone_credential_grace_ms > 0:
+        # The relay verifies credentials itself and doesn't extend their expiry (mppx).
+        raise ValueError("zone_credential_grace_ms is not supported with relay.")
     if supported_modes is not None:
         if isinstance(supported_modes, str) or not supported_modes:
             raise ValueError("supported_modes must be a non-empty sequence of modes")
@@ -234,6 +237,7 @@ def charge(
             # The relay consumes credentials itself, so it needs no local replay store.
             _has_store=lambda: relay is not None or intent._store is not None,
             _credential_grace=intent._credential_grace,
+            _issue_expiry_grace=intent._issue_expiry_grace,
         )
         for accepted in config.currencies
     ]

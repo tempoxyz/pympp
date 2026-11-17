@@ -1562,6 +1562,47 @@ class TestClientZoneCancelledAfterSettlement:
         assert calls.count("eth_sendRawTransactionSync") == 2
 
     @pytest.mark.asyncio
+    async def test_a_retry_of_a_resuming_challenge_never_withdraws_again(self) -> None:
+        calls: list[str] = []
+
+        async def send() -> dict[str, Any]:
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": "0x" + "cd" * 32,
+                    "logs": [requested_log(PAYER.address, 9, "0x" + "00" * 32)],
+                }
+            }
+
+        settled = False
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return "0x20"
+            if method == "eth_getLogs":
+                return [processed_log(sender_tag=params[0]["topics"][2])] if settled else []
+            raise AssertionError(method)
+
+        zone = preparing_zone(calls, send)
+        method = payer_method(replace(zone, settlement_timeout=0), rpc_client(tempo_l1))
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        second, _ = await issue(server)
+        with pytest.raises(ZoneSettlementPendingError):
+            await pay_over_http(method, first)
+        # A newly issued Challenge resumes the withdrawal, which still hasn't settled.
+        with pytest.raises(ZoneSettlementPendingError):
+            await pay_over_http(method, second)
+        # Retrying that Challenge resumes it again rather than withdrawing again.
+        method.zone = zone
+        settled = True
+        credential = await pay_over_http(method, second)
+        assert credential.challenge.id == first.id
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
     async def test_a_new_challenge_for_other_terms_withdraws_again(self) -> None:
         calls: list[str] = []
 
@@ -2104,13 +2145,14 @@ class TestClientZoneStalledWithdrawals:
         )
         settled = True
         monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
-        # A server may still accept it within its grace period, so it is returned. It
-        # pays once either way, so it is forgotten: keeping it would block these terms
-        # for good (mppx).
+        # A server may still accept it within its grace period, so it is returned. It is
+        # kept for a retry of its own Challenge, which would otherwise pay again (mppx).
         credential = await method.create_credential(issued)
         assert credential.challenge.id == issued.id
+        again = await method.create_credential(issued)
+        assert again.payload == credential.payload
         assert calls.count("eth_sendRawTransactionSync") == 1
-        assert not method._zone_withdrawals  # pyright: ignore[reportPrivateUsage]
+        assert method._zone_withdrawals  # pyright: ignore[reportPrivateUsage]
 
     @pytest.mark.asyncio
     async def test_a_withdrawal_cancelled_after_it_was_sent_is_not_sent_again(self) -> None:
@@ -2150,6 +2192,118 @@ class TestClientZoneStalledWithdrawals:
         )
         assert receipt is None
         assert asyncio.get_running_loop().time() - started < 1
+
+
+class TestClientZoneLateCredentialAccepted:
+    """A late credential the server accepted paid once, so its terms are free again."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("status", "kept"), [(200, False), (403, True)])
+    async def test_an_accepted_late_credential_frees_its_terms(
+        self, monkeypatch: pytest.MonkeyPatch, status: int, kept: bool
+    ) -> None:
+        from mpp.client.transport import PaymentTransport
+
+        settled = False
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
+        paid: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if "authorization" in request.headers:
+                paid.append(request)
+                return httpx.Response(status)
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": issued.to_www_authenticate(REALM)}
+            )
+
+        transport = PaymentTransport(
+            [tempo_client._client_method(method)], inner=httpx.MockTransport(respond)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get(f"https://{REALM}/paid")
+        assert response.status_code == status
+        assert len(paid) == 1
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # Until the server accepts it, the server may have redeemed or refused it, so
+        # a Challenge with its terms still fails closed.
+        assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("outcome", ["accepted", "tool error", "refused"])
+    async def test_an_accepted_late_credential_frees_its_terms_over_mcp(
+        self, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        from mcp.shared.exceptions import McpError
+        from mcp.types import CallToolResult, ErrorData
+
+        from mpp.extensions.mcp import McpClient, PaymentOutcomeUnknownError
+        from mpp.extensions.mcp.constants import META_CREDENTIAL, META_RECEIPT
+        from mpp.extensions.mcp.types import MCPChallenge
+
+        settled = False
+        calls: list[str] = []
+        zone = replace(
+            scripted_zone(calls, eth_sendRawTransactionSync=sent_receipt()), settlement_timeout=0
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_challenge_expired", lambda expires: True)
+        offered = MCPChallenge.from_core(issued, REALM, expires=issued.expires).to_dict()
+        paid: list[dict[str, Any]] = []
+
+        class Session:
+            async def call_tool(
+                self, name: str, arguments: Any, meta: dict[str, Any] | None = None
+            ) -> CallToolResult:
+                if not meta or META_CREDENTIAL not in meta:
+                    raise McpError(
+                        ErrorData(
+                            code=-32042,
+                            message="Payment Required",
+                            data={"httpStatus": 402, "challenges": [offered]},
+                        )
+                    )
+                paid.append(meta)
+                if outcome == "refused":
+                    raise McpError(ErrorData(code=-32043, message="Payment verification failed"))
+                if outcome == "tool error":
+                    return CallToolResult(content=[], isError=True)
+                receipt = {
+                    "status": "success",
+                    "challengeId": issued.id,
+                    "method": "tempo",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "reference": "0xabc",
+                }
+                return CallToolResult(content=[], _meta={META_RECEIPT: receipt})
+
+        client = McpClient(Session(), methods=[tempo_client._client_method(method)])
+        if outcome == "refused":
+            with pytest.raises(PaymentOutcomeUnknownError):
+                await client.call_tool("paid", {})
+        else:
+            result = await client.call_tool("paid", {})
+            assert (result.receipt is not None) is (outcome == "accepted")
+        assert len(paid) == 1
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # The server verifies a credential before it runs the tool, so any result it
+        # returned for the credential, even a tool error, frees its terms.
+        kept = outcome == "refused"
+        assert bool(method._zone_withdrawals) is kept  # pyright: ignore[reportPrivateUsage]
 
 
 class TestWaitForSettlementFromBlock:
@@ -2341,6 +2495,91 @@ class TestServerZoneCredentialGrace:
         )
 
 
+class TestServerZoneExpiryGraceMarker:
+    """Only a challenge issued with the grace on carries the marker its grace needs (mppx)."""
+
+    @pytest.mark.asyncio
+    async def test_marks_challenges_only_when_a_grace_is_configured(self) -> None:
+        marked, _ = await issue(setup(zone_credential_grace_ms=60_000))
+        unmarked, _ = await issue(setup())
+        assert marked.opaque is not None
+        assert marked.opaque.get("_mppx_expiry_grace") == "1"
+        assert "_mppx_expiry_grace" not in (unmarked.opaque or {})
+
+    @pytest.mark.asyncio
+    async def test_gives_no_grace_to_a_challenge_issued_without_the_marker(self) -> None:
+        now = time.time()
+        rpc_methods: list[str] = []
+        fixture: list[Fixture] = []
+        issued, memo = await issue(setup(), expires=iso(now - 1))
+        server = setup(
+            lambda: fixture,
+            rpc_methods=rpc_methods,
+            settled_at=lambda: now - 31,
+            zone_credential_grace_ms=60_000,
+        )
+        fixture[:] = [Fixture(TAG_A, memo)]
+        with pytest.raises(PaymentExpiredError):
+            await server.broadcast_credential(zone_credential(issued, TAG_A))
+        assert "eth_getTransactionReceipt" not in rpc_methods
+
+    @pytest.mark.asyncio
+    async def test_a_marked_challenge_still_verifies_before_it_expires(self) -> None:
+        fixture: list[Fixture] = []
+        server = setup(lambda: fixture, zone_credential_grace_ms=60_000)
+        issued, memo = await issue(server)
+        fixture[:] = [Fixture(TAG_A, memo)]
+        receipt = await server.broadcast_credential(zone_credential(issued, TAG_A))
+        assert receipt.reference == SETTLEMENT_HASH
+
+    def test_refuses_a_grace_with_a_relay(self) -> None:
+        from mpp.methods.tempo.relay import Relay
+
+        with pytest.raises(ValueError, match="relay"):
+            tempo_server.charge(
+                recipient=MERCHANT,
+                currencies=[CURRENCY],
+                chain_id=MODERATO,
+                zones=[ZONE_ID],
+                relay=Relay(api_key="test"),
+                zone_credential_grace_ms=60_000,
+            )
+
+    @pytest.mark.parametrize(
+        ("url", "origin"),
+        [
+            ("https://API.example.com:8443/x", "https://api.example.com:8443"),
+            ("http://api.example.com/x", "http://api.example.com"),
+            ("ws://api.example.com/x", None),
+            ("file://host/x", None),
+        ],
+    )
+    def test_only_http_origins_are_known(self, url: str, origin: str | None) -> None:
+        request = httpx.Request("GET", url)
+        assert tempo_client._request_origin(request) == origin  # pyright: ignore[reportPrivateUsage]
+
+
+class TestCredentialChallenge:
+    """Identity proofs bind to the Challenge a credential pays (mppx)."""
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_credential_pays_its_earlier_challenge(self) -> None:
+        from mpp import Credential
+        from mpp.client.transport import (
+            _credential_challenge,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        server = setup(zones=[3])
+        earlier, _ = await issue(server)
+        selected, _ = await issue(server)
+        paid = _credential_challenge(Credential(challenge=earlier.to_echo(), payload={}), selected)
+        assert paid.id == earlier.id
+        assert paid.opaque == earlier.opaque
+        assert paid.credential_header == selected.credential_header
+        same = Credential(challenge=selected.to_echo(), payload={})
+        assert _credential_challenge(same, selected) is selected
+
+
 class TestServerZoneSettlementRedeemsOnce:
     """A transfer from a Zone portal never matches a hash credential (mppx)."""
 
@@ -2440,6 +2679,7 @@ class TestClientZoneOneWithdrawalPerIntent:
         assert isinstance(error, ZoneSettlementPendingError)
         assert error.challenge_id == first.id
         assert error.sender_tag is None
+        assert not error.redeemed_late
         assert "withdrawal for challenge" in str(error)
         assert calls == before
 
@@ -2458,10 +2698,50 @@ class TestClientZoneOneWithdrawalPerIntent:
         )
         # As if the first Challenge expired more than five minutes ago.
         monkeypatch.setattr(zone_lib, "REDEMPTION_GRACE", -3600.0)
-        for challenge in (first, retried):
-            error = await error_of(method.create_credential(challenge, origin=ORIGIN))
-            assert isinstance(error, ZoneSettlementPendingError)
-            assert error.challenge_id == first.id
+        # Its own Challenge fails closed: the withdrawal may have paid it.
+        error = await error_of(method.create_credential(first, origin=ORIGIN))
+        assert isinstance(error, ZoneSettlementPendingError)
+        assert error.challenge_id == first.id
+        assert calls.count("eth_sendRawTransactionSync") == 1
+        # No server redeems it any more, so it no longer pays another Challenge and is
+        # dropped: a new Challenge with the same terms is a new payment (mppx).
+        error = await error_of(method.create_credential(retried, origin=ORIGIN))
+        assert isinstance(error, ZoneSettlementPendingError)
+        assert error.challenge_id == retried.id
+        assert calls.count("eth_sendRawTransactionSync") == 2
+
+    @pytest.mark.asyncio
+    async def test_a_late_credential_is_returned_only_for_its_own_challenge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        settled = False
+        method = self.stalled(calls, lambda: settled)
+        server = setup(zones=[3])
+        first, _ = await issue(server)
+        retried, _ = await issue(server)
+        assert isinstance(
+            await error_of(method.create_credential(first, origin=ORIGIN)),
+            ZoneSettlementPendingError,
+        )
+        settled = True
+        expired = {first.expires}
+        monkeypatch.setattr(
+            tempo_client, "_zone_challenge_expired", lambda expires: expires in expired
+        )
+        late = await method.create_credential(first, origin=ORIGIN)
+        assert late.challenge.id == first.id
+        # Its server may have redeemed or refused it, so another Challenge with the same
+        # terms neither gets it nor withdraws again until its window ends (mppx).
+        error = await error_of(method.create_credential(retried, origin=ORIGIN))
+        assert isinstance(error, ZoneSettlementPendingError)
+        assert error.challenge_id == first.id
+        assert error.sender_tag == late.payload["senderTag"]
+        assert str(late.payload["senderTag"]) in str(error)
+        assert error.redeemed_late
+        assert "settled, and its credential was returned after" in str(error)
+        # A retry of its own Challenge gets the same credential again.
+        assert (await method.create_credential(first, origin=ORIGIN)).payload == late.payload
         assert calls.count("eth_sendRawTransactionSync") == 1
 
     @pytest.mark.asyncio

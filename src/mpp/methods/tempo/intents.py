@@ -1048,12 +1048,27 @@ class ChargeIntent:
         """Seconds past its challenge's expiry this intent accepts ``credential``.
 
         Only a ``zone`` credential gets ``zone_credential_grace``: its settlement block
-        proves the payment completed before the expiry (:meth:`_validate_zone`).
+        proves the payment completed before the expiry (:meth:`_validate_zone`). And only
+        for a challenge issued with the grace on, which carries the expiry grace marker in its
+        HMAC-bound opaque metadata: one issued without it (by an earlier release, or with no
+        grace) gets none (mppx).
         """
+        from mpp._credential_expiry import has_expiry_grace
+
         payload = credential.payload
-        if is_dict(payload) and payload.get("type") == "zone":
+        if (
+            self._zone_credential_grace > 0
+            and is_dict(payload)
+            and payload.get("type") == "zone"
+            and has_expiry_grace(credential.challenge)
+        ):
             return self._zone_credential_grace
         return 0.0
+
+    @property
+    def _issue_expiry_grace(self) -> bool:
+        """Whether challenges issued for this intent carry the expiry grace marker."""
+        return self._zone_credential_grace > 0
 
     def _challenge_expired(self, credential: Credential, expires: str) -> bool:
         """Whether a challenge expired, past any grace its credential gets."""

@@ -36,9 +36,21 @@ from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
 from mpp.errors import NoMethodFoundError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
-from mpp.extensions.mcp.constants import CODE_PAYMENT_REQUIRED, META_CREDENTIAL, META_RECEIPT
+from mpp.extensions.mcp.constants import (
+    CODE_PAYMENT_REQUIRED,
+    CODE_PAYMENT_VERIFICATION_FAILED,
+    META_CREDENTIAL,
+    META_RECEIPT,
+)
 from mpp.extensions.mcp.types import MCPChallenge, MCPCredential, MCPReceipt
-from mpp.runtime import ChallengeCandidate, ClientMethod, OrderChallenges, PaymentRuntime
+from mpp.runtime import (
+    AttemptOutcome,
+    ChallengeCandidate,
+    ClientMethod,
+    OrderChallenges,
+    PaymentAttempt,
+    PaymentRuntime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -241,26 +253,43 @@ class McpClient:
             # A Zone withdrawal still settling is resumed for this same Challenge
             # rather than paid again under a new one (mppx).
             core_challenge = challenge.to_core()
-            core_credential = await resume_pending_settlement(
-                lambda check_expiry: self._runtime.create_credential(
-                    core_challenge, method, check_expiry=check_expiry
-                ),
-                _MAX_PAYMENT_ATTEMPTS,
-            )
-            mcp_credential = MCPCredential.from_core(core_credential, challenge)
-
-            retry_meta = dict(meta) if meta else {}
-            retry_meta.update(mcp_credential.to_meta())
+            attempt = PaymentAttempt()
+            try:
+                core_credential = await resume_pending_settlement(
+                    lambda check_expiry: self._runtime.create_credential(
+                        core_challenge, method, attempt=attempt, check_expiry=check_expiry
+                    ),
+                    _MAX_PAYMENT_ATTEMPTS,
+                )
+                mcp_credential = MCPCredential.from_core(core_credential, challenge)
+                retry_meta = dict(meta) if meta else {}
+                retry_meta.update(mcp_credential.to_meta())
+            except BaseException:
+                # A credential that never reaches the server is rejected, so the method
+                # releases its state, even when an event handler fails or the call is
+                # cancelled after signing (as over HTTP).
+                await _settle_attempt(attempt, AttemptOutcome(status="rejected"))
+                raise
 
             retry_kwargs: dict[str, Any] = {"meta": retry_meta}
             if timeout is not None:
                 retry_kwargs["read_timeout_seconds"] = timeout
 
+            # The method may keep state for this credential until it learns the outcome,
+            # as over HTTP. The server verifies a credential before it runs the tool and
+            # refuses it with a -32042 error, so a returned tool result counts as accepted,
+            # even one reporting a tool error.
             try:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
             except (Exception, get_cancelled_exc_class()) as exc:
+                # A replacement challenge may still acknowledge what the credential opened.
+                await _settle_attempt(
+                    attempt,
+                    AttemptOutcome(status="rejected", challenges=_error_challenges(exc)),
+                )
                 raise PaymentOutcomeUnknownError(challenge, exc) from exc
 
+            await _settle_attempt(attempt, AttemptOutcome(status="accepted"))
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
 
@@ -325,3 +354,47 @@ class McpClient:
         except (KeyError, TypeError):
             logger.warning("Failed to parse receipt from _meta")
             return None
+
+
+def _core_challenges(challenges: Sequence[MCPChallenge]) -> tuple[CoreChallenge, ...]:
+    """The challenges among ``challenges`` that convert to core challenges."""
+    cores: list[CoreChallenge] = []
+    for offered in challenges:
+        try:
+            cores.append(offered.to_core())
+        except Exception:  # noqa: BLE001 - an unconvertible challenge acknowledges nothing
+            continue
+    return tuple(cores)
+
+
+def _error_challenges(error: BaseException) -> tuple[CoreChallenge, ...]:
+    """The challenges of a ``-32042`` payment required or ``-32043`` verification
+    failed error, else none: the server sends fresh challenges with either."""
+    if not isinstance(error, Exception):
+        return ()
+    if not _is_payment_required_error(error) and _error_code(error) != (
+        CODE_PAYMENT_VERIFICATION_FAILED
+    ):
+        return ()
+    return _core_challenges(_extract_challenges(error))
+
+
+async def _settle_attempt(attempt: PaymentAttempt, outcome: AttemptOutcome) -> None:
+    """Report a paid retry's outcome to the method that created its credential.
+
+    A tool call has no redirect or resend, so an accepted outcome the method doesn't settle
+    is settled as rejected, which releases whatever it kept for the credential. A failing
+    settle hook is logged, never raised: the server has already answered the call.
+    """
+    settle = attempt.settle
+    if settle is None:
+        return
+    attempt.settle = None
+    try:
+        if await settle(outcome) or outcome.status == "rejected":
+            return
+        await settle(AttemptOutcome(status="rejected", challenges=outcome.challenges))
+    except Exception as error:  # noqa: BLE001 - the tool call's own outcome wins
+        logger.warning(
+            "Payment method failed to settle a paid tool call (%s)", type(error).__name__
+        )

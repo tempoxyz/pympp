@@ -168,7 +168,8 @@ async def verify_or_challenge(
             realm,
             secret_key,
             description,
-            meta,
+            # Marks the challenge when the intent accepts some credentials past its expiry.
+            _credential_expiry.issuance_meta(intent, meta),
             expires,
             body,
             header,
@@ -315,7 +316,7 @@ async def verify_or_challenge(
             credential,
         )
 
-    if _application_meta(echo_opaque) != (meta or None):
+    if _application_meta(echo_opaque) != _application_meta(meta):
         return await fail(
             InvalidChallengeError(echo.id, "credential opaque does not match this route"),
             credential,
@@ -586,7 +587,9 @@ def _extract_payment_scheme(header: str) -> str | None:
 
 
 def _application_meta(meta: dict[str, str] | None) -> dict[str, str] | None:
-    """Remove the HMAC-authenticated issuance nonce for route comparison."""
+    """Remove the HMAC-authenticated issuance nonce and expiry grace marker for route
+    comparison."""
     if not isinstance(meta, dict):
         return None
-    return {key: value for key, value in meta.items() if key != "_mpp_nonce"} or None
+    reserved = ("_mpp_nonce", _credential_expiry.EXPIRY_GRACE_KEY)
+    return {key: value for key, value in meta.items() if key not in reserved} or None

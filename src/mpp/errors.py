@@ -120,6 +120,11 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
     credential for that challenge; otherwise it raises this error again.
     The settlement can also be found by ``sender_tag`` on the Zone's portal.
     The error that ended the wait is its ``__cause__``.
+
+    With ``redeemed_late``, the withdrawal settled and its credential was returned
+    after its challenge expired, so the server may still accept or refuse it: only a
+    retry with ``challenge`` gets that credential again, and a new challenge for the
+    same payment raises this error until the redemption window ends.
     """
 
     def __init__(
@@ -129,9 +134,13 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
         sender_tag: str | None = None,
         zone_id: int,
         challenge: Any = None,
+        redeemed_late: bool = False,
     ) -> None:
         self.challenge = challenge
         """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
+        self.redeemed_late = redeemed_late
+        """Whether the withdrawal settled and its credential was returned after its
+        challenge expired."""
         self.challenge_id = challenge_id
         """ID of the challenge the withdrawal pays."""
         self.sender_tag = sender_tag
@@ -140,11 +149,20 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
         self.zone_id = zone_id
         """ID of the Zone the withdrawal left."""
         withdrawal = f"{sender_tag} " if sender_tag else ""
-        super().__init__(
-            f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} has not "
-            "settled on Tempo yet. Retry with this error's challenge to resume waiting "
-            "instead of paying again."
-        )
+        if redeemed_late:
+            message = (
+                f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} "
+                "settled, and its credential was returned after the challenge expired. "
+                "Retry with this error's challenge to get that credential again instead "
+                "of paying again."
+            )
+        else:
+            message = (
+                f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} has "
+                "not settled on Tempo yet. Retry with this error's challenge to resume "
+                "waiting instead of paying again."
+            )
+        super().__init__(message)
 
 
 class ZoneWithdrawalBouncedError(PaymentError, RuntimeError):
