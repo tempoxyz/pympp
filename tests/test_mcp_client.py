@@ -1003,6 +1003,53 @@ class TestMcpClientAttemptSettlement:
         assert [outcome.status for outcome in outcomes] == ["rejected", "rejected"]
 
     @pytest.mark.asyncio
+    async def test_unknown_outcome_from_a_later_round_method_is_raised_as_is(self) -> None:
+        replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            side_effect=[_payment_required_error(), _payment_required_error(replacement)]
+        )
+        outcomes: list[AttemptOutcome] = []
+        second_outcomes: list[AttemptOutcome] = []
+        method = settling_method(outcomes)
+        create = method.create_credential
+        created: list[CredentialParams] = []
+        failures: list[PaymentOutcomeUnknownError] = []
+
+        async def broadcasting_second(params: CredentialParams) -> str:
+            created.append(params)
+            if len(created) == 2:
+                assert params.attempt is not None
+
+                async def settle(outcome: AttemptOutcome) -> bool:
+                    second_outcomes.append(outcome)
+                    return True
+
+                params.attempt.settle = settle
+                # A push payment broadcast whose inclusion could not be confirmed.
+                failure = PaymentOutcomeUnknownError(
+                    params.challenge, TimeoutError(), transaction_hash="0xabc"
+                )
+                failures.append(failure)
+                raise failure
+            return await create(params)
+
+        client = McpClient(
+            session, methods=[replace(method, create_credential=broadcasting_second)]
+        )
+
+        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+            await client.call_tool("premium_tool", {})
+
+        # The method's own error reaches the caller with its Challenge and hash intact.
+        assert raised.value is failures[0]
+        assert raised.value.challenge.id == "ch_replacement"
+        assert raised.value.transaction_hash == "0xabc"
+        assert session.call_tool.await_count == 2
+        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        assert [outcome.status for outcome in second_outcomes] == ["rejected"]
+
+    @pytest.mark.asyncio
     async def test_cancelled_later_round_settles_and_propagates(self) -> None:
         replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
         session = AsyncMock()

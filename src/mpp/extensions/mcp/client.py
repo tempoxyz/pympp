@@ -314,7 +314,13 @@ class McpClient:
                 # cancelled after signing (as over HTTP).
                 with CancelScope(shield=True):
                     await _settle_attempt(attempt, AttemptOutcome(status="rejected"))
-                if refused is None or not isinstance(failure, Exception):
+                if (
+                    refused is None
+                    or not isinstance(failure, Exception)
+                    # The method's own unknown outcome (such as a broadcast push payment)
+                    # carries its transaction hash: keep it, as over HTTP.
+                    or isinstance(failure, PaymentOutcomeUnknownError)
+                ):
                     raise
                 # A later round failed before sending (such as an expired replacement): the
                 # Credential already sent is what the caller must reconcile.
