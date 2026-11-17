@@ -14,7 +14,11 @@ from pydantic import BaseModel, ConfigDict
 
 from mpp import Challenge, ChallengeEcho, Credential, NoMethodFoundError
 from mpp import PaymentOutcomeUnknownError as CoreOutcomeUnknownError
-from mpp.errors import PaymentExpiredError
+from mpp.errors import (
+    PaymentExpiredError,
+    ZoneSettlementPendingError,
+    ZoneWithdrawalBouncedError,
+)
 from mpp.extensions.mcp import (
     META_CREDENTIAL,
     META_RECEIPT,
@@ -1003,7 +1007,32 @@ class TestMcpClientAttemptSettlement:
         assert [outcome.status for outcome in outcomes] == ["rejected", "rejected"]
 
     @pytest.mark.asyncio
-    async def test_unknown_outcome_from_a_later_round_method_is_raised_as_is(self) -> None:
+    @pytest.mark.parametrize(
+        "make_failure",
+        [
+            pytest.param(
+                lambda challenge: PaymentOutcomeUnknownError(
+                    challenge, TimeoutError(), transaction_hash="0xabc"
+                ),
+                id="outcome-unknown",
+            ),
+            pytest.param(
+                lambda challenge: ZoneSettlementPendingError(
+                    challenge_id=challenge.id, sender_tag="0xtag", zone_id=7, challenge=challenge
+                ),
+                id="zone-settlement-pending",
+            ),
+            pytest.param(
+                lambda challenge: ZoneWithdrawalBouncedError(
+                    challenge_id=challenge.id, sender_tag="0xtag", zone_id=7, challenge=challenge
+                ),
+                id="zone-withdrawal-bounced",
+            ),
+        ],
+    )
+    async def test_funds_moved_error_from_a_later_round_method_is_raised_as_is(
+        self, make_failure: Any
+    ) -> None:
         replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
         session = AsyncMock()
         session.call_tool = AsyncMock(
@@ -1014,39 +1043,37 @@ class TestMcpClientAttemptSettlement:
         method = settling_method(outcomes)
         create = method.create_credential
         created: list[CredentialParams] = []
-        failures: list[PaymentOutcomeUnknownError] = []
+        failures: list[
+            PaymentOutcomeUnknownError | ZoneSettlementPendingError | ZoneWithdrawalBouncedError
+        ] = []
 
-        async def broadcasting_second(params: CredentialParams) -> str:
+        async def failing_later(params: CredentialParams) -> str:
             created.append(params)
-            if len(created) == 2:
-                assert params.attempt is not None
+            if len(created) == 1:
+                return await create(params)
+            assert params.attempt is not None
 
-                async def settle(outcome: AttemptOutcome) -> bool:
-                    second_outcomes.append(outcome)
-                    return True
+            async def settle(outcome: AttemptOutcome) -> bool:
+                second_outcomes.append(outcome)
+                return True
 
-                params.attempt.settle = settle
-                # A push payment broadcast whose inclusion could not be confirmed.
-                failure = PaymentOutcomeUnknownError(
-                    params.challenge, TimeoutError(), transaction_hash="0xabc"
-                )
-                failures.append(failure)
-                raise failure
-            return await create(params)
+            params.attempt.settle = settle
+            # Funds the method may already have moved (a broadcast payment, a Zone
+            # withdrawal on chain): its error carries the Challenge to resume or reconcile.
+            if not failures:
+                failures.append(make_failure(params.challenge))
+            raise failures[0]
 
-        client = McpClient(
-            session, methods=[replace(method, create_credential=broadcasting_second)]
-        )
+        client = McpClient(session, methods=[replace(method, create_credential=failing_later)])
 
-        with pytest.raises(PaymentOutcomeUnknownError) as raised:
+        with pytest.raises(Exception) as raised:
             await client.call_tool("premium_tool", {})
 
-        # The method's own error reaches the caller with its Challenge and hash intact.
         assert raised.value is failures[0]
-        assert raised.value.challenge.id == "ch_replacement"
-        assert raised.value.transaction_hash == "0xabc"
+        assert failures[0].challenge.id == "ch_replacement"
         assert session.call_tool.await_count == 2
         assert [outcome.status for outcome in outcomes] == ["rejected"]
+        # The unsent attempt settles once, after any resumed waits.
         assert [outcome.status for outcome in second_outcomes] == ["rejected"]
 
     @pytest.mark.asyncio

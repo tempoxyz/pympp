@@ -37,7 +37,7 @@ from mpp._challenge_identity import same_challenge
 from mpp._parsing import is_payment_authorization_header
 from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
-from mpp.errors import NoMethodFoundError
+from mpp.errors import NoMethodFoundError, ZoneSettlementPendingError, ZoneWithdrawalBouncedError
 from mpp.errors import PaymentOutcomeUnknownError as PaymentOutcomeUnknownError
 from mpp.extensions.mcp.constants import (
     CODE_PAYMENT_REQUIRED,
@@ -61,6 +61,14 @@ logger = logging.getLogger(__name__)
 
 # Credential creations per paid call while a Zone withdrawal settles, as mppx's McpClient.
 _MAX_PAYMENT_ATTEMPTS = 3
+
+# Errors a method raises to report funds it may already have moved (a broadcast payment, a
+# Zone withdrawal on chain), with the Challenge to resume or reconcile it: raised as is.
+_FUNDS_MOVED_ERRORS = (
+    PaymentOutcomeUnknownError,
+    ZoneSettlementPendingError,
+    ZoneWithdrawalBouncedError,
+)
 
 
 def _error_code(error: Exception) -> int | None:
@@ -243,6 +251,8 @@ class McpClient:
         Raises:
             McpError: If the error is not payment-related or no method matches.
             PaymentOutcomeUnknownError: If the paid retry fails after sending a credential.
+            ZoneSettlementPendingError: If a Zone withdrawal paying a challenge has not
+                settled yet: retry with its ``challenge`` to resume waiting.
             NoMethodFoundError: If no installed method matches the server's challenge.
             ValueError: If the server's challenges are malformed.
         """
@@ -317,9 +327,9 @@ class McpClient:
                 if (
                     refused is None
                     or not isinstance(failure, Exception)
-                    # The method's own unknown outcome (such as a broadcast push payment)
-                    # carries its transaction hash: keep it, as over HTTP.
-                    or isinstance(failure, PaymentOutcomeUnknownError)
+                    # The method's own report of funds it moved (a broadcast push payment's
+                    # hash, a pending Zone withdrawal's Challenge): keep it, as over HTTP.
+                    or isinstance(failure, _FUNDS_MOVED_ERRORS)
                 ):
                     raise
                 # A later round failed before sending (such as an expired replacement): the
