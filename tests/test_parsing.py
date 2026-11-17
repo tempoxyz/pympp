@@ -14,10 +14,21 @@ from mpp._parsing import MAX_AUTHORIZATION_SIZE, MAX_HEADER_PAYLOAD_SIZE, ParseE
 from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
-INVALID_PAYMENT_METHOD_IDS = ("Tempo", "tempo.pay", "2tempo", "-tempo", "tempo pay")
-# mppx's grammar (^[a-z][a-z0-9:_-]*$) allows digits, colons, underscores and
-# hyphens after a leading lowercase letter.
-VALID_EXTENDED_PAYMENT_METHOD_IDS = ("tempo2", "tempo-pay", "tempo_pay", "vendor:method", "x402")
+# The spec grammar is payment-method-id = 1*LOWERALPHA: lowercase a-z only.
+INVALID_PAYMENT_METHOD_IDS = (
+    "Tempo",
+    "TEMPO",
+    "tempo.pay",
+    "2tempo",
+    "-tempo",
+    "tempo pay",
+    "tempo2",
+    "tempo-pay",
+    "tempo_pay",
+    "vendor:method",
+    "x402",
+    "a1:b_2-c",
+)
 
 
 def _b64_json(data: Mapping[str, object]) -> str:
@@ -105,15 +116,20 @@ class TestChallenge:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Challenge.from_www_authenticate(header)
 
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_method_id(self, method: str) -> None:
-        header = (
-            f'Payment id="test", realm="api.example.com", method="{method}", '
-            'intent="charge", request="e30"'
-        )
+    @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
+    def test_format_rejects_invalid_method_id(self, method: str) -> None:
+        challenge = Challenge(id="test", method=method, intent="charge", request={})
 
-        challenge = Challenge.from_www_authenticate(header)
-        assert challenge.method == method
+        with pytest.raises(ParseError, match="Invalid payment method id"):
+            challenge.to_www_authenticate("api.example.com")
+
+    @pytest.mark.parametrize("method", ["tempo", "stripe", "evm", "custompay"])
+    def test_lowercase_method_id_roundtrips(self, method: str) -> None:
+        challenge = Challenge(id="test", method=method, intent="charge", request={})
+
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert Challenge.from_www_authenticate(header).method == method
 
     @pytest.mark.parametrize(
         "header",
@@ -537,22 +553,6 @@ class TestCredential:
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Credential.from_authorization(header)
 
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_challenge_method_id(self, method: str) -> None:
-        data = {
-            "challenge": {
-                "id": "test-id",
-                "realm": "api.example.com",
-                "method": method,
-                "intent": "charge",
-                "request": "e30",
-            },
-            "payload": {},
-        }
-
-        credential = Credential.from_authorization("Payment " + _b64_json(data))
-        assert credential.challenge.method == method
-
     def test_roundtrip_with_optional_challenge_fields(self) -> None:
         credential = Credential(
             challenge=ChallengeEcho(
@@ -886,17 +886,6 @@ class TestReceipt:
 
         with pytest.raises(ParseError, match="Invalid payment method id"):
             Receipt.from_payment_receipt(b64)
-
-    @pytest.mark.parametrize("method", VALID_EXTENDED_PAYMENT_METHOD_IDS)
-    def test_parse_accepts_extended_charset_method_id(self, method: str) -> None:
-        payload = {
-            "status": "success",
-            "timestamp": "2024-01-20T12:00:00Z",
-            "reference": "0xabc",
-            "method": method,
-        }
-
-        assert Receipt.from_payment_receipt(_b64_json(payload)).method == method
 
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
