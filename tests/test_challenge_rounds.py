@@ -676,9 +676,12 @@ async def test_mcp_new_round_does_not_pay_expired_challenge() -> None:
     server = McpServer(handle)
     wallet = Wallet()
 
-    with pytest.raises(PaymentExpiredError):
+    # The proof was sent and refused: its unknown outcome is reported, never the expiry alone.
+    with pytest.raises(PaymentOutcomeUnknownError) as raised:
         await _mcp_client(server, wallet).call_tool("premium", {})
 
+    assert raised.value.challenge.id == "proof-1"
+    assert isinstance(raised.value.__cause__, PaymentExpiredError)
     assert server.paid_ids == ["proof-1"]
     assert wallet.signed_ids == ["proof-1"]
 

@@ -285,33 +285,40 @@ class McpClient:
 
         challenge, method = await self._select_challenge(error)
         sends = 0
+        # The Credential last sent and the server's refusal of it, once a round has ended.
+        refused: tuple[MCPChallenge, BaseException] | None = None
         while True:
-            core_challenge = challenge.to_core()
             attempt = PaymentAttempt()
-
-            def create(
-                check_expiry: bool,
-                challenge: CoreChallenge = core_challenge,
-                method: ClientMethod = method,
-                attempt: PaymentAttempt = attempt,
-            ) -> Awaitable[CoreCredential]:
-                return self._runtime.create_credential(
-                    challenge, method, attempt=attempt, check_expiry=check_expiry
-                )
-
             try:
+                core_challenge = challenge.to_core()
+
+                def create(
+                    check_expiry: bool,
+                    challenge: CoreChallenge = core_challenge,
+                    method: ClientMethod = method,
+                    attempt: PaymentAttempt = attempt,
+                ) -> Awaitable[CoreCredential]:
+                    return self._runtime.create_credential(
+                        challenge, method, attempt=attempt, check_expiry=check_expiry
+                    )
+
                 # A Zone withdrawal still settling is resumed for this same Challenge
                 # rather than paid again under a new one (mppx).
                 core_credential = await resume_pending_settlement(create, _MAX_PAYMENT_ATTEMPTS)
                 mcp_credential = MCPCredential.from_core(core_credential, challenge)
                 retry_meta = dict(meta) if meta else {}
                 retry_meta.update(mcp_credential.to_meta())
-            except BaseException:
+            except BaseException as failure:
                 # A credential that never reaches the server is rejected, so the method
                 # releases its state, even when an event handler fails or the call is
                 # cancelled after signing (as over HTTP).
-                await _settle_attempt(attempt, AttemptOutcome(status="rejected"))
-                raise
+                with CancelScope(shield=True):
+                    await _settle_attempt(attempt, AttemptOutcome(status="rejected"))
+                if refused is None or not isinstance(failure, Exception):
+                    raise
+                # A later round failed before sending (such as an expired replacement): the
+                # Credential already sent is what the caller must reconcile.
+                raise PaymentOutcomeUnknownError(*refused) from failure
 
             retry_kwargs: dict[str, Any] = {"meta": retry_meta}
             if timeout is not None:
@@ -383,6 +390,7 @@ class McpClient:
                     if _is_pushed(core_credential):
                         # A payment already on chain: paying again could pay twice.
                         raise PaymentOutcomeUnknownError(challenge, exc) from exc
+                    refused = (challenge, exc)
                     challenge, method = selected
                     break
 
