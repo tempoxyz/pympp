@@ -544,6 +544,19 @@ def parse_payment_receipt(header: str) -> Receipt:
     )
 
 
+def receipt_with_valid_method(receipt: Receipt, method: str) -> Receipt:
+    """Return ``receipt`` with ``method`` in place of a method id the grammar rejects.
+
+    Runs once a payment has settled, so the receipt can always be sent: a method's
+    ``verify`` that reports an invalid id must not turn a charge into a 500.
+    """
+    if _PAYMENT_METHOD_ID_RE.fullmatch(receipt.method):
+        return receipt
+    from dataclasses import replace
+
+    return replace(receipt, method=method)
+
+
 def format_payment_receipt(receipt: Receipt) -> str:
     """Format a Receipt as a Payment-Receipt header value.
 

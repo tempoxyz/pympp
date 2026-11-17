@@ -457,3 +457,18 @@ def test_select_offers_must_be_callable() -> None:
             secret_key="secret",
             select_offers=cast(Any, object()),
         )
+
+
+async def test_settled_receipt_with_invalid_method_still_sends_its_header():
+    # A receipt's method that the grammar rejects must not turn a settled charge into a 500.
+    async def settle(_context: VerifyContext) -> Receipt:
+        return Receipt.success("ref", method="vendor-v2")
+
+    server = create_server(third_party_method("vendor", verify=settle))
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+
+    paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.method == "vendor"
+    assert Receipt.from_payment_receipt(paid.receipt.to_payment_receipt()).method == "vendor"

@@ -20,7 +20,12 @@ from mpp import (
     _credential_expiry,
     generate_challenge_id,
 )
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    ParseError,
+    _b64_decode,
+    receipt_with_valid_method,
+)
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
@@ -50,7 +55,8 @@ class Intent(Protocol):
 async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) -> Receipt:
     """Run ``validate`` then ``broadcast`` when the intent has them, else ``verify``.
 
-    The validation's ``payer`` is copied to the receipt unless it already has one.
+    The validation's ``payer`` is copied to the receipt unless it already has one, and an
+    invalid receipt ``method`` is replaced by the credential's.
     """
     if hasattr(intent, "broadcast"):
         validation = await intent.validate(credential, request)
@@ -59,8 +65,10 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
         receipt: Receipt = await intent.broadcast(credential, request)
         if validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)
-        return receipt
-    return await intent.verify(credential, request)
+        return receipt_with_valid_method(receipt, credential.challenge.method)
+    return receipt_with_valid_method(
+        await intent.verify(credential, request), credential.challenge.method
+    )
 
 
 async def verify_or_challenge(
