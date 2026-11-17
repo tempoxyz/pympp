@@ -63,6 +63,10 @@ TRANSACTIONS: dict[str, Any] = {
     "inline key": lambda: inline(),
     "wrong chain": lambda: inline(chain_id=999),
     "expired authorization": lambda: inline(expiry=1),
+    # mppx's verifiedPayer cannot prove a multisig signer either.
+    "multisig": lambda: with_signature(
+        unsigned(), b"\x05" + rlp.encode([bytes.fromhex(PAYER.address[2:]), [], []])
+    ),
 }
 
 

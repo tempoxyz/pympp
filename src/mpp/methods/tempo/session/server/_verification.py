@@ -231,7 +231,8 @@ async def assert_credential_source_is_payer(
     A credential without a source is accepted. Otherwise the source must be the transaction's
     payer, proven by its signature: a direct signature by the payer, an access key the
     transaction itself authorizes for the payer (for this chain and unexpired), or an access key
-    the payer authorized earlier that is neither revoked nor expired on chain.
+    the payer authorized earlier that is neither revoked nor expired on chain. Multisig (0x05)
+    signatures cannot prove the source, as in mppx; such opens must omit it.
     """
     if source is None:
         return
@@ -269,6 +270,8 @@ async def _signature_authenticates_payer(
 
     signer = verified_payer(serialized_transaction)
     if signer is None:
+        # Like mppx's verifiedPayer, this proves only secp256k1, P256, WebAuthn and keychain
+        # signatures, so a multisig (0x05) open that names a source is rejected on purpose.
         return False
     decoded = _decode_signed_transaction(bytes.fromhex(serialized_transaction[2:]))
     if decoded is None:
