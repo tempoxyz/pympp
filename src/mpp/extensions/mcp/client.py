@@ -27,11 +27,13 @@ Example:
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
 from mpp import Challenge as CoreChallenge
+from mpp import Credential as CoreCredential
 from mpp._parsing import is_payment_authorization_header
 from mpp._pending_settlement import resume as resume_pending_settlement
 from mpp._typing import is_dict, is_list
@@ -52,6 +54,7 @@ from mpp.runtime import (
     PaymentAttempt,
     PaymentRuntime,
 )
+from mpp.x402._client import is_x402_challenge
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +245,6 @@ class McpClient:
             NoMethodFoundError: If no installed method matches the server's challenge.
             ValueError: If the server's challenges are malformed.
         """
-        from anyio import get_cancelled_exc_class
         from mcp.shared.exceptions import McpError
 
         call_kwargs: dict[str, Any] = {}
@@ -259,45 +261,44 @@ class McpClient:
         except McpError as e:
             if not _is_payment_required_error(e) or (meta and META_CREDENTIAL in meta):
                 raise
+            return await self._pay(name, arguments, e, meta=meta, timeout=timeout)
 
-            challenges = _extract_challenges(e)
-            if not challenges and _only_unsupported_credential_headers(e):
-                # Well-formed but unsupported challenges: nothing this client may pay.
-                raise NoMethodFoundError(
-                    (),
-                    self._runtime.methods,
-                    message=(
-                        "No supported payment challenge: every challenge selects an "
-                        "unsupported credential header"
-                    ),
-                ) from e
-            if not challenges:
-                raise ValueError("Server returned malformed payment challenges") from e
+    async def _pay(
+        self,
+        name: str,
+        arguments: dict[str, Any] | None,
+        error: Exception,
+        *,
+        meta: dict[str, Any] | None,
+        timeout: float | None,
+    ) -> McpToolResult:
+        """Pay the challenges of a ``-32042`` error and call the tool again with the credential.
 
-            # A challenge that can't be converted (such as a request that won't
-            # canonicalize) is unpayable on its own; it doesn't block the others.
-            usable: list[MCPChallenge] = []
-            cores: list[CoreChallenge] = []
-            for offered in challenges:
-                try:
-                    cores.append(offered.to_core())
-                except Exception:  # noqa: BLE001 - any conversion failure means unpayable
-                    continue
-                usable.append(offered)
-            candidates = await self._runtime.order_challenges(cores, self._order_challenges)
-            challenge, method = self._match_challenge(usable, candidates)
+        A ``-32042`` or ``-32043`` answering a credential with a payable challenge (such as
+        the real charge after a zero-amount proof) starts a new round, up to
+        ``_MAX_PAYMENT_ATTEMPTS`` credentials per call (mppx ``McpClient``).
+        """
+        from anyio import get_cancelled_exc_class
 
-            # A Zone withdrawal still settling is resumed for this same Challenge
-            # rather than paid again under a new one (mppx).
+        challenge, method = await self._select_challenge(error)
+        for round_number in range(_MAX_PAYMENT_ATTEMPTS):
             core_challenge = challenge.to_core()
             attempt = PaymentAttempt()
-            try:
-                core_credential = await resume_pending_settlement(
-                    lambda check_expiry: self._runtime.create_credential(
-                        core_challenge, method, attempt=attempt, check_expiry=check_expiry
-                    ),
-                    _MAX_PAYMENT_ATTEMPTS,
+
+            def create(
+                check_expiry: bool,
+                challenge: CoreChallenge = core_challenge,
+                method: ClientMethod = method,
+                attempt: PaymentAttempt = attempt,
+            ) -> Awaitable[CoreCredential]:
+                return self._runtime.create_credential(
+                    challenge, method, attempt=attempt, check_expiry=check_expiry
                 )
+
+            try:
+                # A Zone withdrawal still settling is resumed for this same Challenge
+                # rather than paid again under a new one (mppx).
+                core_credential = await resume_pending_settlement(create, _MAX_PAYMENT_ATTEMPTS)
                 mcp_credential = MCPCredential.from_core(core_credential, challenge)
                 retry_meta = dict(meta) if meta else {}
                 retry_meta.update(mcp_credential.to_meta())
@@ -320,15 +321,63 @@ class McpClient:
                 retry_result = await self._session.call_tool(name, arguments, **retry_kwargs)
             except (Exception, get_cancelled_exc_class()) as exc:
                 # A replacement challenge may still acknowledge what the credential opened.
+                replacements = _error_challenges(exc)
                 await _settle_attempt(
-                    attempt,
-                    AttemptOutcome(status="rejected", challenges=_error_challenges(exc)),
+                    attempt, AttemptOutcome(status="rejected", challenges=replacements)
                 )
-                raise PaymentOutcomeUnknownError(challenge, exc) from exc
+                selected: tuple[MCPChallenge, ClientMethod] | None = None
+                if (
+                    replacements
+                    and isinstance(exc, Exception)
+                    and round_number + 1 < _MAX_PAYMENT_ATTEMPTS
+                    and _may_pay_again(core_challenge, core_credential)
+                ):
+                    with suppress(NoMethodFoundError, ValueError):
+                        selected = await self._select_challenge(exc)
+                if selected is None:
+                    # No payable challenge: the server's answer to this credential.
+                    raise PaymentOutcomeUnknownError(challenge, exc) from exc
+                challenge, method = selected
+                continue
 
             await _settle_attempt(attempt, AttemptOutcome(status="accepted"))
             receipt = self._extract_receipt(retry_result)
             return McpToolResult(result=retry_result, receipt=receipt)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _select_challenge(self, error: Exception) -> tuple[MCPChallenge, ClientMethod]:
+        """Return the challenge of a payment error to pay and the method that pays it.
+
+        Raises:
+            NoMethodFoundError: If no installed method matches a challenge.
+            ValueError: If the server's challenges are malformed.
+        """
+        challenges = _extract_challenges(error)
+        if not challenges and _only_unsupported_credential_headers(error):
+            # Well-formed but unsupported challenges: nothing this client may pay.
+            raise NoMethodFoundError(
+                (),
+                self._runtime.methods,
+                message=(
+                    "No supported payment challenge: every challenge selects an "
+                    "unsupported credential header"
+                ),
+            ) from error
+        if not challenges:
+            raise ValueError("Server returned malformed payment challenges") from error
+
+        # A challenge that can't be converted (such as a request that won't
+        # canonicalize) is unpayable on its own; it doesn't block the others.
+        usable: list[MCPChallenge] = []
+        cores: list[CoreChallenge] = []
+        for offered in challenges:
+            try:
+                cores.append(offered.to_core())
+            except Exception:  # noqa: BLE001 - any conversion failure means unpayable
+                continue
+            usable.append(offered)
+        candidates = await self._runtime.order_challenges(cores, self._order_challenges)
+        return self._match_challenge(usable, candidates)
 
     def _match_challenge(
         self,
@@ -391,6 +440,18 @@ class McpClient:
         except (KeyError, TypeError):
             logger.warning("Failed to parse receipt from _meta")
             return None
+
+
+def _may_pay_again(challenge: CoreChallenge, credential: CoreCredential) -> bool:
+    """Whether a refused credential leaves the client free to pay a new challenge, as over HTTP.
+
+    A payment the client already broadcast, or an x402 or ``evm/charge`` authorization that
+    stays spendable, could be redeemed as well as a new payment, so its refusal is final.
+    """
+    if is_x402_challenge(challenge) or (challenge.method == "evm" and challenge.intent == "charge"):
+        return False
+    payload = credential.payload
+    return not (is_dict(payload) and payload.get("type") in ("hash", "zone"))
 
 
 def _core_challenges(challenges: Sequence[MCPChallenge]) -> tuple[CoreChallenge, ...]:

@@ -756,7 +756,11 @@ class TestMcpClientAttemptSettlement:
         replacement = {**_make_challenge_dict(), "id": "ch_replacement"}
         session = AsyncMock()
         session.call_tool = AsyncMock(
-            side_effect=[_payment_required_error(), _payment_required_error(replacement)]
+            side_effect=[
+                _payment_required_error(),
+                _payment_required_error(replacement),
+                TimeoutError("timed out"),
+            ]
         )
         outcomes: list[AttemptOutcome] = []
         client = McpClient(session, methods=[settling_method(outcomes)])
@@ -764,7 +768,8 @@ class TestMcpClientAttemptSettlement:
         with pytest.raises(PaymentOutcomeUnknownError):
             await client.call_tool("premium_tool", {})
 
-        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        # The replacement challenge is paid as a new round.
+        assert [outcome.status for outcome in outcomes] == ["rejected", "rejected"]
         assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
 
     @pytest.mark.asyncio
@@ -775,6 +780,7 @@ class TestMcpClientAttemptSettlement:
             side_effect=[
                 _payment_required_error(),
                 _payment_required_error(replacement, code=-32043),
+                TimeoutError("timed out"),
             ]
         )
         outcomes: list[AttemptOutcome] = []
@@ -783,7 +789,7 @@ class TestMcpClientAttemptSettlement:
         with pytest.raises(PaymentOutcomeUnknownError):
             await client.call_tool("premium_tool", {})
 
-        assert [outcome.status for outcome in outcomes] == ["rejected"]
+        assert [outcome.status for outcome in outcomes] == ["rejected", "rejected"]
         assert [challenge.id for challenge in outcomes[0].challenges] == ["ch_replacement"]
 
     @pytest.mark.asyncio

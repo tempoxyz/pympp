@@ -305,6 +305,10 @@ class PaymentTransport(httpx.AsyncBaseTransport):
             trusted_tempo_realms: Explicit origin-to-realm pins for zero-amount
                 Tempo charges and Tempo session payments when a server uses a realm
                 other than its hostname.
+            max_payment_retries: Credentials sent per request at most. A ``402``
+                answering a credential with a payable challenge, such as the real charge
+                after a zero-amount proof, is paid as a new round (mppx Fetch); one with
+                no payable challenge is returned as the server's answer.
             paid_retry_timeout: Timeout in seconds for the paid retry request,
                 used exactly when set. ``None`` inherits the request's timeout
                 unchanged. When unset, the inherited read timeout is raised to
