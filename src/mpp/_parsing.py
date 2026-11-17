@@ -321,10 +321,10 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     Output format (per IETF draft-ietf-httpauth-payment):
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
-    _validate_payment_method_id(challenge.method)
-
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
+
+    _validate_payment_method_id(challenge.method)
 
     # Build auth-params
     parts = [
