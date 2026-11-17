@@ -205,6 +205,7 @@ class SessionRequest(BaseModel):
     recipient: str | None = None
     chain_id: int | None = Field(default=None, alias="chainId")
     channel_id: _Hash | None = Field(default=None, alias="channelId")
+    configurable_vouchers: bool | None = Field(default=None, alias="configurableVouchers")
     escrow_contract: str | None = Field(default=None, alias="escrowContract")
     fee_payer: Any = Field(default=None, alias="feePayer")
     fee_token: _Address | None = Field(default=None, alias="feeToken")
@@ -235,6 +236,9 @@ class SessionRequest(BaseModel):
             details["minVoucherDelta"] = str(parse_units(self.min_voucher_delta, self.decimals))
         if self.chain_id is not None:
             details["chainId"] = self.chain_id
+        if self.configurable_vouchers:
+            # TIP-1166: the server accepts configurable account (0x05) vouchers.
+            details["configurableVouchers"] = True
         if self.fee_payer is not None:
             # An account object means the server sponsors fees: advertise `true`.
             details["feePayer"] = self.fee_payer if isinstance(self.fee_payer, bool) else True

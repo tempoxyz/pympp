@@ -113,10 +113,27 @@ _EVENTS: dict[str, tuple[str, list[tuple[str, str, bool]]]] = {
             ("payee", "address", True),
         ],
     ),
+    # TIP-1166 (T15): an open whose voucher signer had a configurable account commitment
+    # caches it as the channel's signer snapshot (the descriptor's salt holds it).
+    "SignerSnapshotCached": (
+        "SignerSnapshotCached(bytes32,address,bytes32)",
+        [
+            ("channelId", "bytes32", True),
+            ("signer", "address", True),
+            ("commitment", "bytes32", False),
+        ],
+    ),
 }
 
 EVENT_TOPICS: dict[str, str] = {name: _topic(sig) for name, (sig, _) in _EVENTS.items()}
 """topic0 of each escrow event, by name."""
+
+ERROR_SELECTORS: dict[str, bytes] = {
+    "SignerConfigChanged": _selector("SignerConfigChanged(address)"),
+    "SaltNotSignerCommitment": _selector("SaltNotSignerCommitment(address,bytes32)"),
+    "RootKeyRetired": _selector("RootKeyRetired(address)"),
+}
+"""4-byte selectors of escrow errors the session SDK maps to typed errors (TIP-1166)."""
 
 
 @dataclass(frozen=True, slots=True)

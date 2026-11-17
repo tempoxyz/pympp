@@ -239,6 +239,13 @@ class ChannelState:
     idempotency_markers: Mapping[str, IdempotencyMarker] | None = None
     """Keyed charge and credit outcomes, by ``charge:<key>`` and ``credit:<key>``."""
     close_supervised_from_block: int | None = None
+    signer_snapshot: str | None = None
+    """TIP-1166 config commitment the escrow cached for the voucher signer at open, or the
+    zero hash when it cached none.
+
+    None (as in records stored before this field existed) means unknown: verification
+    looks the snapshot up on chain once and stores it.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -413,8 +420,13 @@ def open_channel_state(
     cumulative_amount: int,
     signature: str,
     state: OnChainChannelState,
+    signer_snapshot: str | None = None,
 ) -> ChannelState:
-    """The persisted state for a verified precompile channel open."""
+    """The persisted state for a verified precompile channel open.
+
+    `signer_snapshot` is the open receipt's TIP-1166 `SignerSnapshotCached` commitment, or
+    the zero hash when the receipt has none.
+    """
     highest = resolve_highest_voucher(
         channel_id=channel_id,
         current=current,
@@ -452,6 +464,11 @@ def open_channel_state(
         "units": current.units if current else 0,
         "finalized": current.finalized if current else False,
         "created_at": current.created_at if current else _now_iso(),
+        "signer_snapshot": (
+            signer_snapshot
+            if signer_snapshot is not None
+            else (current.signer_snapshot if current else None)
+        ),
     }
     if current is not None and highest.highest_voucher_amount > current.highest_voucher_amount:
         fields["retained_vouchers"] = retain_vouchers(
@@ -780,6 +797,8 @@ def channel_state_to_json(state: ChannelState) -> dict[str, Any]:
         data["idempotencyMarkers"] = markers
     if state.close_supervised_from_block is not None:
         data["closeSupervisedFromBlock"] = str(state.close_supervised_from_block)
+    if state.signer_snapshot is not None:
+        data["signerSnapshot"] = state.signer_snapshot
     return data
 
 
@@ -912,6 +931,7 @@ def channel_state_from_json(value: Mapping[str, Any]) -> ChannelState:
             else {str(k): _marker_from_json(m) for k, m in _obj(markers).items()}
         ),
         close_supervised_from_block=_opt_int(data, "closeSupervisedFromBlock"),
+        signer_snapshot=_opt_str(data, "signerSnapshot"),
     )
 
 

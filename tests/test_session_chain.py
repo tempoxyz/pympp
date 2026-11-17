@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 from eth_abi.abi import decode, encode
+from eth_hash.auto import keccak
 from pytempo import Call, TempoTransaction  # pyright: ignore[reportMissingTypeStubs]
 
 from mpp.errors import (
@@ -78,6 +79,10 @@ class FakeRpc:
     overrides: dict[str, Callable[[list[Any]], Any]] = field(default_factory=dict)
     requests: list[tuple[str, list[Any]]] = field(default_factory=list)
     sent: list[str] = field(default_factory=list)
+    commitments: dict[str, str] = field(default_factory=dict)
+    """TIP-1107 config commitments by lowercase account (zero when absent)."""
+    chain_logs: list[dict[str, Any]] = field(default_factory=list)
+    """Logs eth_getLogs answers from, filtered by address and topics."""
 
     def __post_init__(self) -> None:
         self.client = httpx.AsyncClient(transport=httpx.MockTransport(self._handle))
@@ -96,6 +101,7 @@ class FakeRpc:
             "eth_sendRawTransaction": self._send,
             "eth_getTransactionReceipt": self._receipt,
             "eth_call": self._call,
+            "eth_getLogs": self._get_logs,
         }
         try:
             result = (self.overrides.get(method) or handlers[method])(params)
@@ -118,6 +124,16 @@ class FakeRpc:
             "logs": self.logs,
         }
 
+    def _get_logs(self, params: list[Any]) -> list[dict[str, Any]]:
+        query = params[0]
+        topics = [str(t).lower() for t in query.get("topics", [])]
+        return [
+            log
+            for log in self.chain_logs
+            if str(log.get("address", "")).lower() == str(query.get("address", "")).lower()
+            and [str(t).lower() for t in log["topics"][: len(topics)]] == topics
+        ]
+
     def _state(self, channel_id: str) -> tuple[int, int, int]:
         return self.states.get(channel_id, self.default_state)
 
@@ -127,6 +143,9 @@ class FakeRpc:
             return "0x"
         data: str = request["data"]
         selector, args = bytes.fromhex(data[2:10]), bytes.fromhex(data[10:])
+        if selector == keccak(b"getConfigCommitment(address)")[:4]:
+            (account,) = decode(["address"], args)
+            return self.commitments.get(str(account).lower(), "0x" + "00" * 32)
         if data.startswith(BALANCE_OF):
             (owner,) = decode(["address"], args)
             balance = self.balances.get(f"{request['to']}:{owner}".lower(), 0)

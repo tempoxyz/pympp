@@ -393,10 +393,13 @@ def validate_voucher(
     escrow: str,
     min_voucher_delta: int,
     voucher: SignedVoucher,
+    configurable: bool = False,
 ) -> VoucherValidation:
     """Verify a cumulative voucher against channel state without changing persisted state.
 
-    ``already_accepted`` is set for a voucher equal to the highest accepted one.
+    ``already_accepted`` is set for a voucher equal to the highest accepted one. With
+    ``configurable``, a TIP-1166 configurable account voucher is checked against the
+    channel's ``signer_snapshot``.
     """
     validate_channel_state(channel_state)
     if voucher.cumulative_amount > channel_state.deposit:
@@ -405,7 +408,14 @@ def validate_voucher(
         raise VerificationFailedError(
             "voucher cumulativeAmount must be strictly greater than highest accepted voucher"
         )
-    if not verify_voucher(escrow, chain_id, voucher, channel.authorized_signer):
+    if not verify_voucher(
+        escrow,
+        chain_id,
+        voucher,
+        channel.authorized_signer,
+        configurable=configurable,
+        signer_snapshot=channel.signer_snapshot,
+    ):
         raise InvalidSignatureError("invalid voucher signature")
     if voucher.cumulative_amount <= channel_state.settled:
         raise VerificationFailedError("voucher cumulativeAmount is below on-chain settled amount")
@@ -459,6 +469,7 @@ async def verify_and_accept_voucher(
     verified_at: int | None = None,
     charge_amount: int | None = None,
     on_charged: Callable[[ChannelState], None] | None = None,
+    configurable: bool = False,
 ) -> SessionReceipt:
     """Verify a voucher and record it as the channel's highest; returns the session receipt.
 
@@ -474,6 +485,7 @@ async def verify_and_accept_voucher(
         escrow=escrow,
         min_voucher_delta=min_voucher_delta,
         voucher=voucher,
+        configurable=configurable,
     )
     if validation.already_accepted and require_advance:
         raise DeltaTooSmallError("voucher does not add new funds for this request")
@@ -559,6 +571,10 @@ class CredentialContext:
     )
     last_on_chain_verified: dict[str, int] = field(default_factory=dict[str, int])
     min_voucher_delta: int = 0
+    configurable_vouchers: bool = False
+    """Accept TIP-1166 configurable account (0x05) voucher signatures."""
+    signer_snapshots: dict[str, str] = field(default_factory=dict[str, str])
+    """TIP-1166 signer snapshots looked up on chain, by lowercase channel ID."""
     on_session_settlement: OnSessionSettlement | None = None
     on_session_settlement_failure: OnSessionSettlementFailure | None = None
     require_voucher_advance: bool = False
@@ -600,6 +616,40 @@ async def _resolve_voucher_channel_state(
     if channel is None:
         raise ChannelNotFoundError("channel not found")
     return _stored_channel_state(channel)
+
+
+_ZERO_SNAPSHOT = "0x" + "00" * 32
+
+
+async def _with_signer_snapshot(context: CredentialContext, channel: ChannelState) -> ChannelState:
+    """``channel`` with its TIP-1166 signer snapshot, looked up on chain when unknown.
+
+    A channel stored without one (its open receipt was not seen here, or the record predates
+    the field) is looked up once per channel ID and the result stored, so a primitive
+    voucher is never accepted on a channel the escrow bound to a configurable account.
+    """
+    if channel.signer_snapshot is not None or channel.descriptor is None:
+        return channel
+    key = channel.channel_id.lower()
+    snapshot = context.signer_snapshots.get(key)
+    if snapshot is None:
+        snapshot = await chain.find_signer_snapshot(
+            context.rpc_url,
+            channel.channel_id,
+            channel.descriptor,
+            escrow=context.escrow,
+            client=context.http_client,
+        )
+        context.signer_snapshots[key] = snapshot
+        resolved = snapshot
+
+        def store(current: ChannelState | None) -> ChannelState | None:
+            if current is None or current.signer_snapshot is not None:
+                return current
+            return replace(current, signer_snapshot=resolved)
+
+        await context.store.update_channel(channel.channel_id, store)
+    return replace(channel, signer_snapshot=snapshot)
 
 
 def _stored_channel_state(channel: ChannelState) -> chain.ChannelState:
@@ -727,10 +777,49 @@ def _check_open_voucher(
     voucher = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=signature
     )
-    if not verify_voucher(
-        context.escrow, context.chain_id, voucher, authorized_signer(validated.descriptor)
+    signer = authorized_signer(validated.descriptor)
+    if verify_voucher(context.escrow, context.chain_id, voucher, signer):
+        return
+    # TIP-1166: before the open lands, the escrow's signer snapshot is unknown. It is the
+    # salt when the signer has a config commitment (the open requires salt == commitment),
+    # else zero. The open's receipt settles which one applies (_check_open_snapshot).
+    if context.configurable_vouchers and any(
+        verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=True,
+            signer_snapshot=snapshot,
+        )
+        for snapshot in (None, validated.descriptor.salt)
     ):
-        raise InvalidSignatureError("invalid voucher signature")
+        return
+    raise InvalidSignatureError("invalid voucher signature")
+
+
+def _check_open_snapshot(
+    context: CredentialContext,
+    *,
+    channel_id: str,
+    cumulative: int,
+    signature: str,
+    descriptor: ChannelDescriptor,
+    signer_snapshot: str | None,
+) -> None:
+    """Recheck an open's voucher against the signer snapshot its receipt cached (TIP-1166)."""
+    voucher = SignedVoucher(
+        channel_id=channel_id, cumulative_amount=cumulative, signature=signature
+    )
+    if not verify_voucher(
+        context.escrow,
+        context.chain_id,
+        voucher,
+        authorized_signer(descriptor),
+        configurable=context.configurable_vouchers,
+        signer_snapshot=signer_snapshot,
+    ):
+        raise InvalidSignatureError("invalid voucher signature for the channel's signer snapshot")
 
 
 async def _validate_top_up(context: CredentialContext, payload: TopUpPayload) -> None:
@@ -816,6 +905,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
+    channel = await _with_signer_snapshot(context, channel)
     state = (
         _stored_channel_state(channel)
         if _can_use_stored_channel_state(context, channel, voucher)
@@ -830,6 +920,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
         escrow=context.escrow,
         min_voucher_delta=context.min_voucher_delta,
         voucher=voucher,
+        configurable=context.configurable_vouchers,
     )
 
 
@@ -857,11 +948,19 @@ async def _check_close(
         chain_id=context.chain_id,
         escrow=context.escrow,
     )
+    channel = await _with_signer_snapshot(context, channel)
     authorization = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.close_signature
     )
     if not verify_close_authorization(
-        context.escrow, context.chain_id, authorization, [channel.payer, channel.authorized_signer]
+        context.escrow, context.chain_id, authorization, [channel.payer]
+    ) and not verify_close_authorization(
+        context.escrow,
+        context.chain_id,
+        authorization,
+        [channel.authorized_signer],
+        configurable=context.configurable_vouchers,
+        signer_snapshot=channel.signer_snapshot,
     ):
         raise InvalidSignatureError("invalid close authorization signature")
     if channel.finalized:
@@ -882,7 +981,14 @@ async def _check_close(
     voucher = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
     )
-    if not verify_voucher(context.escrow, context.chain_id, voucher, channel.authorized_signer):
+    if not verify_voucher(
+        context.escrow,
+        context.chain_id,
+        voucher,
+        channel.authorized_signer,
+        configurable=context.configurable_vouchers,
+        signer_snapshot=channel.signer_snapshot,
+    ):
         raise InvalidSignatureError("invalid voucher signature")
     capture = uint96(max(channel.spent, state.settled))
     if capture > state.deposit:
@@ -977,6 +1083,18 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
     )
     assert_same_descriptor(result.descriptor, descriptor)
     validate_channel_state(result.state, request.amount)
+    # The receipt settles the signer snapshot: the open's voucher follows the same rules as
+    # every later voucher (a primitive one fails once the escrow cached a commitment).
+    signer_snapshot = result.signer_snapshot or _ZERO_SNAPSHOT
+    _check_open_snapshot(
+        context,
+        channel_id=channel_id,
+        cumulative=cumulative,
+        signature=payload.signature,
+        descriptor=result.descriptor,
+        signer_snapshot=signer_snapshot,
+    )
+    context.signer_snapshots[channel_id.lower()] = signer_snapshot
 
     def update(current: ChannelState | None) -> ChannelState | None:
         if (
@@ -996,6 +1114,7 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
             cumulative_amount=cumulative,
             signature=payload.signature,
             state=result.state,
+            signer_snapshot=signer_snapshot,
         )
 
     updated = await context.store.update_channel(channel_id, update)
@@ -1201,6 +1320,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
             require_advance=context.require_voucher_advance,
             charge_amount=context.charge_amount,
             on_charged=context.on_charged,
+            configurable=context.configurable_vouchers,
         )
     channel = loaded
     read = read_channel_state()
@@ -1220,6 +1340,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
     if state.close_requested_at != 0:
         await _record_pending_close(context, channel_id, state)
         raise ChannelClosedError("channel has a pending close request")
+    reconciled = await _with_signer_snapshot(context, reconciled)
     return await verify_and_accept_voucher(
         store=context.store,
         challenge_id=context.challenge.id,
@@ -1233,6 +1354,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
         verified_at=read.started_at,
         charge_amount=context.charge_amount,
         on_charged=context.on_charged,
+        configurable=context.configurable_vouchers,
     )
 
 
@@ -1260,7 +1382,7 @@ async def _accept_or_load_voucher_channel(
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    return channel
+    return await _with_signer_snapshot(context, channel)
 
 
 async def _accept_voucher_in_one_update(
@@ -1272,9 +1394,23 @@ async def _accept_voucher_in_one_update(
     """Accept a voucher, and charge its request, in one store update with no separate read.
 
     The update checks the stored channel itself. Returns None without writing when the stored
-    on-chain state was not verified recently enough to accept against.
+    on-chain state was not verified recently enough to accept against, or when the channel's
+    TIP-1166 signer snapshot is not known yet (the caller's slower path looks it up).
     """
-    if not verify_voucher(context.escrow, context.chain_id, voucher, authorized_signer(descriptor)):
+    signer = authorized_signer(descriptor)
+
+    def signature_valid(signer_snapshot: str) -> bool:
+        return verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            signer_snapshot=signer_snapshot,
+        )
+
+    cached = context.signer_snapshots.get(voucher.channel_id.lower())
+    if cached is not None and not signature_valid(cached):
         raise InvalidSignatureError("invalid voucher signature")
     charge_amount = context.charge_amount
 
@@ -1283,6 +1419,11 @@ async def _accept_voucher_in_one_update(
             raise ChannelNotFoundError("channel not found")
         if not is_precompile_state(current) or current.descriptor is None:
             raise VerificationFailedError("channel is not precompile-backed")
+        snapshot = current.signer_snapshot or cached
+        if snapshot is None:
+            return StoreChange("noop", None)
+        if snapshot != cached and not signature_valid(snapshot):
+            raise InvalidSignatureError("invalid voucher signature")
         assert_same_descriptor(descriptor, current.descriptor)
         validate_channel_descriptor(
             descriptor,

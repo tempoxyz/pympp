@@ -187,6 +187,7 @@ async def hydrate_session_snapshot(
     *,
     rpc_url: str,
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
 ) -> tuple[ChannelEntry, int]:
     """Check a server snapshot and return the channel entry to cache and the server's spend.
 
@@ -219,8 +220,18 @@ async def hydrate_session_snapshot(
     if snapshot.settled > snapshot.deposit:
         raise ValueError("session snapshot settled amount exceeds deposit")
     descriptor = snapshot.descriptor
-    if not verify_voucher(
-        snapshot.escrow, snapshot.chain_id, signed, resolve_descriptor_signer(descriptor)
+    signer = resolve_descriptor_signer(descriptor)
+    if not verify_voucher(snapshot.escrow, snapshot.chain_id, signed, signer) and not any(
+        # A TIP-1166 configurable account signer's voucher, under either possible snapshot.
+        verify_voucher(
+            snapshot.escrow,
+            snapshot.chain_id,
+            signed,
+            signer,
+            configurable=True,
+            signer_snapshot=signer_snapshot,
+        )
+        for signer_snapshot in (None, descriptor.salt)
     ):
         raise ValueError("session snapshot highest voucher signature is invalid")
     channel_id = compute_channel_id(descriptor, chain_id=snapshot.chain_id, escrow=snapshot.escrow)
@@ -229,7 +240,7 @@ async def hydrate_session_snapshot(
     if not is_same_address(descriptor.payer, account.address):
         raise ValueError("context descriptor payer does not match account")
     if not is_same_address(
-        resolve_descriptor_signer(descriptor), resolve_authorized_signer(account)
+        resolve_descriptor_signer(descriptor), resolve_authorized_signer(account, voucher_signer)
     ):
         raise ValueError("context descriptor authorizedSigner does not match account")
     state = await chain.get_channel_state(

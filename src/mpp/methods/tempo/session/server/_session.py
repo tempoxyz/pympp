@@ -224,6 +224,7 @@ def session(
     on_payment_success: PaymentSuccessHandler | None = None,
     resolve_channel_id: ResolveSessionChannelId | None = None,
     bootstrap: bool = False,
+    configurable_vouchers: bool = False,
 ) -> ServerMethod:
     """Create the server-side Tempo session method (mppx ``tempo.session``).
 
@@ -293,6 +294,10 @@ def session(
             zero-amount identity challenge, verifies the returned proof, passes its ``source``
             to ``resolve_channel_id``, validates the channel's payment scope and returns its
             snapshot (with the signed highest voucher) in ``Payment-Session-Snapshot``.
+        configurable_vouchers: Accept TIP-1166 configurable account (``0x05``) vouchers and
+            advertise ``methodDetails.configurableVouchers`` so such clients open channels.
+            Enable once the chain runs T15; off by default, which accepts only primitive
+            vouchers, as before.
     """
     from mpp.methods.tempo._defaults import (
         CHAIN_ID,
@@ -335,6 +340,7 @@ def session(
             channel_stores.append(checked_store(engine_store))
 
     last_on_chain_verified: dict[str, int] = {}
+    signer_snapshots: dict[str, str] = {}
     chain_ids: list[int] = [chain_id] if chain_id is not None else []
 
     async def resolve_chain_id() -> int:
@@ -371,6 +377,7 @@ def session(
             default_fee_payer=resolved_fee_payer,
             parameter_escrow_contract=escrow_contract,
             fee_token=fee_token,
+            configurable_vouchers=configurable_vouchers,
         )
         resolved.setdefault("decimals", decimals)
         snapshot = await resolve_request_snapshot(context, resolved)
@@ -466,7 +473,9 @@ def session(
             fee_payer_policy=fee_payer_policy,
             fee_token=verification.method_details.fee_token,
             last_on_chain_verified=last_on_chain_verified,
+            signer_snapshots=signer_snapshots,
             min_voucher_delta=verification.min_voucher_delta,
+            configurable_vouchers=configurable_vouchers,
             on_session_settlement=on_session_settlement,
             on_session_settlement_failure=on_session_settlement_failure,
             voucher_state_max_age=voucher_state_max_age,

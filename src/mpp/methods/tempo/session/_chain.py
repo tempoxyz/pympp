@@ -22,6 +22,13 @@ from mpp._typing import is_dict, is_list
 from mpp.errors import BadRequestError, PaymentSimulationError, VerificationFailedError
 from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session._channel import compute_channel_id, expiring_nonce_hash
+from mpp.methods.tempo.session._configurable import (
+    CONFIGURABLE_ACCOUNT_ADDRESS,
+    ConfigurableAccount,
+    SignerConfigChangedError,
+    encode_get_config_commitment,
+    is_zero_hash,
+)
 from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
@@ -255,6 +262,173 @@ def get_channel_event(
             f"expected one {name} event for credential channelId in receipt"
         )
     return matches[0]
+
+
+def get_signer_snapshot(
+    receipt: Mapping[str, Any],
+    descriptor: ChannelDescriptor,
+    channel_id: str,
+    *,
+    escrow: str | None = None,
+) -> str | None:
+    """The TIP-1166 signer snapshot an `open` receipt cached for `channel_id`, else None.
+
+    From T15 the escrow emits `SignerSnapshotCached` when the channel's voucher signer has a
+    config commitment, which the salt must equal. No event means the snapshot is zero.
+    """
+    logs = receipt.get("logs")
+    matches: list[dict[str, Any]] = []
+    for log in logs if is_list(logs) else []:
+        if not is_dict(log):
+            continue
+        if escrow is not None and str(log.get("address", "")).lower() != escrow.lower():
+            continue
+        topics = log.get("topics")
+        if (
+            not is_list(topics)
+            or not topics
+            or str(topics[0]).lower() != abi.EVENT_TOPICS["SignerSnapshotCached"]
+        ):
+            continue
+        try:
+            event = abi.decode_event([str(t) for t in topics], str(log.get("data", "0x")))
+        except Exception:
+            continue
+        if event is not None and str(event.args["channelId"]).lower() == channel_id.lower():
+            matches.append(event.args)
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise VerificationFailedError(
+            "expected at most one SignerSnapshotCached event for credential channelId in receipt"
+        )
+    signer = str(matches[0]["signer"])
+    commitment = str(matches[0]["commitment"]).lower()
+    expected_signer = descriptor.authorized_signer
+    if is_zero_hash(expected_signer):
+        expected_signer = descriptor.payer
+    if signer.lower() != expected_signer.lower():
+        raise VerificationFailedError("SignerSnapshotCached signer does not match descriptor")
+    if commitment != descriptor.salt.lower() or is_zero_hash(commitment):
+        raise VerificationFailedError("SignerSnapshotCached commitment does not match salt")
+    return commitment
+
+
+async def get_config_commitment(
+    rpc_url: str,
+    account: str,
+    *,
+    block: int | str | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """The TIP-1107 config commitment of `account` (zero when it has none)."""
+    result = await _eth_call(
+        rpc_url, CONFIGURABLE_ACCOUNT_ADDRESS, encode_get_config_commitment(account), block, client
+    )
+    raw = bytes.fromhex(str(result).removeprefix("0x"))
+    if not raw:
+        # A chain without the configurable account precompile has no commitments.
+        return "0x" + "00" * 32
+    if len(raw) != 32:
+        raise ValueError("unexpected getConfigCommitment result")
+    return "0x" + raw.hex()
+
+
+async def find_signer_snapshot(
+    rpc_url: str,
+    channel_id: str,
+    descriptor: ChannelDescriptor,
+    *,
+    escrow: str,
+    from_block: int = 0,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """The TIP-1166 signer snapshot the escrow cached for an open channel; zero when none.
+
+    For a channel whose open receipt was not seen. A signer that has no config commitment
+    now had none at open, so the snapshot is zero without a log search. Otherwise the
+    channel's ``SignerSnapshotCached`` log (searched by its indexed channel ID from
+    ``from_block``) decides: its commitment, or zero when the escrow emitted none.
+    """
+    zero = "0x" + "00" * 32
+    signer = descriptor.authorized_signer
+    if is_zero_hash(signer):
+        signer = descriptor.payer
+    if is_zero_hash(await get_config_commitment(rpc_url, signer, client=client)):
+        return zero
+    logs = await _rpc(
+        rpc_url,
+        "eth_getLogs",
+        [
+            {
+                "address": escrow,
+                "topics": [abi.EVENT_TOPICS["SignerSnapshotCached"], channel_id],
+                "fromBlock": hex(from_block),
+                "toBlock": "latest",
+            }
+        ],
+        client,
+    )
+    present = (
+        [log for log in logs if is_dict(log) and not log.get("removed")] if is_list(logs) else []
+    )
+    snapshot = get_signer_snapshot({"logs": present}, descriptor, channel_id, escrow=escrow)
+    return zero if snapshot is None else snapshot
+
+
+async def resolve_open_salt(
+    rpc_url: str,
+    signer: ConfigurableAccount,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """The default `open` salt for a configurable account voucher signer (TIP-1166).
+
+    From T15 the escrow requires the salt of a channel whose signer has a config commitment
+    to equal it, so this returns the signer's on-chain commitment. A signer that has not
+    registered a configuration yet has none: it signs with its version-zero config and the
+    salt stays random. The open is signed by the payer's own key (primitive or keychain),
+    never by the configurable account, so it cannot register the account (TIP-1107
+    registration runs only for a transaction the account signs with ``0x05``); the commitment
+    when the open executes is the one read here.
+    """
+    on_chain = await get_config_commitment(rpc_url, signer.address, client=client)
+    if not is_zero_hash(on_chain):
+        if int(on_chain, 16) != int(signer.commitment, 16):
+            raise ValueError(
+                f"Configurable account {signer.address} holds a config whose commitment "
+                f"{signer.commitment} does not match its on-chain commitment {on_chain}. "
+                "Use the account's current config."
+            )
+        return on_chain
+    if signer.config.version != 0:
+        raise ValueError(
+            f"Configurable account {signer.address} has no on-chain config, so it needs its "
+            "version-zero config to sign vouchers."
+        )
+    return "0x" + os.urandom(32).hex()
+
+
+def signer_config_error(error: BaseException) -> SignerConfigChangedError | None:
+    """Map a TIP-1166 `SignerConfigChanged` or `RootKeyRetired` revert to a typed error."""
+    from mpp.methods.tempo._rpc import RpcError
+
+    if not isinstance(error, RpcError):
+        return None
+    detail = error.response.get("error")
+    data: object = detail.get("data") if is_dict(detail) else None
+    if is_dict(data):
+        data = data.get("data")
+    if not isinstance(data, str):
+        return None
+    try:
+        raw = bytes.fromhex(data.removeprefix("0x"))
+    except ValueError:
+        return None
+    for reason in ("SignerConfigChanged", "RootKeyRetired"):
+        if raw[:4] == abi.ERROR_SELECTORS[reason] and len(raw) == 36:
+            return SignerConfigChangedError(signer="0x" + raw[16:36].hex(), reason=reason)
+    return None
 
 
 def _receipt_block(receipt: Mapping[str, Any]) -> int | None:
@@ -933,6 +1107,8 @@ class BroadcastOpenResult:
     state: ChannelState
     expiring_nonce_hash: str
     open_deposit: int
+    signer_snapshot: str | None = None
+    """TIP-1166 config commitment the escrow cached for the signer at open, if it had one."""
 
 
 async def broadcast_open_transaction(
@@ -958,7 +1134,8 @@ async def broadcast_open_transaction(
     """Validate, broadcast and verify a client-signed `open` transaction.
 
     Checks the `ChannelOpened` event against the calldata and credential, then
-    reads the channel back at the receipt's block.
+    reads the channel back at the receipt's block. A `SignerSnapshotCached` event
+    (TIP-1166) for the channel becomes the result's `signer_snapshot`.
     """
     validated = validate_open_credential_transaction(
         serialized_transaction=serialized_transaction,
@@ -1005,6 +1182,9 @@ async def broadcast_open_transaction(
         expected_channel_id=expected_channel_id,
         open_deposit=validated.open_deposit,
     )
+    signer_snapshot = get_signer_snapshot(
+        receipt, validated.descriptor, expected_channel_id, escrow=escrow_contract
+    )
     block = _receipt_block(receipt)
     channel = await readback_with_retry(
         lambda: get_channel(
@@ -1018,6 +1198,7 @@ async def broadcast_open_transaction(
         state=channel.state,
         expiring_nonce_hash=opened["expiringNonceHash"],
         open_deposit=validated.open_deposit,
+        signer_snapshot=signer_snapshot,
     )
 
 
@@ -1124,7 +1305,10 @@ async def _estimate_gas(
             ),
             16,
         )
-    except Exception:
+    except Exception as error:
+        mapped = signer_config_error(error)
+        if mapped is not None:
+            raise mapped from error
         if required:
             raise
         return DEFAULT_GAS_LIMIT
@@ -1232,6 +1416,7 @@ async def build_open_transaction(
     root_account: str | None = None,
     valid_before: int | None = None,
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
 ) -> tuple[str, ChannelDescriptor, str]:
     """Build and sign an expiring-nonce `open` transaction (mppx `createOpenPayload`).
 
@@ -1240,9 +1425,17 @@ async def build_open_transaction(
     to `account` (the access key, when one signs). With `fee_payer`, `raw_tx` is
     a 0x78 fee payer envelope for the server to co-sign. The fee token defaults
     to `token`. `prefix_calls` are `(to, data)` calls run first, such as an auto-swap.
+
+    `voucher_signer`, when given, is the channel's authorized signer. When it is a TIP-1166
+    `ConfigurableAccount`, the salt defaults to its on-chain config commitment (T15
+    requires it), else the salt is random. An explicit `salt` always wins.
     """
     payer = root_account or account.address
+    if voucher_signer is not None and authorized_signer is None:
+        authorized_signer = str(voucher_signer.address)
     signer = authorized_signer or account.address
+    if salt is None and isinstance(voucher_signer, ConfigurableAccount):
+        salt = await resolve_open_salt(rpc_url, voucher_signer, client=client)
     channel_salt = salt or "0x" + os.urandom(32).hex()
     open_data = abi.encode_open(
         payee=payee,
@@ -1295,20 +1488,27 @@ async def build_top_up_transaction(
 ) -> str:
     """Build and sign an expiring-nonce `topUp` transaction (mppx `createTopUpPayload`).
 
-    Uses a random past `valid_after` so identical top-ups stay distinct.
+    Uses a random past `valid_after` so identical top-ups stay distinct. Raises
+    `SignerConfigChangedError` when the escrow refuses the top-up because the channel's
+    voucher signer changed its configuration (TIP-1166).
     """
-    signed, _ = await _build_signed_transaction(
-        account,
-        [*prefix_calls, (escrow, abi.encode_top_up(descriptor, additional_deposit))],
-        rpc_url=rpc_url,
-        chain_id=chain_id,
-        fee_token=fee_token or descriptor.token,
-        awaiting_fee_payer=fee_payer,
-        root_account=root_account,
-        valid_before=valid_before,
-        valid_after=_random_valid_after(),
-        client=client,
-    )
+    try:
+        signed, _ = await _build_signed_transaction(
+            account,
+            [*prefix_calls, (escrow, abi.encode_top_up(descriptor, additional_deposit))],
+            rpc_url=rpc_url,
+            chain_id=chain_id,
+            fee_token=fee_token or descriptor.token,
+            awaiting_fee_payer=fee_payer,
+            root_account=root_account,
+            valid_before=valid_before,
+            valid_after=_random_valid_after(),
+            client=client,
+        )
+    except SignerConfigChangedError as error:
+        if chain_id is not None and error.channel_id is None:
+            error.channel_id = compute_channel_id(descriptor, chain_id=chain_id, escrow=escrow)
+        raise
     return _serialize_client_transaction(signed, fee_payer)
 
 
