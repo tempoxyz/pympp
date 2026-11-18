@@ -7,6 +7,7 @@ settles either through an x402 facilitator or a custom ``settle`` hook.
 
 from __future__ import annotations
 
+import copy
 import heapq
 import inspect
 import json
@@ -375,8 +376,9 @@ class ChargeIntent:
             "asset": to_checksum_address(request["currency"]),
             "payTo": to_checksum_address(request["recipient"]),
             "maxTimeoutSeconds": self.max_timeout_seconds,
+            # Deep copy: a facilitator editing nested values must not change the configured terms.
             "extra": {
-                **self.x402_extra,
+                **copy.deepcopy(self.x402_extra),
                 "assetTransferMethod": EIP3009,
                 "name": self.domain_name,
                 "version": self.domain_version,

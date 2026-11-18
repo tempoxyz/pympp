@@ -307,6 +307,19 @@ class TestX402Extra:
             "version": "2",
         }
 
+    def test_edits_to_nested_extra_do_not_change_later_requirements(self) -> None:
+        method = evm_method(x402_extra={"nested": {"value": 1}})
+        intent = method.x402
+        assert intent is not None
+        request = {
+            "amount": "1",
+            "currency": "0x" + "11" * 20,
+            "recipient": "0x" + "22" * 20,
+            "methodDetails": {"chainId": 8453},
+        }
+        intent.x402_requirements(request)["extra"]["nested"]["value"] = 2  # type: ignore[attr-defined]
+        assert intent.x402_requirements(request)["extra"]["nested"] == {"value": 1}  # type: ignore[attr-defined]
+
     async def test_extra_cannot_override_the_eip3009_fields(self) -> None:
         server = Mpp(
             methods=evm_method(
