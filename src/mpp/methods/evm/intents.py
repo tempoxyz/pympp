@@ -150,6 +150,8 @@ _ATOMIC_RE = re.compile(r"[0-9]{1,78}")
 _MAX_X402_EXTRA_BYTES = 8 * 1024
 
 _MAX_SAFE_INTEGER = 2**53 - 1
+# Nesting past this would exhaust the recursion limit when the terms are deep-copied.
+_MAX_X402_EXTRA_DEPTH = 64
 """Largest integer a JavaScript number holds exactly."""
 """Largest canonical x402_extra, leaving room in the 64 KiB PAYMENT-REQUIRED header."""
 _UINT256_MAX = 2**256 - 1
@@ -643,17 +645,25 @@ class _X402ExtraError(ValueError):
 
 
 def _check_x402_extra(value: Any) -> None:
-    """Refuse non-string keys, which JSON would merge or rename, and floats beyond
-    2**53, which a JavaScript client echoes as integers the header decoder refuses."""
-    stack: list[Any] = [value]
+    """Refuse non-string keys, which JSON would merge or rename, floats beyond
+    2**53, which a JavaScript client echoes as integers the header decoder refuses,
+    and nesting deeper than _MAX_X402_EXTRA_DEPTH, which deepcopy cannot copy."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
     while stack:
-        item = stack.pop()
+        item, depth = stack.pop()
+        children: list[Any]
         if is_mapping(item):
-            for key, child in item.items():
-                if not isinstance(key, str):
-                    raise _X402ExtraError("x402_extra object keys must be strings")
-                stack.append(child)
+            if not all(isinstance(key, str) for key in item):
+                raise _X402ExtraError("x402_extra object keys must be strings")
+            children = list(item.values())
         elif isinstance(item, list | tuple):
-            stack.extend(cast("list[Any] | tuple[Any, ...]", item))
-        elif isinstance(item, float) and abs(item) > _MAX_SAFE_INTEGER:
-            raise _X402ExtraError("x402_extra numbers must be at most 2**53 - 1 in magnitude")
+            children = list(cast("list[Any] | tuple[Any, ...]", item))
+        else:
+            if isinstance(item, float) and abs(item) > _MAX_SAFE_INTEGER:
+                raise _X402ExtraError("x402_extra numbers must be at most 2**53 - 1 in magnitude")
+            continue
+        if depth >= _MAX_X402_EXTRA_DEPTH:
+            raise _X402ExtraError(
+                f"x402_extra must nest at most {_MAX_X402_EXTRA_DEPTH} levels deep"
+            )
+        stack.extend((child, depth + 1) for child in children)

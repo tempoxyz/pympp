@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
 import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from pytest_httpx import HTTPXMock
@@ -677,6 +679,27 @@ class TestFacilitatorSupported:
         httpx_mock.add_response(content=b" " * (1024 * 1024 + 1))
         with pytest.raises(FacilitatorError, match="more than 1048576 bytes"):
             await HttpFacilitator("https://f.example").supported()
+
+    async def test_supported_refuses_a_compressed_body(self, httpx_mock: HTTPXMock) -> None:
+        # 1 MiB of spaces gzips to about 1 KiB: the cap must count wire bytes.
+        httpx_mock.add_response(
+            content=gzip.compress(b" " * (1024 * 1024 + 1)), headers={"content-encoding": "gzip"}
+        )
+        with pytest.raises(FacilitatorError, match="compressed body"):
+            await HttpFacilitator("https://f.example").supported()
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers.get_list("accept-encoding") == ["identity"]
+
+    def test_supported_runs_under_trio(self) -> None:
+        def answer(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"kinds": []})
+
+        async def run() -> Any:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as client:
+                return await HttpFacilitator("https://f.example", client=client).supported()
+
+        assert anyio.run(run, backend="trio") == {"kinds": []}
 
     async def test_supported_errors_omit_httpx_messages(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_exception(httpx.LocalProtocolError("Illegal header value b'secret\\n'"))

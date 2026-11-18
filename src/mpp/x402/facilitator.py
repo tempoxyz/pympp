@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import ipaddress
 import json
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 from urllib.parse import urlsplit
 
+import anyio
 import httpx
 
 from mpp.x402._types import (
@@ -206,15 +206,19 @@ class HttpFacilitator:
         """List the payment kinds the facilitator supports (``GET /supported``).
 
         The whole request, body included, must finish within ``timeout`` seconds,
-        and the body may hold at most 1 MiB. Redirects are never followed. When
+        and the body may hold at most 1 MiB, sent uncompressed. Redirects are never followed. When
         this client opens its own connection to an ``http://`` URL, it ignores
         proxy environment variables, so loopback discovery stays on the machine;
         an injected ``client`` keeps its own proxy settings.
         """
         try:
             # A GET has no body, so only a Content-Type the caller configured is sent.
+            # identity: the size cap counts the bytes on the wire, so refuse compression
+            # rather than let a small gzip body inflate past it.
             headers = _merge_headers(
-                await self._configured_headers(), await self._auth_headers("supported")
+                await self._configured_headers(),
+                await self._auth_headers("supported"),
+                {"Accept-Encoding": "identity"},
             )
         except Exception as error:
             raise FacilitatorError(
@@ -223,7 +227,9 @@ class HttpFacilitator:
         try:
             # httpx's timeout bounds each phase, so a body trickled a byte at a time
             # would never time out without one deadline for the whole exchange.
-            status, body = await asyncio.wait_for(self._get_supported(headers), self._timeout)
+            # anyio, not asyncio.wait_for, so discovery also runs under trio.
+            with anyio.fail_after(self._timeout):
+                status, body = await self._get_supported(headers)
         except TimeoutError:
             raise FacilitatorError(
                 f"facilitator /supported did not answer within {self._timeout} seconds"
@@ -273,14 +279,27 @@ async def _read_capped(
     ) as response:
         if not response.is_success:
             return response.status_code, b""
+        encoding = response.headers.get("content-encoding", "").strip().lower()
+        if encoding not in ("", "identity"):
+            raise FacilitatorError("facilitator /supported returned a compressed body")
         body = bytearray()
-        async for chunk in response.aiter_bytes():
+        async for chunk in _wire_chunks(response):
             body += chunk
             if len(body) > _MAX_SUPPORTED_BYTES:
                 raise FacilitatorError(
                     f"facilitator /supported returned more than {_MAX_SUPPORTED_BYTES} bytes"
                 )
         return response.status_code, bytes(body)
+
+
+async def _wire_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield a response's body as sent, without decoding any Content-Encoding."""
+    if response.is_stream_consumed:
+        # A transport that answers with an in-memory body (httpx.MockTransport) read it already.
+        yield response.content
+        return
+    async for chunk in response.aiter_raw():
+        yield chunk
 
 
 async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = "exact") -> str:

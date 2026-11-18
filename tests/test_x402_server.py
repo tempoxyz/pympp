@@ -406,6 +406,20 @@ class TestX402Extra:
         with pytest.raises(ValueError, match="keys must be strings"):
             evm_method(x402_extra=extra)
 
+    def test_rejects_deep_nesting(self) -> None:
+        extra: Any = {"leaf": 1}
+        # Shallow enough for json.dumps, too deep to deep-copy safely.
+        for _ in range(300):
+            extra = {"n": extra}
+        with pytest.raises(ValueError, match="nest at most 64 levels"):
+            evm_method(x402_extra=extra)
+
+    def test_accepts_nesting_within_the_limit(self) -> None:
+        extra: Any = 1
+        for _ in range(63):
+            extra = {"n": extra}
+        assert evm_method(x402_extra=extra) is not None
+
     def test_rejects_an_oversized_extra(self) -> None:
         with pytest.raises(ValueError, match="at most 8192 bytes"):
             evm_method(x402_extra={"blob": "a" * 8192})
