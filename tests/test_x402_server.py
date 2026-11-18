@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -369,3 +371,11 @@ class TestX402Extra:
     def test_rejects_a_non_object_extra(self) -> None:
         with pytest.raises(ValueError, match="x402_extra"):
             evm_method(x402_extra=["nope"])
+
+    @pytest.mark.parametrize(
+        "value",
+        [Decimal("1.5"), float("nan"), float("inf"), 9007199254740993, {"at": datetime.now(UTC)}],
+    )
+    def test_rejects_a_non_canonical_json_extra(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="x402_extra must be canonical JSON"):
+            evm_method(x402_extra={"nested": {"value": value}})

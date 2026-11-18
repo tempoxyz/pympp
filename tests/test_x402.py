@@ -668,5 +668,21 @@ class TestFacilitatorSupported:
 
         with pytest.raises(FacilitatorError, match="publishes no payTo"):
             await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+
+    async def test_pay_to_skips_matching_kinds_without_a_valid_pay_to(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
+                return {
+                    "kinds": [
+                        kind,
+                        {**kind, "extra": {"payTo": "nope"}},
+                        {**kind, "extra": {"payTo": PAY_TO.lower()}},
+                    ]
+                }
+
+        assert await pay_to(Stub(), network="eip155:8453") == PAY_TO  # type: ignore[arg-type]
         with pytest.raises(FacilitatorError, match="publishes no payTo"):
             await pay_to(Stub(), network="eip155:1")  # type: ignore[arg-type]

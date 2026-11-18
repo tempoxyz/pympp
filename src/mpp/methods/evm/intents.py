@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+import rfc8785
 from eth_utils.address import to_checksum_address
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
@@ -331,9 +332,14 @@ class ChargeIntent:
         if x402_extra is not None and not is_mapping(x402_extra):
             raise ValueError("x402_extra must be an object")
         # Normalize to the JSON the challenge carries, so credentials echoing it match exactly.
-        self.x402_extra: dict[str, Any] = (
-            json.loads(json.dumps(dict(x402_extra))) if x402_extra else {}
-        )
+        # Require RFC 8785 JSON, which the x402 header decoder also requires of echoed values.
+        self.x402_extra: dict[str, Any] = {}
+        if x402_extra:
+            try:
+                self.x402_extra = json.loads(json.dumps(dict(x402_extra), allow_nan=False))
+                rfc8785.dumps(self.x402_extra)
+            except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError) as error:
+                raise ValueError("x402_extra must be canonical JSON (RFC 8785)") from error
 
     # -- request helpers -------------------------------------------------
 

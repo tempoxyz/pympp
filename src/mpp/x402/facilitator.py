@@ -239,19 +239,20 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
         response = parse_supported_response(await client.supported())
     except X402FormatError as error:
         raise FacilitatorError(f"facilitator /supported returned {error}") from error
-    kind = next(
+    # Take the first matching kind that publishes a valid payTo, not just the first match.
+    value = next(
         (
-            kind
+            pay_to
             for kind in response["kinds"]
             if kind.get("x402Version") == X402_VERSION
             and kind.get("scheme") == scheme
             and kind.get("network") == network
+            for pay_to in [(kind.get("extra") or {}).get("payTo")]
+            if isinstance(pay_to, str) and _ADDRESS_RE.fullmatch(pay_to)
         ),
         None,
     )
-    extra = kind.get("extra") if kind is not None else None
-    value: object = extra.get("payTo") if extra is not None else None
-    if not isinstance(value, str) or not _ADDRESS_RE.fullmatch(value):
+    if value is None:
         raise FacilitatorError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
     from eth_utils.address import to_checksum_address
 
