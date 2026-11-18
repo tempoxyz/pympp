@@ -7,16 +7,19 @@ settles either through an x402 facilitator or a custom ``settle`` hook.
 
 from __future__ import annotations
 
+import copy
 import heapq
 import inspect
+import json
 import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
+import rfc8785
 from eth_utils.address import to_checksum_address
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
@@ -144,6 +147,13 @@ _HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 _SIGNATURE_RE = re.compile(r"0x[0-9a-fA-F]{130}")
 # uint256 values have at most 78 digits; longer strings could not be parsed safely.
 _ATOMIC_RE = re.compile(r"[0-9]{1,78}")
+_MAX_X402_EXTRA_BYTES = 8 * 1024
+
+_MAX_SAFE_INTEGER = 2**53 - 1
+# Nesting past this would exhaust the recursion limit when the terms are deep-copied.
+_MAX_X402_EXTRA_DEPTH = 64
+"""Largest integer a JavaScript number holds exactly."""
+"""Largest canonical x402_extra, leaving room in the 64 KiB PAYMENT-REQUIRED header."""
 _UINT256_MAX = 2**256 - 1
 
 
@@ -300,6 +310,7 @@ class ChargeIntent:
         store: Store | None = None,
         max_validity_seconds: int = 3600,
         siwx: SiwxOptions | None = None,
+        x402_extra: Mapping[str, Any] | None = None,
     ) -> None:
         if facilitator is None and settle is None:
             raise ValueError("EVM charge requires a facilitator or a settle hook")
@@ -326,6 +337,27 @@ class ChargeIntent:
         if siwx is not None and not isinstance(siwx, SiwxOptions):
             raise ValueError("siwx must be mpp.x402.siwx.SiwxOptions")
         self.siwx = siwx
+        if x402_extra is not None and not is_mapping(x402_extra):
+            raise ValueError("x402_extra must be an object")
+        # Normalize to the JSON the challenge carries, so credentials echoing it match exactly.
+        # Require RFC 8785 JSON, which the x402 header decoder also requires of echoed values.
+        self.x402_extra: dict[str, Any] = {}
+        if x402_extra:
+            try:
+                text = json.dumps(dict(x402_extra), allow_nan=False)
+                # After json.dumps, which refuses circular values, so the walk ends.
+                _check_x402_extra(x402_extra)
+                self.x402_extra = json.loads(text)
+                encoded = rfc8785.dumps(self.x402_extra)
+            except _X402ExtraError:
+                raise
+            except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError) as error:
+                raise ValueError("x402_extra must be canonical JSON (RFC 8785)") from error
+            # Every offer repeats it in one PAYMENT-REQUIRED header, which decoders cap at 64 KiB.
+            if len(encoded) > _MAX_X402_EXTRA_BYTES:
+                raise ValueError(
+                    f"x402_extra must be at most {_MAX_X402_EXTRA_BYTES} bytes of JSON"
+                )
 
     # -- request helpers -------------------------------------------------
 
@@ -354,7 +386,9 @@ class ChargeIntent:
             "asset": to_checksum_address(request["currency"]),
             "payTo": to_checksum_address(request["recipient"]),
             "maxTimeoutSeconds": self.max_timeout_seconds,
+            # Deep copy: a facilitator editing nested values must not change the configured terms.
             "extra": {
+                **copy.deepcopy(self.x402_extra),
                 "assetTransferMethod": EIP3009,
                 "name": self.domain_name,
                 "version": self.domain_version,
@@ -604,3 +638,32 @@ class ChargeIntent:
                 "facilitator reported success without a transaction"
             )
         return settled["transaction"]
+
+
+class _X402ExtraError(ValueError):
+    """``x402_extra`` holds a value a credential could not echo back unchanged."""
+
+
+def _check_x402_extra(value: Any) -> None:
+    """Refuse non-string keys, which JSON would merge or rename, floats beyond
+    2**53, which a JavaScript client echoes as integers the header decoder refuses,
+    and nesting deeper than _MAX_X402_EXTRA_DEPTH, which deepcopy cannot copy."""
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    while stack:
+        item, depth = stack.pop()
+        children: list[Any]
+        if is_mapping(item):
+            if not all(isinstance(key, str) for key in item):
+                raise _X402ExtraError("x402_extra object keys must be strings")
+            children = list(item.values())
+        elif isinstance(item, list | tuple):
+            children = list(cast("list[Any] | tuple[Any, ...]", item))
+        else:
+            if isinstance(item, float) and abs(item) > _MAX_SAFE_INTEGER:
+                raise _X402ExtraError("x402_extra numbers must be at most 2**53 - 1 in magnitude")
+            continue
+        if depth >= _MAX_X402_EXTRA_DEPTH:
+            raise _X402ExtraError(
+                f"x402_extra must nest at most {_MAX_X402_EXTRA_DEPTH} levels deep"
+            )
+        stack.extend((child, depth + 1) for child in children)

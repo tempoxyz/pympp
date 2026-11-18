@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -10,6 +12,8 @@ from eth_account import Account
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
 from mpp.events import PAYMENT_FAILED, EventDispatcher
 from mpp.methods.evm import BASE_SEPOLIA_USDC, evm
+from mpp.methods.evm.server import charge as evm_charge
+from mpp.methods.evm.server import facilitator_pay_to
 from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
 from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp, PaymentRequired, PaymentVerified
@@ -286,3 +290,136 @@ async def test_charge_advertises_the_http_method() -> None:
     rejected = await handler(x402_request(signature, method="GET"))
     assert isinstance(rejected, PaymentRequired)
     assert "extensions do not match" in (rejected.challenge.body or b"").decode()
+
+
+class TestX402Extra:
+    async def test_adds_extra_to_the_x402_requirements(self) -> None:
+        server = Mpp(
+            methods=evm_method(x402_extra={"tempoSettlement": "0x" + "55" * 20}),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["extra"] == {
+            "tempoSettlement": "0x" + "55" * 20,
+            "assetTransferMethod": "eip3009",
+            "name": "USDC",
+            "version": "2",
+        }
+
+    def test_edits_to_nested_extra_do_not_change_later_requirements(self) -> None:
+        method = evm_method(x402_extra={"nested": {"value": 1}})
+        intent = method.x402
+        assert intent is not None
+        request = {
+            "amount": "1",
+            "currency": "0x" + "11" * 20,
+            "recipient": "0x" + "22" * 20,
+            "methodDetails": {"chainId": 8453},
+        }
+        intent.x402_requirements(request)["extra"]["nested"]["value"] = 2  # type: ignore[attr-defined]
+        assert intent.x402_requirements(request)["extra"]["nested"] == {"value": 1}  # type: ignore[attr-defined]
+
+    async def test_extra_cannot_override_the_eip3009_fields(self) -> None:
+        server = Mpp(
+            methods=evm_method(
+                x402_extra={"assetTransferMethod": "permit2", "name": "x", "version": "9"}
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["extra"] == {"assetTransferMethod": "eip3009", "name": "USDC", "version": "2"}
+
+    async def test_payment_echoing_the_extra_settles_through_the_facilitator(self) -> None:
+        settled: list[dict[str, Any]] = []
+        deposit = "0x" + "44" * 20
+
+        class DepositFacilitator:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                return {"isValid": True, "payer": PAYER.address}
+
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                settled.append(dict(payment_requirements))
+                return {
+                    "success": True,
+                    "transaction": "0x" + "cd" * 32,
+                    "network": "eip155:84532",
+                    "payer": PAYER.address,
+                }
+
+            async def supported(self) -> Any:
+                return {
+                    "kinds": [
+                        {
+                            "x402Version": 2,
+                            "scheme": "exact",
+                            "network": "eip155:84532",
+                            "extra": {"payTo": deposit},
+                        }
+                    ]
+                }
+
+        facilitator = DepositFacilitator()
+        recipient = await facilitator_pay_to(facilitator, network="eip155:84532")  # type: ignore[arg-type]
+        server = Mpp(
+            methods=evm_charge(
+                currency=BASE_SEPOLIA_USDC,
+                recipient=recipient,
+                facilitator=facilitator,  # type: ignore[arg-type]
+                x402_extra={"tempoSettlement": "0x" + "55" * 20},
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["payTo"].lower() == deposit
+
+        result = await server.charge(amount="0.01")(x402_request(await signed(server)))
+
+        assert isinstance(result, PaymentVerified), result
+        assert settled[0]["payTo"].lower() == deposit
+        assert settled[0]["extra"]["tempoSettlement"] == "0x" + "55" * 20
+
+    def test_rejects_a_non_object_extra(self) -> None:
+        with pytest.raises(ValueError, match="x402_extra"):
+            evm_method(x402_extra=["nope"])
+
+    @pytest.mark.parametrize(
+        "value",
+        [Decimal("1.5"), float("nan"), float("inf"), 9007199254740993, {"at": datetime.now(UTC)}],
+    )
+    def test_rejects_a_non_canonical_json_extra(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="x402_extra must be canonical JSON"):
+            evm_method(x402_extra={"nested": {"value": value}})
+
+    @pytest.mark.parametrize("value", [1e20, -1e16, 2.0**53, [{"deep": 1e300}]])
+    def test_rejects_floats_a_javascript_client_cannot_echo(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="at most 2\\*\\*53 - 1"):
+            evm_method(x402_extra={"nested": {"value": value}})
+
+    def test_accepts_small_floats(self) -> None:
+        assert evm_method(x402_extra={"rate": 1.5, "big": 2**53 - 1}) is not None
+
+    @pytest.mark.parametrize("extra", [{"1": "a", 1: "b"}, {"nested": [{2: "x"}]}, {None: 1}])
+    def test_rejects_non_string_keys(self, extra: Any) -> None:
+        with pytest.raises(ValueError, match="keys must be strings"):
+            evm_method(x402_extra=extra)
+
+    def test_rejects_deep_nesting(self) -> None:
+        extra: Any = {"leaf": 1}
+        # Shallow enough for json.dumps, too deep to deep-copy safely.
+        for _ in range(300):
+            extra = {"n": extra}
+        with pytest.raises(ValueError, match="nest at most 64 levels"):
+            evm_method(x402_extra=extra)
+
+    def test_accepts_nesting_within_the_limit(self) -> None:
+        extra: Any = 1
+        for _ in range(63):
+            extra = {"n": extra}
+        assert evm_method(x402_extra=extra) is not None
+
+    def test_rejects_an_oversized_extra(self) -> None:
+        with pytest.raises(ValueError, match="at most 8192 bytes"):
+            evm_method(x402_extra={"blob": "a" * 8192})
