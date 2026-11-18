@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import ipaddress
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 from urllib.parse import urlsplit
@@ -35,6 +37,9 @@ PathHeaders: TypeAlias = Mapping[str, Mapping[str, str]]
 CreateAuthHeaders: TypeAlias = Callable[[], PathHeaders | Awaitable[PathHeaders]]
 
 _ENDPOINTS = ("verify", "settle", "supported", "list")
+
+_MAX_SUPPORTED_BYTES = 1024 * 1024
+"""Largest decoded ``GET /supported`` body read; a list of kinds is a few KiB."""
 
 
 class FacilitatorError(Exception):
@@ -198,34 +203,84 @@ class HttpFacilitator:
             raise FacilitatorError(f"facilitator /settle returned {error}") from error
 
     async def supported(self) -> SupportedResponse:
-        """List the payment kinds the facilitator supports (``GET /supported``)."""
+        """List the payment kinds the facilitator supports (``GET /supported``).
+
+        The whole request, body included, must finish within ``timeout`` seconds,
+        and the body may hold at most 1 MiB. Redirects are never followed. When
+        this client opens its own connection to an ``http://`` URL, it ignores
+        proxy environment variables, so loopback discovery stays on the machine;
+        an injected ``client`` keeps its own proxy settings.
+        """
         try:
             # A GET has no body, so only a Content-Type the caller configured is sent.
-            headers = {
-                **await self._configured_headers(),
-                **await self._auth_headers("supported"),
-            }
+            headers = _merge_headers(
+                await self._configured_headers(), await self._auth_headers("supported")
+            )
         except Exception as error:
             raise FacilitatorError(
                 f"facilitator /supported auth headers failed: {error}"
             ) from error
         try:
-            if self._client is not None:
-                response = await self._client.get(
-                    f"{self.url}/supported", headers=headers, timeout=self._timeout
-                )
-            else:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
-                    response = await client.get(f"{self.url}/supported", headers=headers)
+            # httpx's timeout bounds each phase, so a body trickled a byte at a time
+            # would never time out without one deadline for the whole exchange.
+            status, body = await asyncio.wait_for(self._get_supported(headers), self._timeout)
+        except TimeoutError:
+            raise FacilitatorError(
+                f"facilitator /supported did not answer within {self._timeout} seconds"
+            ) from None
         except httpx.HTTPError as error:
-            raise FacilitatorError(f"facilitator /supported request failed: {error}") from error
-        if not response.is_success:
-            raise FacilitatorError(f"facilitator /supported failed: {response.status_code}")
+            # httpx's message can quote a header value it refused, such as a token.
+            raise FacilitatorError(
+                f"facilitator /supported request failed: {type(error).__name__}"
+            ) from None
+        if not 200 <= status < 300:
+            raise FacilitatorError(f"facilitator /supported failed: {status}")
         try:
-            return parse_supported_response(response.json())
+            return parse_supported_response(json.loads(body))
         # RecursionError: JSON nested deeper than the decoder allows.
         except (ValueError, RecursionError) as error:
             raise FacilitatorError(f"facilitator /supported returned {error}") from error
+
+    async def _get_supported(self, headers: Mapping[str, str]) -> tuple[int, bytes]:
+        url = f"{self.url}/supported"
+        if self._client is not None:
+            return await _read_capped(self._client, url, headers, self._timeout)
+        # Cleartext is allowed only to a loopback host: don't let a proxy from the
+        # environment carry it off the machine.
+        trust_env = urlsplit(self.url).scheme == "https"
+        async with httpx.AsyncClient(timeout=self._timeout, trust_env=trust_env) as client:
+            return await _read_capped(client, url, headers, self._timeout)
+
+
+def _merge_headers(*sources: Mapping[str, str]) -> dict[str, str]:
+    """Merge header mappings; a later field replaces an earlier one of any case."""
+    merged: dict[str, str] = {}
+    for source in sources:
+        for name, value in source.items():
+            for existing in [key for key in merged if key.lower() == name.lower()]:
+                del merged[existing]
+            merged[name] = value
+    return merged
+
+
+async def _read_capped(
+    client: httpx.AsyncClient, url: str, headers: Mapping[str, str], timeout: float
+) -> tuple[int, bytes]:
+    """GET a URL without following redirects, reading at most ``_MAX_SUPPORTED_BYTES``."""
+    # pay_to checks only the configured URL; a redirect could move discovery to cleartext.
+    async with client.stream(
+        "GET", url, headers=headers, timeout=timeout, follow_redirects=False
+    ) as response:
+        if not response.is_success:
+            return response.status_code, b""
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            body += chunk
+            if len(body) > _MAX_SUPPORTED_BYTES:
+                raise FacilitatorError(
+                    f"facilitator /supported returned more than {_MAX_SUPPORTED_BYTES} bytes"
+                )
+        return response.status_code, bytes(body)
 
 
 async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = "exact") -> str:
@@ -256,7 +311,11 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
             "x402 facilitator does not implement supported(), so it cannot provide payTo"
         )
     try:
-        response = parse_supported_response(await client.supported())
+        # The protocol declares it async, but accept a custom client's plain method too.
+        result: Any = client.supported()
+        if inspect.isawaitable(result):
+            result = await result
+        response = parse_supported_response(result)
     except X402FormatError as error:
         raise FacilitatorError(f"facilitator /supported returned {error}") from error
     # Every matching kind that publishes a usable payTo counts; the zero address can't be paid.

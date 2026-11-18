@@ -393,6 +393,19 @@ class TestX402Extra:
         with pytest.raises(ValueError, match="x402_extra must be canonical JSON"):
             evm_method(x402_extra={"nested": {"value": value}})
 
+    @pytest.mark.parametrize("value", [1e20, -1e16, 2.0**53, [{"deep": 1e300}]])
+    def test_rejects_floats_a_javascript_client_cannot_echo(self, value: Any) -> None:
+        with pytest.raises(ValueError, match="at most 2\\*\\*53 - 1"):
+            evm_method(x402_extra={"nested": {"value": value}})
+
+    def test_accepts_small_floats(self) -> None:
+        assert evm_method(x402_extra={"rate": 1.5, "big": 2**53 - 1}) is not None
+
+    @pytest.mark.parametrize("extra", [{"1": "a", 1: "b"}, {"nested": [{2: "x"}]}, {None: 1}])
+    def test_rejects_non_string_keys(self, extra: Any) -> None:
+        with pytest.raises(ValueError, match="keys must be strings"):
+            evm_method(x402_extra=extra)
+
     def test_rejects_an_oversized_extra(self) -> None:
         with pytest.raises(ValueError, match="at most 8192 bytes"):
             evm_method(x402_extra={"blob": "a" * 8192})

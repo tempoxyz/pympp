@@ -17,7 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 import rfc8785
 from eth_utils.address import to_checksum_address
@@ -148,6 +148,9 @@ _SIGNATURE_RE = re.compile(r"0x[0-9a-fA-F]{130}")
 # uint256 values have at most 78 digits; longer strings could not be parsed safely.
 _ATOMIC_RE = re.compile(r"[0-9]{1,78}")
 _MAX_X402_EXTRA_BYTES = 8 * 1024
+
+_MAX_SAFE_INTEGER = 2**53 - 1
+"""Largest integer a JavaScript number holds exactly."""
 """Largest canonical x402_extra, leaving room in the 64 KiB PAYMENT-REQUIRED header."""
 _UINT256_MAX = 2**256 - 1
 
@@ -339,8 +342,13 @@ class ChargeIntent:
         self.x402_extra: dict[str, Any] = {}
         if x402_extra:
             try:
-                self.x402_extra = json.loads(json.dumps(dict(x402_extra), allow_nan=False))
+                text = json.dumps(dict(x402_extra), allow_nan=False)
+                # After json.dumps, which refuses circular values, so the walk ends.
+                _check_x402_extra(x402_extra)
+                self.x402_extra = json.loads(text)
                 encoded = rfc8785.dumps(self.x402_extra)
+            except _X402ExtraError:
+                raise
             except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError) as error:
                 raise ValueError("x402_extra must be canonical JSON (RFC 8785)") from error
             # Every offer repeats it in one PAYMENT-REQUIRED header, which decoders cap at 64 KiB.
@@ -628,3 +636,24 @@ class ChargeIntent:
                 "facilitator reported success without a transaction"
             )
         return settled["transaction"]
+
+
+class _X402ExtraError(ValueError):
+    """``x402_extra`` holds a value a credential could not echo back unchanged."""
+
+
+def _check_x402_extra(value: Any) -> None:
+    """Refuse non-string keys, which JSON would merge or rename, and floats beyond
+    2**53, which a JavaScript client echoes as integers the header decoder refuses."""
+    stack: list[Any] = [value]
+    while stack:
+        item = stack.pop()
+        if is_mapping(item):
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise _X402ExtraError("x402_extra object keys must be strings")
+                stack.append(child)
+        elif isinstance(item, list | tuple):
+            stack.extend(cast("list[Any] | tuple[Any, ...]", item))
+        elif isinstance(item, float) and abs(item) > _MAX_SAFE_INTEGER:
+            raise _X402ExtraError("x402_extra numbers must be at most 2**53 - 1 in magnitude")

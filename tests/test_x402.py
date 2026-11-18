@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import sys
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
@@ -643,6 +645,78 @@ class TestFacilitatorSupported:
             supported = await HttpFacilitator("https://f.example", client=client).supported()
         assert supported == {"kinds": []}
 
+    async def test_supported_sends_one_field_per_header_name(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(json={"kinds": []})
+        facilitator = HttpFacilitator(
+            "https://f.example",
+            headers={"Authorization": "Bearer generic"},
+            create_auth_headers=lambda: {"supported": {"authorization": "Bearer endpoint"}},
+        )
+        await facilitator.supported()
+        request = httpx_mock.get_request()
+        assert request is not None
+        assert request.headers.get_list("authorization") == ["Bearer endpoint"]
+
+    async def test_supported_has_a_total_deadline(self) -> None:
+        class Trickle(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                while True:
+                    yield b" "
+                    await asyncio.sleep(0.01)
+
+        class Slow(httpx.AsyncBaseTransport):
+            async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+                return httpx.Response(200, stream=Trickle())
+
+        async with httpx.AsyncClient(transport=Slow()) as client:
+            facilitator = HttpFacilitator("https://f.example", timeout=0.2, client=client)
+            with pytest.raises(FacilitatorError, match="did not answer within"):
+                await facilitator.supported()
+
+    async def test_supported_caps_the_body_size(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(content=b" " * (1024 * 1024 + 1))
+        with pytest.raises(FacilitatorError, match="more than 1048576 bytes"):
+            await HttpFacilitator("https://f.example").supported()
+
+    async def test_supported_errors_omit_httpx_messages(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_exception(httpx.LocalProtocolError("Illegal header value b'secret\\n'"))
+        with pytest.raises(FacilitatorError) as error:
+            await HttpFacilitator("https://f.example").supported()
+        assert "secret" not in str(error.value)
+        assert error.value.__cause__ is None and error.value.__suppress_context__
+
+    async def test_supported_does_not_follow_redirects(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url="https://f.example/supported",
+            status_code=302,
+            headers={"location": "http://downgrade.example/supported"},
+        )
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            with pytest.raises(FacilitatorError, match="302"):
+                await pay_to(
+                    HttpFacilitator("https://f.example", client=client), network="eip155:8453"
+                )
+        assert len(httpx_mock.get_requests()) == 1
+
+    @pytest.mark.parametrize(
+        ("url", "trust_env"), [("http://127.0.0.1:4021", False), ("https://f.example", True)]
+    )
+    async def test_supported_ignores_environment_proxies_for_cleartext(
+        self, httpx_mock: HTTPXMock, monkeypatch: pytest.MonkeyPatch, url: str, trust_env: bool
+    ) -> None:
+        created: list[bool] = []
+        real = httpx.AsyncClient
+
+        class Recording(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                created.append(kwargs.get("trust_env", True))
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "AsyncClient", Recording)
+        httpx_mock.add_response(json={"kinds": []})
+        await HttpFacilitator(url).supported()
+        assert created == [trust_env]
+
     async def test_supported_rejects_deeply_nested_json(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(
             content=b"[" * 100_000 + b"]" * 100_000, headers={"content-type": "application/json"}
@@ -740,6 +814,18 @@ class TestFacilitatorSupported:
         kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
         httpx_mock.add_response(json={"kinds": [{**kind, "extra": {"payTo": PAY_TO}}]})
         assert await pay_to(url, network="eip155:8453") == PAY_TO
+
+    async def test_pay_to_accepts_a_synchronous_supported(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+
+            def supported(self) -> Any:
+                kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
+                return {"kinds": [{**kind, "extra": {"payTo": PAY_TO}}]}
+
+        assert await pay_to(Stub(), network="eip155:8453") == PAY_TO  # type: ignore[arg-type]
 
     async def test_pay_to_needs_supported(self) -> None:
         class Stub:
