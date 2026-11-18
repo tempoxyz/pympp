@@ -236,7 +236,11 @@ async def assert_credential_source_is_payer(
     """
     if source is None:
         return
-    if not _same(_read_source_address(source, chain_id), payer):
+    try:
+        address = _read_source_address(source, chain_id)
+    except VerificationFailedError:
+        address = None
+    if address is None or not _same(address, payer):
         raise VerificationFailedError("credential source does not match transaction payer")
     try:
         valid = await _signature_authenticates_payer(

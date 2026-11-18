@@ -212,6 +212,23 @@ class TestVerifiedPayer:
         assert verify(json.dumps({"type": "webauthn.get", "challenge": "!!"}).encode()) is None
         assert verify(json.dumps({"type": "webauthn.get"}).encode()) is None
 
+    def test_bounds_webauthn_data_before_parsing_it(self) -> None:
+        key = p256_key()
+        tx = unsigned()
+        payload = tx.get_signing_hash()
+        fits = webauthn_signature(key, payload, pad="x" * 1500)
+        assert len(fits) - 1 <= limits._WEBAUTHN_MAX_DATA  # pyright: ignore[reportPrivateUsage]
+        assert limits.verified_payer(with_signature(tx, fits)) == key_address(key)
+        oversized = webauthn_signature(key, payload, pad="x" * 2048)
+        assert limits.verified_payer(with_signature(tx, oversized)) is None
+        # Metadata that never forms JSON is refused without trying every split offset.
+        braces = b"\x02" + b"\x11" * 37 + b"{" * 100_000 + b"}" + b"\x00" * 128
+        assert limits.verified_payer(with_signature(tx, braces)) is None
+        assert (
+            limits._verified_webauthn_signer(payload, braces[1:])  # pyright: ignore[reportPrivateUsage]
+            is None
+        )
+
     @pytest.mark.parametrize("version", [3, 4])
     def test_keys_an_access_key_on_the_key_not_the_claimed_account(self, version: int) -> None:
         tx = unsigned()

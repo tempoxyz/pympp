@@ -115,6 +115,26 @@ async def test_open_source_must_name_the_transaction_payer() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        f"did:pkh:eip155:1:{PAYER.address}",
+        "",
+        "did:web:payer.test",
+        f"did:pkh:eip155:{CHAIN_ID}:0x12",
+    ],
+)
+async def test_open_source_errors_name_the_transaction_payer(source: str) -> None:
+    with pytest.raises(VerificationFailedError, match="does not match transaction payer"):
+        await verification.assert_credential_source_is_payer(
+            source=source,
+            chain_id=CHAIN_ID,
+            payer=PAYER.address,
+            serialized_transaction="0x" + unsigned().sign(PAYER_KEY).encode().hex(),
+            rpc_url=RPC_URL,
+        )
+
+
 async def test_open_without_a_source_is_not_bound() -> None:
     await verification.assert_credential_source_is_payer(
         source=None,
