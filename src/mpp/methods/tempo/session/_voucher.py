@@ -174,12 +174,12 @@ def _verify_signer_signature(
     expected_signer: str,
     *,
     configurable: bool,
-    signer_snapshot: str | None,
+    opening_commitment: str | None,
 ) -> bool:
     """Apply the TIP-1034 and TIP-1166 signer rules to one signature.
 
     A `0x05` configurable account signature counts only with `configurable`. A nonzero
-    `signer_snapshot` (the config commitment the escrow cached at open) rejects
+    `opening_commitment` (the config commitment the escrow cached at open) rejects
     primitive signatures, as the escrow does.
     """
     if is_configurable_signature(signature):
@@ -189,8 +189,8 @@ def _verify_signer_signature(
             inner = bytes.fromhex(digest.removeprefix("0x"))
         except ValueError:
             return False
-        return verify_configurable_signature(signature, inner, expected_signer, signer_snapshot)
-    if not is_zero_hash(signer_snapshot):
+        return verify_configurable_signature(signature, inner, expected_signer, opening_commitment)
+    if not is_zero_hash(opening_commitment):
         return False
     signer = _recover_canonical(signature, digest)
     return signer is not None and signer.lower() == expected_signer.lower()
@@ -203,15 +203,15 @@ def verify_voucher(
     expected_signer: str,
     *,
     configurable: bool = False,
-    signer_snapshot: str | None = None,
+    opening_commitment: str | None = None,
 ) -> bool:
     """Return whether `voucher` carries a valid signature by `expected_signer`.
 
     By default only canonical TIP-1020 primitive signatures are accepted. With
     `configurable`, a TIP-1166 configurable account (`0x05`) signature is accepted when
     it names `expected_signer`, its owner approvals reach the threshold, and its config
-    commits to `signer_snapshot` or, when the snapshot is absent or zero, is the
-    version-zero config that derives `expected_signer`. A nonzero `signer_snapshot`
+    commits to `opening_commitment` or, when the opening commitment is absent or zero, is the
+    version-zero config that derives `expected_signer`. A nonzero `opening_commitment`
     rejects primitive signatures.
     """
     try:
@@ -221,7 +221,7 @@ def verify_voucher(
             chain_id=chain_id,
             escrow=escrow,
         )
-        snapshot_zero = is_zero_hash(signer_snapshot)
+        commitment_zero = is_zero_hash(opening_commitment)
     except Exception:
         return False
     return _verify_signer_signature(
@@ -229,7 +229,7 @@ def verify_voucher(
         digest,
         expected_signer,
         configurable=configurable,
-        signer_snapshot=None if snapshot_zero else signer_snapshot,
+        opening_commitment=None if commitment_zero else opening_commitment,
     )
 
 
@@ -240,13 +240,13 @@ def verify_close_authorization(
     expected_signers: Sequence[str],
     *,
     configurable: bool = False,
-    signer_snapshot: str | None = None,
+    opening_commitment: str | None = None,
 ) -> bool:
     """Return whether a close-authorization signature belongs to one of `expected_signers`.
 
-    `configurable` and `signer_snapshot` apply the TIP-1166 rules of :func:`verify_voucher`
+    `configurable` and `opening_commitment` apply the TIP-1166 rules of :func:`verify_voucher`
     to the channel's voucher signer. The payer's own close authorization stays a
-    primitive signature: pass the snapshot only when checking the voucher signer.
+    primitive signature: pass the opening commitment only when checking the voucher signer.
     """
     try:
         digest = close_authorization_digest(
@@ -255,7 +255,7 @@ def verify_close_authorization(
             chain_id=chain_id,
             escrow=escrow,
         )
-        snapshot_zero = is_zero_hash(signer_snapshot)
+        commitment_zero = is_zero_hash(opening_commitment)
     except Exception:
         return False
     return any(
@@ -264,7 +264,7 @@ def verify_close_authorization(
             digest,
             expected,
             configurable=configurable,
-            signer_snapshot=None if snapshot_zero else signer_snapshot,
+            opening_commitment=None if commitment_zero else opening_commitment,
         )
         for expected in expected_signers
     )

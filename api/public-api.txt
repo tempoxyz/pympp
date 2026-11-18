@@ -1272,7 +1272,7 @@ module mpp.methods.tempo.session.server
         field kw_only pending_settlement: PendingSettlement | None = None
         field kw_only idempotency_markers: Mapping[str, IdempotencyMarker] | None = None
         field kw_only close_supervised_from_block: int | None = None
-        field kw_only signer_snapshot: str | None = None
+        field kw_only opening_commitment: str | None = None
     class CloseSupervision
         @dataclass(frozen=False, slots=True)
         field block: int

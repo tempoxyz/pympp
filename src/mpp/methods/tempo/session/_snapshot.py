@@ -229,9 +229,9 @@ async def hydrate_session_snapshot(
             signed,
             signer,
             configurable=True,
-            signer_snapshot=signer_snapshot,
+            opening_commitment=opening_commitment,
         )
-        for signer_snapshot in (None, descriptor.salt)
+        for opening_commitment in (None, descriptor.salt)
     ):
         raise ValueError("session snapshot highest voucher signature is invalid")
     channel_id = compute_channel_id(descriptor, chain_id=snapshot.chain_id, escrow=snapshot.escrow)

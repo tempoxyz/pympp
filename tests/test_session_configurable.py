@@ -1,4 +1,4 @@
-"""TIP-1166 configurable account voucher signers (T15): 0x05 vouchers, signer snapshots, salts.
+"""TIP-1166 configurable account voucher signers (T15): 0x05 vouchers, opening commitments, salts.
 
 Encodings are checked against a vector computed with ox's tempo AccountConfig and
 SignatureEnvelope (ox 1.8.16), which match tempo-primitives' configurable account code.
@@ -104,10 +104,10 @@ def check(signed: SignedVoucher, signer: str = ACCOUNT, **options: Any) -> bool:
     return verify_voucher(ESCROW_ADDRESS, CHAIN_ID, signed, signer, **options)
 
 
-def snapshot_log(channel_id: str, signer: str, commitment: str) -> dict[str, Any]:
+def commitment_log(channel_id: str, signer: str, commitment: str) -> dict[str, Any]:
     return {
         "address": ESCROW_ADDRESS,
-        "topics": [abi.EVENT_TOPICS["SignerSnapshotCached"], channel_id, topic(signer)],
+        "topics": [abi.EVENT_TOPICS["OpeningCommitmentRecorded"], channel_id, topic(signer)],
         "data": "0x" + encode(["bytes32"], [bytes.fromhex(commitment[2:])]).hex(),
     }
 
@@ -180,33 +180,35 @@ class TestVerifyVoucher:
         signed = voucher(configurable())
         assert signed.signature.startswith("0x05")
         assert not check(signed)
-        assert not check(signed, signer_snapshot=COMMITMENT)
+        assert not check(signed, opening_commitment=COMMITMENT)
 
     def test_primitive_vouchers_are_unchanged(self) -> None:
         signed = voucher(PAYER)
         assert check(signed, PAYER.address)
         assert check(signed, PAYER.address, configurable=True)
-        assert check(signed, PAYER.address, configurable=True, signer_snapshot=ZERO)
+        assert check(signed, PAYER.address, configurable=True, opening_commitment=ZERO)
 
-    def test_accepts_a_configurable_voucher_under_its_snapshot(self) -> None:
-        assert check(voucher(configurable()), configurable=True, signer_snapshot=COMMITMENT)
+    def test_accepts_a_configurable_voucher_under_its_opening_commitment(self) -> None:
+        assert check(voucher(configurable()), configurable=True, opening_commitment=COMMITMENT)
 
     def test_rejects_a_voucher_under_a_rotated_config(self) -> None:
         rotated = voucher(configurable(ROTATED))
-        assert check(rotated, configurable=True, signer_snapshot=ROTATED_COMMITMENT)
-        assert not check(rotated, configurable=True, signer_snapshot=COMMITMENT)
+        assert check(rotated, configurable=True, opening_commitment=ROTATED_COMMITMENT)
+        assert not check(rotated, configurable=True, opening_commitment=COMMITMENT)
         original = voucher(configurable())
-        assert not check(original, configurable=True, signer_snapshot=ROTATED_COMMITMENT)
+        assert not check(original, configurable=True, opening_commitment=ROTATED_COMMITMENT)
 
-    def test_rejects_a_primitive_voucher_when_the_snapshot_is_nonzero(self) -> None:
+    def test_rejects_a_primitive_voucher_when_the_opening_commitment_is_nonzero(self) -> None:
         signed = voucher(PAYER)
-        assert not check(signed, PAYER.address, signer_snapshot=COMMITMENT)
-        assert not check(signed, PAYER.address, configurable=True, signer_snapshot=COMMITMENT)
+        assert not check(signed, PAYER.address, opening_commitment=COMMITMENT)
+        assert not check(signed, PAYER.address, configurable=True, opening_commitment=COMMITMENT)
 
-    def test_zero_snapshot_needs_the_version_zero_config_that_derives_the_signer(self) -> None:
+    def test_zero_opening_commitment_needs_the_version_zero_config_that_derives_the_signer(
+        self,
+    ) -> None:
         assert check(voucher(configurable()), configurable=True)
-        assert check(voucher(configurable()), configurable=True, signer_snapshot=ZERO)
-        # A later config version cannot prove the address without a snapshot.
+        assert check(voucher(configurable()), configurable=True, opening_commitment=ZERO)
+        # A later config version cannot prove the address without an opening commitment.
         assert not check(voucher(configurable(ROTATED)), configurable=True)
         # A version-zero config that derives another address.
         stranger = "0x" + "77" * 20
@@ -217,7 +219,7 @@ class TestVerifyVoucher:
         signed = voucher(configurable())
         assert not check(signed, PAYER.address, configurable=True)
         moved = replace(signed, cumulative_amount=101)
-        assert not check(moved, configurable=True, signer_snapshot=COMMITMENT)
+        assert not check(moved, configurable=True, opening_commitment=COMMITMENT)
 
     def test_rejects_approvals_below_threshold_out_of_order_or_unneeded(self) -> None:
         digest = configurable_account_digest(PAYLOAD, ACCOUNT, 0)
@@ -258,28 +260,29 @@ class TestVerifyVoucher:
             )
 
         assert not verify()
-        assert verify(configurable=True, signer_snapshot=COMMITMENT)
-        assert not verify(configurable=True, signer_snapshot=ROTATED_COMMITMENT)
+        assert verify(configurable=True, opening_commitment=COMMITMENT)
+        assert not verify(configurable=True, opening_commitment=ROTATED_COMMITMENT)
 
 
 class TestChain:
-    def test_reads_the_signer_snapshot_from_the_open_receipt(self) -> None:
+    def test_reads_the_opening_commitment_from_the_open_receipt(self) -> None:
         descriptor = replace(DESCRIPTOR, authorized_signer=ACCOUNT, salt=COMMITMENT)
-        receipt = {"logs": [snapshot_log(CHANNEL_ID, ACCOUNT, COMMITMENT)]}
-        assert chain.get_signer_snapshot(receipt, descriptor, CHANNEL_ID) == COMMITMENT
-        assert chain.get_signer_snapshot({"logs": []}, descriptor, CHANNEL_ID) is None
-        assert chain.get_signer_snapshot(receipt, descriptor, "0x" + "d2" * 32) is None
+        receipt = {"logs": [commitment_log(CHANNEL_ID, ACCOUNT, COMMITMENT)]}
+        assert chain.get_opening_commitment(receipt, descriptor, CHANNEL_ID) == COMMITMENT
+        assert chain.get_opening_commitment({"logs": []}, descriptor, CHANNEL_ID) is None
+        assert chain.get_opening_commitment(receipt, descriptor, "0x" + "d2" * 32) is None
         assert (
-            chain.get_signer_snapshot(receipt, descriptor, CHANNEL_ID, escrow=PAYEE.address) is None
+            chain.get_opening_commitment(receipt, descriptor, CHANNEL_ID, escrow=PAYEE.address)
+            is None
         )
         with pytest.raises(VerificationFailedError, match="salt"):
-            chain.get_signer_snapshot(receipt, replace(descriptor, salt=SALT), CHANNEL_ID)
-        wrong = {"logs": [snapshot_log(CHANNEL_ID, PAYEE.address, COMMITMENT)]}
+            chain.get_opening_commitment(receipt, replace(descriptor, salt=SALT), CHANNEL_ID)
+        wrong = {"logs": [commitment_log(CHANNEL_ID, PAYEE.address, COMMITMENT)]}
         with pytest.raises(VerificationFailedError, match="signer"):
-            chain.get_signer_snapshot(wrong, descriptor, CHANNEL_ID)
+            chain.get_opening_commitment(wrong, descriptor, CHANNEL_ID)
         twice = {"logs": receipt["logs"] * 2}
         with pytest.raises(VerificationFailedError, match="at most one"):
-            chain.get_signer_snapshot(twice, descriptor, CHANNEL_ID)
+            chain.get_opening_commitment(twice, descriptor, CHANNEL_ID)
 
     async def test_open_salt_defaults_to_the_signer_commitment(self) -> None:
         rpc = FakeRpc()
@@ -356,7 +359,7 @@ class TestServer:
         signed = voucher(configurable(), 100, life.channel_id)
         life.rpc.logs = [
             opened_log(life.descriptor, life.channel_id),
-            snapshot_log(life.channel_id, ACCOUNT, cached),
+            commitment_log(life.channel_id, ACCOUNT, cached),
         ]
         await verification.broadcast_credential_payload(
             life.context(life.open_payload(signature=signed.signature), **overrides)
@@ -365,7 +368,7 @@ class TestServer:
     async def test_accepts_configurable_vouchers_when_enabled(self) -> None:
         life = await self._life()
         await self._open(life, configurable_vouchers=True)
-        assert (await life.channel()).signer_snapshot == COMMITMENT
+        assert (await life.channel()).opening_commitment == COMMITMENT
         signed = voucher(configurable(), 300, life.channel_id)
         receipt = await life.accept(
             life.voucher_payload(300, signature=signed.signature), configurable_vouchers=True
@@ -383,24 +386,29 @@ class TestServer:
             await self._open(life)
         assert not life.rpc.sent
 
-    async def test_rejects_an_open_whose_receipt_caches_another_snapshot(self) -> None:
+    async def test_rejects_an_open_whose_receipt_caches_another_opening_commitment(self) -> None:
         life = await self._life()
         with pytest.raises(VerificationFailedError):
             await self._open(life, ROTATED_COMMITMENT, configurable_vouchers=True)
 
-    async def test_primitive_opens_store_a_zero_snapshot(self) -> None:
+    async def test_primitive_opens_store_a_zero_opening_commitment(self) -> None:
         life = await Lifecycle().build()
         await life.open(configurable_vouchers=True)
         channel = await life.channel()
-        assert channel.signer_snapshot == ZERO
-        assert channel_state_from_json(channel_state_to_json(channel)).signer_snapshot == ZERO
+        assert channel.opening_commitment == ZERO
+        assert channel_state_from_json(channel_state_to_json(channel)).opening_commitment == ZERO
         # Records written before the field existed load as unknown.
-        legacy = channel_state_to_json(replace(channel, signer_snapshot=None))
-        assert "signerSnapshot" not in legacy
-        assert channel_state_from_json(legacy).signer_snapshot is None
-        cached = channel_state_to_json(replace(channel, signer_snapshot=COMMITMENT))
-        assert cached["signerSnapshot"] == COMMITMENT
-        assert channel_state_from_json(cached).signer_snapshot == COMMITMENT
+        legacy = channel_state_to_json(replace(channel, opening_commitment=None))
+        assert "openingCommitment" not in legacy
+        assert channel_state_from_json(legacy).opening_commitment is None
+        cached = channel_state_to_json(replace(channel, opening_commitment=COMMITMENT))
+        assert cached["openingCommitment"] == COMMITMENT
+        assert channel_state_from_json(cached).opening_commitment == COMMITMENT
+        # Records written under the field's earlier name still load.
+        for key in ("signerSnapshot", "signer_snapshot"):
+            renamed = {k: v for k, v in cached.items() if k != "openingCommitment"}
+            renamed[key] = COMMITMENT
+            assert channel_state_from_json(renamed).opening_commitment == COMMITMENT
 
     async def test_accepts_configurable_vouchers_in_one_store_update(self) -> None:
         life = await self._life()
@@ -423,54 +431,54 @@ class TestServer:
         life = await Lifecycle().build(salt=COMMITMENT)
         life.rpc.logs = [
             opened_log(life.descriptor, life.channel_id),
-            snapshot_log(life.channel_id, PAYER.address, COMMITMENT),
+            commitment_log(life.channel_id, PAYER.address, COMMITMENT),
         ]
         with pytest.raises(InvalidSignatureError):
             await verification.broadcast_credential_payload(life.context(life.open_payload()))
 
 
-class TestUnknownSnapshot:
-    """A channel stored without a snapshot is looked up on chain once, never assumed zero."""
+class TestUnknownOpeningCommitment:
+    """A channel stored without an opening commitment is looked up on chain once, never zero."""
 
     async def _life(self, *, commitment: str | None, logged: bool) -> Lifecycle:
         life = await Lifecycle().build(salt=COMMITMENT)
         await life.open()
-        await life.update(signer_snapshot=None)
+        await life.update(opening_commitment=None)
         if commitment is not None:
             life.rpc.commitments[PAYER.address.lower()] = commitment
         if logged:
-            life.rpc.chain_logs = [snapshot_log(life.channel_id, PAYER.address, COMMITMENT)]
+            life.rpc.chain_logs = [commitment_log(life.channel_id, PAYER.address, COMMITMENT)]
         return life
 
-    async def test_a_logged_snapshot_rejects_primitive_vouchers(self) -> None:
+    async def test_a_logged_opening_commitment_rejects_primitive_vouchers(self) -> None:
         life = await self._life(commitment=ROTATED_COMMITMENT, logged=True)
-        snapshots: dict[str, str] = {}
+        commitments: dict[str, str] = {}
         for amount in (200, 300):
             with pytest.raises(InvalidSignatureError):
-                await life.accept(life.voucher_payload(amount), signer_snapshots=snapshots)
-        assert (await life.channel()).signer_snapshot == COMMITMENT
+                await life.accept(life.voucher_payload(amount), opening_commitments=commitments)
+        assert (await life.channel()).opening_commitment == COMMITMENT
         assert len(life.rpc.methods("eth_getLogs")) == 1
 
     async def test_the_one_store_update_path_also_waits_for_the_lookup(self) -> None:
         life = await self._life(commitment=COMMITMENT, logged=True)
         with pytest.raises(InvalidSignatureError):
             await life.accept(life.voucher_payload(200), voucher_state_max_age=60_000)
-        assert (await life.channel()).signer_snapshot == COMMITMENT
+        assert (await life.channel()).opening_commitment == COMMITMENT
 
     async def test_no_log_means_zero_rules(self) -> None:
         life = await self._life(commitment=COMMITMENT, logged=False)
         receipt = await life.accept(life.voucher_payload(200))
         assert receipt.accepted_cumulative == "200"
-        assert (await life.channel()).signer_snapshot == ZERO
+        assert (await life.channel()).opening_commitment == ZERO
 
     async def test_a_signer_without_a_commitment_skips_the_log_search(self) -> None:
         life = await self._life(commitment=None, logged=False)
         receipt = await life.accept(life.voucher_payload(200))
         assert receipt.accepted_cumulative == "200"
         assert not life.rpc.methods("eth_getLogs")
-        assert (await life.channel()).signer_snapshot == ZERO
+        assert (await life.channel()).opening_commitment == ZERO
 
-    async def test_close_looks_the_snapshot_up_too(self) -> None:
+    async def test_close_looks_the_opening_commitment_up_too(self) -> None:
         life = await self._life(commitment=COMMITMENT, logged=True)
         with pytest.raises(InvalidSignatureError):
             await life.accept(life.close_payload(100))
@@ -496,15 +504,15 @@ class TestChannelSigner:
         account = configurable(ROTATED)
         assert account.channel_signer(ROTATED_COMMITMENT) is account
 
-    def test_zero_snapshot_channels_use_the_version_zero_config_that_derives_the_address(
+    def test_zero_opening_commitment_channels_use_the_version_zero_config_that_derives_the_address(
         self,
     ) -> None:
         account = configurable()
         assert account.channel_signer(SALT) is account
         signed = voucher(account.channel_signer(SALT))
-        assert check(signed, configurable=True, signer_snapshot=ZERO)
+        assert check(signed, configurable=True, opening_commitment=ZERO)
 
-    def test_zero_snapshot_channels_fall_back_to_the_root_key(self) -> None:
+    def test_zero_opening_commitment_channels_fall_back_to_the_root_key(self) -> None:
         # An EOA that adopted a configuration (TIP-1113): its v0 config does not derive it.
         root = PAYER
         config = replace(ROTATED, version=0)
@@ -514,7 +522,7 @@ class TestChannelSigner:
         assert account.channel_signer(SALT) is root
         assert account.channel_signer(config.commitment()) is account
         signed = voucher(account.channel_signer(SALT))
-        assert check(signed, root.address, signer_snapshot=ZERO)
+        assert check(signed, root.address, opening_commitment=ZERO)
         with pytest.raises(ValueError, match="own key"):
             ConfigurableAccount(address=ACCOUNT, config=CONFIG, owners=KEYS, root_key=root)
 
@@ -558,7 +566,7 @@ class TestClient:
         signed = SignedVoucher(
             channel_id=payload.channel_id, cumulative_amount=100, signature=payload.signature
         )
-        assert check(signed, configurable=True, signer_snapshot=COMMITMENT)
+        assert check(signed, configurable=True, opening_commitment=COMMITMENT)
 
     async def test_reads_configurable_vouchers_from_the_challenge(self) -> None:
         from tests.test_session_client import resolved_for

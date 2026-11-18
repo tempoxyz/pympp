@@ -310,12 +310,12 @@ def verify_configurable_signature(
     signature: str,
     inner_digest: bytes,
     expected_signer: str,
-    signer_snapshot: str | None = None,
+    opening_commitment: str | None = None,
 ) -> bool:
     """Verify a 0x05 signature over inner_digest for expected_signer (TIP-1166).
 
-    With a nonzero signer_snapshot (the commitment the escrow cached at open) the
-    signature's config must commit to it. With a zero or absent snapshot the config
+    With a nonzero opening_commitment (the commitment the escrow cached at open) the
+    signature's config must commit to it. With a zero or absent opening commitment the config
     must be version zero and derive the signer's address. Either way, the owner
     approvals must reach the config's threshold.
     """
@@ -323,14 +323,14 @@ def verify_configurable_signature(
         parsed = ConfigurableAccountSignature.decode(bytes.fromhex(signature.removeprefix("0x")))
         if parsed.account.lower() != expected_signer.lower():
             return False
-        if is_zero_hash(signer_snapshot):
+        if is_zero_hash(opening_commitment):
             if parsed.config.version != 0:
                 return False
             if parsed.config.derive_address() != parsed.account:
                 return False
         else:
-            assert signer_snapshot is not None
-            if int(parsed.config.commitment(), 16) != int(signer_snapshot, 16):
+            assert opening_commitment is not None
+            if int(parsed.config.commitment(), 16) != int(opening_commitment, 16):
                 return False
     except ValueError:
         return False
@@ -394,9 +394,10 @@ class ConfigurableAccount:
         """The signer for vouchers of a channel with descriptor salt ``salt`` (TIP-1166).
 
         A channel this account opened while it had a config commitment carries that
-        commitment as its salt and its escrow snapshot, so this account signs ``0x05``. A
-        channel opened before then has a zero snapshot: the escrow accepts ``0x05`` only from
-        the version-zero config that derives this address, and otherwise a primitive
+        commitment as its salt and its opening commitment, so this account signs ``0x05``.
+        A channel opened before then has a zero opening commitment: the escrow accepts
+        ``0x05`` only from the version-zero config that derives this address, and otherwise a
+        primitive
         signature from ``root_key``.
         """
         if not is_zero_hash(salt) and int(salt, 16) == int(self.commitment, 16):

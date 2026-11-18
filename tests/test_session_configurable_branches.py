@@ -1,4 +1,4 @@
-"""Edge cases of TIP-1166 configurable account signatures, signer snapshots and commitments."""
+"""Edge cases of TIP-1166 configurable account signatures and opening commitments."""
 
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ from tests.test_session_configurable import (
     ROTATED,
     SALT,
     ZERO,
+    commitment_log,
     configurable,
-    snapshot_log,
 )
 
 ZERO_ADDRESS = "0x" + "00" * 20
@@ -184,10 +184,10 @@ class TestApprovals:
     def test_voucher_rule_rejects_a_bad_digest(self) -> None:
         signature = "0x" + configurable().sign_hash(PAYLOAD).hex()
         assert not _verify_signer_signature(
-            signature, "0xzz", ACCOUNT, configurable=True, signer_snapshot=None
+            signature, "0xzz", ACCOUNT, configurable=True, opening_commitment=None
         )
         assert not _verify_signer_signature(
-            signature, "0x" + PAYLOAD.hex(), ACCOUNT, configurable=False, signer_snapshot=None
+            signature, "0x" + PAYLOAD.hex(), ACCOUNT, configurable=False, opening_commitment=None
         )
 
 
@@ -225,19 +225,19 @@ class TestConfigurableAccount:
         assert account.channel_signer(account.commitment) is account
 
 
-class TestChainSnapshots:
+class TestChainOpeningCommitments:
     def test_skips_unusable_logs(self) -> None:
         descriptor = replace(DESCRIPTOR, authorized_signer=ACCOUNT, salt=COMMITMENT)
-        log = snapshot_log(CHANNEL_ID, ACCOUNT, COMMITMENT)
+        log = commitment_log(CHANNEL_ID, ACCOUNT, COMMITMENT)
         broken = {**log, "data": "0x1234"}
         receipt = {"logs": ["not a log", broken, {**log, "topics": []}, log]}
-        assert chain.get_signer_snapshot(receipt, descriptor, CHANNEL_ID) == COMMITMENT
-        assert chain.get_signer_snapshot({"logs": None}, descriptor, CHANNEL_ID) is None
+        assert chain.get_opening_commitment(receipt, descriptor, CHANNEL_ID) == COMMITMENT
+        assert chain.get_opening_commitment({"logs": None}, descriptor, CHANNEL_ID) is None
 
     def test_zero_authorized_signer_means_the_payer(self) -> None:
         descriptor = replace(DESCRIPTOR, authorized_signer=ZERO_ADDRESS, salt=COMMITMENT)
-        receipt = {"logs": [snapshot_log(CHANNEL_ID, PAYER.address, COMMITMENT)]}
-        assert chain.get_signer_snapshot(receipt, descriptor, CHANNEL_ID) == COMMITMENT
+        receipt = {"logs": [commitment_log(CHANNEL_ID, PAYER.address, COMMITMENT)]}
+        assert chain.get_opening_commitment(receipt, descriptor, CHANNEL_ID) == COMMITMENT
 
     async def test_config_commitment_results(self) -> None:
         rpc = FakeRpc()
@@ -247,13 +247,15 @@ class TestChainSnapshots:
         with pytest.raises(ValueError, match="getConfigCommitment"):
             await chain.get_config_commitment(RPC, ACCOUNT, client=rpc.client)
 
-    async def test_payer_signed_channel_without_commitment_has_a_zero_snapshot(self) -> None:
+    async def test_payer_signed_channel_without_commitment_has_a_zero_opening_commitment(
+        self,
+    ) -> None:
         rpc = FakeRpc()
         descriptor = replace(DESCRIPTOR, authorized_signer=ZERO_ADDRESS)
-        snapshot = await chain.find_signer_snapshot(
+        recorded = await chain.find_opening_commitment(
             RPC, CHANNEL_ID, descriptor, escrow=ESCROW_ADDRESS, client=rpc.client
         )
-        assert snapshot == ZERO
+        assert recorded == ZERO
         assert rpc.methods("eth_getLogs") == []
 
     def test_signer_config_error_reads_nested_revert_data(self) -> None:

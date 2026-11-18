@@ -264,17 +264,17 @@ def get_channel_event(
     return matches[0]
 
 
-def get_signer_snapshot(
+def get_opening_commitment(
     receipt: Mapping[str, Any],
     descriptor: ChannelDescriptor,
     channel_id: str,
     *,
     escrow: str | None = None,
 ) -> str | None:
-    """The TIP-1166 signer snapshot an `open` receipt cached for `channel_id`, else None.
+    """The TIP-1166 opening commitment an `open` receipt cached for `channel_id`, else None.
 
-    From T15 the escrow emits `SignerSnapshotCached` when the channel's voucher signer has a
-    config commitment, which the salt must equal. No event means the snapshot is zero.
+    From T15 the escrow emits `OpeningCommitmentRecorded` when the channel's voucher signer has a
+    config commitment, which the salt must equal. No event means the opening commitment is zero.
     """
     logs = receipt.get("logs")
     matches: list[dict[str, Any]] = []
@@ -287,7 +287,7 @@ def get_signer_snapshot(
         if (
             not is_list(topics)
             or not topics
-            or str(topics[0]).lower() != abi.EVENT_TOPICS["SignerSnapshotCached"]
+            or str(topics[0]).lower() != abi.EVENT_TOPICS["OpeningCommitmentRecorded"]
         ):
             continue
         try:
@@ -300,7 +300,8 @@ def get_signer_snapshot(
         return None
     if len(matches) > 1:
         raise VerificationFailedError(
-            "expected at most one SignerSnapshotCached event for credential channelId in receipt"
+            "expected at most one OpeningCommitmentRecorded event for credential channelId "
+            "in receipt"
         )
     signer = str(matches[0]["signer"])
     commitment = str(matches[0]["commitment"]).lower()
@@ -308,9 +309,9 @@ def get_signer_snapshot(
     if is_zero_hash(expected_signer):
         expected_signer = descriptor.payer
     if signer.lower() != expected_signer.lower():
-        raise VerificationFailedError("SignerSnapshotCached signer does not match descriptor")
+        raise VerificationFailedError("OpeningCommitmentRecorded signer does not match descriptor")
     if commitment != descriptor.salt.lower() or is_zero_hash(commitment):
-        raise VerificationFailedError("SignerSnapshotCached commitment does not match salt")
+        raise VerificationFailedError("OpeningCommitmentRecorded commitment does not match salt")
     return commitment
 
 
@@ -334,7 +335,7 @@ async def get_config_commitment(
     return "0x" + raw.hex()
 
 
-async def find_signer_snapshot(
+async def find_opening_commitment(
     rpc_url: str,
     channel_id: str,
     descriptor: ChannelDescriptor,
@@ -343,11 +344,11 @@ async def find_signer_snapshot(
     from_block: int = 0,
     client: httpx.AsyncClient | None = None,
 ) -> str:
-    """The TIP-1166 signer snapshot the escrow cached for an open channel; zero when none.
+    """The TIP-1166 opening commitment the escrow cached for an open channel; zero when none.
 
     For a channel whose open receipt was not seen. A signer that has no config commitment
-    now had none at open, so the snapshot is zero without a log search. Otherwise the
-    channel's ``SignerSnapshotCached`` log (searched by its indexed channel ID from
+    now had none at open, so the opening commitment is zero without a log search. Otherwise the
+    channel's ``OpeningCommitmentRecorded`` log (searched by its indexed channel ID from
     ``from_block``) decides: its commitment, or zero when the escrow emitted none.
     """
     zero = "0x" + "00" * 32
@@ -362,7 +363,7 @@ async def find_signer_snapshot(
         [
             {
                 "address": escrow,
-                "topics": [abi.EVENT_TOPICS["SignerSnapshotCached"], channel_id],
+                "topics": [abi.EVENT_TOPICS["OpeningCommitmentRecorded"], channel_id],
                 "fromBlock": hex(from_block),
                 "toBlock": "latest",
             }
@@ -372,8 +373,8 @@ async def find_signer_snapshot(
     present = (
         [log for log in logs if is_dict(log) and not log.get("removed")] if is_list(logs) else []
     )
-    snapshot = get_signer_snapshot({"logs": present}, descriptor, channel_id, escrow=escrow)
-    return zero if snapshot is None else snapshot
+    recorded = get_opening_commitment({"logs": present}, descriptor, channel_id, escrow=escrow)
+    return zero if recorded is None else recorded
 
 
 async def resolve_open_salt(
@@ -1107,7 +1108,7 @@ class BroadcastOpenResult:
     state: ChannelState
     expiring_nonce_hash: str
     open_deposit: int
-    signer_snapshot: str | None = None
+    opening_commitment: str | None = None
     """TIP-1166 config commitment the escrow cached for the signer at open, if it had one."""
 
 
@@ -1134,8 +1135,8 @@ async def broadcast_open_transaction(
     """Validate, broadcast and verify a client-signed `open` transaction.
 
     Checks the `ChannelOpened` event against the calldata and credential, then
-    reads the channel back at the receipt's block. A `SignerSnapshotCached` event
-    (TIP-1166) for the channel becomes the result's `signer_snapshot`.
+    reads the channel back at the receipt's block. A `OpeningCommitmentRecorded` event
+    (TIP-1166) for the channel becomes the result's `opening_commitment`.
     """
     validated = validate_open_credential_transaction(
         serialized_transaction=serialized_transaction,
@@ -1182,7 +1183,7 @@ async def broadcast_open_transaction(
         expected_channel_id=expected_channel_id,
         open_deposit=validated.open_deposit,
     )
-    signer_snapshot = get_signer_snapshot(
+    opening_commitment = get_opening_commitment(
         receipt, validated.descriptor, expected_channel_id, escrow=escrow_contract
     )
     block = _receipt_block(receipt)
@@ -1198,7 +1199,7 @@ async def broadcast_open_transaction(
         state=channel.state,
         expiring_nonce_hash=opened["expiringNonceHash"],
         open_deposit=validated.open_deposit,
-        signer_snapshot=signer_snapshot,
+        opening_commitment=opening_commitment,
     )
 
 

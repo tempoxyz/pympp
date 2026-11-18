@@ -114,9 +114,9 @@ _EVENTS: dict[str, tuple[str, list[tuple[str, str, bool]]]] = {
         ],
     ),
     # TIP-1166 (T15): an open whose voucher signer had a configurable account commitment
-    # caches it as the channel's signer snapshot (the descriptor's salt holds it).
-    "SignerSnapshotCached": (
-        "SignerSnapshotCached(bytes32,address,bytes32)",
+    # caches it as the channel's opening commitment (the descriptor's salt holds it).
+    "OpeningCommitmentRecorded": (
+        "OpeningCommitmentRecorded(bytes32,address,bytes32)",
         [
             ("channelId", "bytes32", True),
             ("signer", "address", True),

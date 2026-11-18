@@ -340,7 +340,7 @@ def session(
             channel_stores.append(checked_store(engine_store))
 
     last_on_chain_verified: dict[str, int] = {}
-    signer_snapshots: dict[str, str] = {}
+    opening_commitments: dict[str, str] = {}
     chain_ids: list[int] = [chain_id] if chain_id is not None else []
 
     async def resolve_chain_id() -> int:
@@ -473,7 +473,7 @@ def session(
             fee_payer_policy=fee_payer_policy,
             fee_token=verification.method_details.fee_token,
             last_on_chain_verified=last_on_chain_verified,
-            signer_snapshots=signer_snapshots,
+            opening_commitments=opening_commitments,
             min_voucher_delta=verification.min_voucher_delta,
             configurable_vouchers=configurable_vouchers,
             on_session_settlement=on_session_settlement,
