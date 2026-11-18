@@ -71,6 +71,8 @@ from mpp.x402._types import (
     PaymentRequirements,
     ResourceInfo,
     SettleResponse,
+    SupportedKind,
+    SupportedResponse,
     VerifyResponse,
     X402FormatError,
 )
@@ -78,6 +80,8 @@ from mpp.x402.facilitator import (
     Facilitator,
     FacilitatorError,
     HttpFacilitator,
+    SupportsSupported,
+    pay_to,
     resolve_facilitator,
 )
 
@@ -99,6 +103,9 @@ __all__ = [
     "ResourceInfo",
     "RouteBinding",
     "SettleResponse",
+    "SupportedKind",
+    "SupportedResponse",
+    "SupportsSupported",
     "VerifyResponse",
     "X402Challenge",
     "X402FormatError",
@@ -112,6 +119,7 @@ __all__ = [
     "encode_payment_signature",
     "is_x402_challenge",
     "is_x402_credential",
+    "pay_to",
     "payment_required_header",
     "payment_response",
     "payment_response_header",

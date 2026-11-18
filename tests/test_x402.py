@@ -27,6 +27,7 @@ from mpp.x402 import (
     encode_payment_response,
     encode_payment_signature,
     is_x402_credential,
+    pay_to,
     payment_required_header,
     payment_response_header,
     resolve_facilitator,
@@ -561,3 +562,111 @@ class TestRouteBinding:
         decoded = decode_payment_required(value)
         assert len(decoded["accepts"]) == 1
         assert "different routes" in decoded.get("error", "")
+
+
+class TestFacilitatorSupported:
+    async def test_http_facilitator_reads_get_supported(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url="https://facilitator.example/supported",
+            method="GET",
+            json={
+                "kinds": [
+                    {
+                        "x402Version": 2,
+                        "scheme": "exact",
+                        "network": "eip155:8453",
+                        "extra": {"payTo": PAY_TO},
+                    }
+                ]
+            },
+        )
+        supported = await HttpFacilitator("https://facilitator.example/").supported()
+        assert supported["kinds"][0].get("extra", {})["payTo"] == PAY_TO
+        request = httpx_mock.get_request()
+        assert request is not None and request.method == "GET"
+
+    async def test_supported_rejects_a_malformed_response(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(json={"kinds": "nope"})
+        with pytest.raises(FacilitatorError, match="kinds"):
+            await HttpFacilitator("https://f.example").supported()
+
+    async def test_supported_raises_on_http_errors(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(status_code=500, json={})
+        with pytest.raises(FacilitatorError, match="500"):
+            await HttpFacilitator("https://f.example").supported()
+
+    async def test_pay_to_picks_the_v2_kind_for_the_scheme_and_network(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                return {
+                    "kinds": [
+                        {
+                            "x402Version": 1,
+                            "scheme": "exact",
+                            "network": "eip155:8453",
+                            "extra": {"payTo": "0x" + "11" * 20},
+                        },
+                        {
+                            "x402Version": 2,
+                            "scheme": "upto",
+                            "network": "eip155:8453",
+                            "extra": {"payTo": "0x" + "22" * 20},
+                        },
+                        {
+                            "x402Version": 2,
+                            "scheme": "exact",
+                            "network": "eip155:8453",
+                            "extra": {"payTo": PAY_TO.lower()},
+                        },
+                    ]
+                }
+
+        assert await pay_to(Stub(), network="eip155:8453") == PAY_TO  # type: ignore[arg-type]
+        assert await pay_to(Stub(), network="eip155:8453", scheme="upto") == "0x" + "22" * 20  # type: ignore[arg-type]
+
+    async def test_pay_to_accepts_a_facilitator_url(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            url="https://facilitator.example/supported",
+            json={
+                "kinds": [
+                    {
+                        "x402Version": 2,
+                        "scheme": "exact",
+                        "network": "eip155:8453",
+                        "extra": {"payTo": PAY_TO},
+                    }
+                ]
+            },
+        )
+        assert await pay_to("https://facilitator.example", network="eip155:8453") == PAY_TO
+
+    async def test_pay_to_needs_supported(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+
+        with pytest.raises(FacilitatorError, match="does not implement"):
+            await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+
+    async def test_pay_to_fails_on_a_missing_kind_or_bad_address(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                return {
+                    "kinds": [
+                        {
+                            "x402Version": 2,
+                            "scheme": "exact",
+                            "network": "eip155:8453",
+                            "extra": {"payTo": "nope"},
+                        }
+                    ]
+                }
+
+        with pytest.raises(FacilitatorError, match="publishes no payTo"):
+            await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+        with pytest.raises(FacilitatorError, match="publishes no payTo"):
+            await pay_to(Stub(), network="eip155:1")  # type: ignore[arg-type]

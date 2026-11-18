@@ -10,6 +10,8 @@ from eth_account import Account
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
 from mpp.events import PAYMENT_FAILED, EventDispatcher
 from mpp.methods.evm import BASE_SEPOLIA_USDC, evm
+from mpp.methods.evm.server import charge as evm_charge
+from mpp.methods.evm.server import facilitator_pay_to
 from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
 from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp, PaymentRequired, PaymentVerified
@@ -286,3 +288,84 @@ async def test_charge_advertises_the_http_method() -> None:
     rejected = await handler(x402_request(signature, method="GET"))
     assert isinstance(rejected, PaymentRequired)
     assert "extensions do not match" in (rejected.challenge.body or b"").decode()
+
+
+class TestX402Extra:
+    async def test_adds_extra_to_the_x402_requirements(self) -> None:
+        server = Mpp(
+            methods=evm_method(x402_extra={"tempoSettlement": "0x" + "55" * 20}),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["extra"] == {
+            "tempoSettlement": "0x" + "55" * 20,
+            "assetTransferMethod": "eip3009",
+            "name": "USDC",
+            "version": "2",
+        }
+
+    async def test_extra_cannot_override_the_eip3009_fields(self) -> None:
+        server = Mpp(
+            methods=evm_method(
+                x402_extra={"assetTransferMethod": "permit2", "name": "x", "version": "9"}
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["extra"] == {"assetTransferMethod": "eip3009", "name": "USDC", "version": "2"}
+
+    async def test_payment_echoing_the_extra_settles_through_the_facilitator(self) -> None:
+        settled: list[dict[str, Any]] = []
+        deposit = "0x" + "44" * 20
+
+        class DepositFacilitator:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                return {"isValid": True, "payer": PAYER.address}
+
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                settled.append(dict(payment_requirements))
+                return {
+                    "success": True,
+                    "transaction": "0x" + "cd" * 32,
+                    "network": "eip155:84532",
+                    "payer": PAYER.address,
+                }
+
+            async def supported(self) -> Any:
+                return {
+                    "kinds": [
+                        {
+                            "x402Version": 2,
+                            "scheme": "exact",
+                            "network": "eip155:84532",
+                            "extra": {"payTo": deposit},
+                        }
+                    ]
+                }
+
+        facilitator = DepositFacilitator()
+        recipient = await facilitator_pay_to(facilitator, network="eip155:84532")  # type: ignore[arg-type]
+        server = Mpp(
+            methods=evm_charge(
+                currency=BASE_SEPOLIA_USDC,
+                recipient=recipient,
+                facilitator=facilitator,  # type: ignore[arg-type]
+                x402_extra={"tempoSettlement": "0x" + "55" * 20},
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+        offer = await accepted(server)
+        assert offer["payTo"].lower() == deposit
+
+        result = await server.charge(amount="0.01")(x402_request(await signed(server)))
+
+        assert isinstance(result, PaymentVerified), result
+        assert settled[0]["payTo"].lower() == deposit
+        assert settled[0]["extra"]["tempoSettlement"] == "0x" + "55" * 20
+
+    def test_rejects_a_non_object_extra(self) -> None:
+        with pytest.raises(ValueError, match="x402_extra"):
+            evm_method(x402_extra=["nope"])

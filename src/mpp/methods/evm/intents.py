@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import heapq
 import inspect
+import json
 import logging
 import re
 import time
@@ -300,6 +301,7 @@ class ChargeIntent:
         store: Store | None = None,
         max_validity_seconds: int = 3600,
         siwx: SiwxOptions | None = None,
+        x402_extra: Mapping[str, Any] | None = None,
     ) -> None:
         if facilitator is None and settle is None:
             raise ValueError("EVM charge requires a facilitator or a settle hook")
@@ -326,6 +328,12 @@ class ChargeIntent:
         if siwx is not None and not isinstance(siwx, SiwxOptions):
             raise ValueError("siwx must be mpp.x402.siwx.SiwxOptions")
         self.siwx = siwx
+        if x402_extra is not None and not is_mapping(x402_extra):
+            raise ValueError("x402_extra must be an object")
+        # Normalize to the JSON the challenge carries, so credentials echoing it match exactly.
+        self.x402_extra: dict[str, Any] = (
+            json.loads(json.dumps(dict(x402_extra))) if x402_extra else {}
+        )
 
     # -- request helpers -------------------------------------------------
 
@@ -355,6 +363,7 @@ class ChargeIntent:
             "payTo": to_checksum_address(request["recipient"]),
             "maxTimeoutSeconds": self.max_timeout_seconds,
             "extra": {
+                **self.x402_extra,
                 "assetTransferMethod": EIP3009,
                 "name": self.domain_name,
                 "version": self.domain_version,

@@ -9,13 +9,16 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 import httpx
 
 from mpp.x402._types import (
+    _ADDRESS_RE,
     X402_VERSION,
     PaymentPayload,
     PaymentRequirements,
     SettleResponse,
+    SupportedResponse,
     VerifyResponse,
     X402FormatError,
     parse_settle_response,
+    parse_supported_response,
     parse_verify_response,
 )
 
@@ -53,11 +56,25 @@ class Facilitator(Protocol):
     ) -> SettleResponse: ...
 
 
+@runtime_checkable
+class SupportsSupported(Protocol):
+    """A facilitator that lists the payment kinds it supports (``GET /supported``).
+
+    Optional for a :class:`Facilitator`, so existing custom clients keep working;
+    it is needed only to read a ``payTo`` the facilitator publishes in
+    ``kinds[].extra.payTo`` (:func:`mpp.methods.evm.server.facilitator_pay_to`).
+    :class:`HttpFacilitator` implements it.
+    """
+
+    async def supported(self) -> SupportedResponse: ...
+
+
 class HttpFacilitator:
     """Client for an x402 facilitator's HTTP API.
 
     Sends ``POST {url}/verify`` and ``POST {url}/settle`` with
-    ``{"paymentPayload", "paymentRequirements", "x402Version": 2}``.
+    ``{"paymentPayload", "paymentRequirements", "x402Version": 2}``, and
+    ``GET {url}/supported`` for :meth:`supported`.
 
     Example:
         facilitator = HttpFacilitator("https://x402.org/facilitator")
@@ -174,6 +191,71 @@ class HttpFacilitator:
             return parse_settle_response(data)
         except X402FormatError as error:
             raise FacilitatorError(f"facilitator /settle returned {error}") from error
+
+    async def supported(self) -> SupportedResponse:
+        """List the payment kinds the facilitator supports (``GET /supported``)."""
+        try:
+            headers = {**await self._resolve_headers(), **await self._auth_headers("supported")}
+        except Exception as error:
+            raise FacilitatorError(
+                f"facilitator /supported auth headers failed: {error}"
+            ) from error
+        headers.pop("Content-Type", None)
+        try:
+            if self._client is not None:
+                response = await self._client.get(
+                    f"{self.url}/supported", headers=headers, timeout=self._timeout
+                )
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.get(f"{self.url}/supported", headers=headers)
+        except httpx.HTTPError as error:
+            raise FacilitatorError(f"facilitator /supported request failed: {error}") from error
+        if not response.is_success:
+            raise FacilitatorError(f"facilitator /supported failed: {response.status_code}")
+        try:
+            return parse_supported_response(response.json())
+        except ValueError as error:
+            raise FacilitatorError(f"facilitator /supported returned {error}") from error
+
+
+async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = "exact") -> str:
+    """Read the ``payTo`` a facilitator publishes for a scheme and network in
+    ``GET /supported`` (``kinds[].extra.payTo``), as an EIP-55 checksummed address.
+
+    For facilitators that settle into an address of their own; call it once at
+    startup and pass the result as the charge's ``recipient``.
+
+    Raises:
+        FacilitatorError: If the facilitator has no ``supported()``, or publishes
+            no valid ``payTo`` for the x402 v2 kind of that scheme and network.
+    """
+    client = resolve_facilitator(facilitator)
+    if not isinstance(client, SupportsSupported):
+        raise FacilitatorError(
+            "x402 facilitator does not implement supported(), so it cannot provide payTo"
+        )
+    try:
+        response = parse_supported_response(await client.supported())
+    except X402FormatError as error:
+        raise FacilitatorError(f"facilitator /supported returned {error}") from error
+    kind = next(
+        (
+            kind
+            for kind in response["kinds"]
+            if kind.get("x402Version") == X402_VERSION
+            and kind.get("scheme") == scheme
+            and kind.get("network") == network
+        ),
+        None,
+    )
+    extra = kind.get("extra") if kind is not None else None
+    value: object = extra.get("payTo") if extra is not None else None
+    if not isinstance(value, str) or not _ADDRESS_RE.fullmatch(value):
+        raise FacilitatorError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
+    from eth_utils.address import to_checksum_address
+
+    return to_checksum_address(value)
 
 
 def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator:
