@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.26.0 (2026-11-18)
+
+### Minor Changes
+
+- Added Zone payments to the Tempo charge method: clients pay by withdrawing from a Zone balance with the new `zone` option, and servers accept Zones with the `zones` option, with an opt-in `zone_credential_grace_ms` for zone credentials settled before their challenge expired. Added the `Zone` configuration class, `ZoneSettlementPendingError` and `ZoneWithdrawalBouncedError`. (by @brendanjryan, [#407](https://github.com/tempoxyz/pympp/pull/407))
+
+### Patch Changes
+
+- Fixed Zone payments so a withdrawal that settles after its Challenge expires is never paid twice, and a server accepts its late credential only within an explicitly configured grace. Once a server accepts that credential, a new Challenge with the same terms pays again. (by @brendanjryan, [#438](https://github.com/tempoxyz/pympp/pull/438))
+- Added `x402_extra` parameter to `ChargeIntent` and `charge()` for passing custom fields into x402 payment requirements' `extra` object. Added `facilitator_pay_to()` helper and `pay_to()` function to retrieve a facilitator's `payTo` address via `GET /supported`, along with the `SupportsSupported` protocol, `SupportedKind`/`SupportedResponse` types, and `supported()` method on `HttpFacilitator`. (by @brendanjryan, [#442](https://github.com/tempoxyz/pympp/pull/442))
+- Rejected challenges whose `header` auth-param is anything but `Payment-Authorization` (ASCII case-insensitive), and made a constructed challenge raise `ValueError` for any other value, including an empty one. A received challenge's `header` is now echoed in its credential exactly as the server spelled it, while locally created challenges emit the canonical `Payment-Authorization`. (by @brendanjryan, [#437](https://github.com/tempoxyz/pympp/pull/437))
+- Fixed `McpClient` to pay a new Challenge offered after a refused Credential, such as the real charge after a zero-amount Tempo proof is refused for insufficient credit. `McpClient` also resent the same Credential, rather than signing another, when the same Challenge was offered again. (by @brendanjryan, [#441](https://github.com/tempoxyz/pympp/pull/441))
+
 ## 0.25.0 (2026-11-16)
 
 ### Minor Changes
