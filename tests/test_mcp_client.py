@@ -1027,3 +1027,50 @@ def test_mcp_tempo_session_requires_pinned_realm(amount: str) -> None:
 
     pinned = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["api.example.com"])
     assert pinned._match_challenge([challenge])[0] == challenge
+
+
+@pytest.mark.asyncio
+async def test_invalid_method_id_challenge_is_not_paid() -> None:
+    # A method id the narrowed grammar rejects is unpayable: the method's hook must not run,
+    # since its credential could not be serialized after the payment completed.
+    session = AsyncMock()
+    session.call_tool.side_effect = _payment_required_error(
+        _make_challenge_dict(method="stripe-pi")
+    )
+    create_credential = AsyncMock()
+    client = McpClient(
+        session, methods=[fake_method(name="stripe-pi", create_credential=create_credential)]
+    )
+
+    with pytest.raises(NoMethodFoundError, match="No compatible payment method"):
+        await client.call_tool("paid")
+
+    create_credential.assert_not_called()
+    session.call_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_invalid_method_id_challenge_is_skipped_for_a_valid_one() -> None:
+    session = AsyncMock()
+    exceptions = pytest.importorskip("mcp.shared.exceptions")
+    types = pytest.importorskip("mcp.types")
+    error = exceptions.McpError(
+        types.ErrorData(
+            code=-32042,
+            message="Payment Required",
+            data={"challenges": [_make_challenge_dict(method="stripe-pi"), _make_challenge_dict()]},
+        )
+    )
+    session.call_tool.side_effect = [error, FakeCallToolResult(meta=_make_receipt_meta())]
+    skipped = AsyncMock()
+    client = McpClient(
+        session,
+        methods=[fake_method(name="stripe-pi", create_credential=skipped), fake_method()],
+    )
+
+    result = await client.call_tool("paid")
+
+    skipped.assert_not_called()
+    assert result.receipt is not None
+    retry_meta = session.call_tool.await_args_list[1].kwargs["meta"]
+    assert retry_meta[META_CREDENTIAL]["challenge"]["method"] == "tempo"

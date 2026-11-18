@@ -160,9 +160,14 @@ def _unescape_quoted(s: str) -> str:
     return "".join(result)
 
 
-def _validate_payment_method_id(method: str) -> None:
+def is_valid_payment_method_id(method: str) -> bool:
+    """Whether ``method`` matches the spec grammar ``1*LOWERALPHA``."""
+    return _PAYMENT_METHOD_ID_RE.fullmatch(method) is not None
+
+
+def validate_payment_method_id(method: str) -> None:
     """Validate a payment method id against the spec grammar ``1*LOWERALPHA``."""
-    if not _PAYMENT_METHOD_ID_RE.fullmatch(method):
+    if not is_valid_payment_method_id(method):
         raise ParseError(f"Invalid payment method id: {method!r}")
 
 
@@ -263,7 +268,7 @@ def parse_www_authenticate(header: str) -> Challenge:
     method = params.get("method")
     if not method:
         raise ParseError("Missing 'method' field")
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     intent = params.get("intent")
     if not intent:
@@ -324,7 +329,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
 
-    _validate_payment_method_id(challenge.method)
+    validate_payment_method_id(challenge.method)
 
     # Build auth-params
     parts = [
@@ -389,7 +394,7 @@ def parse_authorization(header: str) -> Credential:
         raise ParseError("Credential challenge missing required field: id")
 
     method = str(challenge_data.get("method", ""))
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     try:
         credential_header = advertised_credential_header(
@@ -527,7 +532,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         if field in data and not isinstance(data[field], str):
             raise ParseError(f"Receipt field {field} must be a string")
     method = data["method"]
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     extra = data.get("extra")
     return Receipt(
@@ -563,7 +568,7 @@ def format_payment_receipt(receipt: Receipt) -> str:
     Output format:
         <base64-receipt>
     """
-    _validate_payment_method_id(receipt.method)
+    validate_payment_method_id(receipt.method)
 
     timestamp = receipt.timestamp
     # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets

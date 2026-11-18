@@ -13,6 +13,7 @@ from mpp import (
     Credential,
     InvalidChallengeError,
     NoMethodFoundError,
+    ParseError,
     PaymentExpiredError,
 )
 from mpp.events import EventDispatcher
@@ -258,3 +259,30 @@ async def test_credential_creation_rejects_invalid_expiry(
         await runtime.create_credential(challenge(expires=expires), method.client)
 
     assert method.loops == []
+
+
+def test_matching_skips_challenge_with_invalid_method_id() -> None:
+    # The older grammar accepted ids such as "stripe-pi"; a credential for one can't be sent.
+    legacy = MockMethod(name="stripe-pi")
+    tempo = MockMethod()
+    runtime = PaymentRuntime([legacy.client, tempo.client])
+    offered = [challenge("legacy", method="stripe-pi"), challenge("tempo")]
+
+    assert runtime.match_challenge(offered) == (offered[1], tempo.client)
+    with pytest.raises(NoMethodFoundError):
+        runtime.match_challenge([offered[0]])
+
+
+async def test_credential_creation_rejects_invalid_method_id_before_hooks() -> None:
+    method = MockMethod(name="stripe-pi")
+    events = EventDispatcher()
+    received: list[Any] = []
+    events.on("challenge.received", received.append)
+
+    runtime = PaymentRuntime([method.client], events=events)
+
+    with pytest.raises(ParseError, match="Invalid payment method id"):
+        await runtime.create_credential(challenge(method="stripe-pi"), method.client)
+
+    assert method.loops == []
+    assert received == []

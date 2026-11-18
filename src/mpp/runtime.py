@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from mpp import Challenge, Credential
+from mpp._parsing import is_valid_payment_method_id, validate_payment_method_id
 from mpp.errors import (
     InvalidChallengeError,
     NoMethodFoundError,
@@ -145,12 +146,15 @@ class PaymentRuntime:
         Challenges keep the server's order, except that native Payment challenges come
         before x402 offers, as in mppx: a client pays x402 only when no native challenge
         suits it. A challenge several methods can pay appears once per method, in
-        configured order.
+        configured order. A challenge whose method id the grammar rejects is unpayable
+        and skipped, so no method starts a payment its credential could not carry.
         """
         candidates: list[ChallengeCandidate] = []
         for x402 in (False, True):
             for index, challenge in enumerate(challenges):
                 if is_x402_challenge(challenge) != x402:
+                    continue
+                if not is_valid_payment_method_id(challenge.method):
                     continue
                 for method in self._methods.get((challenge.method, challenge.intent), ()):
                     if method.can_handle_challenge is None or method.can_handle_challenge(
@@ -209,9 +213,15 @@ class PaymentRuntime:
         ``check_expiry`` set to ``False`` skips the expired-challenge check, for a retry
         resuming a payment the method already started for this challenge: the method then
         decides whether it can still be redeemed, and starts no new payment once it expired.
+
+        Raises:
+            ParseError: If the challenge's method id is not ``1*LOWERALPHA``. It is checked
+                before any event handler or method hook runs, so no payment starts for a
+                credential that could not be serialized.
         """
         if not any(candidate is method for candidate in self.methods):
             raise ValueError("Method is not installed in this PaymentRuntime")
+        validate_payment_method_id(challenge.method)
         if challenge.method != method.name or challenge.intent != method.intent:
             raise ValueError(
                 f"Method {method.key!r} does not support {challenge.method}/{challenge.intent}"
