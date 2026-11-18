@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import inspect
+import ipaddress
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Protocol, TypeAlias, runtime_checkable
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -235,7 +237,9 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
 
     Raises:
         FacilitatorError: If the facilitator has no ``supported()``, or publishes
-            no valid ``payTo`` for the x402 v2 kind of that scheme and network.
+            no valid ``payTo`` for the x402 v2 kind of that scheme and network,
+            or is an HTTP facilitator whose URL is not ``https://`` (loopback hosts
+            excepted).
         ImportError: If the ``evm`` extra is not installed.
     """
     # Fail before the network request, naming the extra, rather than after discovery.
@@ -244,6 +248,9 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
     except ImportError as error:
         raise ImportError('x402 pay_to needs the "evm" extra: pip install "pympp[evm]"') from error
     client = resolve_facilitator(facilitator)
+    if isinstance(client, HttpFacilitator) and not _is_secure_url(client.url):
+        # The answer becomes the payment recipient, so it must not be rewritable in transit.
+        raise FacilitatorError("x402 pay_to needs an https:// facilitator URL (or a loopback host)")
     if not isinstance(client, SupportsSupported):
         raise FacilitatorError(
             "x402 facilitator does not implement supported(), so it cannot provide payTo"
@@ -271,6 +278,21 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
             f"for {scheme} on {network}"
         )
     return to_checksum_address(published.pop())
+
+
+def _is_secure_url(url: str) -> bool:
+    """Whether a URL is ``https``, or ``http`` to a loopback host."""
+    parsed = urlsplit(url)
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http" or parsed.hostname is None:
+        return False
+    if parsed.hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator:

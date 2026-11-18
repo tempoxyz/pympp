@@ -60,8 +60,9 @@ async def facilitator_pay_to(
         )
 
     Raises:
-        FacilitatorError: If the facilitator has no ``supported()`` or publishes no
-            valid ``payTo`` for the scheme and network.
+        FacilitatorError: If the facilitator has no ``supported()``, publishes no
+            valid ``payTo`` for the scheme and network, or is a URL that is not
+            ``https://`` (loopback hosts excepted).
     """
     return await pay_to(facilitator, network=network, scheme=scheme)
 

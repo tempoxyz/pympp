@@ -726,6 +726,21 @@ class TestFacilitatorSupported:
         )
         assert await pay_to("https://facilitator.example", network="eip155:8453") == PAY_TO
 
+    @pytest.mark.parametrize(
+        "url", ["http://facilitator.example", "http://10.0.0.1:8080", "ftp://facilitator.example"]
+    )
+    async def test_pay_to_refuses_cleartext_facilitators(self, url: str) -> None:
+        with pytest.raises(FacilitatorError, match="needs an https:// facilitator URL"):
+            await pay_to(url, network="eip155:8453")
+
+    @pytest.mark.parametrize(
+        "url", ["http://localhost:4021", "http://127.0.0.1:4021", "http://[::1]:4021"]
+    )
+    async def test_pay_to_allows_loopback_http(self, httpx_mock: HTTPXMock, url: str) -> None:
+        kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
+        httpx_mock.add_response(json={"kinds": [{**kind, "extra": {"payTo": PAY_TO}}]})
+        assert await pay_to(url, network="eip155:8453") == PAY_TO
+
     async def test_pay_to_needs_supported(self) -> None:
         class Stub:
             async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
