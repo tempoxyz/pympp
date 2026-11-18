@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
@@ -34,6 +35,7 @@ from mpp._parsing import ParseError, _b64_decode
 from mpp._typing import is_mapping
 from mpp.errors import MalformedCredentialError, VerificationFailedError
 from mpp.x402._header import (
+    MAX_HEADER_SIZE,
     InvalidHeaderError,
     decode_payment_signature,
     encode_payment_required,
@@ -56,6 +58,8 @@ if TYPE_CHECKING:
 
 RouteBinding = Literal["required", "resource"]
 """How a route-scoped charge binds an x402 payment to its route (mppx ``routeBinding``)."""
+
+logger = logging.getLogger(__name__)
 
 ROUTE_BINDING_EXTENSION = "mppx"
 """x402 extension key carrying mppx's route binding."""
@@ -320,7 +324,16 @@ def payment_required_header(
     }
     if extensions is not None:
         value["extensions"] = dict(extensions)
-    return encode_payment_required(value)  # type: ignore[arg-type]
+    encoded = encode_payment_required(value)  # type: ignore[arg-type]
+    if len(encoded) > MAX_HEADER_SIZE:
+        # x402 decoders, this SDK's included, reject a longer header: offer only MPP.
+        logger.warning(
+            "x402 PAYMENT-REQUIRED is %d bytes, over the %d-byte limit; omitting x402 offers",
+            len(encoded),
+            MAX_HEADER_SIZE,
+        )
+        return None
+    return encoded
 
 
 def challenges_payment_required_header(

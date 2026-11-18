@@ -111,13 +111,16 @@ class HttpFacilitator:
         self._timeout = timeout
         self._client = client
 
-    async def _resolve_headers(self) -> dict[str, str]:
+    async def _configured_headers(self) -> dict[str, str]:
         headers = self._headers
         if callable(headers):
             headers = headers()
             if inspect.isawaitable(headers):
                 headers = await headers
-        return {"Content-Type": "application/json", **dict(headers or {})}
+        return dict(headers or {})
+
+    async def _resolve_headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json", **await self._configured_headers()}
 
     async def _auth_headers(self, endpoint: str) -> dict[str, str]:
         """The headers ``create_auth_headers`` returns for one endpoint, made per request
@@ -195,12 +198,15 @@ class HttpFacilitator:
     async def supported(self) -> SupportedResponse:
         """List the payment kinds the facilitator supports (``GET /supported``)."""
         try:
-            headers = {**await self._resolve_headers(), **await self._auth_headers("supported")}
+            # A GET has no body, so only a Content-Type the caller configured is sent.
+            headers = {
+                **await self._configured_headers(),
+                **await self._auth_headers("supported"),
+            }
         except Exception as error:
             raise FacilitatorError(
                 f"facilitator /supported auth headers failed: {error}"
             ) from error
-        headers.pop("Content-Type", None)
         try:
             if self._client is not None:
                 response = await self._client.get(
@@ -246,22 +252,25 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
         response = parse_supported_response(await client.supported())
     except X402FormatError as error:
         raise FacilitatorError(f"facilitator /supported returned {error}") from error
-    # Take the first matching kind that publishes a valid payTo, not just the first match.
-    value = next(
-        (
-            pay_to
-            for kind in response["kinds"]
-            if kind.get("x402Version") == X402_VERSION
-            and kind.get("scheme") == scheme
-            and kind.get("network") == network
-            for pay_to in [(kind.get("extra") or {}).get("payTo")]
-            if isinstance(pay_to, str) and _ADDRESS_RE.fullmatch(pay_to)
-        ),
-        None,
-    )
-    if value is None:
+    # Every matching kind that publishes a usable payTo counts; the zero address can't be paid.
+    published = {
+        pay_to.lower()
+        for kind in response["kinds"]
+        if kind.get("x402Version") == X402_VERSION
+        and kind.get("scheme") == scheme
+        and kind.get("network") == network
+        for pay_to in [(kind.get("extra") or {}).get("payTo")]
+        if isinstance(pay_to, str) and _ADDRESS_RE.fullmatch(pay_to) and int(pay_to, 16) != 0
+    }
+    if not published:
         raise FacilitatorError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
-    return to_checksum_address(value)
+    if len(published) > 1:
+        # Don't let array order pick the recipient.
+        raise FacilitatorError(
+            f"x402 facilitator publishes {len(published)} different payTo addresses "
+            f"for {scheme} on {network}"
+        )
+    return to_checksum_address(published.pop())
 
 
 def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator:

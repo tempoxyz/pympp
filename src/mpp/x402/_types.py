@@ -296,7 +296,8 @@ def parse_supported_response(value: Any) -> SupportedResponse:
         for key, value in _object(signers, "supportedResponse.signers").items():
             if not is_list(value) or not all(isinstance(item, str) for item in value):
                 raise X402FormatError(
-                    f"supportedResponse.signers.{key} must be an array of strings"
+                    # repr() so a facilitator-chosen key can't add lines to the error.
+                    f"supportedResponse.signers[{key!r}] must be an array of strings"
                 )
     return record  # type: ignore[return-value]
 

@@ -415,6 +415,15 @@ class TestServerHelpers:
     def test_payment_required_header_without_offers(self) -> None:
         assert payment_required_header([], "https://api.example.com/paid") is None
 
+    def test_payment_required_header_omits_offers_over_the_size_limit(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        accepts: list[Any] = [
+            {**requirements(amount=str(n)), "extra": {"blob": "a" * 8000}} for n in range(1, 10)
+        ]
+        assert payment_required_header(accepts, "https://api.example.com/paid") is None
+        assert "omitting x402 offers" in caplog.text
+
     def test_payment_response_header(self) -> None:
         credential = x402_credential({"methodDetails": {"chainId": 8453}})
         receipt = Receipt.success("0xabc", method="evm")
@@ -591,6 +600,25 @@ class TestFacilitatorSupported:
         with pytest.raises(FacilitatorError, match="kinds"):
             await HttpFacilitator("https://f.example").supported()
 
+    async def test_supported_sends_only_a_configured_content_type(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        httpx_mock.add_response(json={"kinds": []})
+        httpx_mock.add_response(json={"kinds": []})
+        await HttpFacilitator("https://f.example").supported()
+        await HttpFacilitator(
+            "https://f.example", headers={"Content-Type": "application/x-custom"}
+        ).supported()
+        first, second = httpx_mock.get_requests()
+        assert "content-type" not in first.headers
+        assert second.headers["content-type"] == "application/x-custom"
+
+    async def test_supported_escapes_signer_keys_in_errors(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(json={"kinds": [], "signers": {"a\nforged": "x"}})
+        with pytest.raises(FacilitatorError) as error:
+            await HttpFacilitator("https://f.example").supported()
+        assert "\n" not in str(error.value)
+
     async def test_supported_raises_on_http_errors(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(status_code=500, json={})
         with pytest.raises(FacilitatorError, match="500"):
@@ -755,3 +783,38 @@ class TestFacilitatorSupported:
         assert await pay_to(Stub(), network="eip155:8453") == PAY_TO  # type: ignore[arg-type]
         with pytest.raises(FacilitatorError, match="publishes no payTo"):
             await pay_to(Stub(), network="eip155:1")  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(
+        ("published", "message"),
+        [
+            (["0x" + "00" * 20], "publishes no payTo"),
+            ([PAY_TO, "0x" + "33" * 20], "2 different payTo addresses"),
+        ],
+    )
+    async def test_pay_to_rejects_unpayable_or_ambiguous_addresses(
+        self, published: list[str], message: str
+    ) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
+                return {"kinds": [{**kind, "extra": {"payTo": a}} for a in published]}
+
+        with pytest.raises(FacilitatorError, match=message):
+            await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+
+    async def test_pay_to_accepts_duplicates_of_one_address(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                kind = {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"}
+                return {
+                    "kinds": [
+                        {**kind, "extra": {"payTo": PAY_TO}},
+                        {**kind, "extra": {"payTo": PAY_TO.lower()}},
+                    ]
+                }
+
+        assert await pay_to(Stub(), network="eip155:8453") == PAY_TO  # type: ignore[arg-type]
