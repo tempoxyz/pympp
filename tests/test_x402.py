@@ -831,6 +831,19 @@ class TestFacilitatorSupported:
             await pay_to(url, network="eip155:8453")
 
     @pytest.mark.parametrize(
+        "url", ["https:", "https://", "https:/facilitator.example", "https:facilitator.example"]
+    )
+    async def test_pay_to_refuses_hostless_https_urls(
+        self, httpx_mock: HTTPXMock, url: str
+    ) -> None:
+        # An injected client would resolve the path against its own base URL, here cleartext.
+        async with httpx.AsyncClient(base_url="http://facilitator.example") as client:
+            facilitator = HttpFacilitator(url, client=client)
+            with pytest.raises(FacilitatorError, match="needs an https:// facilitator URL"):
+                await pay_to(facilitator, network="eip155:8453")
+        assert httpx_mock.get_requests() == []
+
+    @pytest.mark.parametrize(
         "url", ["http://localhost:4021", "http://127.0.0.1:4021", "http://[::1]:4021"]
     )
     async def test_pay_to_allows_loopback_http(self, httpx_mock: HTTPXMock, url: str) -> None:

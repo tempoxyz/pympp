@@ -359,11 +359,15 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
 
 
 def _is_secure_url(url: str) -> bool:
-    """Whether a URL is ``https``, or ``http`` to a loopback host."""
+    """Whether a URL is ``https`` to a host, or ``http`` to a loopback host."""
     parsed = urlsplit(url)
+    # A hostless URL (``https:``, ``https:/path``) names no host for TLS to verify, and an
+    # injected client resolves it against its own, possibly cleartext, base URL.
+    if not parsed.hostname:
+        return False
     if parsed.scheme == "https":
         return True
-    if parsed.scheme != "http" or parsed.hostname is None:
+    if parsed.scheme != "http":
         return False
     if parsed.hostname == "localhost":
         return True
