@@ -627,6 +627,10 @@ class TestFacilitatorSupported:
             {"kinds": [{"x402Version": "2", "scheme": "exact", "network": "eip155:8453"}]},
             {"kinds": [], "extensions": [1]},
             {"kinds": [], "signers": {"eip155:*": "0xabc"}},
+            {"kinds": [{"x402Version": 2.5, "scheme": "exact", "network": "eip155:8453"}]},
+            {"kinds": [{"x402Version": 2, "scheme": "exact", "network": "n", "extra": None}]},
+            {"kinds": [], "extensions": None},
+            {"kinds": [], "signers": None},
         ],
     )
     async def test_supported_validates_its_fields(

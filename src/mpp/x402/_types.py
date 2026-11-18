@@ -279,19 +279,20 @@ def parse_supported_response(value: Any) -> SupportedResponse:
         name = f"supportedResponse.kinds[{index}]"
         kind = _object(kind, name)
         version = kind.get("x402Version")
-        if isinstance(version, bool) or not isinstance(version, int | float):
-            raise X402FormatError(f"{name}.x402Version must be a number")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise X402FormatError(f"{name}.x402Version must be an integer")
         _string(kind, "scheme", name)
         _string(kind, "network", name)
-        if kind.get("extra") is not None:
+        # Present members must match SupportedResponse's types; null is not allowed.
+        if "extra" in kind:
             _object(kind["extra"], f"{name}.extra")
     extensions = record.get("extensions")
-    if extensions is not None and (
+    if "extensions" in record and (
         not is_list(extensions) or not all(isinstance(item, str) for item in extensions)
     ):
         raise X402FormatError("supportedResponse.extensions must be an array of strings")
     signers = record.get("signers")
-    if signers is not None:
+    if "signers" in record:
         for key, value in _object(signers, "supportedResponse.signers").items():
             if not is_list(value) or not all(isinstance(item, str) for item in value):
                 raise X402FormatError(
