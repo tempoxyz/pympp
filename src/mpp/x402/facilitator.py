@@ -215,7 +215,8 @@ class HttpFacilitator:
             raise FacilitatorError(f"facilitator /supported failed: {response.status_code}")
         try:
             return parse_supported_response(response.json())
-        except ValueError as error:
+        # RecursionError: JSON nested deeper than the decoder allows.
+        except (ValueError, RecursionError) as error:
             raise FacilitatorError(f"facilitator /supported returned {error}") from error
 
 

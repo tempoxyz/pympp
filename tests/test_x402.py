@@ -595,6 +595,57 @@ class TestFacilitatorSupported:
         with pytest.raises(FacilitatorError, match="500"):
             await HttpFacilitator("https://f.example").supported()
 
+    async def test_supported_raises_on_transport_errors(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_exception(httpx.ConnectError("down"))
+        with pytest.raises(FacilitatorError, match="request failed"):
+            await HttpFacilitator("https://f.example").supported()
+
+    async def test_supported_raises_when_auth_headers_fail(self) -> None:
+        async def create_auth_headers() -> Any:
+            raise RuntimeError("no key")
+
+        facilitator = HttpFacilitator("https://f.example", create_auth_headers=create_auth_headers)
+        with pytest.raises(FacilitatorError, match="auth headers failed"):
+            await facilitator.supported()
+
+    async def test_supported_uses_the_given_client(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(url="https://f.example/supported", json={"kinds": []})
+        async with httpx.AsyncClient() as client:
+            supported = await HttpFacilitator("https://f.example", client=client).supported()
+        assert supported == {"kinds": []}
+
+    async def test_supported_rejects_deeply_nested_json(self, httpx_mock: HTTPXMock) -> None:
+        httpx_mock.add_response(
+            content=b"[" * 100_000 + b"]" * 100_000, headers={"content-type": "application/json"}
+        )
+        with pytest.raises(FacilitatorError, match="/supported returned"):
+            await HttpFacilitator("https://f.example").supported()
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"kinds": [{"x402Version": "2", "scheme": "exact", "network": "eip155:8453"}]},
+            {"kinds": [], "extensions": [1]},
+            {"kinds": [], "signers": {"eip155:*": "0xabc"}},
+        ],
+    )
+    async def test_supported_validates_its_fields(
+        self, httpx_mock: HTTPXMock, body: dict[str, Any]
+    ) -> None:
+        httpx_mock.add_response(json=body)
+        with pytest.raises(FacilitatorError, match="supportedResponse"):
+            await HttpFacilitator("https://f.example").supported()
+
+    async def test_pay_to_rejects_a_malformed_supported_response(self) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                return {"kinds": "nope"}
+
+        with pytest.raises(FacilitatorError, match="/supported returned"):
+            await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+
     async def test_pay_to_picks_the_v2_kind_for_the_scheme_and_network(self) -> None:
         class Stub:
             async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...

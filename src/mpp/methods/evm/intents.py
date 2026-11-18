@@ -146,6 +146,8 @@ _HASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
 _SIGNATURE_RE = re.compile(r"0x[0-9a-fA-F]{130}")
 # uint256 values have at most 78 digits; longer strings could not be parsed safely.
 _ATOMIC_RE = re.compile(r"[0-9]{1,78}")
+_MAX_X402_EXTRA_BYTES = 8 * 1024
+"""Largest canonical x402_extra, leaving room in the 64 KiB PAYMENT-REQUIRED header."""
 _UINT256_MAX = 2**256 - 1
 
 
@@ -337,9 +339,14 @@ class ChargeIntent:
         if x402_extra:
             try:
                 self.x402_extra = json.loads(json.dumps(dict(x402_extra), allow_nan=False))
-                rfc8785.dumps(self.x402_extra)
+                encoded = rfc8785.dumps(self.x402_extra)
             except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError) as error:
                 raise ValueError("x402_extra must be canonical JSON (RFC 8785)") from error
+            # Every offer repeats it in one PAYMENT-REQUIRED header, which decoders cap at 64 KiB.
+            if len(encoded) > _MAX_X402_EXTRA_BYTES:
+                raise ValueError(
+                    f"x402_extra must be at most {_MAX_X402_EXTRA_BYTES} bytes of JSON"
+                )
 
     # -- request helpers -------------------------------------------------
 

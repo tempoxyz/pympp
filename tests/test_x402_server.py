@@ -379,3 +379,7 @@ class TestX402Extra:
     def test_rejects_a_non_canonical_json_extra(self, value: Any) -> None:
         with pytest.raises(ValueError, match="x402_extra must be canonical JSON"):
             evm_method(x402_extra={"nested": {"value": value}})
+
+    def test_rejects_an_oversized_extra(self) -> None:
+        with pytest.raises(ValueError, match="at most 8192 bytes"):
+            evm_method(x402_extra={"blob": "a" * 8192})
