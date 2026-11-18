@@ -31,8 +31,11 @@ from mpp.x402._server import RouteBinding
 from mpp.x402.facilitator import Facilitator
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mpp.server.method import RequestContext, ServerMethod
     from mpp.store import Store
+    from mpp.x402.siwx import SiwxOptions
 
 _ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{40}")
 DEFAULT_VALIDITY_SECONDS = 300
@@ -355,6 +358,8 @@ def evm(
     route_binding: RouteBinding = "required",
     max_validity_seconds: int = 3600,
     store: Store | None = None,
+    siwx: SiwxOptions | None = None,
+    x402_extra: Mapping[str, Any] | None = None,
     can_offer: CanOfferFn | None = None,
     on_payment_success: PaymentSuccessHandler | None = None,
 ) -> ServerMethod: ...

@@ -230,7 +230,13 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
     Raises:
         FacilitatorError: If the facilitator has no ``supported()``, or publishes
             no valid ``payTo`` for the x402 v2 kind of that scheme and network.
+        ImportError: If the ``evm`` extra is not installed.
     """
+    # Fail before the network request, naming the extra, rather than after discovery.
+    try:
+        from eth_utils.address import to_checksum_address
+    except ImportError as error:
+        raise ImportError('x402 pay_to needs the "evm" extra: pip install "pympp[evm]"') from error
     client = resolve_facilitator(facilitator)
     if not isinstance(client, SupportsSupported):
         raise FacilitatorError(
@@ -255,8 +261,6 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
     )
     if value is None:
         raise FacilitatorError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
-    from eth_utils.address import to_checksum_address
-
     return to_checksum_address(value)
 
 

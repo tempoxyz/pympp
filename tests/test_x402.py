@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -722,6 +723,19 @@ class TestFacilitatorSupported:
                 }
 
         with pytest.raises(FacilitatorError, match="publishes no payTo"):
+            await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
+
+    async def test_pay_to_names_the_evm_extra_before_discovery(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class Stub:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any: ...
+            async def supported(self) -> Any:
+                raise AssertionError("discovery must not run without the evm extra")
+
+        monkeypatch.setitem(sys.modules, "eth_utils.address", None)
+        with pytest.raises(ImportError, match=r"pympp\[evm\]"):
             await pay_to(Stub(), network="eip155:8453")  # type: ignore[arg-type]
 
     async def test_pay_to_skips_matching_kinds_without_a_valid_pay_to(self) -> None:
