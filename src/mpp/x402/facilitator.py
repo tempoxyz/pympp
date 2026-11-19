@@ -363,7 +363,8 @@ class PayToResolver:
     """Reads an address on demand, caches it for ``ttl`` seconds and remembers the
     addresses it replaced for ``grace`` seconds (mppx ``payToResolver``).
 
-    Call it to get the current address. Concurrent calls share one read, and a failed read
+    Call it to get the current address. A read that takes longer than ``timeout`` seconds
+    fails. Concurrent calls share one read, and a failed read
     is shared too: it is raised to every caller for 30 seconds before the next attempt.
     After a success, a failed refresh keeps the last address and retries after 30 seconds.
     """
@@ -374,10 +375,12 @@ class PayToResolver:
         *,
         ttl: float = 300.0,
         grace: float = 600.0,
+        timeout: float = 10.0,
     ) -> None:
         self._read = read
         self._ttl = ttl
         self._grace = grace
+        self._timeout = timeout
         self._retry_after_failure = min(ttl, 30.0)
         self._current: str | None = None
         self._fresh_until = 0.0
@@ -413,7 +416,8 @@ class PayToResolver:
             if self._failure is not None and now < self._failure[1]:
                 raise self._failure[0]
             try:
-                address = await self._read()
+                with anyio.fail_after(self._timeout):
+                    address = await self._read()
             except Exception as error:
                 if self._current is None:
                     self._failure = (error, now + self._retry_after_failure)
@@ -447,6 +451,7 @@ def pay_to_resolver(
     scheme: str = "exact",
     ttl: float = 300.0,
     grace: float = 600.0,
+    timeout: float = 10.0,
 ) -> PayToResolver:
     """Return a :class:`PayToResolver` for a facilitator's ``payTo`` (see :func:`pay_to`),
     so a rotated deposit address is picked up without a restart.
@@ -457,7 +462,7 @@ def pay_to_resolver(
     async def read() -> str:
         return await pay_to(facilitator, network=network, scheme=scheme)
 
-    return PayToResolver(read, ttl=ttl, grace=grace)
+    return PayToResolver(read, ttl=ttl, grace=grace, timeout=timeout)
 
 
 def _is_secure_url(url: str) -> bool:

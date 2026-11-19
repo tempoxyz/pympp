@@ -697,7 +697,7 @@ module mpp.methods.evm.intents
 module mpp.methods.evm.server
     def charge(*, currency: EvmAsset | str, recipient: str | RecipientResolver | None = None, chain_id: int | None = None, decimals: int | None = None, authorization: AuthorizationConfig | None = None, facilitator: str | Facilitator | None = None, settle: SettleFn | None = None, max_timeout_seconds: int = 300, route_binding: RouteBinding = 'required', max_validity_seconds: int = 3600, store: Store | None = None, siwx: SiwxOptions | None = None, x402_extra: Mapping[str, Any] | None = None, can_offer: CanOfferFn | None = None, on_payment_success: PaymentSuccessHandler | None = None) -> ServerMethod
     async def facilitator_pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact') -> str
-    def facilitator_pay_to_resolver(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact', ttl: float = 300.0, grace: float = 600.0) -> PayToResolver
+    def facilitator_pay_to_resolver(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact', ttl: float = 300.0, grace: float = 600.0, timeout: float = 10.0) -> PayToResolver
 
 module mpp.methods.stripe
     StripeMethod -> mpp.methods.stripe.client.StripeMethod
@@ -1830,10 +1830,10 @@ module mpp.x402.facilitator
     async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact') -> str
     class PayToResolver
         async def __call__(self) -> str
-        def __init__(self, read: Callable[[], Awaitable[str]], *, ttl: float = 300.0, grace: float = 600.0) -> None
+        def __init__(self, read: Callable[[], Awaitable[str]], *, ttl: float = 300.0, grace: float = 600.0, timeout: float = 10.0) -> None
         property current: str | None
         def issued(self, address: str) -> str | None
-    def pay_to_resolver(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact', ttl: float = 300.0, grace: float = 600.0) -> PayToResolver
+    def pay_to_resolver(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact', ttl: float = 300.0, grace: float = 600.0, timeout: float = 10.0) -> PayToResolver
     def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
 
 module mpp.x402.fastapi

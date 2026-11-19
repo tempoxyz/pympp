@@ -1146,6 +1146,24 @@ class TestPayToResolver:
         with pytest.raises(FacilitatorError, match="down"):
             await pay_to_resolver(Down(), network="eip155:84532")()
 
+    async def test_fails_a_stalled_read_and_keeps_the_last_address(self) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        reads = [0]
+
+        async def read() -> str:
+            reads[0] += 1
+            if reads[0] > 1:
+                await anyio.sleep_forever()
+            return RECIPIENT
+
+        resolver = PayToResolver(read, ttl=0, timeout=0.05)
+        assert await resolver() == RECIPIENT
+        with anyio.fail_after(2):
+            assert await resolver() == RECIPIENT
+
     async def test_shares_a_first_read_failure_until_the_retry(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

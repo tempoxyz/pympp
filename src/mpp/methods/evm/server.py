@@ -86,14 +86,17 @@ def facilitator_pay_to_resolver(
     scheme: str = "exact",
     ttl: float = 300.0,
     grace: float = 600.0,
+    timeout: float = 10.0,
 ) -> PayToResolver:
     """Like :func:`facilitator_pay_to`, but return a :class:`~mpp.x402.PayToResolver` that
     caches the address for ``ttl`` seconds and refreshes it after, for :func:`charge`'s
     ``recipient``. Payments for an address it replaced still verify for ``grace``
     seconds. A charge that leaves out ``recipient`` uses one for you; call this only to
-    change ``ttl`` or ``grace``.
+    change ``ttl``, ``grace`` or ``timeout``.
     """
-    return pay_to_resolver(facilitator, network=network, scheme=scheme, ttl=ttl, grace=grace)
+    return pay_to_resolver(
+        facilitator, network=network, scheme=scheme, ttl=ttl, grace=grace, timeout=timeout
+    )
 
 
 def charge(
