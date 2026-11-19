@@ -493,6 +493,21 @@ class TestUnknownOpeningCommitment:
         assert (await life.channel()).opening_commitment == ZERO
         assert self._verify_calls(life) == 1
 
+    async def test_validation_does_not_store_the_opening_commitment(self) -> None:
+        life = await self._life(commitment=COMMITMENT, recorded=None)
+        commitments: dict[str, str] = {}
+        await verification.validate_credential_payload(
+            life.context(life.voucher_payload(200), opening_commitments=commitments)
+        )
+        await verification.validate_credential_payload(
+            life.context(life.close_payload(200), opening_commitments=commitments)
+        )
+        assert (await life.channel()).opening_commitment is None
+        assert not commitments
+        receipt = await life.accept(life.voucher_payload(200), opening_commitments=commitments)
+        assert receipt.accepted_cumulative == "200"
+        assert (await life.channel()).opening_commitment == ZERO
+
     async def test_a_signer_without_a_commitment_skips_the_escrow_check(self) -> None:
         life = await self._life(commitment=None, recorded=None)
         receipt = await life.accept(life.voucher_payload(200))

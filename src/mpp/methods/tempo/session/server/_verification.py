@@ -623,7 +623,11 @@ _ZERO_COMMITMENT = "0x" + "00" * 32
 
 
 async def _with_opening_commitment(
-    context: CredentialContext, channel: ChannelState, voucher: SignedVoucher
+    context: CredentialContext,
+    channel: ChannelState,
+    voucher: SignedVoucher,
+    *,
+    persist: bool = True,
 ) -> ChannelState:
     """channel with its TIP-1166 opening commitment, resolved on chain when unknown.
 
@@ -632,7 +636,8 @@ async def _with_opening_commitment(
     Otherwise the escrow's verifyVoucher view must accept voucher, and the commitment is the
     one (zero or the salt) under which voucher verifies here. It is stored only when exactly
     one does, so a primitive voucher is never accepted on a channel the escrow bound to a
-    configurable account.
+    configurable account. With persist false (advisory validation) neither the store nor the
+    cache changes.
     """
     if channel.opening_commitment is not None or channel.descriptor is None:
         return channel
@@ -677,6 +682,8 @@ async def _with_opening_commitment(
             # Both fit this voucher; the escrow accepted it, so check the next one again.
             return replace(channel, opening_commitment=candidates[0])
     commitment = candidates[0]
+    if not persist:
+        return replace(channel, opening_commitment=commitment)
     context.opening_commitments[key] = commitment
     resolved = commitment
 
@@ -950,7 +957,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    channel = await _with_opening_commitment(context, channel, voucher)
+    channel = await _with_opening_commitment(context, channel, voucher, persist=False)
     state = (
         _stored_channel_state(channel)
         if _can_use_stored_channel_state(context, channel, voucher)
@@ -970,7 +977,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
 
 
 async def _check_close(
-    context: CredentialContext, payload: ClosePayload
+    context: CredentialContext, payload: ClosePayload, *, persist: bool = True
 ) -> tuple[ChannelState, chain.ChannelState, int, int, str]:
     """Shared close checks; returns (channel, state, cumulative, capture, channel_id)."""
     request = get_challenge_payment_fields(context.challenge)
@@ -999,6 +1006,7 @@ async def _check_close(
         SignedVoucher(
             channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
         ),
+        persist=persist,
     )
     authorization = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.close_signature
@@ -1048,7 +1056,7 @@ async def _check_close(
 
 
 async def _validate_close(context: CredentialContext, payload: ClosePayload) -> None:
-    channel, _, _, _, channel_id = await _check_close(context, payload)
+    channel, _, _, _, channel_id = await _check_close(context, payload, persist=False)
     assert_settlement_sender(
         operation="close",
         channel_id=channel_id,
