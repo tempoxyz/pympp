@@ -1150,6 +1150,30 @@ class TestRecipientFromFacilitator:
         assert not isinstance(result, PaymentRequired), result
         assert [r["payTo"] for _, r in shared.settled] == [ROTATED]
 
+    async def test_an_explicit_route_recipient_is_not_bypassed(self) -> None:
+        # The resolver issued both RECIPIENT and ROTATED; a route pinned to ROTATED must
+        # not settle a credential echoing RECIPIENT.
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=evm_server.facilitator_pay_to_resolver(
+                facilitator, network="eip155:84532", ttl=0
+            ),
+            facilitator=facilitator,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        lazy = server.charge(amount="0.25")
+        issued = challenge(await lazy(http_request()))
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        facilitator.pay_to = ROTATED
+        challenge(await lazy(http_request()))
+        pinned = server.charge(amount="0.25", recipient=ROTATED)
+        result = await pinned(http_request(credential.to_authorization()))
+        assert isinstance(result, PaymentRequired)
+        assert facilitator.settled == []
+
     async def test_a_plain_recipient_function_is_called_for_each_challenge(self) -> None:
         calls = [0]
 
@@ -1302,6 +1326,31 @@ class TestRecipientFromFacilitator:
 
 
 class TestPayToResolver:
+    async def test_a_failed_refresh_does_not_extend_past_the_stale_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        up = [True]
+
+        async def read() -> str:
+            if not up[0]:
+                raise FacilitatorError("down")
+            return RECIPIENT
+
+        resolver = PayToResolver(read, ttl=10, grace=10)
+        await resolver()
+        up[0] = False
+        now[0] += 19.9
+        assert await resolver() == RECIPIENT
+        now[0] += 0.2
+        with pytest.raises(FacilitatorError):
+            await resolver()
+
     async def test_caches_for_ttl_and_shares_one_read(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

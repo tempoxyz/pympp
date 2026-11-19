@@ -476,7 +476,10 @@ class PayToResolver:
                         now + self._retry_after_failure,
                     )
                     raise
-                self._fresh_until = now + self._retry_after_failure
+                # Never past the stale-address deadline.
+                self._fresh_until = min(
+                    now + self._retry_after_failure, self._read_at + self._ttl + self._grace
+                )
                 return self._current
         now = anyio.current_time()
         with self._state_lock:
