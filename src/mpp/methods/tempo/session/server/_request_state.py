@@ -366,11 +366,13 @@ def resolve_session_payment_request(
     default_fee_payer: TempoAccount | None,
     parameter_escrow_contract: str | None,
     fee_token: str | None,
+    configurable_vouchers: bool = False,
 ) -> dict[str, Any]:
     """Add the TIP-1034 method details a session challenge carries to the route input.
 
     ``chain_id``, ``escrow_contract`` (the canonical precompile by default), ``fee_payer``,
-    ``fee_token`` and ``session_protocol="v2"``, as mppx's ``request`` hook does.
+    ``fee_token`` and ``session_protocol="v2"``, as mppx's ``request`` hook does, and
+    ``configurable_vouchers`` when the server accepts TIP-1166 configurable account vouchers.
     """
     resolved = {key: value for key, value in request.items() if value is not None}
     route_chain_id = resolved.pop("chainId", None)
@@ -395,6 +397,8 @@ def resolve_session_payment_request(
         resolved[FEE_PAYER_DISABLED] = True
     if fee_token is not None:
         resolved["fee_token"] = fee_token
+    if configurable_vouchers:
+        resolved["configurable_vouchers"] = True
     resolved["session_protocol"] = SESSION_PROTOCOL_V2
     return resolved
 

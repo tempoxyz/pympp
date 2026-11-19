@@ -14,6 +14,13 @@ from mpp import Challenge, Credential
 from mpp._typing import is_dict
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._channel import (
+    resolve_authorized_signer as resolve_channel_signer,
+)
+from mpp.methods.tempo.session._configurable import (
+    ConfigurableAccount,
+    ConfigurableVouchersUnsupportedError,
+)
 from mpp.methods.tempo.session._protocol import (
     ESCROW_ADDRESS,
     ZERO_ADDRESS,
@@ -54,9 +61,50 @@ def read_optional_address(value: object) -> str | None:
     return value if isinstance(value, str) and _is_address(value) else None
 
 
-def resolve_authorized_signer(account: TempoAccount) -> str:
-    """The voucher authority address for a client account."""
-    return account.address
+def resolve_authorized_signer(account: TempoAccount, voucher_signer: Any = None) -> str:
+    """The voucher authority address: ``voucher_signer``'s when given, else the account's."""
+    return str(voucher_signer.address) if voucher_signer is not None else account.address
+
+
+def voucher_authorities(account: TempoAccount, voucher_signer: Any = None) -> list[str]:
+    """Addresses whose channels the client signs: ``voucher_signer``'s and ``account``'s.
+
+    ``account`` keeps signing channels it opened as their voucher signer before a
+    ``voucher_signer`` was configured.
+    """
+    if voucher_signer is None:
+        return [account.address]
+    return [str(voucher_signer.address), account.address]
+
+
+def channel_voucher_signer(
+    account: TempoAccount, voucher_signer: Any, descriptor: ChannelDescriptor
+) -> Any:
+    """Who signs ``descriptor``'s vouchers: ``account``, or ``voucher_signer`` for its channel."""
+    if voucher_signer is None:
+        return account
+    signer = resolve_channel_signer(descriptor)
+    if not is_same_address(signer, str(voucher_signer.address)) and is_same_address(
+        signer, account.address
+    ):
+        return account
+    if isinstance(voucher_signer, ConfigurableAccount):
+        # An EOA that adopted a configuration (TIP-1113) signs its earlier channels itself.
+        return voucher_signer.channel_signer(descriptor.salt, root_key=account)
+    return voucher_signer
+
+
+def assert_configurable_vouchers_supported(
+    voucher_signer: Any, configurable_vouchers: bool | None
+) -> None:
+    """Fail before opening a channel the server would refuse vouchers for (TIP-1166).
+
+    A configurable account voucher signer signs ``0x05`` vouchers, which only servers that
+    advertise ``methodDetails.configurableVouchers`` accept. Checking first keeps the client
+    from locking a deposit in a channel it could not pay through.
+    """
+    if isinstance(voucher_signer, ConfigurableAccount) and configurable_vouchers is not True:
+        raise ConfigurableVouchersUnsupportedError(signer=voucher_signer.address)
 
 
 def resolve_escrow(
@@ -107,12 +155,22 @@ def create_voucher_payload(
     cumulative_amount: int,
     chain_id: int,
     escrow: str = ESCROW_ADDRESS,
+    *,
+    voucher_signer: Any = None,
 ) -> VoucherPayload:
-    """Sign a voucher credential payload for an existing channel."""
+    """Sign a voucher credential payload for an existing channel.
+
+    ``voucher_signer`` (such as a TIP-1166 ``ConfigurableAccount``) signs in place of
+    ``account`` when the channel names it as the authorized signer.
+    """
     channel_id = compute_channel_id(descriptor, chain_id=chain_id, escrow=escrow)
     amount = uint96(cumulative_amount)
     signature = sign_voucher(
-        account, channel_id=channel_id, cumulative_amount=amount, chain_id=chain_id, escrow=escrow
+        channel_voucher_signer(account, voucher_signer, descriptor),
+        channel_id=channel_id,
+        cumulative_amount=amount,
+        chain_id=chain_id,
+        escrow=escrow,
     )
     return VoucherPayload.model_validate(
         {
@@ -130,11 +188,15 @@ def create_close_payload(
     cumulative_amount: int,
     chain_id: int,
     escrow: str = ESCROW_ADDRESS,
+    *,
+    voucher_signer: Any = None,
 ) -> ClosePayload:
     """Sign a cooperative close credential payload: a voucher plus a close authorization."""
-    voucher = create_voucher_payload(account, descriptor, cumulative_amount, chain_id, escrow)
+    voucher = create_voucher_payload(
+        account, descriptor, cumulative_amount, chain_id, escrow, voucher_signer=voucher_signer
+    )
     close_signature = sign_close_authorization(
-        account,
+        channel_voucher_signer(account, voucher_signer, descriptor),
         channel_id=voucher.channel_id,
         cumulative_amount=int(voucher.cumulative_amount),
         chain_id=chain_id,
@@ -166,11 +228,18 @@ async def create_open_payload(
     fee_token: str | None = None,
     prefix_calls: Sequence[tuple[str, str]] = (),
     client: httpx.AsyncClient | None = None,
+    voucher_signer: Any = None,
+    configurable_vouchers: bool | None = None,
 ) -> OpenPayload:
     """Sign an expiring-nonce ``open`` transaction and the initial voucher.
 
     The descriptor binds the signed transaction's expiring nonce hash, as TIP-1034 requires.
+    A TIP-1166 ``ConfigurableAccount`` ``voucher_signer`` becomes the channel's authorized
+    signer and its salt defaults to the account's config commitment; it needs the server to
+    advertise ``configurable_vouchers``, else this raises
+    ``ConfigurableVouchersUnsupportedError`` before signing anything.
     """
+    assert_configurable_vouchers_supported(voucher_signer, configurable_vouchers)
     raw_tx, descriptor, channel_id = await chain.build_open_transaction(
         account,
         rpc_url=rpc_url,
@@ -180,15 +249,20 @@ async def create_open_payload(
         chain_id=chain_id,
         escrow=escrow,
         operator=operator or ZERO_ADDRESS,
-        authorized_signer=resolve_authorized_signer(account),
+        authorized_signer=resolve_authorized_signer(account, voucher_signer),
         fee_payer=bool(fee_payer),
         fee_token=fee_token,
         prefix_calls=prefix_calls,
         client=client,
+        voucher_signer=voucher_signer,
     )
     amount = uint96(initial_amount)
     signature = sign_voucher(
-        account, channel_id=channel_id, cumulative_amount=amount, chain_id=chain_id, escrow=escrow
+        channel_voucher_signer(account, voucher_signer, descriptor),
+        channel_id=channel_id,
+        cumulative_amount=amount,
+        chain_id=chain_id,
+        escrow=escrow,
     )
     return OpenPayload.model_validate(
         {
