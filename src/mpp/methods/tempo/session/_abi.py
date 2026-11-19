@@ -43,6 +43,7 @@ SELECTORS: dict[str, bytes] = {
         "computeChannelId(address,address,address,address,bytes32,address,bytes32)"
     ),
     "getVoucherDigest": _selector("getVoucherDigest(bytes32,uint96)"),
+    "verifyVoucher": _selector(f"verifyVoucher({DESCRIPTOR_TYPE},uint96,bytes)"),
     "domainSeparator": _selector("domainSeparator()"),
     "CLOSE_GRACE_PERIOD": _selector("CLOSE_GRACE_PERIOD()"),
     "VOUCHER_TYPEHASH": _selector("VOUCHER_TYPEHASH()"),
@@ -277,6 +278,23 @@ def encode_compute_channel_id(descriptor: ChannelDescriptor) -> str:
         ["address", "address", "address", "address", "bytes32", "address", "bytes32"],
         list(descriptor_tuple(descriptor)),
     )
+
+
+def encode_verify_voucher(
+    descriptor: ChannelDescriptor, cumulative_amount: int, signature: str
+) -> str:
+    """Calldata for the T15 verifyVoucher(descriptor, cumulativeAmount, signature) view."""
+    return _hex(
+        SELECTORS["verifyVoucher"],
+        [DESCRIPTOR_TYPE, "uint96", "bytes"],
+        [descriptor_tuple(descriptor), uint96(cumulative_amount), _signature_bytes(signature)],
+    )
+
+
+def decode_bool(data: str) -> bool:
+    """Decode a single bool result."""
+    (value,) = decode(["bool"], _result_bytes(data))
+    return bool(value)
 
 
 def _result_bytes(data: str) -> bytes:

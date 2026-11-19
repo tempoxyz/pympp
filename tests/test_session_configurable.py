@@ -53,6 +53,7 @@ from tests.test_session_chain import (
     PAYER,
     RPC,
     FakeRpc,
+    RpcError,
     opened_log,
     topic,
 )
@@ -424,6 +425,17 @@ class TestServer:
         with pytest.raises(InvalidSignatureError):
             await life.accept(primitive, configurable_vouchers=True, voucher_state_max_age=60_000)
 
+    async def test_rejects_an_open_voucher_for_another_config_before_broadcast(self) -> None:
+        life = await self._life()
+        rotated = voucher(configurable(ROTATED), 100, life.channel_id)
+        with pytest.raises(InvalidSignatureError):
+            await verification.broadcast_credential_payload(
+                life.context(
+                    life.open_payload(signature=rotated.signature), configurable_vouchers=True
+                )
+            )
+        assert not life.rpc.sent
+
     async def test_rejects_a_primitive_open_voucher_once_the_escrow_cached_a_commitment(
         self,
     ) -> None:
@@ -438,50 +450,75 @@ class TestServer:
 
 
 class TestUnknownOpeningCommitment:
-    """A channel stored without an opening commitment is looked up on chain once, never zero."""
+    """A channel stored without an opening commitment asks the escrow, never assumes zero."""
 
-    async def _life(self, *, commitment: str | None, logged: bool) -> Lifecycle:
+    async def _life(self, *, commitment: str | None, recorded: str | None) -> Lifecycle:
         life = await Lifecycle().build(salt=COMMITMENT)
         await life.open()
         await life.update(opening_commitment=None)
         if commitment is not None:
             life.rpc.commitments[PAYER.address.lower()] = commitment
-        if logged:
-            life.rpc.chain_logs = [commitment_log(life.channel_id, PAYER.address, COMMITMENT)]
+        if recorded is not None:
+            life.rpc.opening_commitments[life.channel_id.lower()] = recorded
         return life
 
-    async def test_a_logged_opening_commitment_rejects_primitive_vouchers(self) -> None:
-        life = await self._life(commitment=ROTATED_COMMITMENT, logged=True)
+    def _verify_calls(self, life: Lifecycle) -> int:
+        selector = "0x" + abi.SELECTORS["verifyVoucher"].hex()
+        return sum(
+            1 for params in life.rpc.methods("eth_call") if params[0]["data"].startswith(selector)
+        )
+
+    async def test_a_recorded_opening_commitment_rejects_primitive_vouchers(self) -> None:
+        # The signer rotated after open: the current commitment is not the recorded one.
+        life = await self._life(commitment=ROTATED_COMMITMENT, recorded=COMMITMENT)
         commitments: dict[str, str] = {}
         for amount in (200, 300):
             with pytest.raises(InvalidSignatureError):
                 await life.accept(life.voucher_payload(amount), opening_commitments=commitments)
-        assert (await life.channel()).opening_commitment == COMMITMENT
-        assert len(life.rpc.methods("eth_getLogs")) == 1
+        assert (await life.channel()).opening_commitment is None
+        assert self._verify_calls(life) == 2
+        assert not life.rpc.methods("eth_getLogs")
 
-    async def test_the_one_store_update_path_also_waits_for_the_lookup(self) -> None:
-        life = await self._life(commitment=COMMITMENT, logged=True)
+    async def test_the_one_store_update_path_also_asks_the_escrow(self) -> None:
+        life = await self._life(commitment=COMMITMENT, recorded=COMMITMENT)
         with pytest.raises(InvalidSignatureError):
             await life.accept(life.voucher_payload(200), voucher_state_max_age=60_000)
-        assert (await life.channel()).opening_commitment == COMMITMENT
+        assert (await life.channel()).opening_commitment is None
 
-    async def test_no_log_means_zero_rules(self) -> None:
-        life = await self._life(commitment=COMMITMENT, logged=False)
+    async def test_a_voucher_the_escrow_accepts_settles_the_opening_commitment(self) -> None:
+        # Opened before the signer had a commitment: zero rules, which the escrow confirms.
+        life = await self._life(commitment=COMMITMENT, recorded=None)
         receipt = await life.accept(life.voucher_payload(200))
         assert receipt.accepted_cumulative == "200"
         assert (await life.channel()).opening_commitment == ZERO
+        assert self._verify_calls(life) == 1
 
-    async def test_a_signer_without_a_commitment_skips_the_log_search(self) -> None:
-        life = await self._life(commitment=None, logged=False)
+    async def test_a_signer_without_a_commitment_skips_the_escrow_check(self) -> None:
+        life = await self._life(commitment=None, recorded=None)
         receipt = await life.accept(life.voucher_payload(200))
         assert receipt.accepted_cumulative == "200"
-        assert not life.rpc.methods("eth_getLogs")
+        assert self._verify_calls(life) == 0
         assert (await life.channel()).opening_commitment == ZERO
 
-    async def test_close_looks_the_opening_commitment_up_too(self) -> None:
-        life = await self._life(commitment=COMMITMENT, logged=True)
+    async def test_close_asks_the_escrow_too(self) -> None:
+        life = await self._life(commitment=COMMITMENT, recorded=COMMITMENT)
         with pytest.raises(InvalidSignatureError):
             await life.accept(life.close_payload(100))
+
+    async def test_a_failed_escrow_check_rejects_rather_than_reading_zero(self) -> None:
+        life = await self._life(commitment=COMMITMENT, recorded=None)
+        original = life.rpc._call  # pyright: ignore[reportPrivateUsage]
+        selector = "0x" + abi.SELECTORS["verifyVoucher"].hex()
+
+        def call(params: list[Any]) -> Any:
+            if params[0]["data"].startswith(selector):
+                raise RpcError("node unavailable")
+            return original(params)
+
+        life.rpc.overrides["eth_call"] = call
+        with pytest.raises(Exception):  # noqa: B017
+            await life.accept(life.voucher_payload(200))
+        assert (await life.channel()).opening_commitment is None
 
     def test_challenge_advertises_configurable_vouchers_only_when_enabled(self) -> None:
         def resolve(**options: Any) -> dict[str, Any]:
@@ -525,6 +562,38 @@ class TestChannelSigner:
         assert check(signed, root.address, opening_commitment=ZERO)
         with pytest.raises(ValueError, match="own key"):
             ConfigurableAccount(address=ACCOUNT, config=CONFIG, owners=KEYS, root_key=root)
+
+
+class TestOpenTransaction:
+    async def test_opens_with_a_fixed_salt_get_distinct_transactions(self) -> None:
+        # Two opens with the same parameters and salt in the same second must not collide.
+        rpc = FakeRpc()
+        first, _, first_id = await build_open(rpc, salt=COMMITMENT)
+        second, _, second_id = await build_open(rpc, salt=COMMITMENT)
+        assert first != second and first_id != second_id
+
+
+class TestAccountSignedChannels:
+    def test_a_voucher_signer_keeps_the_accounts_own_channels(self) -> None:
+        signer = configurable()
+        own = replace(DESCRIPTOR, payer=PAYER.address, authorized_signer=PAYER.address)
+        delegated = replace(DESCRIPTOR, payer=PAYER.address, authorized_signer=ACCOUNT)
+        authorities = [a.lower() for a in ops.voucher_authorities(PAYER, signer)]
+        assert authorities == [ACCOUNT.lower(), PAYER.address.lower()]
+        assert ops.voucher_authorities(PAYER) == [PAYER.address]
+        assert ops.channel_voucher_signer(PAYER, signer, own) is PAYER
+        assert ops.channel_voucher_signer(PAYER, signer, delegated) is not PAYER
+
+
+class TestPreviousConfigs:
+    def test_a_channel_opened_under_a_previous_config_keeps_signing_with_it(self) -> None:
+        account = ConfigurableAccount(
+            address=ACCOUNT, config=ROTATED, owners=KEYS, previous_configs=[CONFIG]
+        )
+        signer = account.channel_signer(COMMITMENT)
+        assert isinstance(signer, ConfigurableAccount) and signer.config == CONFIG
+        assert check(voucher(signer), configurable=True, opening_commitment=COMMITMENT)
+        assert account.channel_signer(ROTATED_COMMITMENT) is account
 
 
 class TestClient:

@@ -40,8 +40,8 @@ from mpp.methods.tempo.session.client._ops import (
     create_voucher_payload,
     is_same_address,
     read_optional_address,
-    resolve_authorized_signer,
     resolve_escrow,
+    voucher_authorities,
 )
 from mpp.methods.tempo.session.client._store import (
     ChannelEntry,
@@ -344,7 +344,7 @@ def _assert_reusable_descriptor(
     expected_channel_id: str,
     payee: str,
     payer: str,
-    authorized_signer: str,
+    authorized_signers: Sequence[str],
     token: str,
 ) -> None:
     if channel_id and channel_id.lower() != expected_channel_id.lower():
@@ -355,7 +355,8 @@ def _assert_reusable_descriptor(
         raise ValueError("context descriptor token does not match challenge")
     if not is_same_address(descriptor.payer, payer):
         raise ValueError("context descriptor payer does not match account")
-    if not is_same_address(resolve_descriptor_signer(descriptor), authorized_signer):
+    signer = resolve_descriptor_signer(descriptor)
+    if not any(is_same_address(signer, authority) for authority in authorized_signers):
         raise ValueError("context descriptor authorizedSigner does not match account")
 
 
@@ -378,7 +379,7 @@ async def resolve_reusable_channel(
         expected_channel_id=expected_channel_id,
         payee=resolved.payee,
         payer=account.address,
-        authorized_signer=resolve_authorized_signer(account, voucher_signer),
+        authorized_signers=voucher_authorities(account, voucher_signer),
         token=resolved.token,
     )
     state = await chain.get_channel_state(
@@ -400,8 +401,10 @@ def can_sign_descriptor(
     voucher authority."""
     if not is_same_address(account.address, descriptor.payer):
         return False
-    return is_same_address(
-        resolve_authorized_signer(account, voucher_signer), resolve_descriptor_signer(descriptor)
+    signer = resolve_descriptor_signer(descriptor)
+    return any(
+        is_same_address(signer, authority)
+        for authority in voucher_authorities(account, voucher_signer)
     )
 
 
@@ -793,7 +796,7 @@ async def _manual(
         expected_channel_id=channel_id,
         payee=resolved.payee,
         payer=account.address,
-        authorized_signer=resolve_authorized_signer(account, voucher_signer),
+        authorized_signers=voucher_authorities(account, voucher_signer),
         token=resolved.token,
     )
     if context.action == "open":

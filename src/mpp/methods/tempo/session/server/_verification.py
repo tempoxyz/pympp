@@ -24,6 +24,7 @@ from mpp._defaults import DEFAULT_TIMEOUT
 from mpp.errors import VerificationFailedError
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id, resolve_authorized_signer
+from mpp.methods.tempo.session._configurable import is_zero_hash
 from mpp.methods.tempo.session._protocol import (
     ZERO_ADDRESS,
     ChannelDescriptor,
@@ -622,35 +623,68 @@ _ZERO_COMMITMENT = "0x" + "00" * 32
 
 
 async def _with_opening_commitment(
-    context: CredentialContext, channel: ChannelState
+    context: CredentialContext, channel: ChannelState, voucher: SignedVoucher
 ) -> ChannelState:
-    """``channel`` with its TIP-1166 opening commitment, looked up on chain when unknown.
+    """channel with its TIP-1166 opening commitment, resolved on chain when unknown.
 
     A channel stored without one (its open receipt was not seen here, or the record predates
-    the field) is looked up once per channel ID and the result stored, so a primitive
-    voucher is never accepted on a channel the escrow bound to a configurable account.
+    the field) has a zero opening commitment when its signer has no config commitment now.
+    Otherwise the escrow's verifyVoucher view must accept voucher, and the commitment is the
+    one (zero or the salt) under which voucher verifies here. It is stored only when exactly
+    one does, so a primitive voucher is never accepted on a channel the escrow bound to a
+    configurable account.
     """
     if channel.opening_commitment is not None or channel.descriptor is None:
         return channel
     key = channel.channel_id.lower()
     commitment = context.opening_commitments.get(key)
-    if commitment is None:
-        commitment = await chain.find_opening_commitment(
+    if commitment is not None:
+        return replace(channel, opening_commitment=commitment)
+    descriptor = channel.descriptor
+    signer = authorized_signer(descriptor)
+    on_chain = await chain.get_config_commitment(
+        context.rpc_url, signer, client=context.http_client
+    )
+    if is_zero_hash(on_chain):
+        # A config commitment is never removed, so the signer had none at open either.
+        candidates = [_ZERO_COMMITMENT]
+    else:
+        if not await chain.verify_voucher_on_chain(
             context.rpc_url,
-            channel.channel_id,
-            channel.descriptor,
+            descriptor,
+            voucher.cumulative_amount,
+            voucher.signature,
             escrow=context.escrow,
             client=context.http_client,
-        )
-        context.opening_commitments[key] = commitment
-        resolved = commitment
+        ):
+            raise InvalidSignatureError("invalid voucher signature")
+        candidates = [
+            candidate
+            for candidate in dict.fromkeys((_ZERO_COMMITMENT, descriptor.salt.lower()))
+            if verify_voucher(
+                context.escrow,
+                context.chain_id,
+                voucher,
+                signer,
+                configurable=context.configurable_vouchers,
+                opening_commitment=candidate,
+            )
+        ]
+        if not candidates:
+            raise InvalidSignatureError("invalid voucher signature")
+        if len(candidates) > 1:
+            # Both fit this voucher; the escrow accepted it, so check the next one again.
+            return replace(channel, opening_commitment=candidates[0])
+    commitment = candidates[0]
+    context.opening_commitments[key] = commitment
+    resolved = commitment
 
-        def store(current: ChannelState | None) -> ChannelState | None:
-            if current is None or current.opening_commitment is not None:
-                return current
-            return replace(current, opening_commitment=resolved)
+    def store(current: ChannelState | None) -> ChannelState | None:
+        if current is None or current.opening_commitment is not None:
+            return current
+        return replace(current, opening_commitment=resolved)
 
-        await context.store.update_channel(channel.channel_id, store)
+    await context.store.update_channel(channel.channel_id, store)
     return replace(channel, opening_commitment=commitment)
 
 
@@ -749,6 +783,7 @@ async def _validate_open(context: CredentialContext, payload: OpenPayload) -> No
         validated=validated,
         descriptor=descriptor,
         request_amount=request.amount,
+        expected_commitment=await _expected_opening_commitment(context, validated.descriptor),
     )
     await chain.simulate_credential_transaction(
         context.rpc_url,
@@ -767,6 +802,7 @@ def _check_open_voucher(
     validated: chain.ValidatedOpenTransaction,
     descriptor: ChannelDescriptor,
     request_amount: int,
+    expected_commitment: str | None,
 ) -> None:
     assert_open_credential_covers_request(
         cumulative_amount=cumulative,
@@ -779,25 +815,29 @@ def _check_open_voucher(
     voucher = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=signature
     )
-    signer = authorized_signer(validated.descriptor)
-    if verify_voucher(context.escrow, context.chain_id, voucher, signer):
-        return
-    # TIP-1166: before the open lands, the escrow's opening commitment is unknown. It is the
-    # salt when the signer has a config commitment (the open requires salt == commitment),
-    # else zero. The open's receipt settles which one applies (_check_open_commitment).
-    if context.configurable_vouchers and any(
-        verify_voucher(
-            context.escrow,
-            context.chain_id,
-            voucher,
-            signer,
-            configurable=True,
-            opening_commitment=commitment,
-        )
-        for commitment in (None, validated.descriptor.salt)
+    # TIP-1166: the open makes the signer's current config commitment the channel's opening
+    # commitment (it requires salt == commitment), so the voucher is checked against it before
+    # the server co-signs or broadcasts. The open's receipt rechecks it (_check_open_commitment).
+    if not verify_voucher(
+        context.escrow,
+        context.chain_id,
+        voucher,
+        authorized_signer(validated.descriptor),
+        configurable=context.configurable_vouchers,
+        opening_commitment=expected_commitment,
     ):
-        return
-    raise InvalidSignatureError("invalid voucher signature")
+        raise InvalidSignatureError("invalid voucher signature")
+
+
+async def _expected_opening_commitment(
+    context: CredentialContext, descriptor: ChannelDescriptor
+) -> str | None:
+    """The opening commitment an open of descriptor would record now (configurable only)."""
+    if not context.configurable_vouchers:
+        return None
+    return await chain.get_config_commitment(
+        context.rpc_url, authorized_signer(descriptor), client=context.http_client
+    )
 
 
 def _check_open_commitment(
@@ -909,7 +949,7 @@ async def _validate_voucher(context: CredentialContext, payload: VoucherPayload)
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    channel = await _with_opening_commitment(context, channel)
+    channel = await _with_opening_commitment(context, channel, voucher)
     state = (
         _stored_channel_state(channel)
         if _can_use_stored_channel_state(context, channel, voucher)
@@ -952,7 +992,13 @@ async def _check_close(
         chain_id=context.chain_id,
         escrow=context.escrow,
     )
-    channel = await _with_opening_commitment(context, channel)
+    channel = await _with_opening_commitment(
+        context,
+        channel,
+        SignedVoucher(
+            channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+        ),
+    )
     authorization = SignedVoucher(
         channel_id=channel_id, cumulative_amount=cumulative, signature=payload.close_signature
     )
@@ -1054,6 +1100,8 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
         operator,
     )
 
+    expected_commitment = await _expected_opening_commitment(context, descriptor)
+
     def before_broadcast(prepared: chain.ValidatedOpenTransaction) -> None:
         _check_open_voucher(
             context,
@@ -1063,6 +1111,7 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
             validated=prepared,
             descriptor=descriptor,
             request_amount=request.amount,
+            expected_commitment=expected_commitment,
         )
 
     await check_atomic_update(context.store, channel_id)
@@ -1344,7 +1393,7 @@ async def _handle_voucher(context: CredentialContext, payload: VoucherPayload) -
     if state.close_requested_at != 0:
         await _record_pending_close(context, channel_id, state)
         raise ChannelClosedError("channel has a pending close request")
-    reconciled = await _with_opening_commitment(context, reconciled)
+    reconciled = await _with_opening_commitment(context, reconciled, voucher)
     return await verify_and_accept_voucher(
         store=context.store,
         challenge_id=context.challenge.id,
@@ -1386,7 +1435,7 @@ async def _accept_or_load_voucher_channel(
     )
     if channel.finalized:
         raise ChannelClosedError("channel is finalized")
-    return await _with_opening_commitment(context, channel)
+    return await _with_opening_commitment(context, channel, voucher)
 
 
 async def _accept_voucher_in_one_update(

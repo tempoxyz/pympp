@@ -14,6 +14,9 @@ from mpp import Challenge, Credential
 from mpp._typing import is_dict
 from mpp.methods.tempo.session import _chain as chain
 from mpp.methods.tempo.session._channel import compute_channel_id
+from mpp.methods.tempo.session._channel import (
+    resolve_authorized_signer as resolve_channel_signer,
+)
 from mpp.methods.tempo.session._configurable import (
     ConfigurableAccount,
     ConfigurableVouchersUnsupportedError,
@@ -63,11 +66,27 @@ def resolve_authorized_signer(account: TempoAccount, voucher_signer: Any = None)
     return str(voucher_signer.address) if voucher_signer is not None else account.address
 
 
+def voucher_authorities(account: TempoAccount, voucher_signer: Any = None) -> list[str]:
+    """Addresses whose channels the client signs: ``voucher_signer``'s and ``account``'s.
+
+    ``account`` keeps signing channels it opened as their voucher signer before a
+    ``voucher_signer`` was configured.
+    """
+    if voucher_signer is None:
+        return [account.address]
+    return [str(voucher_signer.address), account.address]
+
+
 def channel_voucher_signer(
     account: TempoAccount, voucher_signer: Any, descriptor: ChannelDescriptor
 ) -> Any:
     """Who signs ``descriptor``'s vouchers: ``account``, or ``voucher_signer`` for its channel."""
     if voucher_signer is None:
+        return account
+    signer = resolve_channel_signer(descriptor)
+    if not is_same_address(signer, str(voucher_signer.address)) and is_same_address(
+        signer, account.address
+    ):
         return account
     if isinstance(voucher_signer, ConfigurableAccount):
         return voucher_signer.channel_signer(descriptor.salt)

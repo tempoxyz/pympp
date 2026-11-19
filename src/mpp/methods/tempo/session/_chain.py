@@ -293,8 +293,11 @@ def get_opening_commitment(
         try:
             event = abi.decode_event([str(t) for t in topics], str(log.get("data", "0x")))
         except Exception:
-            continue
-        if event is not None and str(event.args["channelId"]).lower() == channel_id.lower():
+            event = None
+        if event is None:
+            # Skipping it could read a nonzero opening commitment as zero.
+            raise VerificationFailedError("undecodable OpeningCommitmentRecorded event in receipt")
+        if str(event.args["channelId"]).lower() == channel_id.lower():
             matches.append(event.args)
     if not matches:
         return None
@@ -335,46 +338,22 @@ async def get_config_commitment(
     return "0x" + raw.hex()
 
 
-async def find_opening_commitment(
+async def verify_voucher_on_chain(
     rpc_url: str,
-    channel_id: str,
     descriptor: ChannelDescriptor,
+    cumulative_amount: int,
+    signature: str,
     *,
     escrow: str,
-    from_block: int = 0,
     client: httpx.AsyncClient | None = None,
-) -> str:
-    """The TIP-1166 opening commitment the escrow cached for an open channel; zero when none.
+) -> bool:
+    """Whether the escrow's T15 verifyVoucher view accepts signature (TIP-1166).
 
-    For a channel whose open receipt was not seen. A signer that has no config commitment
-    now had none at open, so the opening commitment is zero without a log search. Otherwise the
-    channel's ``OpeningCommitmentRecorded`` log (searched by its indexed channel ID from
-    ``from_block``) decides: its commitment, or zero when the escrow emitted none.
+    The escrow checks it against the channel's opening commitment, so this decides a channel
+    whose opening commitment is not known here. Raises when the call fails.
     """
-    zero = "0x" + "00" * 32
-    signer = descriptor.authorized_signer
-    if is_zero_hash(signer):
-        signer = descriptor.payer
-    if is_zero_hash(await get_config_commitment(rpc_url, signer, client=client)):
-        return zero
-    logs = await _rpc(
-        rpc_url,
-        "eth_getLogs",
-        [
-            {
-                "address": escrow,
-                "topics": [abi.EVENT_TOPICS["OpeningCommitmentRecorded"], channel_id],
-                "fromBlock": hex(from_block),
-                "toBlock": "latest",
-            }
-        ],
-        client,
-    )
-    present = (
-        [log for log in logs if is_dict(log) and not log.get("removed")] if is_list(logs) else []
-    )
-    recorded = get_opening_commitment({"logs": present}, descriptor, channel_id, escrow=escrow)
-    return zero if recorded is None else recorded
+    data = abi.encode_verify_voucher(descriptor, cumulative_amount, signature)
+    return abi.decode_bool(await _eth_call(rpc_url, escrow, data, None, client))
 
 
 async def resolve_open_salt(
@@ -1438,6 +1417,9 @@ async def build_open_transaction(
     if salt is None and isinstance(voucher_signer, ConfigurableAccount):
         salt = await resolve_open_salt(rpc_url, voucher_signer, client=client)
     channel_salt = salt or "0x" + os.urandom(32).hex()
+    # A fixed salt (such as a signer's config commitment) no longer tells apart two opens with
+    # the same parameters built in the same second, so vary the transaction's valid_after.
+    open_valid_after = None if salt is None else _random_valid_after()
     open_data = abi.encode_open(
         payee=payee,
         operator=operator,
@@ -1455,7 +1437,7 @@ async def build_open_transaction(
         awaiting_fee_payer=fee_payer,
         root_account=root_account,
         valid_before=valid_before,
-        valid_after=None,
+        valid_after=open_valid_after,
         client=client,
     )
     raw_tx = _serialize_client_transaction(signed, fee_payer)

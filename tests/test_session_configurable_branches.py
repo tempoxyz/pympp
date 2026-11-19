@@ -7,10 +7,12 @@ from typing import Any
 
 import pytest
 
+from mpp.errors import VerificationFailedError
 from mpp.methods.tempo import _rlp as rlp
 from mpp.methods.tempo._rpc import RpcError as NodeRpcError
 from mpp.methods.tempo.session import _abi as abi
 from mpp.methods.tempo.session import _chain as chain
+from mpp.methods.tempo.session._channel import compute_channel_id
 from mpp.methods.tempo.session._configurable import (
     MAX_OWNERS,
     ConfigurableAccount,
@@ -22,6 +24,7 @@ from mpp.methods.tempo.session._configurable import (
 from mpp.methods.tempo.session._protocol import ESCROW_ADDRESS
 from mpp.methods.tempo.session._voucher import (
     _verify_signer_signature,  # pyright: ignore[reportPrivateUsage]
+    sign_voucher,
 )
 from tests.test_session_chain import DESCRIPTOR, PAYER, RPC, FakeRpc
 from tests.test_session_configurable import (
@@ -229,10 +232,17 @@ class TestChainOpeningCommitments:
     def test_skips_unusable_logs(self) -> None:
         descriptor = replace(DESCRIPTOR, authorized_signer=ACCOUNT, salt=COMMITMENT)
         log = commitment_log(CHANNEL_ID, ACCOUNT, COMMITMENT)
-        broken = {**log, "data": "0x1234"}
-        receipt = {"logs": ["not a log", broken, {**log, "topics": []}, log]}
+        receipt = {"logs": ["not a log", {**log, "topics": []}, log]}
         assert chain.get_opening_commitment(receipt, descriptor, CHANNEL_ID) == COMMITMENT
         assert chain.get_opening_commitment({"logs": None}, descriptor, CHANNEL_ID) is None
+
+    def test_an_undecodable_opening_commitment_event_fails(self) -> None:
+        # Skipping it could read a nonzero opening commitment as zero.
+        descriptor = replace(DESCRIPTOR, authorized_signer=ACCOUNT, salt=COMMITMENT)
+        log = commitment_log(CHANNEL_ID, ACCOUNT, COMMITMENT)
+        for broken in ({**log, "data": "0x1234"}, {**log, "topics": log["topics"][:2]}):
+            with pytest.raises(VerificationFailedError, match="undecodable"):
+                chain.get_opening_commitment({"logs": [broken, log]}, descriptor, CHANNEL_ID)
 
     def test_zero_authorized_signer_means_the_payer(self) -> None:
         descriptor = replace(DESCRIPTOR, authorized_signer=ZERO_ADDRESS, salt=COMMITMENT)
@@ -247,16 +257,25 @@ class TestChainOpeningCommitments:
         with pytest.raises(ValueError, match="getConfigCommitment"):
             await chain.get_config_commitment(RPC, ACCOUNT, client=rpc.client)
 
-    async def test_payer_signed_channel_without_commitment_has_a_zero_opening_commitment(
-        self,
-    ) -> None:
+    async def test_verify_voucher_on_chain_asks_the_escrow(self) -> None:
         rpc = FakeRpc()
         descriptor = replace(DESCRIPTOR, authorized_signer=ZERO_ADDRESS)
-        recorded = await chain.find_opening_commitment(
-            RPC, CHANNEL_ID, descriptor, escrow=ESCROW_ADDRESS, client=rpc.client
+        channel_id = compute_channel_id(descriptor, chain_id=rpc.chain_id)
+        signed = sign_voucher(
+            PAYER, channel_id=channel_id, cumulative_amount=100, chain_id=rpc.chain_id
         )
-        assert recorded == ZERO
-        assert rpc.methods("eth_getLogs") == []
+
+        async def verify() -> bool:
+            return await chain.verify_voucher_on_chain(
+                RPC, descriptor, 100, signed, escrow=ESCROW_ADDRESS, client=rpc.client
+            )
+
+        assert await verify()
+        rpc.opening_commitments[channel_id.lower()] = COMMITMENT
+        assert not await verify()
+        rpc.overrides["eth_call"] = lambda params: "0x1234"
+        with pytest.raises(Exception):  # noqa: B017
+            await verify()
 
     def test_signer_config_error_reads_nested_revert_data(self) -> None:
         selector = abi.ERROR_SELECTORS["RootKeyRetired"]

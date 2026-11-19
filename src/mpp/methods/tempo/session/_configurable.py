@@ -352,6 +352,9 @@ class ConfigurableAccount:
         root_key: The account's own secp256k1 key, for an EOA that adopted a configuration
             (TIP-1113). It signs vouchers of channels opened before the account had a config
             commitment, which the escrow still accepts from it.
+        previous_configs: Configurations the account held before ``config``. A channel opened
+            under one carries its commitment as salt, and only that configuration signs its
+            vouchers until it closes.
     """
 
     def __init__(
@@ -361,8 +364,12 @@ class ConfigurableAccount:
         config: ConfigurableAccountConfig,
         owners: Sequence[OwnerSigner],
         root_key: OwnerSigner | None = None,
+        previous_configs: Sequence[ConfigurableAccountConfig] = (),
     ) -> None:
         config.validate(address)
+        for previous in previous_configs:
+            previous.validate(address)
+        self.previous_configs = tuple(previous_configs)
         self._address = _hex(_address_bytes(address))
         if root_key is not None and root_key.address.lower() != self._address:
             raise ValueError("root_key must be the configurable account's own key")
@@ -370,6 +377,7 @@ class ConfigurableAccount:
         self.config = config
         self._owners = {owner.address.lower(): owner for owner in owners}
         self._approvers = self._select_approvers()
+        self._owner_signers = tuple(owners)
 
     @classmethod
     def from_initial_config(
@@ -402,6 +410,16 @@ class ConfigurableAccount:
         """
         if not is_zero_hash(salt) and int(salt, 16) == int(self.commitment, 16):
             return self
+        if not is_zero_hash(salt):
+            for previous in self.previous_configs:
+                if int(salt, 16) == int(previous.commitment(), 16):
+                    # The config the channel opened under, not the account's current one.
+                    return ConfigurableAccount(
+                        address=self._address,
+                        config=previous,
+                        owners=self._owner_signers,
+                        root_key=self.root_key,
+                    )
         if self.config.version == 0:
             try:
                 if self.config.derive_address() == self._address:
