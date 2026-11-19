@@ -449,7 +449,21 @@ async def _prepare_offer(
     input, wire = await _resolve_wire(offer, request, credential)
 
     async def challenge_request() -> dict[str, Any]:
-        return (await _resolve_wire(offer, request, None))[1]
+        # As for a request carrying no payment at all: no credential, and no x402 payment
+        # header, so neither can steer the reissued terms.
+        fresh_input, fresh = await _resolve_wire(offer, _without_payment(request), None)
+        if fresh != prepared.request:
+            # Register the issuer of the reissued Challenge, so the response can still carry
+            # its x402 requirements and SIWX terms.
+            call.prepared.append(
+                replace(
+                    prepared,
+                    intent=_intent(method, fresh_input, request, call.gate(offer, request)),
+                    request=fresh,
+                    challenge_request=None,
+                )
+            )
+        return fresh
 
     expires = _offer_expires(offer)
 
@@ -475,6 +489,14 @@ async def _prepare_offer(
     )
     call.prepared.append(prepared)
     return prepared
+
+
+def _without_payment(request: Request) -> Request:
+    """``request`` without the headers that carry a payment."""
+    headers = request.headers.copy()
+    for name in {PAYMENT_SIGNATURE_HEADER, "authorization", PAYMENT_AUTHORIZATION_HEADER}:
+        headers.pop(name, None)
+    return Request(request.method, request.url, headers, request.body, request.route)
 
 
 def _offer_expires(offer: _Offer) -> str | None:
@@ -998,6 +1020,17 @@ class ComposedHandler:
                     return result
             error = VerificationFailedError(
                 "x402 payment payload does not match route requirements"
+            )
+        if any(offer.offer.method._fresh_failure_challenges for offer in prepared):
+            # The offers above were resolved with the rejected payment in view (it may name
+            # an older recipient to redeem): advertise the terms a request without it gets.
+            advertised = await self._advertised(
+                await self._identified(
+                    await _prepare_offers(self._offers, _without_payment(request), None, call),
+                    call,
+                ),
+                request,
+                call,
             )
         challenges: list[Challenge] = []
         for offer in advertised:

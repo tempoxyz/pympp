@@ -1071,6 +1071,11 @@ class TestRecipientFromFacilitator:
         result = await route(http_request(broken.to_authorization()))
         assert isinstance(result, PaymentRequired)
         assert challenge(result).request["recipient"] == ROTATED
+        # The reissued Challenge keeps its x402 terms, for the current address.
+        from mpp.x402 import PAYMENT_REQUIRED_HEADER, decode_payment_required
+
+        required = decode_payment_required(result.challenge.headers[PAYMENT_REQUIRED_HEADER])
+        assert [a["payTo"] for a in required["accepts"]] == [ROTATED]
 
     def test_discovery_leaves_out_a_lazy_recipient(self) -> None:
         from mpp.discovery import HandlerRoute, generate
@@ -1122,6 +1127,103 @@ class TestRecipientFromFacilitator:
         result = await handler(http_request(credential.to_authorization()))
         assert isinstance(result, PaymentRequired)
         assert [c.method for c in challenges(result)] == ["tempo"]
+
+    async def test_a_plain_recipient_function_is_called_for_each_challenge(self) -> None:
+        calls = [0]
+
+        async def recipient() -> str:
+            calls[0] += 1
+            return RECIPIENT
+
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC, recipient=recipient, facilitator=PayToFacilitator()
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        await route(http_request())
+        await route(http_request())
+        assert calls[0] == 2
+
+    async def test_a_lazy_offer_leaves_a_fixed_sibling_credential_alone(self) -> None:
+        fixed = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+        lazy_facilitator = PayToFacilitator()
+        fixed_facilitator = PayToFacilitator()
+        lazy = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=lazy_facilitator)
+        static = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC, recipient=fixed, facilitator=fixed_facilitator
+        )
+        server = Mpp(methods=[lazy, static], realm=REALM, secret_key="k", store=MemoryStore())
+        handler = server.compose(
+            (server.methods[0], {"amount": "0.25"}), (server.methods[1], {"amount": "0.25"})
+        )
+        offer = next(
+            c for c in challenges(await handler(http_request())) if c.request["recipient"] == fixed
+        )
+        credential = await sign(evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), offer)
+        result = await handler(http_request(credential.to_authorization()))
+        assert not isinstance(result, PaymentRequired), result
+        assert [r["payTo"] for _, r in fixed_facilitator.settled] == [fixed]
+        assert lazy_facilitator.settled == []
+
+    async def test_a_payment_header_cannot_steer_a_reissued_challenge(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # After a rotation, a rejected credential sent with a PAYMENT-SIGNATURE naming the
+        # retired address still gets a Challenge for the current one.
+        import anyio
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=evm_server.facilitator_pay_to_resolver(
+                facilitator, network="eip155:84532", ttl=10
+            ),
+            facilitator=facilitator,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        issued = challenge(await route(http_request()))
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        facilitator.pay_to = ROTATED
+        now[0] += 11
+        broken = Credential(
+            challenge=credential.challenge, payload={"bogus": True}, source=credential.source
+        )
+        header = encode_payment_signature(
+            cast(
+                PaymentPayload,
+                {
+                    "x402Version": 2,
+                    "accepted": {
+                        "scheme": "exact",
+                        "network": "eip155:84532",
+                        "amount": "1",
+                        "asset": BASE_SEPOLIA_USDC.address,
+                        "payTo": RECIPIENT,
+                        "maxTimeoutSeconds": 60,
+                    },
+                    "payload": {},
+                },
+            )
+        )
+        request = Request(
+            "GET",
+            "https://example.com/paid",
+            {"authorization": broken.to_authorization(), PAYMENT_SIGNATURE_HEADER: header},
+        )
+        result = await route(request)
+        assert isinstance(result, PaymentRequired)
+        assert all(c.request["recipient"] == ROTATED for c in challenges(result))
+
+        # An x402 header alone, matching nothing current, gets the current terms too.
+        alone = Request("GET", "https://example.com/paid", {PAYMENT_SIGNATURE_HEADER: header})
+        result = await route(alone)
+        assert isinstance(result, PaymentRequired)
+        assert all(c.request["recipient"] == ROTATED for c in challenges(result))
 
     async def test_x402_payment_keeps_a_recently_issued_pay_to(self) -> None:
         current = [RECIPIENT]
@@ -1297,6 +1399,34 @@ class TestPayToResolver:
         now[0] += 60
         with pytest.raises(FacilitatorError):
             await resolver()
+
+    def test_a_slow_read_on_another_loop_cannot_revert_a_rotation(self) -> None:
+        import asyncio
+        import threading
+
+        from mpp.x402 import PayToResolver
+
+        slow_started = threading.Event()
+        release_slow = threading.Event()
+        reads = [0]
+
+        async def read() -> str:
+            reads[0] += 1
+            if reads[0] == 1:
+                slow_started.set()
+                await asyncio.to_thread(release_slow.wait)
+                return RECIPIENT  # the old address, read before the rotation
+            return ROTATED
+
+        resolver = PayToResolver(read, ttl=0)
+        results: list[str] = []
+        slow = threading.Thread(target=lambda: results.append(asyncio.run(resolver())))
+        slow.start()
+        slow_started.wait()
+        assert asyncio.run(resolver()) == ROTATED
+        release_slow.set()
+        slow.join()
+        assert resolver.current == ROTATED
 
     def test_works_across_event_loops(self) -> None:
         import asyncio

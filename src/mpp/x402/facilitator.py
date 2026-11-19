@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+import itertools
 import json
+import threading
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Protocol, TypeAlias, runtime_checkable
@@ -397,6 +399,11 @@ class PayToResolver:
         # One lock per event loop: an anyio/asyncio lock is bound to the loop that first
         # waits on it, so a shared one would hang callers on another loop.
         self._locks: weakref.WeakKeyDictionary[object, anyio.Lock] = weakref.WeakKeyDictionary()
+        # Reads on different loops aren't serialized: number each read and apply a result only
+        # if no later-started read was applied first, so a slow read can't revert a rotation.
+        self._started = itertools.count(1)
+        self._applied = 0
+        self._state_lock = threading.Lock()
 
     def _lock(self) -> anyio.Lock:
         token = anyio.lowlevel.current_token()
@@ -435,23 +442,35 @@ class PayToResolver:
                 raise FacilitatorError(f"payTo unavailable: {self._failure[0]}") from self._failure[
                     0
                 ]
+            started = next(self._started)
             try:
                 with anyio.fail_after(self._timeout):
                     address = await self._read()
             except Exception as error:
                 # Measured after the read, so a slow read doesn't shorten the windows.
                 now = anyio.current_time()
-                if self._current is None or now - self._read_at > self._ttl + self._grace:
-                    self._failure = (error.with_traceback(None), now + self._retry_after_failure)
-                    raise
-                self._fresh_until = now + self._retry_after_failure
-                return self._current
+                with self._state_lock:
+                    if self._applied > started and self._current is not None:
+                        return self._current  # a later read already succeeded
+                    if self._current is None or now - self._read_at > self._ttl + self._grace:
+                        self._failure = (
+                            error.with_traceback(None),
+                            now + self._retry_after_failure,
+                        )
+                        raise
+                    self._fresh_until = now + self._retry_after_failure
+                    return self._current
             now = anyio.current_time()
-            self._failure = None
-            self._read_at = now
-            self._replace(address, now)
-            self._fresh_until = now + self._ttl
-            return address
+            with self._state_lock:
+                if started < self._applied:
+                    # Superseded by a read that started later and finished first.
+                    return self._current  # type: ignore[return-value]
+                self._applied = started
+                self._failure = None
+                self._read_at = now
+                self._replace(address, now)
+                self._fresh_until = now + self._ttl
+                return address
 
     def _usable(self) -> bool:
         return self._current is not None and anyio.current_time() < self._fresh_until

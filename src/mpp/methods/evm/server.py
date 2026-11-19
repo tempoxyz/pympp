@@ -175,7 +175,8 @@ def charge(
     elif isinstance(recipient, PayToResolver):
         resolve_recipient = recipient
     elif not isinstance(recipient, str):
-        resolve_recipient = PayToResolver(recipient)
+        # Called for each challenge, as documented: no caching.
+        resolve_recipient = PayToResolver(recipient, ttl=0)
     intent = ChargeIntent(
         name=config.domain_name,
         version=config.domain_version,
