@@ -89,7 +89,8 @@ def channel_voucher_signer(
     ):
         return account
     if isinstance(voucher_signer, ConfigurableAccount):
-        return voucher_signer.channel_signer(descriptor.salt)
+        # An EOA that adopted a configuration (TIP-1113) signs its earlier channels itself.
+        return voucher_signer.channel_signer(descriptor.salt, root_key=account)
     return voucher_signer
 
 

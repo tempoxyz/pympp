@@ -520,6 +520,21 @@ class TestUnknownOpeningCommitment:
             await life.accept(life.voucher_payload(200))
         assert (await life.channel()).opening_commitment is None
 
+    async def test_a_forged_voucher_is_rejected_before_any_rpc(self) -> None:
+        life = await self._life(commitment=COMMITMENT, recorded=None)
+        forged = voucher(PAYEE, 200, life.channel_id)
+        for _ in range(2):
+            with pytest.raises(InvalidSignatureError):
+                await life.accept(life.voucher_payload(200, signature=forged.signature))
+        commitment_calls = [
+            params
+            for params in life.rpc.methods("eth_call")
+            if str(params[0].get("to", "")).lower() == CONFIGURABLE_ACCOUNT_ADDRESS.lower()
+        ]
+        assert not commitment_calls
+        assert self._verify_calls(life) == 0
+        assert (await life.channel()).opening_commitment is None
+
     def test_challenge_advertises_configurable_vouchers_only_when_enabled(self) -> None:
         def resolve(**options: Any) -> dict[str, Any]:
             return request_state.resolve_session_payment_request(
@@ -563,6 +578,17 @@ class TestChannelSigner:
         with pytest.raises(ValueError, match="own key"):
             ConfigurableAccount(address=ACCOUNT, config=CONFIG, owners=KEYS, root_key=root)
 
+    def test_pre_registration_channels_keep_the_version_zero_config_after_rotation(self) -> None:
+        # Opened with a random salt before the derived account registered, then rotated.
+        account = ConfigurableAccount(
+            address=ACCOUNT, config=ROTATED, owners=KEYS, previous_configs=[CONFIG]
+        )
+        random_salt = "0x" + "12" * 32
+        signer = account.channel_signer(random_salt)
+        assert isinstance(signer, ConfigurableAccount) and signer.config == CONFIG
+        assert check(voucher(signer), configurable=True, opening_commitment=ZERO)
+        assert not check(voucher(account), configurable=True, opening_commitment=ZERO)
+
 
 class TestOpenTransaction:
     async def test_opens_with_a_fixed_salt_get_distinct_transactions(self) -> None:
@@ -583,6 +609,17 @@ class TestAccountSignedChannels:
         assert ops.voucher_authorities(PAYER) == [PAYER.address]
         assert ops.channel_voucher_signer(PAYER, signer, own) is PAYER
         assert ops.channel_voucher_signer(PAYER, signer, delegated) is not PAYER
+
+    def test_a_same_address_voucher_signer_lets_the_payer_sign_legacy_channels(self) -> None:
+        # An EOA that adopted a configuration (TIP-1113), given without root_key.
+        signer = ConfigurableAccount(address=PAYER.address, config=ROTATED, owners=KEYS)
+        legacy = replace(DESCRIPTOR, payer=PAYER.address, authorized_signer=PAYER.address)
+        bound = replace(legacy, salt=ROTATED_COMMITMENT)
+        assert ops.channel_voucher_signer(PAYER, signer, legacy) is PAYER
+        assert ops.channel_voucher_signer(PAYER, signer, bound) is signer
+        assert check(voucher(PAYER), PAYER.address, opening_commitment=ZERO)
+        other = TempoAccount.from_key("0x" + "55" * 32)
+        assert signer.channel_signer(legacy.salt, root_key=other) is signer
 
 
 class TestPreviousConfigs:

@@ -1133,7 +1133,7 @@ module mpp.methods.tempo.session.client
     class ConfigurableAccount
         def __init__(self, *, address: str, config: ConfigurableAccountConfig, owners: Sequence[OwnerSigner], root_key: OwnerSigner | None = None, previous_configs: Sequence[ConfigurableAccountConfig] = ()) -> None
         property address: str
-        def channel_signer(self, salt: str) -> ConfigurableAccount | OwnerSigner
+        def channel_signer(self, salt: str, *, root_key: OwnerSigner | None = None) -> ConfigurableAccount | OwnerSigner
         property commitment: str
         @classmethod def from_initial_config(cls, config: ConfigurableAccountConfig, owners: Sequence[OwnerSigner]) -> ConfigurableAccount
         def sign_hash(self, msg_hash: bytes) -> bytes

@@ -398,15 +398,17 @@ class ConfigurableAccount:
         """The commitment of the account's current configuration."""
         return self.config.commitment()
 
-    def channel_signer(self, salt: str) -> ConfigurableAccount | OwnerSigner:
+    def channel_signer(
+        self, salt: str, *, root_key: OwnerSigner | None = None
+    ) -> ConfigurableAccount | OwnerSigner:
         """The signer for vouchers of a channel with descriptor salt ``salt`` (TIP-1166).
 
         A channel this account opened while it had a config commitment carries that
         commitment as its salt and its opening commitment, so this account signs ``0x05``.
         A channel opened before then has a zero opening commitment: the escrow accepts
-        ``0x05`` only from the version-zero config that derives this address, and otherwise a
-        primitive
-        signature from ``root_key``.
+        ``0x05`` only from the version-zero config that derives this address, current or in
+        ``previous_configs``, and otherwise a primitive signature from the account's own key:
+        ``root_key`` here when this account was built without one.
         """
         if not is_zero_hash(salt) and int(salt, 16) == int(self.commitment, 16):
             return self
@@ -420,13 +422,28 @@ class ConfigurableAccount:
                         owners=self._owner_signers,
                         root_key=self.root_key,
                     )
-        if self.config.version == 0:
+        for config in (self.config, *self.previous_configs):
+            if config.version != 0:
+                continue
             try:
-                if self.config.derive_address() == self._address:
-                    return self
+                derived = config.derive_address() == self._address
             except ValueError:
-                pass
-        return self.root_key if self.root_key is not None else self
+                continue
+            if not derived:
+                continue
+            if config is self.config:
+                return self
+            # Registered since: the version-zero config still signs pre-registration channels.
+            return ConfigurableAccount(
+                address=self._address,
+                config=config,
+                owners=self._owner_signers,
+                root_key=self.root_key,
+            )
+        own_key = self.root_key if self.root_key is not None else root_key
+        if own_key is not None and own_key.address.lower() == self._address:
+            return own_key
+        return self
 
     def _select_approvers(self) -> list[str]:
         available = [o for o in self.config.owners if o.owner.lower() in self._owners]

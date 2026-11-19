@@ -642,6 +642,21 @@ async def _with_opening_commitment(
         return replace(channel, opening_commitment=commitment)
     descriptor = channel.descriptor
     signer = authorized_signer(descriptor)
+    # Check locally first, so a forged voucher costs no RPC.
+    candidates = [
+        candidate
+        for candidate in dict.fromkeys((_ZERO_COMMITMENT, descriptor.salt.lower()))
+        if verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            opening_commitment=candidate,
+        )
+    ]
+    if not candidates:
+        raise InvalidSignatureError("invalid voucher signature")
     on_chain = await chain.get_config_commitment(
         context.rpc_url, signer, client=context.http_client
     )
@@ -657,20 +672,6 @@ async def _with_opening_commitment(
             escrow=context.escrow,
             client=context.http_client,
         ):
-            raise InvalidSignatureError("invalid voucher signature")
-        candidates = [
-            candidate
-            for candidate in dict.fromkeys((_ZERO_COMMITMENT, descriptor.salt.lower()))
-            if verify_voucher(
-                context.escrow,
-                context.chain_id,
-                voucher,
-                signer,
-                configurable=context.configurable_vouchers,
-                opening_commitment=candidate,
-            )
-        ]
-        if not candidates:
             raise InvalidSignatureError("invalid voucher signature")
         if len(candidates) > 1:
             # Both fit this voucher; the escrow accepted it, so check the next one again.
