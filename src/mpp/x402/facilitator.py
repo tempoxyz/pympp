@@ -404,6 +404,8 @@ class PayToResolver:
         self._started = itertools.count(1)
         self._applied = 0
         self._state_lock = threading.Lock()
+        self._refresh_interval = 30.0
+        self._last_forced = float("-inf")
 
     def _lock(self) -> anyio.Lock:
         token = anyio.lowlevel.current_token()
@@ -430,47 +432,63 @@ class PayToResolver:
                 return retired
         return None
 
+    async def refresh(self) -> str:
+        """Read again now, ignoring ``ttl``, at most once per 30 seconds; otherwise return
+        as a normal call would. For a payment naming an address this server hasn't seen,
+        which may be one the facilitator just published (mppx ``refresh``)."""
+        now = anyio.current_time()
+        with self._state_lock:
+            if now - self._last_forced >= self._refresh_interval:
+                self._last_forced = now
+                self._fresh_until = 0.0
+        return await self()
+
     async def __call__(self) -> str:
         if self._usable():
             return self._current  # type: ignore[return-value]
+        if self._ttl <= 0:
+            # Nothing to share: every call reads. Reads run concurrently instead of queueing
+            # behind one lock; the read sequence still keeps the newest result.
+            return await self._read_once()
         async with self._lock():
             if self._usable():
                 return self._current  # type: ignore[return-value]
-            if self._failure is not None and anyio.current_time() < self._failure[1]:
-                # A fresh exception per caller: re-raising one instance would chain every
-                # caller's frames onto its traceback.
-                raise FacilitatorError(f"payTo unavailable: {self._failure[0]}") from self._failure[
-                    0
-                ]
-            started = next(self._started)
-            try:
-                with anyio.fail_after(self._timeout):
-                    address = await self._read()
-            except Exception as error:
-                # Measured after the read, so a slow read doesn't shorten the windows.
-                now = anyio.current_time()
-                with self._state_lock:
-                    if self._applied > started and self._current is not None:
-                        return self._current  # a later read already succeeded
-                    if self._current is None or now - self._read_at > self._ttl + self._grace:
-                        self._failure = (
-                            error.with_traceback(None),
-                            now + self._retry_after_failure,
-                        )
-                        raise
-                    self._fresh_until = now + self._retry_after_failure
-                    return self._current
+            return await self._read_once()
+
+    async def _read_once(self) -> str:
+        if self._failure is not None and anyio.current_time() < self._failure[1]:
+            # A fresh exception per caller: re-raising one instance would chain every
+            # caller's frames onto its traceback.
+            raise FacilitatorError(f"payTo unavailable: {self._failure[0]}") from self._failure[0]
+        started = next(self._started)
+        try:
+            with anyio.fail_after(self._timeout):
+                address = await self._read()
+        except Exception as error:
+            # Measured after the read, so a slow read doesn't shorten the windows.
             now = anyio.current_time()
             with self._state_lock:
-                if started < self._applied:
-                    # Superseded by a read that started later and finished first.
-                    return self._current  # type: ignore[return-value]
-                self._applied = started
-                self._failure = None
-                self._read_at = now
-                self._replace(address, now)
-                self._fresh_until = now + self._ttl
-                return address
+                if self._applied > started and self._current is not None:
+                    return self._current  # a later read already succeeded
+                if self._current is None or now - self._read_at > self._ttl + self._grace:
+                    self._failure = (
+                        error.with_traceback(None),
+                        now + self._retry_after_failure,
+                    )
+                    raise
+                self._fresh_until = now + self._retry_after_failure
+                return self._current
+        now = anyio.current_time()
+        with self._state_lock:
+            if started < self._applied:
+                # Superseded by a read that started later and finished first.
+                return self._current  # type: ignore[return-value]
+            self._applied = started
+            self._failure = None
+            self._read_at = now
+            self._replace(address, now)
+            self._fresh_until = now + self._ttl
+            return address
 
     def _usable(self) -> bool:
         return self._current is not None and anyio.current_time() < self._fresh_until

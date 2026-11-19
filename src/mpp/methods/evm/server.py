@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -257,6 +258,11 @@ def _recipient_hook(
             else _x402_pay_to(context.input)
         )
         if named is not None:
+            if resolver.issued(named) is None:
+                # Not seen yet: maybe just published. Re-read (rate-limited) before falling
+                # back to the current address.
+                with contextlib.suppress(Exception):
+                    recipient = await resolver.refresh()
             recipient = resolver.issued(named) or recipient
         return with_recipient(context, recipient)
 

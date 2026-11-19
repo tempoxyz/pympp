@@ -1833,6 +1833,7 @@ module mpp.x402.facilitator
         def __init__(self, read: Callable[[], Awaitable[str]], *, ttl: float = 300.0, grace: float = 600.0, timeout: float = 10.0) -> None
         property current: str | None
         def issued(self, address: str) -> str | None
+        async def refresh(self) -> str
     def pay_to_resolver(facilitator: str | Facilitator, *, network: str, scheme: str = 'exact', ttl: float = 300.0, grace: float = 600.0, timeout: float = 10.0) -> PayToResolver
     def resolve_facilitator(facilitator: str | Facilitator) -> Facilitator
 

@@ -1128,6 +1128,28 @@ class TestRecipientFromFacilitator:
         assert isinstance(result, PaymentRequired)
         assert [c.method for c in challenges(result)] == ["tempo"]
 
+    async def test_a_stale_worker_accepts_a_payment_to_a_newly_published_address(self) -> None:
+        # Worker A already picked up a rotation; worker B (same secret) still caches the old
+        # address. B re-reads before rejecting a payment to the address A issued.
+        def worker(facilitator: PayToFacilitator) -> Any:
+            method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=facilitator)
+            server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+            return server.charge(amount="0.25")
+
+        shared = PayToFacilitator()
+        stale = worker(shared)
+        challenge(await stale(http_request()))  # caches RECIPIENT
+        shared.pay_to = ROTATED
+        fresh = worker(shared)
+        issued = challenge(await fresh(http_request()))
+        assert issued.request["recipient"] == ROTATED
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        result = await stale(http_request(credential.to_authorization()))
+        assert not isinstance(result, PaymentRequired), result
+        assert [r["payTo"] for _, r in shared.settled] == [ROTATED]
+
     async def test_a_plain_recipient_function_is_called_for_each_challenge(self) -> None:
         calls = [0]
 
@@ -1427,6 +1449,52 @@ class TestPayToResolver:
         release_slow.set()
         slow.join()
         assert resolver.current == ROTATED
+
+    async def test_ttl_zero_reads_run_concurrently(self) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        running = [0]
+        peak = [0]
+
+        async def read() -> str:
+            running[0] += 1
+            peak[0] = max(peak[0], running[0])
+            await anyio.sleep(0.05)
+            running[0] -= 1
+            return RECIPIENT
+
+        resolver = PayToResolver(read, ttl=0)
+        async with anyio.create_task_group() as group:
+            for _ in range(5):
+                group.start_soon(resolver)
+        assert peak[0] == 5
+
+    async def test_refresh_forces_a_read_at_most_once_per_30_seconds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        reads = [0]
+
+        async def read() -> str:
+            reads[0] += 1
+            return RECIPIENT
+
+        resolver = PayToResolver(read)
+        await resolver()
+        await resolver.refresh()
+        assert reads[0] == 2
+        await resolver.refresh()
+        assert reads[0] == 2
+        now[0] += 31
+        await resolver.refresh()
+        assert reads[0] == 3
 
     def test_works_across_event_loops(self) -> None:
         import asyncio
