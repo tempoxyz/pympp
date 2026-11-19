@@ -43,7 +43,7 @@ from mpp.x402 import (
     PaymentRequirements,
     encode_payment_signature,
 )
-from tests import challenge, http_request
+from tests import challenge, challenges, http_request
 
 PAYER = Account.from_key("0x" + "11" * 32)
 OTHER = Account.from_key("0x" + "22" * 32)
@@ -943,7 +943,10 @@ class TestRecipientFromFacilitator:
         [(_, requirements)] = facilitator.settled
         assert requirements["payTo"] == RECIPIENT
 
-    async def test_another_worker_accepts_a_challenge_issued_before_a_rotation(self) -> None:
+    async def test_a_credential_cannot_pick_an_address_this_server_never_issued(self) -> None:
+        # A server sharing the secret issued a challenge for an address this one never read
+        # (a retired deposit address, or one a sibling route paid out to): it must not
+        # settle there just because the HMAC verifies.
         def worker(facilitator: PayToFacilitator) -> Any:
             method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=facilitator)
             server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
@@ -955,12 +958,65 @@ class TestRecipientFromFacilitator:
             evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), before
         )
 
-        # A worker that started after the rotation has only ever seen the new address.
         rotated = PayToFacilitator(ROTATED)
         result = await worker(rotated)(http_request(credential.to_authorization()))
-        assert not isinstance(result, PaymentRequired), result
-        [(_, requirements)] = rotated.settled
-        assert requirements["payTo"] == RECIPIENT
+        assert isinstance(result, PaymentRequired)
+        assert rotated.settled == []
+        assert challenge(result).request["recipient"] == ROTATED
+
+    async def test_stops_accepting_a_replaced_address_after_grace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=evm_server.facilitator_pay_to_resolver(
+                facilitator, network="eip155:84532", ttl=10, grace=60
+            ),
+            facilitator=facilitator,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        client = evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER)
+
+        stale = await sign(client, challenge(await route(http_request())))
+        facilitator.pay_to = ROTATED
+        now[0] += 11
+        challenge(await route(http_request()))  # reads the rotation
+        now[0] += 61
+        challenge(await route(http_request()))
+        result = await route(http_request(stale.to_authorization()))
+        assert isinstance(result, PaymentRequired)
+        assert facilitator.settled == []
+
+    async def test_discovery_and_compose_do_not_need_the_facilitator(self) -> None:
+        from mpp.discovery import HandlerRoute, generate
+        from mpp.methods.tempo import server as tempo
+
+        class Down(PayToFacilitator):
+            async def supported(self) -> Any:
+                raise FacilitatorError("down")
+
+        lazy = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=Down())
+        tempo_method = tempo.charge(
+            recipient=RECIPIENT, currencies=["0x20c0000000000000000000006a37DA5C996874BE"]
+        )
+        server = Mpp(methods=[lazy, tempo_method], realm=REALM, secret_key="k", store=MemoryStore())
+        handler = server.compose(
+            (server.methods[0], {"amount": "0.25"}), (server.methods[1], {"amount": "0.25"})
+        )
+
+        # Discovery runs without a request and without reading payTo.
+        generate(server, [HandlerRoute(method="get", path="/paid", handler=handler)])
+
+        # The EVM offer is left out while payTo is unavailable; the Tempo offer still works.
+        result = await handler(http_request())
+        assert isinstance(result, PaymentRequired)
+        assert [c.method for c in challenges(result)] == ["tempo"]
 
     async def test_rejects_a_credential_whose_echoed_recipient_was_changed(self) -> None:
         facilitator = PayToFacilitator()
@@ -986,10 +1042,14 @@ class TestRecipientFromFacilitator:
     async def test_x402_payment_keeps_a_recently_issued_pay_to(self) -> None:
         current = [RECIPIENT]
 
-        async def resolve() -> str:
+        async def read() -> str:
             return current[0]
 
-        hook = evm_server._recipient_hook(lambda context: context.request, resolve)  # pyright: ignore[reportPrivateUsage]
+        from mpp.x402 import PayToResolver
+
+        resolver = PayToResolver(read, ttl=0)
+        hook = evm_server._recipient_hook(lambda context: context.request, resolver)  # pyright: ignore[reportPrivateUsage]
+        dummy = Request("GET", "https://example.com/paid", {})
 
         def paying(pay_to: str) -> RequestContext:
             payment = encode_payment_signature(
@@ -1016,13 +1076,14 @@ class TestRecipientFromFacilitator:
                 ),
             )
 
-        assert (await hook(RequestContext(request={"amount": "1"})))["recipient"] == RECIPIENT
+        first = await hook(RequestContext(request={"amount": "1"}, input=dummy))  # type: ignore[misc]
+        assert first["recipient"] == RECIPIENT
         current[0] = ROTATED
-        assert (await hook(paying(RECIPIENT)))["recipient"] == RECIPIENT
-        assert (await hook(paying(ROTATED)))["recipient"] == ROTATED
+        assert (await hook(paying(RECIPIENT)))["recipient"] == RECIPIENT  # type: ignore[misc]
+        assert (await hook(paying(ROTATED)))["recipient"] == ROTATED  # type: ignore[misc]
         # Never seen by this process: not taken from the unsigned payload.
         stranger = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
-        assert (await hook(paying(stranger)))["recipient"] == ROTATED
+        assert (await hook(paying(stranger)))["recipient"] == ROTATED  # type: ignore[misc]
 
     def test_requires_recipient_without_a_facilitator(self) -> None:
         with pytest.raises(ValueError, match="requires recipient or a facilitator"):
@@ -1084,3 +1145,28 @@ class TestPayToResolver:
 
         with pytest.raises(FacilitatorError, match="down"):
             await pay_to_resolver(Down(), network="eip155:84532")()
+
+    async def test_shares_a_first_read_failure_until_the_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        calls = [0]
+
+        async def read() -> str:
+            calls[0] += 1
+            raise FacilitatorError("down")
+
+        resolver = PayToResolver(read, ttl=300)
+        for _ in range(3):
+            with pytest.raises(FacilitatorError):
+                await resolver()
+        assert calls[0] == 1
+        now[0] += 31
+        with pytest.raises(FacilitatorError):
+            await resolver()
+        assert calls[0] == 2

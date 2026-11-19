@@ -28,10 +28,16 @@ from mpp._parsing import ParseError, _b64_decode
 from mpp.methods.evm.client import AuthorizationConfig, _config
 from mpp.methods.evm.intents import ChargeIntent, SettleFn
 from mpp.methods.evm.intents import charge as definition
-from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
+from mpp.server.method import OfferUnavailableError, ServerMethod, ValidateContext, VerifyContext
 from mpp.x402._header import InvalidHeaderError, decode_payment_signature
 from mpp.x402._types import PAYMENT_SIGNATURE_HEADER
-from mpp.x402.facilitator import Facilitator, pay_to, pay_to_resolver, resolve_facilitator
+from mpp.x402.facilitator import (
+    Facilitator,
+    PayToResolver,
+    pay_to,
+    pay_to_resolver,
+    resolve_facilitator,
+)
 
 if TYPE_CHECKING:
     from mpp import Credential, Receipt
@@ -74,13 +80,20 @@ async def facilitator_pay_to(
 
 
 def facilitator_pay_to_resolver(
-    facilitator: str | Facilitator, *, network: str, scheme: str = "exact", ttl: float = 300.0
-) -> RecipientResolver:
-    """Like :func:`facilitator_pay_to`, but return a function that caches the address for
-    ``ttl`` seconds and refreshes it after, for :func:`charge`'s ``recipient``. A charge
-    that leaves out ``recipient`` uses one for you; call this only to change ``ttl``.
+    facilitator: str | Facilitator,
+    *,
+    network: str,
+    scheme: str = "exact",
+    ttl: float = 300.0,
+    grace: float = 600.0,
+) -> PayToResolver:
+    """Like :func:`facilitator_pay_to`, but return a :class:`~mpp.x402.PayToResolver` that
+    caches the address for ``ttl`` seconds and refreshes it after, for :func:`charge`'s
+    ``recipient``. Payments for an address it replaced still verify for ``grace``
+    seconds. A charge that leaves out ``recipient`` uses one for you; call this only to
+    change ``ttl`` or ``grace``.
     """
-    return pay_to_resolver(facilitator, network=network, scheme=scheme, ttl=ttl)
+    return pay_to_resolver(facilitator, network=network, scheme=scheme, ttl=ttl, grace=grace)
 
 
 def charge(
@@ -151,13 +164,15 @@ def charge(
         authorization=authorization,
         recipient=recipient if isinstance(recipient, str) else None,
     )
-    resolve_recipient: RecipientResolver | None = None
+    resolve_recipient: PayToResolver | None = None
     if recipient is None:
         if facilitator is None:
             raise ValueError("EVM charge requires recipient or a facilitator that publishes payTo")
         resolve_recipient = pay_to_resolver(facilitator, network=f"eip155:{config.chain_id}")
-    elif not isinstance(recipient, str):
+    elif isinstance(recipient, PayToResolver):
         resolve_recipient = recipient
+    elif not isinstance(recipient, str):
+        resolve_recipient = PayToResolver(recipient)
     intent = ChargeIntent(
         name=config.domain_name,
         version=config.domain_version,
@@ -199,40 +214,50 @@ def charge(
     )
 
 
+# Satisfies the request model where no payment is in flight (discovery, route checks).
+_PLACEHOLDER_RECIPIENT = "0x0000000000000000000000000000000000000000"
+
+
 def _recipient_hook(
-    resolve_request: Callable[[RequestContext], dict[str, Any]], resolve: RecipientResolver
-) -> Callable[[RequestContext], Awaitable[dict[str, Any]]]:
-    """Fill a route's ``recipient`` from ``resolve`` on each challenge.
+    resolve_request: Callable[[RequestContext], dict[str, Any]], resolver: PayToResolver
+) -> Callable[[RequestContext], dict[str, Any] | Awaitable[dict[str, Any]]]:
+    """Fill a route's ``recipient`` from ``resolver`` on each challenge.
 
-    Payments for a challenge issued before ``resolve`` picked up a rotation keep the
-    address they were issued with, so in-flight payments still verify:
+    New challenges always carry the current address. A payment still verifies against an
+    address the resolver replaced less than its ``grace`` ago, when the payment names it:
+    the echoed challenge of a native credential, or an x402 payment's ``accepted.payTo``.
+    Neither is trusted on its own (both come from the caller, and a failed check re-issues
+    a challenge from this request), so only addresses this process issued qualify.
 
-    - A native credential keeps the recipient its echoed challenge carries. The challenge
-      is HMAC-bound to the server's secret and checked before verification, so this holds
-      across workers and restarts that share the secret, and a forged recipient fails
-      that check.
-    - An x402 payment's ``accepted.payTo`` is not signed by the server, so it is kept
-      only when this process issued it recently (the last two addresses).
+    Discovery and route checks carry no payment and run synchronously, with the last
+    address read or a placeholder.
     """
-    issued: list[str] = []
 
-    async def hook(context: RequestContext) -> dict[str, Any]:
-        if context.request.get("recipient"):
-            return resolve_request(context)
-        recipient = await resolve()
-        if recipient not in issued:
-            issued.append(recipient)
-            del issued[:-2]
-        echoed = _echoed_recipient(context.credential)
-        if echoed is not None:
-            recipient = echoed
-        elif context.credential is None:
-            accepted = _x402_pay_to(context.input)
-            if accepted is not None:
-                recipient = next((a for a in issued if a.lower() == accepted.lower()), recipient)
+    def with_recipient(context: RequestContext, recipient: str) -> dict[str, Any]:
         return resolve_request(
             replace(context, request={**context.request, "recipient": recipient})
         )
+
+    async def resolve(context: RequestContext) -> dict[str, Any]:
+        try:
+            recipient = await resolver()
+        except Exception as error:
+            raise OfferUnavailableError(f"EVM charge recipient unavailable: {error}") from error
+        named = (
+            _echoed_recipient(context.credential)
+            if context.credential is not None
+            else _x402_pay_to(context.input)
+        )
+        if named is not None:
+            recipient = resolver.issued(named) or recipient
+        return with_recipient(context, recipient)
+
+    def hook(context: RequestContext) -> dict[str, Any] | Awaitable[dict[str, Any]]:
+        if context.request.get("recipient"):
+            return resolve_request(context)
+        if context.credential is None and context.input is None:
+            return with_recipient(context, resolver.current or _PLACEHOLDER_RECIPIENT)
+        return resolve(context)
 
     return hook
 

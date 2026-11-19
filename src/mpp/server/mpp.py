@@ -38,6 +38,7 @@ from mpp.server.compose import ComposedHandler, SelectOffers, _Offer, _validate_
 from mpp.server.http import Request
 from mpp.server.method import (
     SETTLING_METHOD,
+    OfferUnavailableError,
     RequestContext,
     ServerMethod,
     ValidateContext,
@@ -442,7 +443,7 @@ class Mpp:
             for candidate in candidates:
                 try:
                     expected = await _expected_request(candidate, request, parsed=credential)
-                except (ValidationError, TypeError, ValueError):
+                except (ValidationError, TypeError, ValueError, OfferUnavailableError):
                     # Rejected as route input by the method's resolve_request or model.
                     continue
                 normalized = True

@@ -39,6 +39,7 @@ from mpp.server._identity import (
 from mpp.server.http import PaymentRequired, PaymentResult, PaymentVerified, Request, Response
 from mpp.server.method import (
     SETTLING_METHOD,
+    OfferUnavailableError,
     PreflightContext,
     RequestContext,
     RespondContext,
@@ -391,6 +392,26 @@ def _parse_credential(authorization: str | None) -> Credential | None:
         return None
 
 
+async def _prepare_offers(
+    offers: Sequence[_Offer],
+    request: Request,
+    credential: Credential | None,
+    call: _Call,
+) -> list[_PreparedOffer]:
+    """Prepare each offer, leaving out the ones that are unavailable right now. Raises the
+    first :class:`OfferUnavailableError` when every offer is."""
+    prepared: list[_PreparedOffer] = []
+    unavailable: OfferUnavailableError | None = None
+    for offer in offers:
+        try:
+            prepared.append(await _prepare_offer(offer, request, credential, call))
+        except OfferUnavailableError as error:
+            unavailable = unavailable or error
+    if not prepared and unavailable is not None:
+        raise unavailable
+    return prepared
+
+
 async def _prepare_offer(
     offer: _Offer,
     request: Request,
@@ -626,7 +647,7 @@ class ComposedHandler:
             # Like mppx's compose, only offers can_offer and select_offers keep run their
             # preflight hook.
             call = _Call()
-            prepared = [await _prepare_offer(offer, request, None, call) for offer in self._offers]
+            prepared = await _prepare_offers(self._offers, request, None, call)
             try:
                 kept = {
                     id(offer.offer) for offer in await self._advertised(prepared, request, call)
@@ -729,12 +750,17 @@ class ComposedHandler:
             # Offers whose identity verifiers reject were never advertised to this caller, so
             # they cannot make the credential's offer ambiguous.
             prepared_offers = await self._identified(
-                [
-                    await _prepare_offer(offer, request, credential, call)
-                    for offer in self._offers
-                    if offer.method.name == credential.challenge.method
-                    and offer.method.intent == credential.challenge.intent
-                ],
+                await _prepare_offers(
+                    [
+                        offer
+                        for offer in self._offers
+                        if offer.method.name == credential.challenge.method
+                        and offer.method.intent == credential.challenge.intent
+                    ],
+                    request,
+                    credential,
+                    call,
+                ),
                 call,
             )
             try:
@@ -757,7 +783,7 @@ class ComposedHandler:
                 return result
 
         prepared = await self._identified(
-            [await _prepare_offer(offer, request, None, call) for offer in self._offers], call
+            await _prepare_offers(self._offers, request, None, call), call
         )
         advertised = await self._advertised(prepared, request, call)
         siwx_error: Exception | None = None
@@ -918,7 +944,7 @@ class ComposedHandler:
     ) -> ComposedResult | None:
         """Pay the offer an x402 payload addresses, or return every challenge."""
         prepared = await self._identified(
-            [await _prepare_offer(offer, request, None, call) for offer in self._offers], call
+            await _prepare_offers(self._offers, request, None, call), call
         )
         x402_offers = [offer for offer in prepared if isinstance(offer.intent, _X402MethodIntent)]
         if not x402_offers:

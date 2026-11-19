@@ -359,41 +359,105 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
     return to_checksum_address(published.pop())
 
 
+class PayToResolver:
+    """Reads an address on demand, caches it for ``ttl`` seconds and remembers the
+    addresses it replaced for ``grace`` seconds (mppx ``payToResolver``).
+
+    Call it to get the current address. Concurrent calls share one read, and a failed read
+    is shared too: it is raised to every caller for 30 seconds before the next attempt.
+    After a success, a failed refresh keeps the last address and retries after 30 seconds.
+    """
+
+    def __init__(
+        self,
+        read: Callable[[], Awaitable[str]],
+        *,
+        ttl: float = 300.0,
+        grace: float = 600.0,
+    ) -> None:
+        self._read = read
+        self._ttl = ttl
+        self._grace = grace
+        self._retry_after_failure = min(ttl, 30.0)
+        self._current: str | None = None
+        self._fresh_until = 0.0
+        self._failure: tuple[BaseException, float] | None = None
+        # (address, retired at), oldest first.
+        self._retired: list[tuple[str, float]] = []
+        self._lock = anyio.Lock()
+
+    @property
+    def current(self) -> str | None:
+        """The last address read, without reading; ``None`` before the first success."""
+        return self._current
+
+    def issued(self, address: str) -> str | None:
+        """The current address, or one it replaced less than ``grace`` seconds ago, that
+        equals ``address`` (case-insensitive); otherwise ``None``."""
+        wanted = address.lower()
+        if self._current is not None and self._current.lower() == wanted:
+            return self._current
+        now = anyio.current_time()
+        for retired, at in reversed(self._retired):
+            if retired.lower() == wanted and now - at < self._grace:
+                return retired
+        return None
+
+    async def __call__(self) -> str:
+        if self._usable():
+            return self._current  # type: ignore[return-value]
+        async with self._lock:
+            if self._usable():
+                return self._current  # type: ignore[return-value]
+            now = anyio.current_time()
+            if self._failure is not None and now < self._failure[1]:
+                raise self._failure[0]
+            try:
+                address = await self._read()
+            except Exception as error:
+                if self._current is None:
+                    self._failure = (error, now + self._retry_after_failure)
+                    raise
+                self._fresh_until = now + self._retry_after_failure
+                return self._current
+            self._failure = None
+            self._replace(address, now)
+            self._fresh_until = now + self._ttl
+            return address
+
+    def _usable(self) -> bool:
+        return self._current is not None and anyio.current_time() < self._fresh_until
+
+    def _replace(self, address: str, now: float) -> None:
+        previous = self._current
+        self._retired = [
+            (retired, at)
+            for retired, at in self._retired
+            if retired.lower() != address.lower() and now - at < self._grace
+        ]
+        if previous is not None and previous.lower() != address.lower():
+            self._retired.append((previous, now))
+        self._current = address
+
+
 def pay_to_resolver(
     facilitator: str | Facilitator,
     *,
     network: str,
     scheme: str = "exact",
     ttl: float = 300.0,
-) -> Callable[[], Awaitable[str]]:
-    """Return a function that reads a facilitator's ``payTo`` (see :func:`pay_to`) and
-    caches it for ``ttl`` seconds, so a rotated deposit address is picked up without a
-    restart (mppx ``payToResolver``).
+    grace: float = 600.0,
+) -> PayToResolver:
+    """Return a :class:`PayToResolver` for a facilitator's ``payTo`` (see :func:`pay_to`),
+    so a rotated deposit address is picked up without a restart.
 
-    Concurrent calls share one ``GET /supported``. When a refresh fails, the last address
-    is kept and the read is retried after 30 seconds; only the first read raises.
+    Payments for an address it replaced are still accepted for ``grace`` seconds.
     """
-    retry_after_failure = min(ttl, 30.0)
-    cached: list[tuple[str, float]] = []
-    lock = anyio.Lock()
 
-    async def resolve() -> str:
-        if cached and anyio.current_time() < cached[0][1]:
-            return cached[0][0]
-        async with lock:
-            if cached and anyio.current_time() < cached[0][1]:
-                return cached[0][0]
-            try:
-                address = await pay_to(facilitator, network=network, scheme=scheme)
-            except Exception:
-                if not cached:
-                    raise
-                cached[0] = (cached[0][0], anyio.current_time() + retry_after_failure)
-                return cached[0][0]
-            cached[:] = [(address, anyio.current_time() + ttl)]
-            return address
+    async def read() -> str:
+        return await pay_to(facilitator, network=network, scheme=scheme)
 
-    return resolve
+    return PayToResolver(read, ttl=ttl, grace=grace)
 
 
 def _is_secure_url(url: str) -> bool:

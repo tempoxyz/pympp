@@ -31,6 +31,13 @@ async def resolve(value: T | Awaitable[T]) -> T:
     return value
 
 
+class OfferUnavailableError(Exception):
+    """Raised by a ``resolve_request`` hook when its offer can't be made right now (for
+    example, its recipient can't be read). A composed route leaves that offer out and still
+    issues the others; a route with no other offer fails.
+    """
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestContext:
     """Arguments for :attr:`ServerMethod.resolve_request`.
