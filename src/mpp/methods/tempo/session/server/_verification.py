@@ -791,7 +791,13 @@ async def _validate_open(context: CredentialContext, payload: OpenPayload) -> No
         validated=validated,
         descriptor=descriptor,
         request_amount=request.amount,
-        expected_commitment=await _expected_opening_commitment(context, validated.descriptor),
+        expected_commitment=await _expected_opening_commitment(
+            context,
+            validated.descriptor,
+            SignedVoucher(
+                channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+            ),
+        ),
     )
     await chain.simulate_credential_transaction(
         context.rpc_url,
@@ -810,7 +816,7 @@ def _check_open_voucher(
     validated: chain.ValidatedOpenTransaction,
     descriptor: ChannelDescriptor,
     request_amount: int,
-    expected_commitment: str | None,
+    expected_commitment: str,
 ) -> None:
     assert_open_credential_covers_request(
         cumulative_amount=cumulative,
@@ -838,14 +844,42 @@ def _check_open_voucher(
 
 
 async def _expected_opening_commitment(
-    context: CredentialContext, descriptor: ChannelDescriptor
-) -> str | None:
-    """The opening commitment an open of descriptor would record now (configurable only)."""
-    if not context.configurable_vouchers:
-        return None
-    return await chain.get_config_commitment(
-        context.rpc_url, authorized_signer(descriptor), client=context.http_client
+    context: CredentialContext, descriptor: ChannelDescriptor, voucher: SignedVoucher
+) -> str:
+    """The opening commitment an open of descriptor would record now (TIP-1166).
+
+    From T15 a signer with a config commitment can only open with it as salt, which becomes
+    the channel's opening commitment; any other signer's channel opens with a zero one. It is
+    read whether or not configurable vouchers are accepted, so a primitive voucher from a
+    signer that adopted a configuration fails before the open is sponsored or broadcast. A
+    commitment never returns to zero, and one that changes before inclusion reverts the open.
+    """
+    if is_zero_hash(descriptor.salt):
+        return _ZERO_COMMITMENT
+    # Check locally first, so a forged voucher costs no RPC.
+    signer = authorized_signer(descriptor)
+    if not any(
+        verify_voucher(
+            context.escrow,
+            context.chain_id,
+            voucher,
+            signer,
+            configurable=context.configurable_vouchers,
+            opening_commitment=candidate,
+        )
+        for candidate in (_ZERO_COMMITMENT, descriptor.salt)
+    ):
+        raise InvalidSignatureError("invalid voucher signature")
+    commitment = await chain.get_config_commitment(
+        context.rpc_url, signer, client=context.http_client
     )
+    if is_zero_hash(commitment):
+        return _ZERO_COMMITMENT
+    if not _same(commitment, descriptor.salt):
+        raise VerificationFailedError(
+            "descriptor salt is not the voucher signer's configuration commitment"
+        )
+    return commitment.lower()
 
 
 def _check_open_commitment(
@@ -1109,7 +1143,13 @@ async def _handle_open(context: CredentialContext, payload: OpenPayload) -> Sess
         operator,
     )
 
-    expected_commitment = await _expected_opening_commitment(context, descriptor)
+    expected_commitment = await _expected_opening_commitment(
+        context,
+        descriptor,
+        SignedVoucher(
+            channel_id=channel_id, cumulative_amount=cumulative, signature=payload.signature
+        ),
+    )
 
     def before_broadcast(prepared: chain.ValidatedOpenTransaction) -> None:
         _check_open_voucher(

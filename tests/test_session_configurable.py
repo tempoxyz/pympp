@@ -52,6 +52,7 @@ from tests.test_session_chain import (
     PAYEE,
     PAYER,
     RPC,
+    SPONSOR,
     FakeRpc,
     RpcError,
     opened_log,
@@ -448,6 +449,50 @@ class TestServer:
         with pytest.raises(InvalidSignatureError):
             await verification.broadcast_credential_payload(life.context(life.open_payload()))
 
+    async def test_sponsored_open_checks_a_primitive_voucher_against_the_signer_commitment(
+        self,
+    ) -> None:
+        # The signer adopted a configuration, so the open records it: its old key's voucher is
+        # rejected before the sponsor signs or broadcasts, whatever configurable_vouchers says.
+        life = await Lifecycle().build(salt=COMMITMENT, fee_payer=True)
+        life.rpc.commitments[PAYER.address.lower()] = COMMITMENT
+        life.rpc.logs = [
+            opened_log(life.descriptor, life.channel_id),
+            commitment_log(life.channel_id, PAYER.address, COMMITMENT),
+        ]
+        for configurable_vouchers in (False, True):
+            context = life.context(
+                life.open_payload(),
+                fee_payer=SPONSOR,
+                configurable_vouchers=configurable_vouchers,
+            )
+            with pytest.raises(InvalidSignatureError):
+                await verification.validate_credential_payload(context)
+            with pytest.raises(InvalidSignatureError):
+                await verification.broadcast_credential_payload(context)
+        assert not life.rpc.sent
+
+    async def test_rejects_an_open_whose_salt_is_not_the_signer_commitment(self) -> None:
+        life = await Lifecycle().build(salt=SALT, fee_payer=True)
+        life.rpc.commitments[PAYER.address.lower()] = COMMITMENT
+        context = life.context(life.open_payload(), fee_payer=SPONSOR)
+        with pytest.raises(VerificationFailedError, match="configuration commitment"):
+            await verification.broadcast_credential_payload(context)
+        assert not life.rpc.sent
+
+    async def test_a_forged_open_voucher_costs_no_commitment_read(self) -> None:
+        life = await Lifecycle().build(salt=COMMITMENT, fee_payer=True)
+        forged = voucher(PAYEE, 100, life.channel_id)
+        with pytest.raises(InvalidSignatureError):
+            await verification.broadcast_credential_payload(
+                life.context(life.open_payload(signature=forged.signature), fee_payer=SPONSOR)
+            )
+        assert all(
+            str(params[0].get("to", "")).lower() != CONFIGURABLE_ACCOUNT_ADDRESS.lower()
+            for params in life.rpc.methods("eth_call")
+        )
+        assert not life.rpc.sent
+
 
 class TestUnknownOpeningCommitment:
     """A channel stored without an opening commitment asks the escrow, never assumes zero."""
@@ -537,6 +582,7 @@ class TestUnknownOpeningCommitment:
 
     async def test_a_forged_voucher_is_rejected_before_any_rpc(self) -> None:
         life = await self._life(commitment=COMMITMENT, recorded=None)
+        life.rpc.requests.clear()  # the open itself read the signer's commitment
         forged = voucher(PAYEE, 200, life.channel_id)
         for _ in range(2):
             with pytest.raises(InvalidSignatureError):
