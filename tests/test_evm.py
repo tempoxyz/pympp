@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from eth_account import Account
@@ -32,9 +33,16 @@ from mpp.methods.evm import server as evm_server
 from mpp.methods.evm._eip3009 import authorization_domain, sign_authorization, to_source
 from mpp.runtime import ClientMethod, CredentialParams
 from mpp.server import Mpp, PaymentRequired
+from mpp.server.http import Request
 from mpp.server.method import RequestContext, ServerMethod
 from mpp.store import MemoryStore
-from mpp.x402 import FacilitatorError, PaymentPayload, PaymentRequirements
+from mpp.x402 import (
+    PAYMENT_SIGNATURE_HEADER,
+    FacilitatorError,
+    PaymentPayload,
+    PaymentRequirements,
+    encode_payment_signature,
+)
 from tests import challenge, http_request
 
 PAYER = Account.from_key("0x" + "11" * 32)
@@ -934,6 +942,87 @@ class TestRecipientFromFacilitator:
         assert not isinstance(result, PaymentRequired), result
         [(_, requirements)] = facilitator.settled
         assert requirements["payTo"] == RECIPIENT
+
+    async def test_another_worker_accepts_a_challenge_issued_before_a_rotation(self) -> None:
+        def worker(facilitator: PayToFacilitator) -> Any:
+            method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=facilitator)
+            server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+            return server.charge(amount="0.25")
+
+        old = PayToFacilitator()
+        before = challenge(await worker(old)(http_request()))
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), before
+        )
+
+        # A worker that started after the rotation has only ever seen the new address.
+        rotated = PayToFacilitator(ROTATED)
+        result = await worker(rotated)(http_request(credential.to_authorization()))
+        assert not isinstance(result, PaymentRequired), result
+        [(_, requirements)] = rotated.settled
+        assert requirements["payTo"] == RECIPIENT
+
+    async def test_rejects_a_credential_whose_echoed_recipient_was_changed(self) -> None:
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=facilitator)
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        issued = challenge(await route(http_request()))
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        forged = Credential(
+            challenge=dataclasses.replace(
+                credential.challenge,
+                request=canonical_b64url({**issued.request, "recipient": ROTATED}),
+            ),
+            payload=credential.payload,
+            source=credential.source,
+        )
+        result = await route(http_request(forged.to_authorization()))
+        assert isinstance(result, PaymentRequired)
+        assert facilitator.settled == []
+
+    async def test_x402_payment_keeps_a_recently_issued_pay_to(self) -> None:
+        current = [RECIPIENT]
+
+        async def resolve() -> str:
+            return current[0]
+
+        hook = evm_server._recipient_hook(lambda context: context.request, resolve)  # pyright: ignore[reportPrivateUsage]
+
+        def paying(pay_to: str) -> RequestContext:
+            payment = encode_payment_signature(
+                cast(
+                    PaymentPayload,
+                    {
+                        "x402Version": 2,
+                        "accepted": {
+                            "scheme": "exact",
+                            "network": "eip155:84532",
+                            "amount": "1",
+                            "asset": BASE_SEPOLIA_USDC.address,
+                            "payTo": pay_to,
+                            "maxTimeoutSeconds": 60,
+                        },
+                        "payload": {},
+                    },
+                )
+            )
+            return RequestContext(
+                request={"amount": "1"},
+                input=Request(
+                    "GET", "https://example.com/paid", {PAYMENT_SIGNATURE_HEADER: payment}
+                ),
+            )
+
+        assert (await hook(RequestContext(request={"amount": "1"})))["recipient"] == RECIPIENT
+        current[0] = ROTATED
+        assert (await hook(paying(RECIPIENT)))["recipient"] == RECIPIENT
+        assert (await hook(paying(ROTATED)))["recipient"] == ROTATED
+        # Never seen by this process: not taken from the unsigned payload.
+        stranger = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+        assert (await hook(paying(stranger)))["recipient"] == ROTATED
 
     def test_requires_recipient_without_a_facilitator(self) -> None:
         with pytest.raises(ValueError, match="requires recipient or a facilitator"):

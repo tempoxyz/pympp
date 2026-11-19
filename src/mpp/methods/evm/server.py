@@ -29,6 +29,8 @@ from mpp.methods.evm.client import AuthorizationConfig, _config
 from mpp.methods.evm.intents import ChargeIntent, SettleFn
 from mpp.methods.evm.intents import charge as definition
 from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
+from mpp.x402._header import InvalidHeaderError, decode_payment_signature
+from mpp.x402._types import PAYMENT_SIGNATURE_HEADER
 from mpp.x402.facilitator import Facilitator, pay_to, pay_to_resolver, resolve_facilitator
 
 if TYPE_CHECKING:
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from mpp._validation import Validation
     from mpp.methods import CanOfferFn, PaymentSuccessHandler
     from mpp.methods.evm.assets import EvmAsset
+    from mpp.server.http import Request
     from mpp.server.method import RequestContext
     from mpp.store import Store
     from mpp.x402._server import RouteBinding
@@ -201,8 +204,15 @@ def _recipient_hook(
 ) -> Callable[[RequestContext], Awaitable[dict[str, Any]]]:
     """Fill a route's ``recipient`` from ``resolve`` on each challenge.
 
-    A credential for a challenge issued with the previous address (before ``resolve``
-    picked up a rotation) keeps that address, so in-flight payments still verify.
+    Payments for a challenge issued before ``resolve`` picked up a rotation keep the
+    address they were issued with, so in-flight payments still verify:
+
+    - A native credential keeps the recipient its echoed challenge carries. The challenge
+      is HMAC-bound to the server's secret and checked before verification, so this holds
+      across workers and restarts that share the secret, and a forged recipient fails
+      that check.
+    - An x402 payment's ``accepted.payTo`` is not signed by the server, so it is kept
+      only when this process issued it recently (the last two addresses).
     """
     issued: list[str] = []
 
@@ -214,13 +224,30 @@ def _recipient_hook(
             issued.append(recipient)
             del issued[:-2]
         echoed = _echoed_recipient(context.credential)
-        if isinstance(echoed, str) and any(a.lower() == echoed.lower() for a in issued):
-            recipient = next(a for a in issued if a.lower() == echoed.lower())
+        if echoed is not None:
+            recipient = echoed
+        elif context.credential is None:
+            accepted = _x402_pay_to(context.input)
+            if accepted is not None:
+                recipient = next((a for a in issued if a.lower() == accepted.lower()), recipient)
         return resolve_request(
             replace(context, request={**context.request, "recipient": recipient})
         )
 
     return hook
+
+
+def _x402_pay_to(request: Request | None) -> str | None:
+    """The ``accepted.payTo`` of an x402 payment the request carries, if any."""
+    header = request.headers.get(PAYMENT_SIGNATURE_HEADER) if request is not None else None
+    if not header:
+        return None
+    try:
+        accepted = decode_payment_signature(header).get("accepted")
+    except InvalidHeaderError:
+        return None
+    pay_to = accepted.get("payTo") if isinstance(accepted, Mapping) else None
+    return pay_to if isinstance(pay_to, str) else None
 
 
 def _echoed_recipient(credential: Credential | None) -> str | None:
