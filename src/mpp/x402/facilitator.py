@@ -353,7 +353,7 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
         if isinstance(pay_to, str) and _ADDRESS_RE.fullmatch(pay_to) and int(pay_to, 16) != 0
     }
     if not published:
-        raise FacilitatorError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
+        raise _PayToWithdrawnError(f"x402 facilitator publishes no payTo for {scheme} on {network}")
     if len(published) > 1:
         # Don't let array order pick the recipient.
         raise FacilitatorError(
@@ -361,6 +361,10 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
             f"for {scheme} on {network}"
         )
     return to_checksum_address(published.pop())
+
+
+class _PayToWithdrawnError(FacilitatorError):
+    """``/supported`` answered but no longer publishes a usable ``payTo``."""
 
 
 class PayToResolver:
@@ -438,10 +442,16 @@ class PayToResolver:
         which may be one the facilitator just published (mppx ``refresh``)."""
         now = anyio.current_time()
         with self._state_lock:
-            if now - self._last_forced >= self._refresh_interval:
+            forced = now - self._last_forced >= self._refresh_interval
+            if forced:
                 self._last_forced = now
-                self._fresh_until = 0.0
-        return await self()
+        if not forced:
+            return await self()
+        # Only this caller waits on the forced read: the cache stays fresh for everyone else.
+        if self._ttl <= 0:
+            return await self._read_once()
+        async with self._lock():
+            return await self._read_once()
 
     async def __call__(self) -> str:
         if self._usable():
@@ -470,6 +480,11 @@ class PayToResolver:
             with self._state_lock:
                 if self._applied > started and self._current is not None:
                     return self._current  # a later read already succeeded
+                if isinstance(error, _PayToWithdrawnError):
+                    # Withdrawn by the facilitator: stop advertising or accepting it.
+                    self._retired = [r for r in self._retired if r[0] != self._current]
+                    self._current = None
+                    self._fresh_until = 0.0
                 if self._current is None or now - self._read_at > self._ttl + self._grace:
                     self._failure = (
                         error.with_traceback(None),

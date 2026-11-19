@@ -1174,6 +1174,12 @@ class TestRecipientFromFacilitator:
         assert isinstance(result, PaymentRequired)
         assert facilitator.settled == []
 
+    async def test_a_route_on_another_chain_is_refused(self) -> None:
+        method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=PayToFacilitator())
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        with pytest.raises(ValueError, match="chain"):
+            await server.charge(amount="0.25", chain_id=8453)(http_request())
+
     async def test_a_plain_recipient_function_is_called_for_each_challenge(self) -> None:
         calls = [0]
 
@@ -1326,6 +1332,45 @@ class TestRecipientFromFacilitator:
 
 
 class TestPayToResolver:
+    async def test_stops_serving_a_withdrawn_pay_to(self) -> None:
+        facilitator = PayToFacilitator()
+        from mpp.x402 import pay_to_resolver
+
+        resolver = pay_to_resolver(facilitator, network="eip155:84532", ttl=0)
+        assert await resolver() == RECIPIENT
+
+        async def none() -> Any:
+            return {"kinds": [], "extensions": [], "signers": {}}
+
+        facilitator.supported = none  # type: ignore[method-assign]
+        with pytest.raises(FacilitatorError, match="publishes no payTo"):
+            await resolver()
+        assert resolver.current is None
+        assert resolver.issued(RECIPIENT) is None
+
+    async def test_a_forced_refresh_does_not_stall_other_callers(self) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        release = anyio.Event()
+        reads = [0]
+
+        async def read() -> str:
+            reads[0] += 1
+            if reads[0] > 1:
+                await release.wait()
+            return RECIPIENT
+
+        resolver = PayToResolver(read)
+        await resolver()
+        async with anyio.create_task_group() as group:
+            group.start_soon(resolver.refresh)
+            await anyio.sleep(0)
+            with anyio.fail_after(1):
+                assert await resolver() == RECIPIENT  # cache, not the forced read
+            release.set()
+
     async def test_a_failed_refresh_does_not_extend_past_the_stale_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
