@@ -219,6 +219,34 @@ class TestVerifyOrChallenge:
         [failure] = failures
         assert failure["credential"].challenge.id.startswith("x402:")
 
+    async def test_invalid_method_name_fails_before_settling(self) -> None:
+        settled: list[Any] = []
+
+        def settle(authorization: Any) -> str:
+            settled.append(authorization)
+            return "0x" + "cd" * 32
+
+        method = evm_method(settle=settle)
+        intent = method.x402
+        assert method.resolve_request is not None
+        request = method.resolve_request(RequestContext(request={"amount": "0.01"}))
+        assert isinstance(request, dict) and intent is not None
+        server = Mpp(methods=evm_method(), realm=REALM, secret_key="k")
+        signature = sign_x402_payment(PAYER, await accepted(server), URL)
+
+        for x402 in (X402Input(resource_url=URL, payment_signature=signature), None):
+            with pytest.raises(ValueError, match="lowercase letters only"):
+                await verify_or_challenge(
+                    authorization=None,
+                    intent=intent,
+                    request=request,
+                    realm=REALM,
+                    secret_key="k",
+                    method="vendor-v2",
+                    x402=x402,
+                )
+        assert settled == []
+
     async def test_intents_without_x402_issue_a_challenge(self) -> None:
         result = await verify_or_challenge(
             authorization="Bearer api-key",

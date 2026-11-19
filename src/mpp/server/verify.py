@@ -20,7 +20,12 @@ from mpp import (
     _credential_expiry,
     generate_challenge_id,
 )
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, ParseError, _b64_decode
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    ParseError,
+    _b64_decode,
+    is_valid_payment_method_id,
+)
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_dict, is_list
 from mpp._units import transform_units
@@ -134,6 +139,11 @@ async def verify_or_challenge(
         If Authorization is valid:
             A tuple of (Credential, Receipt) for the successful payment.
 
+    Raises:
+        ValueError: If ``method`` is not lowercase letters only. It is checked before any
+            Challenge is issued or any intent hook runs, so an x402 payment never settles
+            for a route whose Receipt could not be sent.
+
     Example:
         result = await verify_or_challenge(
             authorization=request.headers.get("Authorization"),
@@ -156,6 +166,12 @@ async def verify_or_challenge(
         )
     """
     method_name = method or "tempo"
+    # The x402 path builds its Credential from this name rather than parsing one, so check
+    # it here: a name the grammar rejects would only fail once the payment had settled.
+    if not is_valid_payment_method_id(method_name):
+        raise ValueError(
+            f"Invalid payment method name {method_name!r}: use lowercase letters only (a-z)."
+        )
     request = transform_units(request)
 
     # A direct intent left to fall back to an in-memory replay store would only fail
