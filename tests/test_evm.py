@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -1039,6 +1040,89 @@ class TestRecipientFromFacilitator:
         assert isinstance(result, PaymentRequired)
         assert facilitator.settled == []
 
+    async def test_a_rejected_retired_address_gets_a_challenge_for_the_current_one(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A credential naming an address still within grace, but rejected for another reason,
+        # must not get a fresh HMAC-valid challenge for the retired address.
+        import anyio
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=evm_server.facilitator_pay_to_resolver(
+                facilitator, network="eip155:84532", ttl=10
+            ),
+            facilitator=facilitator,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        issued = challenge(await route(http_request()))
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        facilitator.pay_to = ROTATED
+        now[0] += 11
+        broken = Credential(
+            challenge=credential.challenge, payload={"bogus": True}, source=credential.source
+        )
+        result = await route(http_request(broken.to_authorization()))
+        assert isinstance(result, PaymentRequired)
+        assert challenge(result).request["recipient"] == ROTATED
+
+    def test_discovery_leaves_out_a_lazy_recipient(self) -> None:
+        from mpp.discovery import HandlerRoute, generate
+
+        method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=PayToFacilitator())
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        document = generate(
+            server,
+            [HandlerRoute(method="get", path="/paid", handler=server.charge(amount="0.25"))],
+        )
+        assert "0x0000000000000000000000000000000000000000" not in json.dumps(document)
+        assert "recipient" not in json.dumps(document)
+
+    async def test_falls_back_to_other_offers_when_the_credential_offer_is_unavailable(
+        self,
+    ) -> None:
+        from mpp.methods.tempo import server as tempo
+
+        state = {"down": False}
+
+        class Flaky(PayToFacilitator):
+            async def supported(self) -> Any:
+                if state["down"]:
+                    raise FacilitatorError("down")
+                return await super().supported()
+
+        lazy = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            # No grace: once down, the stale address is not served either.
+            recipient=evm_server.facilitator_pay_to_resolver(
+                Flaky(), network="eip155:84532", ttl=0, grace=0
+            ),
+            facilitator=Flaky(),
+        )
+        tempo_method = tempo.charge(
+            recipient=RECIPIENT, currencies=["0x20c0000000000000000000006a37DA5C996874BE"]
+        )
+        server = Mpp(methods=[lazy, tempo_method], realm=REALM, secret_key="k", store=MemoryStore())
+        handler = server.compose(
+            (server.methods[0], {"amount": "0.25"}), (server.methods[1], {"amount": "0.25"})
+        )
+        evm_challenge = next(
+            c for c in challenges(await handler(http_request())) if c.method == "evm"
+        )
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), evm_challenge
+        )
+        state["down"] = True
+        result = await handler(http_request(credential.to_authorization()))
+        assert isinstance(result, PaymentRequired)
+        assert [c.method for c in challenges(result)] == ["tempo"]
+
     async def test_x402_payment_keeps_a_recently_issued_pay_to(self) -> None:
         current = [RECIPIENT]
 
@@ -1188,3 +1272,45 @@ class TestPayToResolver:
         with pytest.raises(FacilitatorError):
             await resolver()
         assert calls[0] == 2
+
+    async def test_stops_serving_a_stale_address_after_ttl_plus_grace(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import PayToResolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        up = [True]
+
+        async def read() -> str:
+            if not up[0]:
+                raise FacilitatorError("down")
+            return RECIPIENT
+
+        resolver = PayToResolver(read, ttl=10, grace=60)
+        assert await resolver() == RECIPIENT
+        up[0] = False
+        now[0] += 11
+        assert await resolver() == RECIPIENT  # within ttl + grace: last address
+        now[0] += 60
+        with pytest.raises(FacilitatorError):
+            await resolver()
+
+    def test_works_across_event_loops(self) -> None:
+        import asyncio
+
+        from mpp.x402 import PayToResolver
+
+        async def read() -> str:
+            await asyncio.sleep(0)
+            return RECIPIENT
+
+        resolver = PayToResolver(read, ttl=0)
+
+        async def twice() -> list[str]:
+            return list(await asyncio.gather(resolver(), resolver()))
+
+        assert asyncio.run(twice()) == [RECIPIENT, RECIPIENT]
+        assert asyncio.run(twice()) == [RECIPIENT, RECIPIENT]

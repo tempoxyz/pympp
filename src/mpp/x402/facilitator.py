@@ -5,11 +5,13 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import json
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 from urllib.parse import urlsplit
 
 import anyio
+import anyio.lowlevel
 import httpx
 
 from mpp.x402._types import (
@@ -364,9 +366,13 @@ class PayToResolver:
     addresses it replaced for ``grace`` seconds (mppx ``payToResolver``).
 
     Call it to get the current address. A read that takes longer than ``timeout`` seconds
-    fails. Concurrent calls share one read, and a failed read
-    is shared too: it is raised to every caller for 30 seconds before the next attempt.
-    After a success, a failed refresh keeps the last address and retries after 30 seconds.
+    fails. Concurrent calls on one event loop share one read, and a failed first read is
+    shared too: callers get a :class:`FacilitatorError` for 30 seconds before the next
+    attempt. After a success, a failed refresh keeps the last address and retries after 30
+    seconds, until the address is older than ``ttl + grace``; then reads fail again.
+
+    Safe to share across event loops (threads, or one ``asyncio.run`` per call): each loop
+    gets its own lock.
     """
 
     def __init__(
@@ -385,9 +391,20 @@ class PayToResolver:
         self._current: str | None = None
         self._fresh_until = 0.0
         self._failure: tuple[BaseException, float] | None = None
+        self._read_at = 0.0
         # (address, retired at), oldest first.
         self._retired: list[tuple[str, float]] = []
-        self._lock = anyio.Lock()
+        # One lock per event loop: an anyio/asyncio lock is bound to the loop that first
+        # waits on it, so a shared one would hang callers on another loop.
+        self._locks: weakref.WeakKeyDictionary[object, anyio.Lock] = weakref.WeakKeyDictionary()
+
+    def _lock(self) -> anyio.Lock:
+        token = anyio.lowlevel.current_token()
+        loop = getattr(token, "native_token", token)
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = self._locks[loop] = anyio.Lock()
+        return lock
 
     @property
     def current(self) -> str | None:
@@ -409,22 +426,29 @@ class PayToResolver:
     async def __call__(self) -> str:
         if self._usable():
             return self._current  # type: ignore[return-value]
-        async with self._lock:
+        async with self._lock():
             if self._usable():
                 return self._current  # type: ignore[return-value]
-            now = anyio.current_time()
-            if self._failure is not None and now < self._failure[1]:
-                raise self._failure[0]
+            if self._failure is not None and anyio.current_time() < self._failure[1]:
+                # A fresh exception per caller: re-raising one instance would chain every
+                # caller's frames onto its traceback.
+                raise FacilitatorError(f"payTo unavailable: {self._failure[0]}") from self._failure[
+                    0
+                ]
             try:
                 with anyio.fail_after(self._timeout):
                     address = await self._read()
             except Exception as error:
-                if self._current is None:
-                    self._failure = (error, now + self._retry_after_failure)
+                # Measured after the read, so a slow read doesn't shorten the windows.
+                now = anyio.current_time()
+                if self._current is None or now - self._read_at > self._ttl + self._grace:
+                    self._failure = (error.with_traceback(None), now + self._retry_after_failure)
                     raise
                 self._fresh_until = now + self._retry_after_failure
                 return self._current
+            now = anyio.current_time()
             self._failure = None
+            self._read_at = now
             self._replace(address, now)
             self._fresh_until = now + self._ttl
             return address

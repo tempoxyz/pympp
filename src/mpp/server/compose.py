@@ -259,6 +259,7 @@ class _PreparedOffer:
     expires: str | None
     body: BodyType | None
     header: str | None = None
+    challenge_request: Callable[[], Awaitable[dict[str, Any]]] | None = None
 
     async def is_available(self) -> bool:
         """Return whether the method wants to advertise this prepared offer."""
@@ -302,6 +303,7 @@ class _PreparedOffer:
             unique_challenges=server.unique_challenges,
             x402=x402,
             stable_binding=self.offer.method.stable_binding,
+            challenge_request=self.challenge_request,
         )
 
 
@@ -412,13 +414,10 @@ async def _prepare_offers(
     return prepared
 
 
-async def _prepare_offer(
-    offer: _Offer,
-    request: Request,
-    credential: Credential | None,
-    call: _Call,
-) -> _PreparedOffer:
-    """Resolve an offer's wire request, expiry and body for this call."""
+async def _resolve_wire(
+    offer: _Offer, request: Request, credential: Credential | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """An offer's resolved input and scoped wire request."""
     method = offer.method
     options = {
         key: value
@@ -436,7 +435,21 @@ async def _prepare_offer(
     scope: dict[str, Any] = request.scope()
     if wire.get("_mppx_scope") is not None:
         scope = {**scope, "custom": wire["_mppx_scope"]}
-    wire = {**wire, "_mppx_scope": scope}
+    return input, {**wire, "_mppx_scope": scope}
+
+
+async def _prepare_offer(
+    offer: _Offer,
+    request: Request,
+    credential: Credential | None,
+    call: _Call,
+) -> _PreparedOffer:
+    """Resolve an offer's wire request, expiry and body for this call."""
+    method = offer.method
+    input, wire = await _resolve_wire(offer, request, credential)
+
+    async def challenge_request() -> dict[str, Any]:
+        return (await _resolve_wire(offer, request, None))[1]
 
     expires = _offer_expires(offer)
 
@@ -456,6 +469,9 @@ async def _prepare_offer(
         expires,
         call.bodies[key],
         header,
+        # A rejected credential gets the Challenge a fresh request would, not one built
+        # from what the credential echoed.
+        challenge_request if credential is not None and method._fresh_failure_challenges else None,
     )
     call.prepared.append(prepared)
     return prepared
@@ -749,8 +765,8 @@ class ComposedHandler:
         if credential is not None:
             # Offers whose identity verifiers reject were never advertised to this caller, so
             # they cannot make the credential's offer ambiguous.
-            prepared_offers = await self._identified(
-                await _prepare_offers(
+            try:
+                candidates = await _prepare_offers(
                     [
                         offer
                         for offer in self._offers
@@ -760,9 +776,12 @@ class ComposedHandler:
                     request,
                     credential,
                     call,
-                ),
-                call,
-            )
+                )
+            except OfferUnavailableError:
+                # The credential's offers can't be made right now: fall through and
+                # advertise the ones that can.
+                candidates = []
+            prepared_offers = await self._identified(candidates, call)
             try:
                 selected_offer = self._select_offer(credential, prepared_offers)
             except _AmbiguousOffersError as error:

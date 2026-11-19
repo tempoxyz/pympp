@@ -214,6 +214,10 @@ def charge(
         x402=intent,
         use_store=use_store,
         _has_store=lambda: intent._store is not None,
+        # A recipient read per challenge: answer rejections with the current one, and keep
+        # it out of static discovery documents.
+        _fresh_failure_challenges=resolve_recipient is not None,
+        _discovery_omit=("recipient",) if resolve_recipient is not None else (),
     )
 
 

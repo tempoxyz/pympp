@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -85,6 +85,7 @@ async def verify_or_challenge(
     unique_challenges: bool = True,
     x402: X402Input | None = None,
     stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    challenge_request: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> Challenge | tuple[Credential, Receipt]:
     """Verify a payment credential or generate a new challenge.
 
@@ -126,6 +127,9 @@ async def verify_or_challenge(
         stable_binding: Compare only these fields of the echoed request with ``request``
             (plus the route scope) instead of requiring the two to be equal, as mppx does for
             a method's ``stableBinding``.
+        challenge_request: Builds the request for the Challenge that answers a rejected
+            credential, when it should differ from ``request`` (which may have been resolved
+            from what the credential echoed).
 
     Returns:
         If no valid Authorization header:
@@ -165,11 +169,12 @@ async def verify_or_challenge(
             f"{method_name}.{intent.name}", f"{type(intent).__name__}(store=...)"
         )
 
-    async def new_challenge() -> Challenge:
+    async def new_challenge(for_request: dict[str, Any] | None = None) -> Challenge:
+        issued_request = request if for_request is None else for_request
         challenge = _create_challenge(
             method_name,
             intent.name,
-            request,
+            issued_request,
             realm,
             secret_key,
             description,
@@ -187,15 +192,22 @@ async def verify_or_challenge(
                     "challenge": challenge,
                     "intent": intent.name,
                     "method": method_name,
-                    "request": request,
+                    "request": issued_request,
                 },
             )
         return challenge
 
+    async def fresh_challenge() -> Challenge:
+        # The Challenge for a request without this credential, when the route's request
+        # was resolved from it (see ``challenge_request``).
+        if challenge_request is None:
+            return await new_challenge()
+        return await new_challenge(transform_units(await challenge_request()))
+
     async def fail(error: Exception, credential: Credential | None = None) -> Challenge:
         # Preserve the existing challenge-on-failure flow while giving hooks a
         # typed reason for why the submitted credential was rejected.
-        challenge = await new_challenge()
+        challenge = await fresh_challenge()
         await emit_failure(error, challenge, credential)
         return challenge
 
@@ -233,7 +245,7 @@ async def verify_or_challenge(
                 meta=meta,
             )
         except PaymentError as error:
-            error.retry_challenge = await new_challenge()
+            error.retry_challenge = await fresh_challenge()
             await emit_failure(error, error.retry_challenge)
             raise
         submitted_challenge = Challenge(
@@ -252,7 +264,7 @@ async def verify_or_challenge(
             raise
         except PaymentError as error:
             if error.status != 403:
-                error.retry_challenge = await new_challenge()
+                error.retry_challenge = await fresh_challenge()
             await emit_failure(error, submitted_challenge, credential)
             raise
         except Exception as error:
@@ -360,7 +372,7 @@ async def verify_or_challenge(
         # fresh challenge would only invite the client to pay again.
         if error.status != 403:
             error.retry_challenge = (
-                await new_challenge()
+                await fresh_challenge()
                 if isinstance(error, (InvalidPayloadError, PaymentExpiredError))
                 else submitted_challenge
             )

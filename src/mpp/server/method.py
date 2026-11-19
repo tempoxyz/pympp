@@ -172,6 +172,12 @@ class ServerMethod:
     # Internal: whether the challenges this method issues carry the expiry grace marker,
     # without which ``_credential_grace`` gives none.
     _issue_expiry_grace: bool = False
+    # Internal: answer a rejected credential with the Challenge a fresh request would get,
+    # built without the credential, when ``resolve_request`` reads fields from it.
+    _fresh_failure_challenges: bool = False
+    # Internal: request fields discovery leaves out of published offers, such as one read
+    # per challenge that a static document would publish stale.
+    _discovery_omit: tuple[str, ...] = ()
     credential_options: tuple[str, ...] = ()
     needs_request_body: bool = False
     respond: RespondFn | None = None

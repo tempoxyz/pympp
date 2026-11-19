@@ -401,7 +401,9 @@ def _payment_offer(
     offer["intent"] = method.intent
     offer["method"] = method.name
     for key, value in request.items():
-        if key not in ("amount", "currency", "description", "methodDetails"):
+        if key not in ("amount", "currency", "description", "methodDetails") and (
+            key not in method._discovery_omit
+        ):
             offer[key] = value
     return offer
 

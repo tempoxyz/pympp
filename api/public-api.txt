@@ -1633,7 +1633,7 @@ module mpp.server.verify
     class Intent(typing.Protocol)
         name: str
         def __init__(self, *args, **kwargs)
-    async def verify_or_challenge(*, authorization: str | None, intent: Intent, request: dict[str, Any], realm: str, secret_key: str, method: str | None = None, description: str | None = None, meta: dict[str, str] | None = None, expires: str | None = None, body: str | bytes | dict[str, Any] | None = None, events: EventDispatcher | None = None, header: str | None = None, unique_challenges: bool = True, x402: X402Input | None = None, stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None) -> Challenge | tuple[Credential, Receipt]
+    async def verify_or_challenge(*, authorization: str | None, intent: Intent, request: dict[str, Any], realm: str, secret_key: str, method: str | None = None, description: str | None = None, meta: dict[str, str] | None = None, expires: str | None = None, body: str | bytes | dict[str, Any] | None = None, events: EventDispatcher | None = None, header: str | None = None, unique_challenges: bool = True, x402: X402Input | None = None, stable_binding: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, challenge_request: Callable[[], Awaitable[dict[str, Any]]] | None = None) -> Challenge | tuple[Credential, Receipt]
 
 module mpp.store
     class Store(typing.Protocol)
