@@ -306,8 +306,9 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
     """Read the ``payTo`` a facilitator publishes for a scheme and network in
     ``GET /supported`` (``kinds[].extra.payTo``), as an EIP-55 checksummed address.
 
-    For facilitators that settle into an address of their own; call it once at
-    startup and pass the result as the charge's ``recipient``.
+    For facilitators that settle into an address of their own. Reads it once; an EVM
+    charge that leaves out ``recipient`` reads and refreshes it for you
+    (see :func:`pay_to_resolver`).
 
     Raises:
         FacilitatorError: If the facilitator has no ``supported()``, or publishes
@@ -356,6 +357,43 @@ async def pay_to(facilitator: str | Facilitator, *, network: str, scheme: str = 
             f"for {scheme} on {network}"
         )
     return to_checksum_address(published.pop())
+
+
+def pay_to_resolver(
+    facilitator: str | Facilitator,
+    *,
+    network: str,
+    scheme: str = "exact",
+    ttl: float = 300.0,
+) -> Callable[[], Awaitable[str]]:
+    """Return a function that reads a facilitator's ``payTo`` (see :func:`pay_to`) and
+    caches it for ``ttl`` seconds, so a rotated deposit address is picked up without a
+    restart (mppx ``payToResolver``).
+
+    Concurrent calls share one ``GET /supported``. When a refresh fails, the last address
+    is kept and the read is retried after 30 seconds; only the first read raises.
+    """
+    retry_after_failure = min(ttl, 30.0)
+    cached: list[tuple[str, float]] = []
+    lock = anyio.Lock()
+
+    async def resolve() -> str:
+        if cached and anyio.current_time() < cached[0][1]:
+            return cached[0][0]
+        async with lock:
+            if cached and anyio.current_time() < cached[0][1]:
+                return cached[0][0]
+            try:
+                address = await pay_to(facilitator, network=network, scheme=scheme)
+            except Exception:
+                if not cached:
+                    raise
+                cached[0] = (cached[0][0], anyio.current_time() + retry_after_failure)
+                return cached[0][0]
+            cached[:] = [(address, anyio.current_time() + ttl)]
+            return address
+
+    return resolve
 
 
 def _is_secure_url(url: str) -> bool:

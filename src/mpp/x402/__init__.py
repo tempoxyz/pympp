@@ -82,6 +82,7 @@ from mpp.x402.facilitator import (
     HttpFacilitator,
     SupportsSupported,
     pay_to,
+    pay_to_resolver,
     resolve_facilitator,
 )
 
@@ -120,6 +121,7 @@ __all__ = [
     "is_x402_challenge",
     "is_x402_credential",
     "pay_to",
+    "pay_to_resolver",
     "payment_required_header",
     "payment_response",
     "payment_response_header",

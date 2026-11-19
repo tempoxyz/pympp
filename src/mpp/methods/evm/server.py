@@ -18,28 +18,32 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from mpp._parsing import ParseError, _b64_decode
 from mpp.methods.evm.client import AuthorizationConfig, _config
 from mpp.methods.evm.intents import ChargeIntent, SettleFn
 from mpp.methods.evm.intents import charge as definition
 from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
-from mpp.x402.facilitator import Facilitator, pay_to, resolve_facilitator
+from mpp.x402.facilitator import Facilitator, pay_to, pay_to_resolver, resolve_facilitator
 
 if TYPE_CHECKING:
     from mpp import Credential, Receipt
     from mpp._validation import Validation
     from mpp.methods import CanOfferFn, PaymentSuccessHandler
     from mpp.methods.evm.assets import EvmAsset
+    from mpp.server.method import RequestContext
     from mpp.store import Store
     from mpp.x402._server import RouteBinding
     from mpp.x402.siwx import SiwxOptions
 
-__all__ = ["charge", "facilitator_pay_to"]
+__all__ = ["charge", "facilitator_pay_to", "facilitator_pay_to_resolver"]
+
+RecipientResolver = Callable[[], Awaitable[str]]
 
 
 async def facilitator_pay_to(
@@ -48,13 +52,12 @@ async def facilitator_pay_to(
     """Read the ``payTo`` an x402 facilitator publishes in ``GET /supported``.
 
     For facilitators that settle into an address of their own
-    (``kinds[].extra.payTo``). Call it once at startup and pass the result as
-    :func:`charge`'s ``recipient``::
+    (``kinds[].extra.payTo``). Reads it once. You rarely need it: leave out
+    :func:`charge`'s ``recipient`` and the charge reads the facilitator's ``payTo``
+    itself, refreshing it every 5 minutes::
 
-        recipient = await facilitator_pay_to(FACILITATOR_URL, network="eip155:8453")
         method = charge(
             currency=BASE_USDC,
-            recipient=recipient,
             facilitator=FACILITATOR_URL,
             x402_extra={"tempoSettlement": "0x..."},
         )
@@ -67,10 +70,20 @@ async def facilitator_pay_to(
     return await pay_to(facilitator, network=network, scheme=scheme)
 
 
+def facilitator_pay_to_resolver(
+    facilitator: str | Facilitator, *, network: str, scheme: str = "exact", ttl: float = 300.0
+) -> RecipientResolver:
+    """Like :func:`facilitator_pay_to`, but return a function that caches the address for
+    ``ttl`` seconds and refreshes it after, for :func:`charge`'s ``recipient``. A charge
+    that leaves out ``recipient`` uses one for you; call this only to change ``ttl``.
+    """
+    return pay_to_resolver(facilitator, network=network, scheme=scheme, ttl=ttl)
+
+
 def charge(
     *,
     currency: EvmAsset | str,
-    recipient: str,
+    recipient: str | RecipientResolver | None = None,
     chain_id: int | None = None,
     decimals: int | None = None,
     authorization: AuthorizationConfig | None = None,
@@ -93,7 +106,11 @@ def charge(
     Args:
         currency: A known :class:`~mpp.methods.evm.EvmAsset`, or a token address
             together with ``chain_id``, ``decimals`` and ``authorization``.
-        recipient: Address that receives payments.
+        recipient: Address that receives payments, or an async function that returns it
+            for each challenge. Leave it out when ``facilitator`` settles into an address
+            of its own and publishes it as ``payTo`` in ``GET /supported`` (such as the
+            Tempo x402 facilitator): it is read on the first challenge, cached and
+            refreshed every 5 minutes.
         chain_id: EVM chain ID. Inferred from a known asset.
         decimals: Token decimals. Inferred from a known asset.
         authorization: EIP-712 domain (``name``, ``version``) the token signs
@@ -129,8 +146,15 @@ def charge(
         chain_id=chain_id,
         decimals=decimals,
         authorization=authorization,
-        recipient=recipient,
+        recipient=recipient if isinstance(recipient, str) else None,
     )
+    resolve_recipient: RecipientResolver | None = None
+    if recipient is None:
+        if facilitator is None:
+            raise ValueError("EVM charge requires recipient or a facilitator that publishes payTo")
+        resolve_recipient = pay_to_resolver(facilitator, network=f"eip155:{config.chain_id}")
+    elif not isinstance(recipient, str):
+        resolve_recipient = recipient
     intent = ChargeIntent(
         name=config.domain_name,
         version=config.domain_version,
@@ -158,7 +182,11 @@ def charge(
         method=definition,
         validate=validate,
         broadcast=broadcast,
-        resolve_request=config.resolve_request,
+        resolve_request=(
+            config.resolve_request
+            if resolve_recipient is None
+            else _recipient_hook(config.resolve_request, resolve_recipient)
+        ),
         can_offer=can_offer,
         defaults={"currency": config.currency},
         on_payment_success=on_payment_success,
@@ -166,6 +194,44 @@ def charge(
         use_store=use_store,
         _has_store=lambda: intent._store is not None,
     )
+
+
+def _recipient_hook(
+    resolve_request: Callable[[RequestContext], dict[str, Any]], resolve: RecipientResolver
+) -> Callable[[RequestContext], Awaitable[dict[str, Any]]]:
+    """Fill a route's ``recipient`` from ``resolve`` on each challenge.
+
+    A credential for a challenge issued with the previous address (before ``resolve``
+    picked up a rotation) keeps that address, so in-flight payments still verify.
+    """
+    issued: list[str] = []
+
+    async def hook(context: RequestContext) -> dict[str, Any]:
+        if context.request.get("recipient"):
+            return resolve_request(context)
+        recipient = await resolve()
+        if recipient not in issued:
+            issued.append(recipient)
+            del issued[:-2]
+        echoed = _echoed_recipient(context.credential)
+        if isinstance(echoed, str) and any(a.lower() == echoed.lower() for a in issued):
+            recipient = next(a for a in issued if a.lower() == echoed.lower())
+        return resolve_request(
+            replace(context, request={**context.request, "recipient": recipient})
+        )
+
+    return hook
+
+
+def _echoed_recipient(credential: Credential | None) -> str | None:
+    """The recipient a credential's echoed challenge carries, if any."""
+    if credential is None or not credential.challenge.request:
+        return None
+    try:
+        echoed = _b64_decode(credential.challenge.request).get("recipient")
+    except ParseError:
+        return None
+    return echoed if isinstance(echoed, str) else None
 
 
 def _native(credential: Credential) -> Credential:

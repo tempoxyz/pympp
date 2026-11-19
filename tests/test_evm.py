@@ -35,7 +35,7 @@ from mpp.server import Mpp, PaymentRequired
 from mpp.server.method import RequestContext, ServerMethod
 from mpp.store import MemoryStore
 from mpp.x402 import FacilitatorError, PaymentPayload, PaymentRequirements
-from tests import http_request
+from tests import challenge, http_request
 
 PAYER = Account.from_key("0x" + "11" * 32)
 OTHER = Account.from_key("0x" + "22" * 32)
@@ -861,3 +861,137 @@ def test_evm_shorthand_creates_either_side() -> None:
         evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=lambda a: "0x1"), ServerMethod
     )
     assert isinstance(evm(currency=BASE_SEPOLIA_USDC, account=PAYER), ClientMethod)
+
+
+ROTATED = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+
+
+class PayToFacilitator(FakeFacilitator):
+    """A FakeFacilitator that publishes a deposit address in GET /supported."""
+
+    def __init__(self, pay_to: str = RECIPIENT) -> None:
+        super().__init__()
+        self.pay_to = pay_to
+        self.supported_calls = 0
+
+    async def supported(self) -> Any:
+        self.supported_calls += 1
+        return {
+            "kinds": [
+                {
+                    "x402Version": 2,
+                    "scheme": "exact",
+                    "network": "eip155:84532",
+                    "extra": {"payTo": self.pay_to},
+                }
+            ],
+            "extensions": [],
+            "signers": {},
+        }
+
+
+class TestRecipientFromFacilitator:
+    async def test_reads_pay_to_when_recipient_is_left_out_and_caches_it(self) -> None:
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(currency=BASE_SEPOLIA_USDC, facilitator=facilitator)
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+
+        issued = challenge(await route(http_request()))
+        assert issued.request["recipient"] == RECIPIENT
+        await route(http_request())
+        assert facilitator.supported_calls == 1
+
+        credential = await sign(
+            evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER), issued
+        )
+        result = await route(http_request(credential.to_authorization()))
+        assert not isinstance(result, PaymentRequired), result
+        [(_, requirements)] = facilitator.settled
+        assert requirements["payTo"] == RECIPIENT
+
+    async def test_picks_up_a_rotated_pay_to_and_still_accepts_the_old_one(self) -> None:
+        facilitator = PayToFacilitator()
+        method = evm_server.charge(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=evm_server.facilitator_pay_to_resolver(
+                facilitator, network="eip155:84532", ttl=0
+            ),
+            facilitator=facilitator,
+        )
+        server = Mpp(methods=method, realm=REALM, secret_key="k", store=MemoryStore())
+        route = server.charge(amount="0.25")
+        client = evm_client.charge(currency=BASE_SEPOLIA_USDC, account=PAYER)
+
+        before = challenge(await route(http_request()))
+        old_credential = await sign(client, before)
+
+        facilitator.pay_to = ROTATED
+        after = challenge(await route(http_request()))
+        assert after.request["recipient"] == ROTATED
+
+        result = await route(http_request(old_credential.to_authorization()))
+        assert not isinstance(result, PaymentRequired), result
+        [(_, requirements)] = facilitator.settled
+        assert requirements["payTo"] == RECIPIENT
+
+    def test_requires_recipient_without_a_facilitator(self) -> None:
+        with pytest.raises(ValueError, match="requires recipient or a facilitator"):
+            evm_server.charge(
+                currency=BASE_SEPOLIA_USDC,
+                settle=lambda *_: None,  # type: ignore[arg-type]
+            )
+
+
+class TestPayToResolver:
+    async def test_caches_for_ttl_and_shares_one_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import pay_to_resolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        facilitator = PayToFacilitator()
+        resolve_pay_to = pay_to_resolver(facilitator, network="eip155:84532", ttl=10)
+
+        async with anyio.create_task_group() as group:
+            for _ in range(3):
+                group.start_soon(lambda: resolve_pay_to())  # type: ignore[arg-type]
+        assert facilitator.supported_calls == 1
+
+        facilitator.pay_to = ROTATED
+        assert await resolve_pay_to() == RECIPIENT
+        now[0] += 11
+        assert await resolve_pay_to() == ROTATED
+
+    async def test_keeps_the_last_address_when_a_refresh_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import anyio
+
+        from mpp.x402 import pay_to_resolver
+
+        now = [1000.0]
+        monkeypatch.setattr(anyio, "current_time", lambda: now[0])
+        facilitator = PayToFacilitator()
+        resolve_pay_to = pay_to_resolver(facilitator, network="eip155:84532", ttl=10)
+        assert await resolve_pay_to() == RECIPIENT
+
+        async def down() -> Any:
+            raise FacilitatorError("down")
+
+        facilitator.supported = down  # type: ignore[method-assign]
+        now[0] += 11
+        assert await resolve_pay_to() == RECIPIENT
+
+    async def test_raises_on_the_first_read(self) -> None:
+        from mpp.x402 import pay_to_resolver
+
+        class Down(FakeFacilitator):
+            async def supported(self) -> Any:
+                raise FacilitatorError("down")
+
+        with pytest.raises(FacilitatorError, match="down"):
+            await pay_to_resolver(Down(), network="eip155:84532")()
