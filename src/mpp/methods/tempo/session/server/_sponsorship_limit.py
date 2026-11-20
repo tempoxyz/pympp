@@ -47,6 +47,10 @@ _KEY_PREFIX = "mppx:session:sponsorship:"
 
 _FeePayer = TypeVar("_FeePayer")
 
+_WEBAUTHN_MAX_DATA = 2048
+"""Largest WebAuthn envelope body (metadata plus the 128-byte signature and key) accepted, as
+the fee-payer path bounds it, so parsing a client-supplied assertion stays cheap."""
+
 
 @dataclass(frozen=True, slots=True)
 class SponsorshipLimit:
@@ -109,19 +113,24 @@ def _base64_bytes(value: str) -> bytes:
 
 def _verified_webauthn_signer(payload: bytes, data: bytes) -> str | None:
     """The public-key address of a WebAuthn assertion over ``payload``, or None."""
+    if not 128 <= len(data) <= _WEBAUTHN_MAX_DATA:
+        return None
     size = len(data) - 128
     webauthn_data = data[:size]
     authenticator_data: bytes | None = None
     client_data_json = ""
-    for split in range(37, size):
+    if not webauthn_data.endswith(b"}"):
+        return None
+    split = webauthn_data.find(b"{", 37)
+    while split != -1:
         candidate = webauthn_data[split:].decode("utf-8", errors="replace")
-        if candidate.startswith("{") and candidate.endswith("}"):
-            try:
-                json.loads(candidate)
-            except ValueError:
-                continue
-            authenticator_data, client_data_json = webauthn_data[:split], candidate
-            break
+        try:
+            json.loads(candidate)
+        except ValueError:
+            split = webauthn_data.find(b"{", split + 1)
+            continue
+        authenticator_data, client_data_json = webauthn_data[:split], candidate
+        break
     if authenticator_data is None:
         return None
     flags = authenticator_data[32]
@@ -167,7 +176,7 @@ def _verified_signer(payload: bytes, signature: bytes) -> str | None:
         r, s, x, y = (int.from_bytes(data[i : i + 32], "big") for i in range(0, 128, 32))
         digest = hashlib.sha256(payload).digest() if data[128] != 0 else payload
         return _public_key_address(x, y) if _p256_verify(digest, r, s, x, y) else None
-    if type_id == b"\x02" and len(data) >= 128:
+    if type_id == b"\x02" and 128 <= len(data) <= _WEBAUTHN_MAX_DATA:
         return _verified_webauthn_signer(payload, data)
     return None
 
