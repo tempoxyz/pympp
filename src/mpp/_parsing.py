@@ -32,10 +32,9 @@ MAX_HEADER_PAYLOAD_SIZE = 16 * 1024
 # JSON and base64url encoding. Matches mppx.
 MAX_AUTHORIZATION_SIZE = 64 * 1024
 
-# Syntax-level Payment Auth grammar. Supported-method dispatch is handled after parsing.
-# Matches mppx and mpp-rs: a lowercase letter, then lowercase letters, digits,
-# colons, underscores, or hyphens (e.g. "tempo-v2", "vendor:method", "x402").
-_PAYMENT_METHOD_ID_RE = re.compile(r"^[a-z][a-z0-9:_-]*$")
+# Syntax-level Payment Auth grammar: payment-method-id = 1*LOWERALPHA (a-z only).
+# Supported-method dispatch is handled after parsing.
+_PAYMENT_METHOD_ID_RE = re.compile(r"[a-z]+")
 # Characters mppx accepts in an auth-param name.
 _AUTH_PARAM_KEY_CHARS = frozenset(string.ascii_letters + string.digits + "_-")
 
@@ -204,9 +203,14 @@ def _unescape_quoted(s: str) -> str:
     return "".join(result)
 
 
-def _validate_payment_method_id(method: str) -> None:
-    """Validate a payment method id against the grammar mppx accepts."""
-    if not _PAYMENT_METHOD_ID_RE.fullmatch(method):
+def is_valid_payment_method_id(method: str) -> bool:
+    """Whether ``method`` matches the spec grammar ``1*LOWERALPHA``."""
+    return _PAYMENT_METHOD_ID_RE.fullmatch(method) is not None
+
+
+def validate_payment_method_id(method: str) -> None:
+    """Validate a payment method id against the spec grammar ``1*LOWERALPHA``."""
+    if not is_valid_payment_method_id(method):
         raise ParseError(f"Invalid payment method id: {method!r}")
 
 
@@ -307,7 +311,7 @@ def parse_www_authenticate(header: str) -> Challenge:
     method = params.get("method")
     if not method:
         raise ParseError("Missing 'method' field")
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     intent = params.get("intent")
     if not intent:
@@ -370,6 +374,8 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
 
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
+
+    validate_payment_method_id(challenge.method)
 
     # Build auth-params
     parts = [
@@ -436,7 +442,7 @@ def parse_authorization(header: str) -> Credential:
         raise ParseError("Credential challenge missing required field: id")
 
     method = str(challenge_data.get("method", ""))
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     credential_header = _received_credential_header(
         challenge_data.get("header"), present="header" in challenge_data
@@ -572,7 +578,7 @@ def parse_payment_receipt(header: str) -> Receipt:
         if field in data and not isinstance(data[field], str):
             raise ParseError(f"Receipt field {field} must be a string")
     method = data["method"]
-    _validate_payment_method_id(method)
+    validate_payment_method_id(method)
 
     extra = data.get("extra")
     return Receipt(
@@ -589,12 +595,33 @@ def parse_payment_receipt(header: str) -> Receipt:
     )
 
 
+def receipt_with_valid_method(receipt: Receipt, method: str) -> Receipt:
+    """Return ``receipt`` with ``method`` in place of a method id the grammar rejects.
+
+    Runs once a payment has settled, so the receipt can always be sent: a method's
+    ``verify`` that reports an invalid id must not turn a charge into a 500. The
+    replacement is a plain ``Receipt`` copied field by field rather than a copy of a
+    subclass, whose constructor may not accept every inherited field.
+    """
+    if _PAYMENT_METHOD_ID_RE.fullmatch(receipt.method):
+        return receipt
+    from dataclasses import fields
+
+    from mpp import Receipt
+
+    values = {field.name: getattr(receipt, field.name) for field in fields(Receipt)}
+    values["method"] = method
+    return Receipt(**values)
+
+
 def format_payment_receipt(receipt: Receipt) -> str:
     """Format a Receipt as a Payment-Receipt header value.
 
     Output format:
         <base64-receipt>
     """
+    validate_payment_method_id(receipt.method)
+
     timestamp = receipt.timestamp
     # Always UTC with a Z suffix, as mppx's Date.toISOString writes it: other offsets
     # (such as ones with seconds) don't fit the receipt schema. A naive datetime is UTC.

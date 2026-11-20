@@ -457,3 +457,49 @@ def test_select_offers_must_be_callable() -> None:
             secret_key="secret",
             select_offers=cast(Any, object()),
         )
+
+
+async def test_settled_receipt_with_invalid_method_still_sends_its_header():
+    # A receipt's method that the grammar rejects must not turn a settled charge into a 500.
+    async def settle(_context: VerifyContext) -> Receipt:
+        return Receipt.success("ref", method="vendor-v2")
+
+    server = create_server(third_party_method("vendor", verify=settle))
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+
+    paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.method == "vendor"
+    assert Receipt.from_payment_receipt(paid.receipt.to_payment_receipt()).method == "vendor"
+
+
+class _NarrowReceipt(Receipt):
+    """A Receipt subclass whose constructor takes only a reference."""
+
+    __slots__ = ()
+
+    def __init__(self, reference: str) -> None:
+        Receipt.__init__(
+            self,
+            status="success",
+            timestamp=Receipt.success(reference).timestamp,
+            reference=reference,
+            method="vendor-v2",
+        )
+
+
+async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_its_header():
+    # Replacing the method must not call the subclass's constructor with every field.
+    async def settle(_context: VerifyContext) -> Receipt:
+        return _NarrowReceipt("ref")
+
+    server = create_server(third_party_method("vendor", verify=settle))
+    issued = challenge(await server.charge(amount="1.00")(http_request()))
+
+    paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
+
+    assert isinstance(paid, PaymentVerified)
+    assert paid.receipt.method == "vendor"
+    assert paid.receipt.reference == "ref"
+    assert Receipt.from_payment_receipt(paid.receipt.to_payment_receipt()).method == "vendor"
