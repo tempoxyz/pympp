@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
-from mpp._parsing import receipt_with_valid_method
+from mpp._parsing import receipt_with_valid_method, validate_payment_method_id
 from mpp._validation import Validation
 from mpp.errors import VerificationFailedError
 from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
@@ -213,7 +213,12 @@ class ServerMethod:
         invalid receipt `method` is replaced by the challenge's, so a settled payment can
         always send its receipt.
         `before_broadcast` sees the validation before anything settles, and can raise to stop it.
+
+        Raises:
+            ParseError: If the challenge's method id is not lowercase letters, before any
+                hook runs, since its receipt could not be sent once the payment settled.
         """
+        validate_payment_method_id(context.challenge.method)
         if self.verify is not None:
             return receipt_with_valid_method(
                 await self.verify(context), context.challenge.method

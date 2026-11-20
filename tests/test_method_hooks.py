@@ -490,9 +490,13 @@ class _NarrowReceipt(Receipt):
 
 
 async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_its_header():
-    # Replacing the method must not call the subclass's constructor with every field.
+    # The subclass reaches the route unchanged; the header carries the challenge's method.
+    from mpp.server import Response
+
+    original = _NarrowReceipt("ref")
+
     async def settle(_context: VerifyContext) -> Receipt:
-        return _NarrowReceipt("ref")
+        return original
 
     server = create_server(third_party_method("vendor", verify=settle))
     issued = challenge(await server.charge(amount="1.00")(http_request()))
@@ -500,6 +504,34 @@ async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_i
     paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
 
     assert isinstance(paid, PaymentVerified)
-    assert paid.receipt.method == "vendor"
-    assert paid.receipt.reference == "ref"
-    assert Receipt.from_payment_receipt(paid.receipt.to_payment_receipt()).method == "vendor"
+    assert paid.receipt is original
+    header = paid.with_receipt(Response.json({})).headers["payment-receipt"]
+    parsed = Receipt.from_payment_receipt(header)
+    assert parsed.method == "vendor"
+    assert parsed.reference == "ref"
+
+
+async def test_settle_rejects_an_invalid_challenge_method_before_any_hook():
+    from mpp import ParseError
+
+    calls: list[str] = []
+
+    async def settle(_context: VerifyContext) -> Receipt:
+        calls.append("verify")
+        return Receipt.success("ref")
+
+    method = third_party_method("vendor", verify=settle)
+    issued = Challenge(id="id", method="vendor-v2", intent="charge", request={})
+    context = VerifyContext(credential=credential(issued), request={}, challenge=issued)
+
+    with pytest.raises(ParseError, match="Invalid payment method id"):
+        await method.settle(context)
+    assert calls == []
+
+
+def test_handler_factory_refuses_an_invalid_method_name():
+    from mpp.server import HandlerFactory
+
+    server = create_server(third_party_method("vendor"))
+    with pytest.raises(ValueError, match="Invalid payment method name"):
+        HandlerFactory(server, [third_party_method("vendor-v2")])

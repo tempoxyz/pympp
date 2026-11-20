@@ -1283,58 +1283,95 @@ class TestOpaqueEcho:
         assert parsed.to_echo().opaque == challenge.to_echo().opaque
 
 
-def test_receipt_with_valid_method_copies_narrow_subclass_without_its_constructor() -> None:
+def test_receipt_with_valid_method_rebuilds_only_a_plain_receipt() -> None:
     from mpp._parsing import receipt_with_valid_method
 
-    class NarrowReceipt(Receipt):
-        __slots__ = ()
-
-        def __init__(self, reference: str) -> None:
-            Receipt.__init__(
-                self,
-                status="success",
-                timestamp=datetime(2026, 1, 1, tzinfo=UTC),
-                reference=reference,
-                method="vendor-v2",
-                payer="0xabc",
-            )
-
-    original = NarrowReceipt("ref")
-    fixed = receipt_with_valid_method(original, "vendor")
-
-    assert type(fixed) is NarrowReceipt
+    plain = Receipt.success("ref", method="vendor-v2")
+    fixed = receipt_with_valid_method(plain, "vendor")
+    assert type(fixed) is Receipt
     assert fixed.method == "vendor"
     assert fixed.reference == "ref"
-    assert fixed.payer == "0xabc"
-    assert original.method == "vendor-v2"
     assert receipt_with_valid_method(fixed, "other") is fixed
 
 
-def test_receipt_with_valid_method_keeps_subclass_fields_and_overrides() -> None:
-    from dataclasses import dataclass
+class _UncopyableReceipt(Receipt):
+    __slots__ = ()
 
+    def __copy__(self) -> Receipt:
+        raise RuntimeError("not copyable")
+
+    def __deepcopy__(self, memo: object) -> Receipt:
+        raise RuntimeError("not copyable")
+
+
+class _StatefulReceipt(Receipt):
+    __slots__ = ("note",)
+
+    def __init__(self, reference: str, note: str) -> None:
+        Receipt.__init__(
+            self,
+            status="success",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            reference=reference,
+            method="vendor-v2",
+            payer="0xabc",
+        )
+        object.__setattr__(self, "note", note)
+
+
+def test_receipt_with_valid_method_leaves_subclasses_untouched() -> None:
     from mpp._parsing import receipt_with_valid_method
 
-    @dataclass(frozen=True, slots=True)
-    class RichReceipt(Receipt):
-        note: str = ""
-
-        def to_payment_receipt(self) -> str:
-            return "custom:" + self.note
-
-    original = RichReceipt(
+    uncopyable = _UncopyableReceipt(
         status="success",
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         reference="ref",
-        method="Vendor",
-        note="kept",
+        method="vendor-v2",
     )
-    fixed = receipt_with_valid_method(original, "vendor")
+    stateful = _StatefulReceipt("ref", "kept")
 
-    assert isinstance(fixed, RichReceipt)
-    assert fixed.method == "vendor"
-    assert fixed.note == "kept"
-    assert fixed.to_payment_receipt() == "custom:kept"
+    assert receipt_with_valid_method(uncopyable, "vendor") is uncopyable
+    assert receipt_with_valid_method(stateful, "vendor") is stateful
+    assert stateful.note == "kept"
+
+
+def test_payment_receipt_header_writes_the_fallback_method_without_copying() -> None:
+    from mpp._parsing import payment_receipt_header
+
+    for receipt in (
+        _UncopyableReceipt(
+            status="success",
+            timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+            reference="ref",
+            method="vendor-v2",
+            payer="0xabc",
+        ),
+        _StatefulReceipt("ref", "kept"),
+    ):
+        parsed = Receipt.from_payment_receipt(payment_receipt_header(receipt, "vendor"))
+        assert parsed.method == "vendor"
+        assert parsed.reference == "ref"
+
+    with pytest.raises(ParseError, match="Invalid payment method id"):
+        payment_receipt_header(_StatefulReceipt("ref", "kept"), "vendor-v2")
+
+
+def test_payment_receipt_header_keeps_a_valid_subclass_serializer() -> None:
+    from mpp._parsing import payment_receipt_header
+
+    class CustomReceipt(Receipt):
+        __slots__ = ()
+
+        def to_payment_receipt(self) -> str:
+            return "custom"
+
+    receipt = CustomReceipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method="vendor",
+    )
+    assert payment_receipt_header(receipt, "other") == "custom"
 
 
 @pytest.mark.parametrize("bad", [None, 7, b"tempo"])

@@ -173,7 +173,13 @@ class PaymentVerified:
         """
         if self.response is not None:
             return self.response
-        headers = {"Payment-Receipt": self.receipt.to_payment_receipt()}
+        from mpp._parsing import payment_receipt_header
+
+        headers = {
+            "Payment-Receipt": payment_receipt_header(
+                self.receipt, self.credential.challenge.method
+            )
+        }
         if x402 := payment_response_header(self.credential, self.receipt):
             headers[PAYMENT_RESPONSE_HEADER] = x402
         if isinstance(response, Response):

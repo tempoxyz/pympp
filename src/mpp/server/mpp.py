@@ -70,6 +70,13 @@ class HandlerFactory:
     def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None:
         self._server = server
         self.methods = tuple(methods)
+        for method in self.methods:
+            # Mpp checks the methods it is given; a factory built directly may name others.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: "
+                    "use lowercase letters only (a-z)."
+                )
 
     def __call__(self, **options: Any) -> ComposedHandler:
         """Configure the offers of this factory's methods for a route.

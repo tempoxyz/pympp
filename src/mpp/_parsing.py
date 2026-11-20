@@ -598,19 +598,38 @@ def parse_payment_receipt(header: str) -> Receipt:
 def receipt_with_valid_method(receipt: Receipt, method: str) -> Receipt:
     """Return ``receipt`` with ``method`` in place of a method id the grammar rejects.
 
-    Runs once a payment has settled, so the receipt can always be sent: a method's
-    ``verify`` that reports an invalid (or non-string) id must not turn a charge
-    into an error. The copy keeps the receipt's own class and fields, including a
-    subclass's, without calling its constructor, which may not accept every
-    inherited field.
+    Runs once a payment has settled. A plain :class:`~mpp.Receipt` is rebuilt with the
+    valid method. A subclass is returned unchanged, so its own fields, constructor and
+    copy behavior never run here: :func:`payment_receipt_header` puts the valid method
+    on the wire when the header is written.
+    """
+    from mpp import Receipt
+
+    if is_valid_payment_method_id(receipt.method) or type(receipt) is not Receipt:
+        return receipt
+    from dataclasses import replace
+
+    return replace(receipt, method=method)
+
+
+def payment_receipt_header(receipt: Receipt, method: str) -> str:
+    """Serialize ``receipt`` as a Payment-Receipt value, with ``method`` if its own is invalid.
+
+    A receipt with a valid method serializes itself (keeping a subclass's override). One
+    whose method the grammar rejects is written from its base fields with ``method``,
+    reading them as attributes, so a settled payment always sends its receipt without
+    copying or reconstructing the receipt object.
     """
     if is_valid_payment_method_id(receipt.method):
-        return receipt
-    import copy
+        return receipt.to_payment_receipt()
+    validate_payment_method_id(method)
+    from dataclasses import fields
 
-    fixed = copy.copy(receipt)
-    object.__setattr__(fixed, "method", method)
-    return fixed
+    from mpp import Receipt
+
+    values = {field.name: getattr(receipt, field.name) for field in fields(Receipt)}
+    values["method"] = method
+    return format_payment_receipt(Receipt(**values))
 
 
 def format_payment_receipt(receipt: Receipt) -> str:
