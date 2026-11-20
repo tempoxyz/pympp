@@ -1319,7 +1319,7 @@ class _StatefulReceipt(Receipt):
         object.__setattr__(self, "note", note)
 
 
-def test_receipt_with_valid_method_leaves_subclasses_untouched() -> None:
+def test_receipt_with_valid_method_replaces_invalid_subclasses_with_a_plain_receipt() -> None:
     from mpp._parsing import receipt_with_valid_method
 
     uncopyable = _UncopyableReceipt(
@@ -1330,9 +1330,27 @@ def test_receipt_with_valid_method_leaves_subclasses_untouched() -> None:
     )
     stateful = _StatefulReceipt("ref", "kept")
 
-    assert receipt_with_valid_method(uncopyable, "vendor") is uncopyable
-    assert receipt_with_valid_method(stateful, "vendor") is stateful
+    for original in (uncopyable, stateful):
+        fixed = receipt_with_valid_method(original, "vendor")
+        assert type(fixed) is Receipt
+        assert fixed.method == "vendor"
+        assert fixed.reference == "ref"
+        # Every receipt it returns serializes, without the caller's help.
+        assert Receipt.from_payment_receipt(fixed.to_payment_receipt()).method == "vendor"
+    assert stateful.method == "vendor-v2"
     assert stateful.note == "kept"
+
+
+def test_receipt_with_valid_method_keeps_a_valid_subclass() -> None:
+    from mpp._parsing import receipt_with_valid_method
+
+    valid = _UncopyableReceipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method="vendor",
+    )
+    assert receipt_with_valid_method(valid, "other") is valid
 
 
 def test_payment_receipt_header_writes_the_fallback_method_without_copying() -> None:

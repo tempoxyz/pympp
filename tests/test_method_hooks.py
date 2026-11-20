@@ -490,7 +490,7 @@ class _NarrowReceipt(Receipt):
 
 
 async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_its_header():
-    # The subclass reaches the route unchanged; the header carries the challenge's method.
+    # The invalid subclass is replaced by a plain receipt carrying the challenge's method.
     from mpp.server import Response
 
     original = _NarrowReceipt("ref")
@@ -504,7 +504,10 @@ async def test_settled_narrow_receipt_subclass_with_invalid_method_still_sends_i
     paid = await server.charge(amount="1.00")(http_request(credential(issued).to_authorization()))
 
     assert isinstance(paid, PaymentVerified)
-    assert paid.receipt is original
+    assert type(paid.receipt) is Receipt
+    assert paid.receipt.method == "vendor"
+    assert paid.receipt.reference == "ref"
+    assert original.method == "vendor-v2"
     header = paid.with_receipt(Response.json({})).headers["payment-receipt"]
     parsed = Receipt.from_payment_receipt(header)
     assert parsed.method == "vendor"

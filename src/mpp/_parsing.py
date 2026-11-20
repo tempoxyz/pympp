@@ -596,20 +596,24 @@ def parse_payment_receipt(header: str) -> Receipt:
 
 
 def receipt_with_valid_method(receipt: Receipt, method: str) -> Receipt:
-    """Return ``receipt`` with ``method`` in place of a method id the grammar rejects.
+    """Return ``receipt``, or a plain receipt with ``method`` if its method id is invalid.
 
-    Runs once a payment has settled. A plain :class:`~mpp.Receipt` is rebuilt with the
-    valid method. A subclass is returned unchanged, so its own fields, constructor and
-    copy behavior never run here: :func:`payment_receipt_header` puts the valid method
-    on the wire when the header is written.
+    Runs once a payment has settled, so every receipt it returns must serialize. A
+    receipt with a valid method (of any class) is returned as is. One whose method the
+    grammar rejects is replaced by a plain :class:`~mpp.Receipt` built from its base
+    fields, read as attributes, with ``method``: a subclass's constructor and copy
+    behavior never run, and callers that serialize it themselves (such as
+    ``verify_or_challenge`` users calling ``to_payment_receipt``) can't fail.
     """
+    if is_valid_payment_method_id(receipt.method):
+        return receipt
+    from dataclasses import fields
+
     from mpp import Receipt
 
-    if is_valid_payment_method_id(receipt.method) or type(receipt) is not Receipt:
-        return receipt
-    from dataclasses import replace
-
-    return replace(receipt, method=method)
+    values = {field.name: getattr(receipt, field.name) for field in fields(Receipt)}
+    values["method"] = method
+    return Receipt(**values)
 
 
 def payment_receipt_header(receipt: Receipt, method: str) -> str:
