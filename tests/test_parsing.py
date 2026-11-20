@@ -1302,11 +1302,50 @@ def test_receipt_with_valid_method_copies_narrow_subclass_without_its_constructo
     original = NarrowReceipt("ref")
     fixed = receipt_with_valid_method(original, "vendor")
 
-    assert fixed == Receipt(
+    assert type(fixed) is NarrowReceipt
+    assert fixed.method == "vendor"
+    assert fixed.reference == "ref"
+    assert fixed.payer == "0xabc"
+    assert original.method == "vendor-v2"
+    assert receipt_with_valid_method(fixed, "other") is fixed
+
+
+def test_receipt_with_valid_method_keeps_subclass_fields_and_overrides() -> None:
+    from dataclasses import dataclass
+
+    from mpp._parsing import receipt_with_valid_method
+
+    @dataclass(frozen=True, slots=True)
+    class RichReceipt(Receipt):
+        note: str = ""
+
+        def to_payment_receipt(self) -> str:
+            return "custom:" + self.note
+
+    original = RichReceipt(
         status="success",
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         reference="ref",
-        method="vendor",
-        payer="0xabc",
+        method="Vendor",
+        note="kept",
     )
-    assert receipt_with_valid_method(fixed, "other") is fixed
+    fixed = receipt_with_valid_method(original, "vendor")
+
+    assert isinstance(fixed, RichReceipt)
+    assert fixed.method == "vendor"
+    assert fixed.note == "kept"
+    assert fixed.to_payment_receipt() == "custom:kept"
+
+
+@pytest.mark.parametrize("bad", [None, 7, b"tempo"])
+def test_receipt_with_valid_method_replaces_non_string_method(bad: object) -> None:
+    from mpp._parsing import is_valid_payment_method_id, receipt_with_valid_method
+
+    assert not is_valid_payment_method_id(bad)
+    receipt = Receipt(
+        status="success",
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        reference="ref",
+        method=bad,  # type: ignore[arg-type]
+    )
+    assert receipt_with_valid_method(receipt, "tempo").method == "tempo"

@@ -263,9 +263,8 @@ async def test_credential_creation_rejects_invalid_expiry(
 
 def test_matching_skips_challenge_with_invalid_method_id() -> None:
     # The older grammar accepted ids such as "stripe-pi"; a credential for one can't be sent.
-    legacy = MockMethod(name="stripe-pi")
     tempo = MockMethod()
-    runtime = PaymentRuntime([legacy.client, tempo.client])
+    runtime = PaymentRuntime([tempo.client])
     offered = [challenge("legacy", method="stripe-pi"), challenge("tempo")]
 
     assert runtime.match_challenge(offered) == (offered[1], tempo.client)
@@ -274,7 +273,8 @@ def test_matching_skips_challenge_with_invalid_method_id() -> None:
 
 
 async def test_credential_creation_rejects_invalid_method_id_before_hooks() -> None:
-    method = MockMethod(name="stripe-pi")
+    # An installed method can't carry an invalid name, but a challenge can name one.
+    method = MockMethod()
     events = EventDispatcher()
     received: list[Any] = []
     events.on("challenge.received", received.append)
@@ -286,3 +286,11 @@ async def test_credential_creation_rejects_invalid_method_id_before_hooks() -> N
 
     assert method.loops == []
     assert received == []
+
+
+@pytest.mark.parametrize("name", ["stripe-pi", "Tempo", "vendor_v2", "x402"])
+def test_runtime_refuses_method_names_outside_the_grammar(name: str) -> None:
+    # A name the method-id grammar rejects could never be paid, yet would be sent
+    # in Accept-Payment on every request: refuse it when the client is configured.
+    with pytest.raises(ValueError, match="Invalid payment method name"):
+        PaymentRuntime([MockMethod(name=name).client])

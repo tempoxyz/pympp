@@ -135,6 +135,12 @@ class PaymentRuntime:
         events: EventDispatcher | None = None,
     ) -> None:
         self.methods = _flatten(methods)
+        for method in self.methods:
+            if not is_valid_payment_method_id(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: method names must be "
+                    "lowercase letters (a-z)"
+                )
         self._methods: dict[tuple[str, str], list[ClientMethod]] = {}
         for method in self.methods:
             self._methods.setdefault((method.name, method.intent), []).append(method)

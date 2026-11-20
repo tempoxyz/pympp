@@ -203,12 +203,12 @@ def _unescape_quoted(s: str) -> str:
     return "".join(result)
 
 
-def is_valid_payment_method_id(method: str) -> bool:
-    """Whether ``method`` matches the spec grammar ``1*LOWERALPHA``."""
-    return _PAYMENT_METHOD_ID_RE.fullmatch(method) is not None
+def is_valid_payment_method_id(method: object) -> bool:
+    """Whether ``method`` is a string matching the spec grammar ``1*LOWERALPHA``."""
+    return isinstance(method, str) and _PAYMENT_METHOD_ID_RE.fullmatch(method) is not None
 
 
-def validate_payment_method_id(method: str) -> None:
+def validate_payment_method_id(method: object) -> None:
     """Validate a payment method id against the spec grammar ``1*LOWERALPHA``."""
     if not is_valid_payment_method_id(method):
         raise ParseError(f"Invalid payment method id: {method!r}")
@@ -599,19 +599,18 @@ def receipt_with_valid_method(receipt: Receipt, method: str) -> Receipt:
     """Return ``receipt`` with ``method`` in place of a method id the grammar rejects.
 
     Runs once a payment has settled, so the receipt can always be sent: a method's
-    ``verify`` that reports an invalid id must not turn a charge into a 500. The
-    replacement is a plain ``Receipt`` copied field by field rather than a copy of a
-    subclass, whose constructor may not accept every inherited field.
+    ``verify`` that reports an invalid (or non-string) id must not turn a charge
+    into an error. The copy keeps the receipt's own class and fields, including a
+    subclass's, without calling its constructor, which may not accept every
+    inherited field.
     """
-    if _PAYMENT_METHOD_ID_RE.fullmatch(receipt.method):
+    if is_valid_payment_method_id(receipt.method):
         return receipt
-    from dataclasses import fields
+    import copy
 
-    from mpp import Receipt
-
-    values = {field.name: getattr(receipt, field.name) for field in fields(Receipt)}
-    values["method"] = method
-    return Receipt(**values)
+    fixed = copy.copy(receipt)
+    object.__setattr__(fixed, "method", method)
+    return fixed
 
 
 def format_payment_receipt(receipt: Receipt) -> str:
