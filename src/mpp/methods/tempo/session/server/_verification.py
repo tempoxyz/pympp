@@ -207,13 +207,15 @@ def _read_source_address(source: str | None, chain_id: int) -> str:
 def assert_credential_source_can_spend(
     *, chain_id: int, channel: ChannelState, source: str | None
 ) -> None:
-    """Check the credential source is the channel's payer or authorized signer."""
+    """Check the credential source is the channel's payer.
+
+    Voucher signing authority is checked separately: the source names the funding account
+    even when a delegated authorized signer signs the vouchers.
+    """
     address = _read_source_address(source, chain_id)
-    if _same(address, channel.payer) or _same(address, channel.authorized_signer):
+    if _same(address, channel.payer):
         return
-    raise VerificationFailedError(
-        "credential source does not match channel payer or authorized signer"
-    )
+    raise VerificationFailedError("credential source does not match channel payer")
 
 
 # --------------------------------------------------------------------------------------------

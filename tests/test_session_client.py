@@ -59,7 +59,11 @@ from mpp.methods.tempo.session.client import (
 from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
 )
-from mpp.methods.tempo.session.client._ops import read_optional_address, resolve_escrow
+from mpp.methods.tempo.session.client._ops import (
+    read_optional_address,
+    resolve_escrow,
+    serialize_credential,
+)
 from mpp.methods.tempo.session.client._session import (
     _acknowledges_open,  # pyright: ignore[reportPrivateUsage]
     _matches_open,  # pyright: ignore[reportPrivateUsage]
@@ -708,6 +712,23 @@ class TestPlanCredential:
         with pytest.raises(ValueError, match="descriptor required to reuse"):
             await _plan(SessionContext(channel_id="0x" + "00" * 32))
         assert await _plan(SessionContext(descriptor=descriptor_for())) == "recover"
+
+
+def test_serialize_credential_names_the_funding_payer_for_a_delegated_signer() -> None:
+    payer = "0x" + "99" * 20
+    descriptor = replace(descriptor_for(), payer=payer)
+    payload = VoucherPayload.model_validate(
+        {
+            "channelId": compute_channel_id(descriptor, chain_id=CHAIN_ID),
+            "descriptor": descriptor.to_wire(),
+            "cumulativeAmount": "1",
+            "signature": "0x1234",
+        }
+    )
+    authorization = serialize_credential(make_challenge(), payload, CHAIN_ID, ACCOUNT)
+    assert Credential.from_authorization(authorization).source == (
+        f"did:pkh:eip155:{CHAIN_ID}:{payer}"
+    )
 
 
 class TestReusableChannel:

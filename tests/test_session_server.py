@@ -563,6 +563,15 @@ class TestDescriptorAndStateChecks:
                 chain_id=CHAIN_ID, channel=channel, source=source
             )
 
+    def test_credential_source_rejects_the_authorized_signer(self) -> None:
+        channel = bare_channel(deposit=1, authorized_signer=PAYEE.address)
+        with pytest.raises(VerificationFailedError, match="does not match channel payer"):
+            verification.assert_credential_source_can_spend(
+                chain_id=CHAIN_ID,
+                channel=channel,
+                source=f"did:pkh:eip155:{CHAIN_ID}:{PAYEE.address}",
+            )
+
     def test_allowed_fee_tokens(self) -> None:
         assert verification._allowed_fee_tokens(CURRENCY, None) == [CURRENCY]
         assert verification._allowed_fee_tokens(CURRENCY, CURRENCY.lower()) == [CURRENCY]
