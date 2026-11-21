@@ -47,6 +47,10 @@ _KEY_PREFIX = "mppx:session:sponsorship:"
 
 _FeePayer = TypeVar("_FeePayer")
 
+_WEBAUTHN_MAX_DATA = 2048
+"""Largest WebAuthn envelope body (metadata plus the 128-byte signature and key) accepted, as
+the fee-payer path bounds it, so parsing a client-supplied assertion stays cheap."""
+
 
 @dataclass(frozen=True, slots=True)
 class SponsorshipLimit:
@@ -107,29 +111,64 @@ def _base64_bytes(value: str) -> bytes:
     return base64.b64decode(normalized + "=" * (-len(normalized) % 4), validate=True)
 
 
+def _object_start(data: bytes) -> int:
+    """The offset of the opening brace that pairs with a closing brace in the last byte, or -1.
+
+    Scans bytes rather than characters: UTF-8 never encodes a multi-byte character with an
+    ASCII byte, so each structural byte is a structural character.
+    """
+    if not data.endswith(b"}"):
+        return -1
+    depth = 0
+    in_string = False
+    i = len(data) - 1
+    while i >= 0:
+        byte = data[i]
+        if byte == 0x22:  # a quote
+            if in_string:
+                # A quote inside a string follows an odd number of backslashes.
+                escapes = 0
+                while i - 1 - escapes >= 0 and data[i - 1 - escapes] == 0x5C:
+                    escapes += 1
+                i -= escapes
+                if escapes % 2 == 1:
+                    i -= 1
+                    continue
+            in_string = not in_string
+        elif not in_string:
+            if byte == 0x7D:  # a closing brace
+                depth += 1
+            elif byte == 0x7B:  # an opening brace
+                depth -= 1
+                if depth == 0:
+                    return i
+        i -= 1
+    return -1
+
+
 def _verified_webauthn_signer(payload: bytes, data: bytes) -> str | None:
     """The public-key address of a WebAuthn assertion over ``payload``, or None."""
+    if not 128 <= len(data) <= _WEBAUTHN_MAX_DATA:
+        return None
     size = len(data) - 128
     webauthn_data = data[:size]
-    authenticator_data: bytes | None = None
-    client_data_json = ""
-    for split in range(37, size):
-        candidate = webauthn_data[split:].decode("utf-8", errors="replace")
-        if candidate.startswith("{") and candidate.endswith("}"):
-            try:
-                json.loads(candidate)
-            except ValueError:
-                continue
-            authenticator_data, client_data_json = webauthn_data[:split], candidate
-            break
-    if authenticator_data is None:
+    # clientDataJSON follows the minimum authenticator data and is the object that closes at
+    # the end, found in one scan and parsed once, as ox's WebauthnData.split does.
+    start = _object_start(webauthn_data[37:]) if size > 37 else -1
+    if start == -1:
+        return None
+    authenticator_data = webauthn_data[: 37 + start]
+    client_data_json = webauthn_data[37 + start :].decode("utf-8", errors="replace")
+    try:
+        client_data: Any = json.loads(client_data_json)
+    except ValueError:
         return None
     flags = authenticator_data[32]
     # User presence; and a backup-state bit only on a backup-eligible credential.
     if flags & 0x01 != 0x01 or (flags & 0x08 != 0x08 and flags & 0x10 == 0x10):
         return None
     # A JSON text from "{" to "}" is an object.
-    client = cast(dict[str, Any], json.loads(client_data_json))
+    client = cast(dict[str, Any], client_data)
     challenge = client.get("challenge")
     if client.get("type") != "webauthn.get" or not isinstance(challenge, str) or not challenge:
         return None
@@ -167,7 +206,7 @@ def _verified_signer(payload: bytes, signature: bytes) -> str | None:
         r, s, x, y = (int.from_bytes(data[i : i + 32], "big") for i in range(0, 128, 32))
         digest = hashlib.sha256(payload).digest() if data[128] != 0 else payload
         return _public_key_address(x, y) if _p256_verify(digest, r, s, x, y) else None
-    if type_id == b"\x02" and len(data) >= 128:
+    if type_id == b"\x02" and 128 <= len(data) <= _WEBAUTHN_MAX_DATA:
         return _verified_webauthn_signer(payload, data)
     return None
 
