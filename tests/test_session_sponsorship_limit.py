@@ -229,6 +229,27 @@ class TestVerifiedPayer:
             is None
         )
 
+    def test_parses_webauthn_client_data_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        key = p256_key()
+        tx = unsigned()
+        payload = tx.get_signing_hash()
+        parses: list[str] = []
+        loads = json.loads
+
+        def counting_loads(text: str) -> Any:
+            parses.append(text)
+            return loads(text)
+
+        monkeypatch.setattr(limits.json, "loads", counting_loads)
+        signature = webauthn_signature(key, payload, origin="https://wallet.test")
+        assert limits.verified_payer(with_signature(tx, signature)) == key_address(key)
+        assert len(parses) == 1
+        parses.clear()
+        # Unpaired braces before the client data are skipped in one scan, not parsed in turn.
+        braces = b"\x02" + b"\x11" * 37 + b"{" * 1_500 + b'{"a":"}"}' + b"\x00" * 128
+        assert limits.verified_payer(with_signature(tx, braces)) is None
+        assert len(parses) == 1
+
     @pytest.mark.parametrize("version", [3, 4])
     def test_keys_an_access_key_on_the_key_not_the_claimed_account(self, version: int) -> None:
         tx = unsigned()

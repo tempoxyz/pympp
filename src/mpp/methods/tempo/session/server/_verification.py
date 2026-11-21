@@ -231,7 +231,8 @@ async def assert_credential_source_is_payer(
 
     A credential without a source is accepted. Otherwise the source must be the transaction's
     payer, proven by its signature: a direct signature by the payer, an access key the
-    transaction itself authorizes for the payer (for this chain and unexpired), or an access key
+    transaction itself authorizes for the payer (for this chain, unexpired and never revoked),
+    or an access key
     the payer authorized earlier that is neither revoked nor expired on chain. Multisig (0x05)
     signatures cannot prove the source, as in mppx; such opens must omit it.
     """
@@ -286,7 +287,6 @@ async def _signature_authenticates_payer(
         return _same(signer, payer)
     if not _same("0x" + signature[1:21].hex(), payer):
         return False
-    now = time.time()
     if len(fields) == 15:
         # verified_payer keys an inline authorization on the account that signed it.
         authorization = fields[13]
@@ -297,12 +297,19 @@ async def _signature_authenticates_payer(
             return False
         key_chain_id = _rlp_uint(items[0])
         expiry = _rlp_uint(items[3]) if len(items) > 3 else 0
-        return (
-            _same(signer, payer) and key_chain_id in (0, chain_id) and (expiry == 0 or expiry > now)
+        if not (_same(signer, payer) and key_chain_id in (0, chain_id)):
+            return False
+        # The chain refuses to authorize a revoked key again, so an earlier revocation makes
+        # the payer's authorization unusable.
+        _, revoked = await _read_access_key(
+            rpc_url, chain_id=chain_id, account=payer, access_key=signer, client=client
         )
-    return await _is_active_access_key(
-        rpc_url, account=payer, access_key=signer, client=client, now=now
+        return not revoked and (expiry == 0 or expiry > time.time())
+    key_expiry, revoked = await _read_access_key(
+        rpc_url, chain_id=chain_id, account=payer, access_key=signer, client=client
     )
+    # Sampled after the read, so a key that expires while it is read does not pass.
+    return not revoked and key_expiry > int(time.time())
 
 
 def _rlp_uint(value: Any) -> int:
@@ -311,15 +318,16 @@ def _rlp_uint(value: Any) -> int:
     return int.from_bytes(value, "big")
 
 
-async def _is_active_access_key(
+async def _read_access_key(
     rpc_url: str,
     *,
+    chain_id: int,
     account: str,
     access_key: str,
     client: httpx.AsyncClient | None,
-    now: float,
-) -> bool:
-    """Whether the access key is an unrevoked, unexpired key of the account on chain."""
+) -> tuple[int, bool]:
+    """The access key's on-chain expiry and revocation for the account, read from an RPC that
+    serves the credential's chain."""
     from eth_abi.abi import decode
 
     from mpp.methods.tempo.intents import ACCOUNT_KEYCHAIN, GET_KEY_SELECTOR
@@ -330,14 +338,19 @@ async def _is_active_access_key(
         + account.lower().removeprefix("0x").zfill(64)
         + access_key.lower().removeprefix("0x").zfill(64)
     )
-    result = await chain._rpc(  # pyright: ignore[reportPrivateUsage]
-        rpc_url, "eth_call", [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"], client
+    rpc_chain_id, result = await asyncio.gather(
+        chain._rpc(rpc_url, "eth_chainId", [], client),  # pyright: ignore[reportPrivateUsage]
+        chain._rpc(  # pyright: ignore[reportPrivateUsage]
+            rpc_url, "eth_call", [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"], client
+        ),
     )
+    if int(str(rpc_chain_id), 16) != chain_id:
+        raise ValueError("RPC chain ID does not match the credential's chain")
     _, _, expiry, _, revoked = decode(
         ["uint8", "address", "uint64", "bool", "bool"],
         bytes.fromhex(str(result).removeprefix("0x")),
     )
-    return not revoked and expiry > int(now)
+    return int(expiry), bool(revoked)
 
 
 # --------------------------------------------------------------------------------------------
