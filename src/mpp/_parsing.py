@@ -16,6 +16,7 @@ import base64
 import json
 import re
 import string
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -206,7 +207,71 @@ def validate_payment_method_id(method: object) -> None:
         raise ParseError(f"Invalid payment method id: {method!r}")
 
 
-def _parse_auth_params(params_str: str) -> dict[str, str]:
+def _unescape_quoted_text(s: str) -> str:
+    """Invert :func:`_escape_quoted_text`: decode its \\uXXXX escapes and quoted-pairs.
+
+    Only for display text this SDK formatted itself, such as re-reading a
+    description from a header the server just built: that formatter always
+    doubles a literal backslash, so a bare \\u only comes from an escape.
+    Never use it for values from a peer, which follow quoted-pair semantics.
+    """
+    result: list[str] = []
+    pending_high: int | None = None
+    index = 0
+    while index < len(s):
+        character = s[index]
+        unit: int | None = None
+        if character == "\\" and index + 1 < len(s):
+            digits = s[index + 2 : index + 6]
+            if (
+                s[index + 1] == "u"
+                and len(digits) == 4
+                and all(digit in string.hexdigits for digit in digits)
+            ):
+                unit = int(digits, 16)
+                index += 6
+            else:
+                character = s[index + 1]
+                index += 2
+        elif character == "\\":
+            break
+        else:
+            index += 1
+        if pending_high is not None:
+            if unit is not None and 0xDC00 <= unit <= 0xDFFF:
+                result.append(chr(0x10000 + ((pending_high - 0xD800) << 10) + (unit - 0xDC00)))
+                pending_high = None
+                continue
+            result.append(chr(pending_high))
+            pending_high = None
+        if unit is None:
+            result.append(character)
+        elif 0xD800 <= unit <= 0xDBFF:
+            pending_high = unit
+        else:
+            result.append(chr(unit))
+    if pending_high is not None:
+        result.append(chr(pending_high))
+    return "".join(result)
+
+
+def parse_formatted_description(header: str) -> str | None:
+    """Read the description of a WWW-Authenticate header this SDK formatted.
+
+    :func:`format_www_authenticate` writes characters above Latin-1 in the
+    description as \\uXXXX escapes, which :func:`parse_www_authenticate` reads
+    as quoted-pairs (``uXXXX``). A server re-reading its own header, such as
+    the MCP transport, uses this to recover the configured description.
+    """
+    header = header.strip()
+    if not header.lower().startswith("payment "):
+        raise ParseError("Expected 'Payment' authentication scheme")
+    return _parse_auth_params(header[8:].strip(), _unescape_quoted_text).get("description")
+
+
+def _parse_auth_params(
+    params_str: str, unescape: Callable[[str], str] = _unescape_quoted
+) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs.
 
     Consumes the input sequentially like mppx's `parseAuthParams`: a position that
@@ -241,7 +306,7 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
             index += 1
 
         if index < length and params_str[index] == '"':
-            value, index = _read_quoted_auth_param(params_str, index + 1)
+            value, index = _read_quoted_auth_param(params_str, index + 1, unescape)
         else:
             value_end = params_str.find(",", index)
             if value_end == -1:
@@ -254,7 +319,9 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     return params
 
 
-def _read_quoted_auth_param(params_str: str, start: int) -> tuple[str, int]:
+def _read_quoted_auth_param(
+    params_str: str, start: int, unescape: Callable[[str], str] = _unescape_quoted
+) -> tuple[str, int]:
     """Read a quoted-string value starting after its opening quote."""
     index = start
     escaped = False
@@ -266,7 +333,7 @@ def _read_quoted_auth_param(params_str: str, start: int) -> tuple[str, int]:
         elif character == "\\":
             escaped = True
         elif character == '"':
-            return _unescape_quoted(params_str[start : index - 1]), index
+            return unescape(params_str[start : index - 1]), index
     raise ParseError("Unterminated quoted-string")
 
 

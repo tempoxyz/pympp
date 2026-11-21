@@ -245,7 +245,8 @@ class Mpp:
 
         Raises:
             RuntimeError: If a method has no store in a production runtime.
-            ValueError: If a method name is not lowercase letters only.
+            ValueError: If a method name is not lowercase letters only, or the realm
+                has characters above U+00FF.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
@@ -267,6 +268,13 @@ class Mpp:
                 name = method.key.replace("/", ".")
                 check_fallback_allowed(name, f"{name}(store=...) or Mpp(store=...)")
         self.realm = detect_realm() if realm is None else realm
+        # Fail at startup rather than on every 402: the realm is bound into the
+        # Challenge ID and a quoted-pair can only carry Latin-1.
+        if any(ord(character) > 0xFF for character in self.realm):
+            raise ValueError(
+                f"Invalid realm {self.realm!r}: use Latin-1 characters only (up to U+00FF), "
+                "such as the ASCII hostname."
+            )
         self.secret_key = detect_secret_key() if secret_key is None else secret_key
         self.unique_challenges = unique_challenges
         if select_offers is not None and not callable(select_offers):

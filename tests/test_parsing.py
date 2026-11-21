@@ -10,7 +10,13 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, MAX_HEADER_PAYLOAD_SIZE, ParseError
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    MAX_HEADER_PAYLOAD_SIZE,
+    ParseError,
+    _unescape_quoted_text,
+    parse_formatted_description,
+)
 from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
@@ -1446,3 +1452,58 @@ def test_receipt_with_valid_method_replaces_non_string_method(bad: object) -> No
         method=bad,  # type: ignore[arg-type]
     )
     assert receipt_with_valid_method(receipt, "tempo").method == "tempo"
+
+
+class TestFormattedDescription:
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "plain",
+            "caf\u00e9 \u2014 \u2615",
+            "emoji \U0001f600",
+            "lone \ud800 high and \udc00 low",
+            "high \ud800A then text",
+            "back\\slash \\u2014 literal",
+            'quote "x"',
+        ],
+    )
+    def test_round_trips_formatted_description(self, description: str) -> None:
+        challenge = Challenge(
+            id="x",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            description=description,
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert parse_formatted_description(header) == description
+
+    def test_peer_parse_keeps_quoted_pair_semantics(self) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description="a\u2014b"
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert Challenge.from_www_authenticate(header).description == "au2014b"
+        assert parse_formatted_description(header) == "a\u2014b"
+
+    def test_missing_description(self) -> None:
+        header = 'Payment id="x", realm="r", method="tempo", intent="charge", request="e30"'
+        assert parse_formatted_description(header) is None
+
+    def test_rejects_other_scheme(self) -> None:
+        with pytest.raises(ParseError):
+            parse_formatted_description('Bearer realm="r"')
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("\\u12", "u12"),
+            ("\\uzzzz", "uzzzz"),
+            ("trailing\\", "trailing"),
+            ('\\"', '"'),
+        ],
+    )
+    def test_unescape_text_edge_cases(self, raw: str, expected: str) -> None:
+        assert _unescape_quoted_text(raw) == expected

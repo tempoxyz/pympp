@@ -77,6 +77,29 @@ class TestMppCreate:
             )
             assert srv.realm == "api.onrender.com"
 
+    def test_create_rejects_realm_above_latin1(self) -> None:
+        with pytest.raises(ValueError, match="Invalid realm"):
+            Mpp(
+                methods=tempo_server.charge(),
+                realm="merchant\u2014api.example.com",
+                secret_key="test-secret",
+            )
+
+    def test_create_rejects_detected_realm_above_latin1(self) -> None:
+        with (
+            patch.dict(os.environ, {"MPP_REALM": "merchant\u2014api.example.com"}, clear=True),
+            pytest.raises(ValueError, match="Invalid realm"),
+        ):
+            Mpp(methods=tempo_server.charge(), secret_key="test-secret")
+
+    def test_create_accepts_latin1_realm(self) -> None:
+        srv = Mpp(
+            methods=tempo_server.charge(),
+            realm="caf\u00e9.example.com",
+            secret_key="test-secret",
+        )
+        assert srv.realm == "caf\u00e9.example.com"
+
     def test_create_requires_secret_key(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(ValueError, match="Missing secret key"):
