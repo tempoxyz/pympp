@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.27.0 (2026-11-21)
+
+### Minor Changes
+
+- Restricted payment method names to lowercase letters (a-z), as the spec requires: parsing and formatting a Challenge now reject any other name, and `Mpp` refuses one at startup. Custom methods that use digits, hyphens, underscores, colons or capitals must be renamed. (by @brendanjryan, [#447](https://github.com/tempoxyz/pympp/pull/447))
+- Added TIP-1166 configurable account voucher signers: `voucher_signer=ConfigurableAccount(...)` on the session client and `configurable_vouchers=True` on the server `session()` (off by default), with `SignerConfigChangedError` and `ConfigurableVouchersUnsupportedError`. Servers now record each channel's opening commitment (looking it up on chain once for channels stored without one) and reject primitive vouchers on channels the escrow bound to a configurable account. (by @brendanjryan, [#432](https://github.com/tempoxyz/pympp/pull/432))
+
 ## 0.26.0 (2026-11-18)
 
 ### Minor Changes
