@@ -11,7 +11,7 @@ import pytest
 
 from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp
-from tests import challenge, http_request
+from tests import challenge, http_request, server_method
 
 
 class TestMppCreate:
@@ -91,6 +91,13 @@ class TestMppCreate:
             pytest.raises(ValueError, match="Invalid realm"),
         ):
             Mpp(methods=tempo_server.charge(), secret_key="test-secret")
+
+    def test_create_rejects_intent_above_latin1(self) -> None:
+        method = server_method(
+            name="custom", intent="charge\u2014premium", verify=lambda *_args: None
+        )
+        with pytest.raises(ValueError, match="Invalid payment intent"):
+            Mpp(methods=method, realm="api.example.com", secret_key="test-secret")
 
     def test_create_accepts_latin1_realm(self) -> None:
         srv = Mpp(

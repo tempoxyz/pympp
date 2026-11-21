@@ -1461,8 +1461,6 @@ class TestFormattedDescription:
             "plain",
             "caf\u00e9 \u2014 \u2615",
             "emoji \U0001f600",
-            "lone \ud800 high and \udc00 low",
-            "high \ud800A then text",
             "back\\slash \\u2014 literal",
             'quote "x"',
         ],
@@ -1478,6 +1476,27 @@ class TestFormattedDescription:
         header = challenge.to_www_authenticate("api.example.com")
 
         assert parse_formatted_description(header) == description
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("lone \ud800 high", "lone \ufffd high"),
+            ("lone \udc00 low", "lone \ufffd low"),
+            ("high \ud800A then text", "high \ufffdA then text"),
+            ("trailing \ud800", "trailing \ufffd"),
+            ("two highs \ud800\ud83d\ude00", "two highs \ufffd\U0001f600"),
+        ],
+    )
+    def test_lone_surrogates_decode_to_replacement(self, description: str, expected: str) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description=description
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        decoded = parse_formatted_description(header)
+        assert decoded == expected
+        assert decoded is not None
+        decoded.encode("utf-8")
 
     def test_peer_parse_keeps_quoted_pair_semantics(self) -> None:
         challenge = Challenge(

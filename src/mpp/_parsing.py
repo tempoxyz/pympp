@@ -210,6 +210,9 @@ def validate_payment_method_id(method: object) -> None:
 def _unescape_quoted_text(s: str) -> str:
     """Invert :func:`_escape_quoted_text`: decode its \\uXXXX escapes and quoted-pairs.
 
+    A lone UTF-16 surrogate escape decodes to U+FFFD, so the result is always
+    encodable and a Credential echoing it still parses.
+
     Only for display text this SDK formatted itself, such as re-reading a
     description from a header the server just built: that formatter always
     doubles a literal backslash, so a bare \\u only comes from an escape.
@@ -242,16 +245,19 @@ def _unescape_quoted_text(s: str) -> str:
                 result.append(chr(0x10000 + ((pending_high - 0xD800) << 10) + (unit - 0xDC00)))
                 pending_high = None
                 continue
-            result.append(chr(pending_high))
+            # A lone surrogate can't be encoded, so it reads as U+FFFD.
+            result.append("\ufffd")
             pending_high = None
         if unit is None:
             result.append(character)
         elif 0xD800 <= unit <= 0xDBFF:
             pending_high = unit
+        elif 0xDC00 <= unit <= 0xDFFF:
+            result.append("\ufffd")
         else:
             result.append(chr(unit))
     if pending_high is not None:
-        result.append(chr(pending_high))
+        result.append("\ufffd")
     return "".join(result)
 
 

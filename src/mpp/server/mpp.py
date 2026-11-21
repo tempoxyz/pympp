@@ -77,6 +77,13 @@ class HandlerFactory:
                     f"Invalid payment method name {method.name!r}: "
                     "use lowercase letters only (a-z)."
                 )
+            # The intent is bound into the Challenge ID and a quoted-pair can only
+            # carry Latin-1.
+            if any(ord(character) > 0xFF for character in method.intent):
+                raise ValueError(
+                    f"Invalid payment intent {method.intent!r}: "
+                    "use Latin-1 characters only (up to U+00FF)."
+                )
 
     def __call__(self, **options: Any) -> ComposedHandler:
         """Configure the offers of this factory's methods for a route.
@@ -245,8 +252,8 @@ class Mpp:
 
         Raises:
             RuntimeError: If a method has no store in a production runtime.
-            ValueError: If a method name is not lowercase letters only, or the realm
-                has characters above U+00FF.
+            ValueError: If a method name is not lowercase letters only, or a method
+                intent or the realm has characters above U+00FF.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)

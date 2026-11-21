@@ -1338,6 +1338,14 @@ class TestChallengeIssuance:
 
         assert challenge.description == "API call fee"
 
+    async def test_challenge_description_replaces_lone_surrogate(self) -> None:
+        challenge = await self._issue(description="fee \ud800 here")
+
+        assert challenge.description == "fee \ufffd here"
+        # The challenge can be echoed in a credential the server parses.
+        credential = MCPCredential(challenge=challenge, payload={})
+        credential.to_core().to_authorization()
+
     @pytest.mark.parametrize(
         "description",
         [
