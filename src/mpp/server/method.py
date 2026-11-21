@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
+from mpp._parsing import receipt_with_valid_method, validate_payment_method_id
 from mpp._validation import Validation
 from mpp.errors import VerificationFailedError
 from mpp.methods import CanOfferFn, Method, PaymentSuccessHandler
@@ -208,11 +209,20 @@ class ServerMethod:
     ) -> tuple[Receipt, Validation | None]:
         """Run `validate` then `broadcast`, or `verify`.
 
-        The validation's `payer` is copied to the receipt unless it already has one.
+        The validation's `payer` is copied to the receipt unless it already has one, and an
+        invalid receipt `method` is replaced by the challenge's, so a settled payment can
+        always send its receipt.
         `before_broadcast` sees the validation before anything settles, and can raise to stop it.
+
+        Raises:
+            ParseError: If the challenge's method id is not lowercase letters, before any
+                hook runs, since its receipt could not be sent once the payment settled.
         """
+        validate_payment_method_id(context.challenge.method)
         if self.verify is not None:
-            return await self.verify(context), None
+            return receipt_with_valid_method(
+                await self.verify(context), context.challenge.method
+            ), None
         assert self.broadcast is not None
         validation = None
         if self.validate is not None:
@@ -232,4 +242,4 @@ class ServerMethod:
         receipt = await self.broadcast(context)
         if validation is not None and validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)
-        return receipt, validation
+        return receipt_with_valid_method(receipt, context.challenge.method), validation

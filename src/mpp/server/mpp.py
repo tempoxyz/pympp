@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import ValidationError
 
 from mpp import PAYMENT_AUTHORIZATION_HEADER, Challenge, Credential, Receipt, _credential_expiry
-from mpp._parsing import ParseError, _b64_decode, _parse_timestamp
+from mpp._parsing import _PAYMENT_METHOD_ID_RE, ParseError, _b64_decode, _parse_timestamp
 from mpp._replay_store import check_fallback_allowed
 from mpp._typing import is_mapping
 from mpp._validation import Validation
@@ -70,6 +70,13 @@ class HandlerFactory:
     def __init__(self, server: Mpp, methods: Sequence[ServerMethod]) -> None:
         self._server = server
         self.methods = tuple(methods)
+        for method in self.methods:
+            # Mpp checks the methods it is given; a factory built directly may name others.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: "
+                    "use lowercase letters only (a-z)."
+                )
 
     def __call__(self, **options: Any) -> ComposedHandler:
         """Configure the offers of this factory's methods for a route.
@@ -238,11 +245,19 @@ class Mpp:
 
         Raises:
             RuntimeError: If a method has no store in a production runtime.
+            ValueError: If a method name is not lowercase letters only.
         """
         self.methods = _flatten(methods)
         self._compose_implicit = isinstance(methods, Sequence)
         if not self.methods:
             raise ValueError("methods is required")
+        for method in self.methods:
+            # Fail at startup rather than on every 402: challenges can't carry the name.
+            if not _PAYMENT_METHOD_ID_RE.fullmatch(method.name):
+                raise ValueError(
+                    f"Invalid payment method name {method.name!r}: "
+                    "use lowercase letters only (a-z)."
+                )
         if store is not None:
             for method in self.methods:
                 if method.use_store is not None:

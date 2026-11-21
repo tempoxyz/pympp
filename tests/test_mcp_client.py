@@ -1423,3 +1423,40 @@ def test_mcp_tempo_session_requires_pinned_realm(amount: str) -> None:
 
     pinned = McpClient(AsyncMock(), methods=[method], trusted_tempo_realms=["api.example.com"])
     assert pinned._match_challenge([challenge])[0] == challenge
+
+
+@pytest.mark.asyncio
+async def test_invalid_method_id_client_method_is_refused() -> None:
+    # A method name the narrowed grammar rejects could never be paid: configuring
+    # one fails up front instead of advertising it and failing every payment.
+    session = AsyncMock()
+    create_credential = AsyncMock()
+    with pytest.raises(ValueError, match="Invalid payment method name"):
+        McpClient(
+            session, methods=[fake_method(name="stripe-pi", create_credential=create_credential)]
+        )
+
+    create_credential.assert_not_called()
+    session.call_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invalid_method_id_challenge_is_skipped_for_a_valid_one() -> None:
+    session = AsyncMock()
+    exceptions = pytest.importorskip("mcp.shared.exceptions")
+    types = pytest.importorskip("mcp.types")
+    error = exceptions.McpError(
+        types.ErrorData(
+            code=-32042,
+            message="Payment Required",
+            data={"challenges": [_make_challenge_dict(method="stripe-pi"), _make_challenge_dict()]},
+        )
+    )
+    session.call_tool.side_effect = [error, FakeCallToolResult(meta=_make_receipt_meta())]
+    client = McpClient(session, methods=[fake_method()])
+
+    result = await client.call_tool("paid")
+
+    assert result.receipt is not None
+    retry_meta = session.call_tool.await_args_list[1].kwargs["meta"]
+    assert retry_meta[META_CREDENTIAL]["challenge"]["method"] == "tempo"

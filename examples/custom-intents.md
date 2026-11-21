@@ -32,8 +32,9 @@ class ChargePayload(BaseModel):
     payment_intent_id: str
 
 
+# Method names are lowercase letters only (a-z); Mpp rejects any other name at startup.
 charge = Method(
-    name="stripe-pi", intent="charge", request_model=ChargeRequest, payload_model=ChargePayload
+    name="stripepi", intent="charge", request_model=ChargeRequest, payload_model=ChargePayload
 )
 ```
 
@@ -63,7 +64,7 @@ async def verify(context: VerifyContext) -> Receipt:
         raise VerificationError("Payment not completed")
     if payment_intent.amount != int(request["amount"]):
         raise VerificationError("Amount mismatch")
-    return Receipt.success(reference=payment_intent.id, method="stripe-pi")
+    return Receipt.success(reference=payment_intent.id, method="stripepi")
 
 
 method = ServerMethod(method=charge, verify=verify, defaults={"currency": "usd"})

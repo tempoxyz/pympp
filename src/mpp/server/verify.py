@@ -24,6 +24,7 @@ from mpp._parsing import (
     MAX_AUTHORIZATION_SIZE,
     ParseError,
     _b64_decode,
+    is_valid_payment_method_id,
     with_received_credential_header,
 )
 from mpp._replay_store import check_fallback_allowed
@@ -55,8 +56,12 @@ class Intent(Protocol):
 async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) -> Receipt:
     """Run ``validate`` then ``broadcast`` when the intent has them, else ``verify``.
 
-    The validation's ``payer`` is copied to the receipt unless it already has one.
+    The validation's ``payer`` is copied to the receipt unless it already has one, and an
+    invalid receipt ``method`` is replaced by the credential's.
     """
+    # Imported here so this module's import list stays as on main.
+    from mpp._parsing import receipt_with_valid_method
+
     if hasattr(intent, "broadcast"):
         validation = await intent.validate(credential, request)
         if not isinstance(validation, Validation):
@@ -64,8 +69,10 @@ async def _settle(intent: Any, credential: Credential, request: dict[str, Any]) 
         receipt: Receipt = await intent.broadcast(credential, request)
         if validation.payer is not None and receipt.payer is None:
             receipt = replace(receipt, payer=validation.payer)
-        return receipt
-    return await intent.verify(credential, request)
+        return receipt_with_valid_method(receipt, credential.challenge.method)
+    return receipt_with_valid_method(
+        await intent.verify(credential, request), credential.challenge.method
+    )
 
 
 async def verify_or_challenge(
@@ -133,6 +140,11 @@ async def verify_or_challenge(
         If Authorization is valid:
             A tuple of (Credential, Receipt) for the successful payment.
 
+    Raises:
+        ValueError: If ``method`` is not lowercase letters only. It is checked before any
+            Challenge is issued or any intent hook runs, so an x402 payment never settles
+            for a route whose Receipt could not be sent.
+
     Example:
         result = await verify_or_challenge(
             authorization=request.headers.get("Authorization"),
@@ -155,6 +167,12 @@ async def verify_or_challenge(
         )
     """
     method_name = method or "tempo"
+    # The x402 path builds its Credential from this name rather than parsing one, so check
+    # it here: a name the grammar rejects would only fail once the payment had settled.
+    if not is_valid_payment_method_id(method_name):
+        raise ValueError(
+            f"Invalid payment method name {method_name!r}: use lowercase letters only (a-z)."
+        )
     request = transform_units(request)
 
     # A direct intent left to fall back to an in-memory replay store would only fail
