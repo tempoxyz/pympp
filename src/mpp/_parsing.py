@@ -137,7 +137,25 @@ def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[s
 
 
 def _escape_quoted(s: str) -> str:
-    """Escape a string for use in a quoted-string. Rejects CRLF."""
+    """Escape a string for use in a quoted-string.
+
+    A quoted-pair can only carry Latin-1 (RFC 9110 qdtext and obs-text), so
+    characters above U+00FF are rejected rather than encoded in a form the
+    peer would parse back differently. Rejects CRLF.
+    """
+    if any(ord(character) > 0xFF for character in s):
+        raise ParseError("Header value contains characters outside Latin-1")
+    return _escape_quoted_text(s)
+
+
+def _escape_quoted_text(s: str) -> str:
+    """Escape display text, such as a description, for use in a quoted-string.
+
+    Header values must be ByteStrings (code points up to U+00FF), so characters
+    above Latin-1 are written as \\uXXXX UTF-16 escapes, as mppx does. Parsers
+    follow quoted-pair semantics and read them back as ``uXXXX`` text, so use
+    this only for unbound display fields. Rejects CRLF.
+    """
     if "\r" in s or "\n" in s:
         raise ParseError("Header value contains invalid CRLF characters")
     escaped: list[str] = []
@@ -158,48 +176,22 @@ def _escape_quoted(s: str) -> str:
     return "".join(escaped)
 
 
-def _read_unicode_escape(s: str, index: int) -> int | None:
-    """Return the UTF-16 code unit in a ``uXXXX`` escape body, if present."""
-    if not s.startswith("u", index):
-        return None
-    digits = s[index + 1 : index + 5]
-    if len(digits) != 4 or not all(character in string.hexdigits for character in digits):
-        return None
-    return int(digits, 16)
-
-
 def _unescape_quoted(s: str) -> str:
-    """Unescape quoted-pairs and the UTF-16 escapes emitted by mppx."""
+    """Unescape quoted-pairs (RFC 9110): a backslash yields the next character.
+
+    A \\uXXXX escape is an ordinary quoted-pair, so it reads as ``uXXXX`` and
+    is never decoded: the realm and other bound values must parse the same way
+    in every SDK.
+    """
     result: list[str] = []
     index = 0
     while index < len(s):
-        if s[index] != "\\":
-            result.append(s[index])
+        if s[index] == "\\":
             index += 1
-            continue
-
+            if index >= len(s):
+                break
+        result.append(s[index])
         index += 1
-        if index >= len(s):
-            break
-
-        code = _read_unicode_escape(s, index)
-        if code is None:
-            result.append(s[index])
-            index += 1
-            continue
-        index += 5
-
-        if 0xD800 <= code <= 0xDBFF:
-            low = _read_unicode_escape(s, index + 1) if s.startswith("\\", index) else None
-            if low is not None and 0xDC00 <= low <= 0xDFFF:
-                result.append(chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)))
-                index += 6
-                continue
-            result.append("\ufffd")
-        elif 0xDC00 <= code <= 0xDFFF:
-            result.append("\ufffd")
-        else:
-            result.append(chr(code))
     return "".join(result)
 
 
@@ -392,7 +384,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     if challenge.expires:
         parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
     if challenge.description:
-        parts.append(f'description="{_escape_quoted(challenge.description)}"')
+        parts.append(f'description="{_escape_quoted_text(challenge.description)}"')
     # Emit the challenge's own spelling: a received challenge keeps the issuer's.
     credential_header = advertised_credential_header(challenge.header)
     if credential_header:
@@ -455,7 +447,7 @@ def parse_authorization(header: str) -> Credential:
     )
     if description is not None:
         # A retry can reflect this unsigned display field into WWW-Authenticate.
-        _escape_quoted(description)
+        _escape_quoted_text(description)
         if any(
             (ord(character) < 0x20 and character != "\t") or ord(character) == 0x7F
             for character in description
