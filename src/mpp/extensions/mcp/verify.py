@@ -40,6 +40,7 @@ from typing import Any
 import rfc8785
 
 from mpp import Challenge
+from mpp._parsing import parse_formatted_description
 from mpp._typing import is_dict
 from mpp.errors import PaymentRequiredError as CorePaymentRequiredError
 from mpp.extensions.mcp.constants import META_CREDENTIAL
@@ -136,7 +137,7 @@ async def verify_or_challenge(
 
     response = result.challenge
     challenges = [
-        _mcp_challenge(Challenge.from_www_authenticate(value))
+        _mcp_challenge(Challenge.from_www_authenticate(value), parse_formatted_description(value))
         for value in response.headers.get_list("www-authenticate")
     ]
     try:
@@ -156,12 +157,15 @@ async def verify_or_challenge(
     )
 
 
-def _mcp_challenge(challenge: Challenge) -> MCPChallenge:
+def _mcp_challenge(challenge: Challenge, description: str | None) -> MCPChallenge:
+    # The description is unbound display text: the header escapes characters above
+    # Latin-1 as \uXXXX, which the quoted-pair parser keeps as text, so take the
+    # configured description back from the header this server just formatted.
     return MCPChallenge.from_core(
         challenge,
         realm=challenge.realm,
         expires=challenge.expires,
-        description=challenge.description,
+        description=description,
     )
 
 

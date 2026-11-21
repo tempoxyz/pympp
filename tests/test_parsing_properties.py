@@ -49,7 +49,10 @@ def assert_only_parse_error(parse: Any, header: str) -> None:
 
 # Strategies -----------------------------------------------------------------
 
-header_text = st.text().filter(lambda value: "\r" not in value and "\n" not in value)
+# Quoted auth-params carry Latin-1 only; characters above it are rejected on format.
+header_text = st.text(st.characters(max_codepoint=0xFF)).filter(
+    lambda value: "\r" not in value and "\n" not in value
+)
 nonempty_header_text = header_text.filter(bool)
 scheme_like_text = st.tuples(
     header_text,
