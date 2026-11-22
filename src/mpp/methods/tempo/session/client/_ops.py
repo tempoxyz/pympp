@@ -141,11 +141,17 @@ def serialize_credential(
     chain_id: int,
     account: TempoAccount,
 ) -> str:
-    """Serialize a session credential with a DID source bound to the payer account."""
+    """Serialize a session credential with a DID source bound to the channel's funding payer.
+
+    The source names the payer from the payload's channel descriptor, falling back to
+    ``account``, so a delegated voucher signer still identifies the funding account.
+    """
+    descriptor = payload.channel_descriptor()
+    payer = descriptor.payer if descriptor is not None else account.address
     return Credential(
         challenge=challenge.to_echo(),
         payload=payload.to_wire(),
-        source=f"did:pkh:eip155:{chain_id}:{account.address}",
+        source=f"did:pkh:eip155:{chain_id}:{payer}",
     ).to_authorization()
 
 
