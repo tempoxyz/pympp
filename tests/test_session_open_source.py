@@ -104,6 +104,10 @@ async def test_open_source_transaction_authentication(
             await check
     if kind in ("active key", "inline key"):
         assert len(calls) == 1
+        # getKey(account, keyId): the access key is read, never the payer as its own key.
+        data = calls[0][0]["data"].lower()
+        assert data.endswith(ACCESS.address.lower().removeprefix("0x").zfill(64))
+        assert PAYER.address.lower().removeprefix("0x") in data[:-64]
 
 
 def key_state(*, expiry: int = 9_999_999_999, revoked: bool = False) -> str:
@@ -127,12 +131,21 @@ async def check_source(transaction: str) -> None:
 async def test_open_source_rejects_an_inline_authorization_for_a_revoked_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    keys: list[str] = []
+
     async def rpc(url: str, method: str, params: list[Any], client: Any) -> str:
-        return hex(CHAIN_ID) if method == "eth_chainId" else key_state(revoked=True)
+        if method == "eth_chainId":
+            return hex(CHAIN_ID)
+        data = params[0]["data"].lower()
+        keys.append("0x" + data[-40:])
+        # Only the authorized access key is revoked; the payer's own address is not a key.
+        revoked = data.endswith(ACCESS.address.lower().removeprefix("0x"))
+        return key_state(revoked=revoked)
 
     monkeypatch.setattr(chain, "_rpc", rpc)
     with pytest.raises(VerificationFailedError, match=NOT_AUTHENTICATED):
         await check_source(inline())
+    assert keys == [ACCESS.address.lower()]
 
 
 @pytest.mark.parametrize("kind", ["active key", "inline key"])

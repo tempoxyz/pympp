@@ -293,16 +293,21 @@ async def _signature_authenticates_payer(
         if not is_list(authorization) or len(authorization) != 2:
             return False
         items = authorization[0]
-        if not is_list(items) or len(items) < 3:
+        if not is_list(items) or len(items) < 3 or not isinstance(items[2], bytes):
             return False
         key_chain_id = _rlp_uint(items[0])
         expiry = _rlp_uint(items[3]) if len(items) > 3 else 0
         if not (_same(signer, payer) and key_chain_id in (0, chain_id)):
             return False
         # The chain refuses to authorize a revoked key again, so an earlier revocation makes
-        # the payer's authorization unusable.
+        # the payer's authorization unusable. Read the key the authorization names (which
+        # verified_payer matched to the keychain signer), not the payer that signed it.
         _, revoked = await _read_access_key(
-            rpc_url, chain_id=chain_id, account=payer, access_key=signer, client=client
+            rpc_url,
+            chain_id=chain_id,
+            account=payer,
+            access_key="0x" + items[2].hex(),
+            client=client,
         )
         return not revoked and (expiry == 0 or expiry > time.time())
     key_expiry, revoked = await _read_access_key(
