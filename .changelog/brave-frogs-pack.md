@@ -2,4 +2,4 @@
 pympp: patch
 ---
 
-Fixed session credential source binding to use the channel's funding payer instead of the signing account, ensuring delegated voucher signers still identify the funding account. Updated server-side verification to only accept the channel payer as a valid credential source, with voucher signing authority checked separately.
+Bound a session credential's source to the channel's funding payer rather than the voucher signer, so a delegated voucher signer still names the funding account; the server accepts only the channel payer as the source and checks voucher signing authority separately (mppx#1326).
