@@ -3572,11 +3572,16 @@ class TestClientZoneRedactedOutbox:
         assert reads == []
 
     @pytest.mark.asyncio
-    async def test_a_slow_derivation_keeps_a_concurrent_retrys_tags(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("older_finishes_first", [True, False])
+    async def test_the_most_recently_observed_block_keeps_its_tags(
+        self, monkeypatch: pytest.MonkeyPatch, older_finishes_first: bool
     ) -> None:
+        # Two overlapping retries: the first's receipt lookup names block 10, the
+        # second's, after a reorg, block 11. Whichever outbox read finishes first, the
+        # tags of block 11 are the ones kept.
         calls: list[str] = []
-        zone = redacting_zone(calls, included_in=lambda: ZONE_BLOCK_11_FORK)
+        blocks = iter([ZONE_BLOCK_10, ZONE_BLOCK_11_FORK])
+        zone = redacting_zone(calls, included_in=lambda: next(blocks))
         method = payer_method(zone)
         withdrawal = tempo_client._ZoneWithdrawal(
             block_hash=ZONE_BLOCK_10,
@@ -3584,18 +3589,71 @@ class TestClientZoneRedactedOutbox:
             transaction_hash=REDACTED_TX,
             sender_tags=None,
         )
-        older = (ZONE_BLOCK_10, ("0x" + "01" * 32,))
-        newer = (ZONE_BLOCK_10_FORK, ("0x" + "02" * 32,))
-        state = tempo_client._ZoneSend(derivation_started=True, derived_sender_tags=older)
+        tags = {ZONE_BLOCK_10: ("0x" + "01" * 32,), ZONE_BLOCK_11_FORK: ("0x" + "02" * 32,)}
+        reading = {block: asyncio.Event() for block in tags}
+        release = {block: asyncio.Event() for block in tags}
+        state = tempo_client._ZoneSend(derivation_started=True)
 
-        async def candidates(*args: Any, **kwargs: Any) -> tuple[str, ...]:
-            # A concurrent retry keeps other tags while this one reads the outbox.
-            state.derived_sender_tags = newer
-            return ("0x" + "03" * 32,)
+        async def candidates(*args: Any, block_hash: str, **kwargs: Any) -> tuple[str, ...]:
+            reading[block_hash].set()
+            await release[block_hash].wait()
+            return tags[block_hash]
 
         monkeypatch.setattr(tempo_client._zones, "sender_tag_candidates", candidates)
-        assert await method._derive_zone_sender_tags(withdrawal, state, 5) == ("0x" + "03" * 32,)
-        assert state.derived_sender_tags is newer
+        older = asyncio.ensure_future(method._derive_zone_sender_tags(withdrawal, state, 5))
+        await asyncio.wait_for(reading[ZONE_BLOCK_10].wait(), 1)
+        newer = asyncio.ensure_future(method._derive_zone_sender_tags(withdrawal, state, 5))
+        await asyncio.wait_for(reading[ZONE_BLOCK_11_FORK].wait(), 1)
+
+        first, second = (older, newer) if older_finishes_first else (newer, older)
+        order = [ZONE_BLOCK_10, ZONE_BLOCK_11_FORK]
+        if not older_finishes_first:
+            order.reverse()
+        release[order[0]].set()
+        await first
+        release[order[1]].set()
+        await second
+        assert older.result() == tags[ZONE_BLOCK_10]
+        assert newer.result() == tags[ZONE_BLOCK_11_FORK]
+        assert state.derived_sender_tags == (ZONE_BLOCK_11_FORK, tags[ZONE_BLOCK_11_FORK])
+
+    @pytest.mark.asyncio
+    async def test_a_newer_lookup_of_the_kept_block_outranks_an_older_derivation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A retry that looked the receipt up before a reorg was undone still reads block
+        # 11's outbox when a later retry finds the receipt back in block 10, whose tags
+        # are kept: block 10's tags stay.
+        calls: list[str] = []
+        included = ZONE_BLOCK_11_FORK
+        zone = redacting_zone(calls, included_in=lambda: included)
+        method = payer_method(zone)
+        withdrawal = tempo_client._ZoneWithdrawal(
+            block_hash=ZONE_BLOCK_10,
+            sender=PAYER.address,
+            transaction_hash=REDACTED_TX,
+            sender_tags=None,
+        )
+        kept = (ZONE_BLOCK_10, ("0x" + "01" * 32,))
+        state = tempo_client._ZoneSend(
+            derivation_started=True, derived_sender_tags=kept, observations=1, derived_observation=1
+        )
+        reading = asyncio.Event()
+        release = asyncio.Event()
+
+        async def candidates(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+            reading.set()
+            await release.wait()
+            return ("0x" + "02" * 32,)
+
+        monkeypatch.setattr(tempo_client._zones, "sender_tag_candidates", candidates)
+        older = asyncio.ensure_future(method._derive_zone_sender_tags(withdrawal, state, 5))
+        await asyncio.wait_for(reading.wait(), 1)
+        included = ZONE_BLOCK_10
+        assert await method._derive_zone_sender_tags(withdrawal, state, 5) == kept[1]
+        release.set()
+        assert await older == ("0x" + "02" * 32,)
+        assert state.derived_sender_tags is kept
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
