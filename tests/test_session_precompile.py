@@ -203,7 +203,7 @@ class TestVoucher:
     def test_sign_voucher_rejects_out_of_range_s(self, bad_s: int) -> None:
         class BadSigner:
             def sign_hash(self, msg_hash: bytes) -> bytes:
-                return b"" * 32 + bad_s.to_bytes(32, "big") + bytes([27])
+                return bytes([1]) * 32 + bad_s.to_bytes(32, "big") + bytes([27])
 
         with pytest.raises(ValueError, match="out of range"):
             voucher.sign_voucher(
