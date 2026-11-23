@@ -17,6 +17,7 @@ from eth_abi.abi import encode
 from eth_hash.auto import keccak
 
 from mpp.methods.tempo.session._configurable import (
+    _SECP256K1_N,  # pyright: ignore[reportPrivateUsage]
     SIGNATURE_TYPE_CONFIGURABLE_ACCOUNT,
     is_configurable_signature,
     is_zero_hash,
@@ -150,7 +151,8 @@ def _recover_canonical(signature: str, digest: str) -> str | None:
 
     Keychain wrappers, multisig, magic-suffixed and non-canonical encodings
     (`v` other than 27 or 28) are rejected, as ox's `SignatureEnvelope` round trip
-    does in mppx. P256 and WebAuthn primitive signatures are not supported yet.
+    does in mppx, and so are high-s signatures, which Tempo does not accept. P256 and
+    WebAuthn primitive signatures are not supported yet.
     """
     from eth_account import Account
 
@@ -159,6 +161,10 @@ def _recover_canonical(signature: str, digest: str) -> str | None:
     except ValueError:
         return None
     if not signature.startswith("0x") or len(raw) != 65 or raw[64] not in (27, 28):
+        return None
+    # Tempo rejects high-s signatures, so a voucher carrying one could never be settled.
+    s = int.from_bytes(raw[32:64], "big")
+    if s == 0 or s > _SECP256K1_N // 2:
         return None
     try:
         return Account._recover_hash(  # pyright: ignore[reportPrivateUsage]
