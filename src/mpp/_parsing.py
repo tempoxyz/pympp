@@ -108,8 +108,9 @@ def _b64_encode(data: dict[str, Any]) -> str:
     return encoded.rstrip("=")
 
 
-# base64url (RFC 4648 §5). Trailing padding is still accepted, as mppx does.
-_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
+# base64url (RFC 4648 §5). Trailing padding is still accepted, as mppx does. The
+# possessive quantifier keeps rejection linear: no backtracking on a bad suffix.
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]++={0,2}")
 
 
 def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
