@@ -3508,3 +3508,112 @@ class TestClientZoneRedactedOutbox:
         assert isinstance(later, ZoneSettlementPendingError)
         assert later.sender_tags == first.sender_tags
         assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_of_a_new_block_keeps_the_derived_sender_tags(self) -> None:
+        calls: list[str] = []
+        settled = False
+        failing = False
+        included: Any = ZONE_BLOCK_10
+        zone = replace(
+            redacting_zone(
+                calls,
+                before=4,
+                after=6,
+                fail_reads=lambda: failing,
+                included_in=lambda: included,
+                nonces={ZONE_BLOCK_10_FORK: 7, ZONE_BLOCK_11_FORK: 8},
+            ),
+            settlement_timeout=0,
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        first = await error_of(method.create_credential(issued))
+        assert isinstance(first, ZoneSettlementPendingError)
+        assert len(first.sender_tags) == 2
+
+        # The receipt names another block, but its outbox can't be read: the tags derived
+        # for block 10 stay until the new block's tags are derived.
+        included = ZONE_BLOCK_11_FORK
+        failing = True
+        second = await error_of(method.create_credential(issued))
+        assert isinstance(second, ZoneSettlementPendingError)
+        [(_, state)] = method._zone_withdrawals.values()
+        assert state.derived_sender_tags == (ZONE_BLOCK_10, first.sender_tags)
+
+        # A later lookup that proves nothing falls back to them, not the unread block.
+        included = {"status": "0x0", "transactionHash": REDACTED_TX, "blockHash": ZONE_BLOCK_9}
+        settled = True
+        credential = await method.create_credential(issued)
+        assert credential.payload["senderTag"] == first.sender_tags[-1]
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_receipt_lookup_keeps_a_concurrent_retrys_block(self) -> None:
+        calls: list[str] = []
+        reads: list[Any] = []
+        zone = redacting_zone(calls, stall_receipts=lambda: True, reads=reads)
+        method = payer_method(zone)
+        withdrawal = tempo_client._ZoneWithdrawal(
+            block_hash=ZONE_BLOCK_10,
+            sender=PAYER.address,
+            transaction_hash=REDACTED_TX,
+            sender_tags=None,
+        )
+        older = (ZONE_BLOCK_10, ("0x" + "01" * 32,))
+        newer = (ZONE_BLOCK_11_FORK, ("0x" + "02" * 32,))
+        state = tempo_client._ZoneSend(derivation_started=True, derived_sender_tags=older)
+        derivation = asyncio.ensure_future(method._derive_zone_sender_tags(withdrawal, state, 0.2))
+        await asyncio.sleep(0.02)
+        # A concurrent retry keeps a newer block's tags while this one's lookup stalls.
+        state.derived_sender_tags = newer
+        assert await derivation == newer[1]
+        assert state.derived_sender_tags is newer
+        assert reads == []
+
+    @pytest.mark.asyncio
+    async def test_a_slow_derivation_keeps_a_concurrent_retrys_tags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        zone = redacting_zone(calls, included_in=lambda: ZONE_BLOCK_11_FORK)
+        method = payer_method(zone)
+        withdrawal = tempo_client._ZoneWithdrawal(
+            block_hash=ZONE_BLOCK_10,
+            sender=PAYER.address,
+            transaction_hash=REDACTED_TX,
+            sender_tags=None,
+        )
+        older = (ZONE_BLOCK_10, ("0x" + "01" * 32,))
+        newer = (ZONE_BLOCK_10_FORK, ("0x" + "02" * 32,))
+        state = tempo_client._ZoneSend(derivation_started=True, derived_sender_tags=older)
+
+        async def candidates(*args: Any, **kwargs: Any) -> tuple[str, ...]:
+            # A concurrent retry keeps other tags while this one reads the outbox.
+            state.derived_sender_tags = newer
+            return ("0x" + "03" * 32,)
+
+        monkeypatch.setattr(tempo_client._zones, "sender_tag_candidates", candidates)
+        assert await method._derive_zone_sender_tags(withdrawal, state, 5) == ("0x" + "03" * 32,)
+        assert state.derived_sender_tags is newer
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("before", "after", "reason"),
+        [
+            (5, 5, "did not request a withdrawal"),
+            (4, 4 + zone_lib.MAX_SENDER_TAG_CANDIDATES + 1, "more than 64"),
+        ],
+    )
+    async def test_an_underivable_sender_tag_reports_why(
+        self, before: int, after: int, reason: str
+    ) -> None:
+        calls: list[str] = []
+        method = payer_method(
+            redacting_zone(calls, before=before, after=after), stalling_l1(lambda: True)
+        )
+        error = await error_of(method.create_credential(await zone_challenge([3])))
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert error.transaction_hash == REDACTED_TX
+        assert reason in str(error.cause)
+        assert "names no withdrawal" not in str(error.cause)

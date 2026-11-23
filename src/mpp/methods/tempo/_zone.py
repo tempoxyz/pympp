@@ -285,8 +285,9 @@ def sender_tag(sender: str, transaction_hash: str, fallback_nonce: int) -> str:
 
 
 class SenderTagUnderivableError(ValueError):
-    """The Zone's outbox state names no withdrawal for a transaction, so its sender
-    tags can't be derived. The state is fixed, so reading it again doesn't help."""
+    """A transaction's sender tags can't be derived from the Zone's outbox state: its
+    block added no withdrawal, or more than ``MAX_SENDER_TAG_CANDIDATES``. The message
+    says which. The state is fixed, so reading it again doesn't help."""
 
 
 async def sender_tag_candidates(
