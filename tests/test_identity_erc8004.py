@@ -410,6 +410,36 @@ async def test_binds_the_query_on_an_encoded_hash_path_from_a_framework_request(
     assert isinstance(outcome, Rejected)
 
 
+class _DecodedPathOnlyRequest:
+    """A framework request that exposes the decoded path but no raw_path."""
+
+    method = "GET"
+
+    def __init__(self, path: str, query: bytes, headers: dict[str, str]) -> None:
+        self.url = f"{ORIGIN}{path}?{query.decode()}"
+        self.headers = headers
+        self.scope = {"type": "http", "path": path, "query_string": query}
+
+
+async def test_a_proof_for_an_encoded_hash_path_does_not_verify_for_an_encoded_percent() -> None:
+    from mpp.server.decorator import to_request
+
+    agents = setup()
+    headers = await _prove(f"{ORIGIN}/notes/a%23b?q=1")
+    # Wire path /notes/a%23b decodes to "/notes/a#b": the signed path.
+    hashed = await to_request(
+        _DecodedPathOnlyRequest("/notes/a#b", b"q=1", headers), read_body=False
+    )
+    assert str(hashed.url) == f"{ORIGIN}/notes/a%23b?q=1"
+    # Wire path /notes/a%2523b decodes to "/notes/a%23b": a different path.
+    percent = await to_request(
+        _DecodedPathOnlyRequest("/notes/a%23b", b"q=1", headers), read_body=False
+    )
+    assert str(percent.url) == f"{ORIGIN}/notes/a%2523b?q=1"
+    assert isinstance(await agents.verifier.verify(percent), Rejected)
+    assert isinstance(await agents.verifier.verify(hashed), Valid)
+
+
 # --- Hardening -----------------------------------------------------------------------------------
 
 

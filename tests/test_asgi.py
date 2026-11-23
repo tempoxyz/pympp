@@ -193,3 +193,12 @@ async def test_paid_response_keeps_non_ascii_header_bytes():
 async def test_fallback_url_keeps_a_decoded_hash_in_the_path():
     sent = await _call(_middleware(), _scope(path="/items/a#b", query_string=b"x=1"))
     assert _challenge(sent).request["_mppx_scope"]["resource"] == "/items/a%23b"
+
+
+@pytest.mark.asyncio
+async def test_fallback_url_keeps_a_decoded_percent_distinct_from_a_decoded_hash():
+    # Wire paths /items/a%23b and /items/a%2523b decode to "/items/a#b" and "/items/a%23b".
+    hashed = await _call(_middleware(), _scope(path="/items/a#b"))
+    percent = await _call(_middleware(), _scope(path="/items/a%23b"))
+    assert _challenge(hashed).request["_mppx_scope"]["resource"] == "/items/a%23b"
+    assert _challenge(percent).request["_mppx_scope"]["resource"] == "/items/a%2523b"

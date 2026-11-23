@@ -6,6 +6,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import TYPE_CHECKING, Any, TypeVar
+from urllib.parse import quote
 
 import httpx
 
@@ -36,6 +37,11 @@ def get_header(request: Any, name: str) -> str | None:
     if hasattr(request, "META"):
         return request.META.get("HTTP_" + name.upper().replace("-", "_"))
     return None
+
+
+# Path characters left as they are when a decoded path is encoded again: RFC 3986 pchar
+# and "/", without "%", so a literal "%" in the decoded path becomes "%25".
+_PATH_SAFE = "/:@!$&'()*+,;=-._~"
 
 
 def get_request_url(request: Any) -> str | None:
@@ -76,8 +82,12 @@ def get_request_url(request: Any) -> str | None:
                 target = raw_path.split(b"?", 1)[0] + (b"?" + query if query else b"")
                 text = str(parsed.copy_with(raw_path=target, fragment=None))
             elif isinstance(path, str) and path:
-                path = path.replace("?", "%3F").replace("#", "%23")
-                text = str(parsed.copy_with(path=path, query=query or None, fragment=None))
+                # Encode the decoded path as data, "%" included, so a decoded "%23" stays
+                # distinct from a decoded "#".
+                target = quote(path, safe=_PATH_SAFE).encode("ascii")
+                if query:
+                    target += b"?" + query
+                text = str(parsed.copy_with(raw_path=target, fragment=None))
         except (httpx.InvalidURL, UnicodeError):
             pass
     return text

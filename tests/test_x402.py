@@ -490,6 +490,13 @@ class TestServerHelpers:
 
         assert get_request_url(DecodedPath()) == "https://api.example.com/a%23b?x=1"
         assert get_request_url(DecodedPathWithoutRaw()) == "https://api.example.com/a%3Fb%23c?x=1"
+
+        class DecodedPercentWithoutRaw:
+            # The wire path /a%2523b decodes to "/a%23b", which is not the path /a%23b.
+            url = "https://api.example.com/a%23b?x=1"
+            scope: ClassVar[dict[str, object]] = {"path": "/a%23b", "query_string": b"x=1"}
+
+        assert get_request_url(DecodedPercentWithoutRaw()) == "https://api.example.com/a%2523b?x=1"
         assert get_request_url(Djangoish()) == "https://api.example.com/django"
         assert get_request_url(Broken()) is None
         assert get_request_url(object()) is None

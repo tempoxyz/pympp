@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, MutableMapping
 from typing import Any, TypeAlias
+from urllib.parse import quote
 
 import httpx
 
@@ -38,6 +39,11 @@ class _ClientDisconnected(Exception):
 
 def _decode(headers: Any) -> list[tuple[str, str]]:
     return [(name.decode("latin-1"), value.decode("latin-1")) for name, value in headers or ()]
+
+
+# Path characters left as they are when a decoded path is encoded again: RFC 3986 pchar
+# and "/", without "%", so a literal "%" in the decoded path becomes "%25".
+_PATH_SAFE = "/:@!$&'()*+,;=-._~"
 
 
 def _url(scope: Scope, headers: list[tuple[str, str]]) -> str:
@@ -67,9 +73,10 @@ def _url(scope: Scope, headers: list[tuple[str, str]]) -> str:
     if raw_path:
         url = url.copy_with(raw_path=raw_path.split(b"?", 1)[0] + (b"?" + query if query else b""))
     else:
-        # Keep a decoded "?" or "#" in the path from becoming the query or a fragment.
-        path = (scope.get("path") or "/").replace("?", "%3F").replace("#", "%23")
-        url = url.copy_with(path=path, query=query or None)
+        # Encode the decoded path as data, "%" included, so a decoded "?" or "#" stays in
+        # the path and a decoded "%23" stays distinct from a decoded "#".
+        path = quote(scope.get("path") or "/", safe=_PATH_SAFE).encode("ascii")
+        url = url.copy_with(raw_path=path + (b"?" + query if query else b""))
     return str(url)
 
 
