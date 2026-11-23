@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge
-from mpp._parsing import ParseError
+from mpp._parsing import ParseError, is_legacy_unicode_escaped
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.client import (
@@ -129,7 +129,8 @@ def session_challenges(response: httpx.Response) -> list[Challenge]:
                 challenge = Challenge.from_www_authenticate(field)
             except ParseError:
                 continue
-            if is_tip1034_session_challenge(challenge):
+            # A legacy \uXXXX-escaped challenge would be rejected after signing: skip it.
+            if is_tip1034_session_challenge(challenge) and not is_legacy_unicode_escaped(challenge):
                 found.append(challenge)
     return found
 

@@ -471,7 +471,9 @@ class PaymentTransport(httpx.AsyncBaseTransport):
                     # rejected credential) is the server's final answer (mppx Fetch).
                     if retry > 0:
                         return response
-                    error = NoMethodFoundError(challenges, self._runtime.methods)
+                    error = self._runtime._legacy_error(  # pyright: ignore[reportPrivateUsage]
+                        challenges
+                    ) or NoMethodFoundError(challenges, self._runtime.methods)
                     await self._events.emit(
                         PAYMENT_FAILED,
                         _client_payment_failed_payload(

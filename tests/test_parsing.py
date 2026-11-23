@@ -15,6 +15,7 @@ from mpp._parsing import (
     MAX_HEADER_PAYLOAD_SIZE,
     ParseError,
     _unescape_quoted_text,
+    is_legacy_unicode_escaped,
     parse_formatted_description,
 )
 from mpp.server.verify import _extract_payment_scheme
@@ -358,6 +359,45 @@ class TestChallenge:
         )
 
         assert Challenge.from_www_authenticate(header).realm == "merchantu2014api.example.com"
+
+    @pytest.mark.parametrize(
+        ("params", "legacy"),
+        [
+            ('realm="caf\\u00e9.example.com"', True),
+            ('realm="merchant\\u2014api.example.com"', True),
+            ('realm="caf\\u00E9.example.com"', True),
+            ('realm="api.example.com", digest="sha-256=\\u00e9"', True),
+            ('realm="api.example.com", opaque-ext="\\u00e9"', True),
+            ('realm="say \\"hi\\" \\\\ api.example.com"', False),
+            # An escaped backslash followed by u00e9 is a literal backslash, not an escape.
+            ('realm="caf\\\\u00e9.example.com"', False),
+            ('realm="caf\\u00g9.example.com"', False),
+            ('realm="caf\\u00e"', False),
+            ('realm="api.example.com", description="caf\\u00e9 \\u2014"', False),
+        ],
+    )
+    def test_flags_legacy_unicode_escapes_in_bound_params(self, params: str, legacy: bool) -> None:
+        header = f'Payment id="x", {params}, method="tempo", intent="charge", request="e30"'
+
+        challenge = Challenge.from_www_authenticate(header)
+
+        assert is_legacy_unicode_escaped(challenge) is legacy
+
+    def test_legacy_flag_is_not_part_of_the_challenge(self) -> None:
+        header = (
+            'Payment id="x", realm="caf\\u00e9.example.com", method="tempo", '
+            'intent="charge", request="e30"'
+        )
+        legacy = Challenge.from_www_authenticate(header)
+        plain = replace(legacy, _legacy_unicode_escape=False)
+
+        assert is_legacy_unicode_escaped(legacy)
+        assert not is_legacy_unicode_escaped(plain)
+        assert legacy.realm == "cafu00e9.example.com"
+        assert legacy == plain
+        assert "legacy" not in repr(legacy)
+        assert legacy.to_www_authenticate(legacy.realm) == plain.to_www_authenticate(plain.realm)
+        assert legacy.to_echo() == plain.to_echo()
 
     @pytest.mark.parametrize("field", ["id", "realm", "intent", "digest"])
     def test_format_rejects_non_latin1_in_bound_params(self, field: str) -> None:

@@ -275,14 +275,39 @@ def parse_formatted_description(header: str) -> str | None:
     return _parse_auth_params(header[8:].strip(), _unescape_quoted_text).get("description")
 
 
+def _has_unicode_escape(raw: str) -> bool:
+    """Whether a raw quoted-string value holds a \\uXXXX escape.
+
+    Walks the quoted-pairs, so an escaped backslash followed by ``uXXXX`` (a literal
+    backslash in the value) is not one.
+    """
+    index = 0
+    while index < len(raw):
+        if raw[index] == "\\":
+            digits = raw[index + 2 : index + 6]
+            if (
+                raw[index + 1 : index + 2] == "u"
+                and len(digits) == 4
+                and all(digit in string.hexdigits for digit in digits)
+            ):
+                return True
+            index += 2
+        else:
+            index += 1
+    return False
+
+
 def _parse_auth_params(
-    params_str: str, unescape: Callable[[str], str] = _unescape_quoted
+    params_str: str,
+    unescape: Callable[[str], str] = _unescape_quoted,
+    quoted_raw: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs.
 
     Consumes the input sequentially like mppx's `parseAuthParams`: a position that
     cannot begin an auth-param is rejected rather than skipped, and parsing stops
-    at a token without `=`, which begins another auth scheme.
+    at a token without `=`, which begins another auth scheme. When ``quoted_raw``
+    is given, it receives each quoted value as written, before unescaping.
     """
     if len(params_str) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authentication parameters exceed maximum size")
@@ -312,7 +337,10 @@ def _parse_auth_params(
             index += 1
 
         if index < length and params_str[index] == '"':
-            value, index = _read_quoted_auth_param(params_str, index + 1, unescape)
+            start = index + 1
+            value, index = _read_quoted_auth_param(params_str, start, unescape)
+            if quoted_raw is not None:
+                quoted_raw[key] = params_str[start : index - 1]
         else:
             value_end = params_str.find(",", index)
             if value_end == -1:
@@ -343,6 +371,16 @@ def _read_quoted_auth_param(
     raise ParseError("Unterminated quoted-string")
 
 
+def is_legacy_unicode_escaped(challenge: object) -> bool:
+    """Whether a parsed challenge escaped a bound parameter as \\uXXXX.
+
+    Servers before quoted-pair parsing wrote characters above U+00FF that way. The value
+    read differs from the one the challenge ID binds, so clients never pay such a
+    challenge (mppx ``Challenge.isLegacyUnicodeEscaped``).
+    """
+    return getattr(challenge, "_legacy_unicode_escape", False) is True
+
+
 def parse_www_authenticate(header: str) -> Challenge:
     """Parse a WWW-Authenticate header into a Challenge.
 
@@ -362,7 +400,8 @@ def parse_www_authenticate(header: str) -> Challenge:
         raise ParseError("Expected 'Payment' authentication scheme")
 
     params_str = header[8:].strip()
-    params = _parse_auth_params(params_str)
+    quoted_raw: dict[str, str] = {}
+    params = _parse_auth_params(params_str, quoted_raw=quoted_raw)
 
     # Extract required fields
     id_ = params.get("id")
@@ -425,6 +464,12 @@ def parse_www_authenticate(header: str) -> Challenge:
         # Keep the issuer's string only when it is strict base64url, so that
         # echoing or re-formatting it cannot inject header parameters.
         _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
+        # Servers before quoted-pair parsing wrote characters above U+00FF as \uXXXX. Such
+        # a bound value now reads as ``uXXXX``, which the challenge ID does not bind, so
+        # clients refuse the challenge before paying. ``description`` is not bound.
+        _legacy_unicode_escape=any(
+            _has_unicode_escape(raw) for key, raw in quoted_raw.items() if key != "description"
+        ),
     )
     return with_received_credential_header(challenge, credential_header)
 
