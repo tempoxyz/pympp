@@ -355,6 +355,48 @@ module mpp.extensions
 
 module mpp.extensions.identity
 
+module mpp.extensions.identity.persona
+    API_URL = 'https://api.withpersona.com'
+    API_VERSION = '2023-01-05'
+    CACHE_TTL = 300
+    INQUIRIES_PATH = '/api/v1/inquiries'
+    ISSUER = 'https://api.withpersona.com'
+    MAX_PAGES = 3
+    REL = 'kyc'
+    STATUSES = ('approved',)
+    TIMEOUT = 5.0
+    TYPE = 'kyc'
+    InquiryStatus = typing.Literal['created', 'pending', 'completed', 'approved', 'declined', 'failed', 'expired', 'needs_review']
+    class StartedInquiry
+        @dataclass(frozen=True, slots=True)
+        field inquiry_id: str
+        field url: str
+    class VerifiedInquiry
+        @dataclass(frozen=True, slots=True)
+        field inquiry_id: str
+        field reference_id: str
+        field status: InquiryStatus
+        field verified_at: datetime | None = None
+    def did(address: str, chain_id: int | str, namespace: str = 'eip155') -> str
+    def normalize(value: str) -> str
+    server: module
+
+module mpp.extensions.identity.persona.server
+    Onboarding = 'str | Callable[[Request, str | None], str | None | Awaitable[str | None]]'
+    PaymentReferenceId = 'Callable[[PaymentCheckInput], str | None | Awaitable[str | None]]'
+    class Persona
+        def __init__(self, api: _Api, template_id: str | None) -> None
+        def payment_check(self, *, reference_id: PaymentReferenceId, statuses: Sequence[InquiryStatus] = ('approved',), max_age: int | None = None, onboarding: Onboarding | None = None, cache: Store | None = None, cache_ttl: float = 300) -> PaymentCheck[VerifiedInquiry]
+        async def start_inquiry(self, reference_id: str, *, template_id: str | None = None, redirect_uri: str | None = None) -> StartedInquiry
+        def verifier(self, *, reference_id: RequestReferenceId, statuses: Sequence[InquiryStatus] = ('approved',), max_age: int | None = None, onboarding: Onboarding | None = None, cache: Store | None = None, cache_ttl: float = 300) -> Verifier[VerifiedInquiry]
+    class PersonaError(Exception)
+    RequestReferenceId = 'Callable[[Request], str | None | Awaitable[str | None]]'
+    class WalletVerifier(typing.Protocol)
+        def __call__(self, *, address: str, chain_id: int, message: str, signature: str) -> bool | Awaitable[bool]
+        def __init__(self, *args, **kwargs)
+    def create(*, api_key: str, template_id: str | None = None, api_url: str = 'https://api.withpersona.com', api_version: str = '2023-01-05', transport: httpx.AsyncBaseTransport | None = None, timeout: float = 5.0) -> Persona
+    async def verify_wallet(*, address: str, chain_id: int, message: str, signature: str, nonce: str, verify: WalletVerifier | None = None) -> str
+
 module mpp.extensions.identity.tempo
     CLOCK_TOLERANCE = 60
     DEFAULT_CHAIN_ID = 4217

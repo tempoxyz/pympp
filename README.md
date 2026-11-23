@@ -179,6 +179,21 @@ request carries none, or raise `identity.RejectionError`), and `identity.any_of`
 first of several. Tempo ID's payment check requires a `tempo` payment from an account the
 user's token grants to the app; install it with `pip install "pympp[tempo-id]"`.
 
+Persona KYC (`mpp.extensions.identity.persona`) requires an approved Persona inquiry on the
+paid retry, looked up by a reference ID you derive from something your server authenticated,
+such as a wallet DID that `persona.server.verify_wallet` linked to the person:
+
+```python
+from mpp.extensions.identity import persona
+
+kyc = persona.server.create(api_key=PERSONA_API_KEY, template_id="itmpl_...")
+check = kyc.payment_check(reference_id=session_wallet, onboarding="https://api.example.com/kyc")
+handler = mpp.charge(amount="0.01", identity=identity.Route(payment=check))
+```
+
+A payer without one gets a 401 or 403 with `Link: <onboarding>; rel="kyc"`, where your
+endpoint calls `kyc.start_inquiry(reference_id)` for a one-time link to Persona's flow.
+
 On the client, provers add identity proofs to requests to their scope:
 
 ```python
