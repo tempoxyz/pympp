@@ -172,6 +172,17 @@ class TestProof:
         assert not verify_proof("0xzz", account=PAYER.address, **verify)
         assert not verify_proof(signature, account="not-an-address", **verify)
 
+    def test_accepts_high_s_proofs(self) -> None:
+        n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        raw = bytes.fromhex(
+            sign_proof(PAYER, chain_id=CHAIN_ID, challenge_id="c", realm="r").removeprefix("0x")
+        )
+        s = int.from_bytes(raw[32:64], "big")
+        high_s = "0x" + (raw[:32] + (n - s).to_bytes(32, "big") + bytes([55 - raw[64]])).hex()
+        assert verify_proof(
+            high_s, account=PAYER.address, chain_id=CHAIN_ID, challenge_id="c", realm="r"
+        )
+
     def test_pkh_sources(self) -> None:
         assert parse_pkh_source(SOURCE) == (PAYER.address, CHAIN_ID)
         for bad in ("did:pkh:eip155:01:" + PAYER.address, "did:pkh:eip155:1:0x12", "x"):

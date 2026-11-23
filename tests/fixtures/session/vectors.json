@@ -208,7 +208,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -257,7 +257,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -306,7 +306,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -355,7 +355,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -404,7 +404,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -453,7 +453,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -502,7 +502,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -551,7 +551,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -600,7 +600,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -649,7 +649,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -698,7 +698,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
@@ -747,7 +747,7 @@
           "other": false
         },
         "highS": {
-          "payer": true,
+          "payer": false,
           "other": false
         },
         "uppercase": {
