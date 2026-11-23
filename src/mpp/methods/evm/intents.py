@@ -214,7 +214,10 @@ def _within_bounds(value: Any, depth_limit: int, size_limit: int) -> bool:
         children: list[Any]
         if is_mapping(node):
             mapping: Mapping[Any, Any] = node
-            budget -= sum(len(key) if isinstance(key, str) else 1 for key in mapping)
+            # JSON names are strings; a non-string key could collide with one (1 and "1").
+            if not all(isinstance(key, str) for key in mapping):
+                return False
+            budget -= sum(len(key) for key in mapping)
             children = list(mapping.values())
         elif isinstance(node, list | tuple):
             children = list(cast("list[Any] | tuple[Any, ...]", node))
@@ -660,13 +663,15 @@ class ChargeIntent:
             if self._store is not None:
                 await self._store.delete(claim_key)
             raise
+        # Snapshot before the next await so a settler that reuses one mapping across
+        # payments can't change this receipt's extensions.
+        settled_extensions = _json_extensions(extensions)
         if memory is not None:
             # compare_and_set keeps the claim's expiry; put would make it permanent.
             await memory.compare_and_set(claim_key, "pending", reference)
         elif self._store is not None:
             await self._store.put(claim_key, reference)
 
-        settled_extensions = _json_extensions(extensions)
         return Receipt(
             status="success",
             timestamp=datetime.now(UTC),

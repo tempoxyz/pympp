@@ -94,7 +94,7 @@ class VerifyResponse(TypedDict):
     invalidMessage: NotRequired[str]
     payer: NotRequired[str]
     extensions: NotRequired[dict[str, Any]]
-    """Response data shaped by each extension, unlike ``PAYMENT-RE`UIRED``'s ``{info, schema}``."""
+    """Response data shaped by each extension, unlike ``PAYMENT-REQUIRED``'s ``{info, schema}``."""
 
 
 class SettleResponse(TypedDict):

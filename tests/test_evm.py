@@ -632,6 +632,8 @@ class TestBroadcast:
             {"payout": {"amount": 2**53}},
             {"note": "\U0001f600" * 1020},
             {"wide": list(range(100_000))},
+            {1: "a", "1": "b"},
+            {"payout": {True: "a", "true": "b"}},
         ],
         ids=[
             "not-json",
@@ -644,6 +646,8 @@ class TestBroadcast:
             "unsafe-integer",
             "too-large-escaped",
             "too-wide",
+            "non-string-key",
+            "nested-non-string-key",
         ],
     )
     async def test_drops_settle_extensions_the_receipt_cannot_carry(self, extensions: Any) -> None:
@@ -657,6 +661,29 @@ class TestBroadcast:
         assert receipt.reference == "0xhook"
         assert receipt.extensions is None
         receipt.to_payment_receipt()
+
+    async def test_snapshots_settle_extensions_before_recording_the_claim(self) -> None:
+        shared: dict[str, Any] = {"payout": "first"}
+
+        class RefillingStore(MemoryStore):
+            async def compare_and_set(
+                self, key: str, expected: Any | None, value: Any | None
+            ) -> bool:
+                # Another payment reuses the settler's mapping while this one records its claim.
+                shared["payout"] = "second"
+                return await super().compare_and_set(key, expected, value)
+
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(reference="0xhook", extensions=shared),
+        )
+        intent = charge_intent(method)
+        intent._store = RefillingStore()
+        req = request(method)
+        receipt = await intent.broadcast(native_credential(req), req)
+        assert shared == {"payout": "second"}
+        assert receipt.extensions == {"extensions": {"payout": "first"}}
 
     async def test_keeps_settle_extensions_at_the_depth_limit(self) -> None:
         extensions = nested_object(6)  # 7 levels of objects plus the outer one
