@@ -2490,7 +2490,7 @@ async def test_refuses_legacy_unicode_escaped_challenge(realm: str) -> None:
 
     assert str(raised.value) == (
         "Legacy unicode-escaped challenge: the server escaped a bound parameter as "
-        "\\uXXXX; upgrade the server"
+        "\\uXXXX; upgrade the server."
     )
     assert isinstance(raised.value, NoMethodFoundError)
     method.create_credential.assert_not_awaited()

@@ -1899,7 +1899,11 @@ class TempoMethod:
 
 def _zone_withdrawal_key(challenge: Challenge) -> str:
     """Key a Zone withdrawal by its whole Challenge, so another realm's or request's
-    challenge with the same ID never matches."""
+    challenge with the same ID never matches.
+
+    The unbound description is left out: a header-parsed Challenge reads characters
+    above U+00FF in it as ``uXXXX`` text, so its structured form must match the same key.
+    """
     return json.dumps(
         [
             challenge.id,
@@ -1909,7 +1913,6 @@ def _zone_withdrawal_key(challenge: Challenge) -> str:
             challenge.request,
             challenge.expires,
             challenge.digest,
-            challenge.description,
             challenge.opaque,
         ],
         sort_keys=True,

@@ -2785,3 +2785,18 @@ class TestClientZoneOneWithdrawalPerIntent:
         assert origin(httpx.Request("GET", "https://API.example.com/paid")) == ORIGIN
         assert origin(httpx.Request("GET", "http://localhost:8443/x")) == "http://localhost:8443"
         assert origin(None) is None
+
+    def test_zone_withdrawal_key_ignores_the_unbound_description(self) -> None:
+        key = tempo_client._zone_withdrawal_key  # pyright: ignore[reportPrivateUsage]
+        issued = Challenge(
+            id="zone",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            realm=REALM,
+            description="caf\u00e9 \u2014",
+        )
+        parsed = Challenge.from_www_authenticate(issued.to_www_authenticate(REALM))
+        assert parsed.description != issued.description
+        assert key(parsed) == key(issued)
+        assert key(replace(issued, realm="other.example.com")) != key(issued)

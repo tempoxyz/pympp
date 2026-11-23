@@ -231,7 +231,7 @@ class LegacyUnicodeEscapedChallengeError(NoMethodFoundError):
             methods,
             message=(
                 "Legacy unicode-escaped challenge: the server escaped a bound parameter "
-                "as \\uXXXX; upgrade the server"
+                "as \\uXXXX; upgrade the server."
             ),
         )
 
