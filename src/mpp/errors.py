@@ -118,8 +118,8 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
     issued challenge for the same payment never starts a second withdrawal: from
     the origin that issued ``challenge_id`` it resumes this withdrawal and returns a
     credential for that challenge; otherwise it raises this error again.
-    The settlement can also be found by ``sender_tag`` on the Zone's portal.
-    The error that ended the wait is its ``__cause__``.
+    The settlement can also be found by ``sender_tag`` (or one of ``sender_tags``) on
+    the Zone's portal. The error that ended the wait is its ``__cause__``.
 
     With ``redeemed_late``, the withdrawal settled and its credential was returned
     after its challenge expired, so the server may still accept or refuse it: only a
@@ -135,6 +135,7 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
         zone_id: int,
         challenge: Any = None,
         redeemed_late: bool = False,
+        sender_tags: Sequence[str] | None = None,
     ) -> None:
         self.challenge = challenge
         """The pending Challenge (``mpp.Challenge``): retry with it to resume the wait."""
@@ -143,12 +144,27 @@ class ZoneSettlementPendingError(PaymentError, RuntimeError):
         challenge expired."""
         self.challenge_id = challenge_id
         """ID of the challenge the withdrawal pays."""
-        self.sender_tag = sender_tag
+        # A bare string is one tag, not a sequence of characters.
+        if isinstance(sender_tags, str):
+            sender_tags = (sender_tags,)
+        tags = (
+            tuple(sender_tags) if sender_tags is not None else (sender_tag,) if sender_tag else ()
+        )
+        self.sender_tags: tuple[str, ...] = tags
+        """Sender tags the withdrawal may carry: its tag alone when known, else every
+        candidate when a Zone RPC hid it, or none when not yet read."""
+        self.sender_tag = tags[0] if len(tags) == 1 else None
         """Sender tag of the withdrawal, as the portal's ``WithdrawalProcessed`` event has it,
-        or ``None`` when not yet read."""
+        or ``None`` when not yet read or more than one candidate remains (see
+        ``sender_tags``)."""
         self.zone_id = zone_id
         """ID of the Zone the withdrawal left."""
-        withdrawal = f"{sender_tag} " if sender_tag else ""
+        if len(tags) == 1:
+            withdrawal = f"{tags[0]} "
+        elif tags:
+            withdrawal = f"with sender tag {' or '.join(tags)} "
+        else:
+            withdrawal = ""
         if redeemed_late:
             message = (
                 f"Zone {zone_id} withdrawal {withdrawal}for challenge {challenge_id!r} "
