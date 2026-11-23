@@ -330,6 +330,9 @@ _ZONE_RECEIPT_RECOVERY_TIMEOUT = 15.0
 _ZONE_RECEIPT_FIRST_LOOKUP = 0.5
 # Gas added to the Zone's estimate for the signature, as the Tempo transfer path does.
 _ZONE_GAS_MARGIN = 5_000
+# Seconds a sender tag lookup on the Zone may take once the Challenge expired: a
+# settlement from before the expiry can still be redeemed within the server's grace.
+_ZONE_LATE_TAG_LOOKUP = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +378,10 @@ class _ZoneSend:
     redeemed_late: bool = False
     # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
     sender_tag: str | None = None
+    # Sender tags derived from the Zone's outbox when its receipt left the event out, kept
+    # so a retry looks the settlement up without reading the Zone again. They depend only
+    # on the withdrawal's block, which never changes for a sent transaction.
+    sender_tags: tuple[str, ...] | None = None
     # IDs of the newly issued Challenges that resumed this withdrawal. A later attempt
     # for one of them is the same request, even while it waits on the withdrawal itself.
     resumed_by: set[str] = field(default_factory=lambda: set[str]())
@@ -1492,9 +1499,7 @@ class TempoMethod:
             if state.redeemed_late:
                 raise ZoneSettlementPendingError(
                     challenge_id=earlier.id,
-                    sender_tags=(state.sender_tag,)
-                    if state.sender_tag
-                    else _zone_sender_tags(task),
+                    sender_tags=_zone_sender_tags(task, state),
                     zone_id=zone_id,
                     challenge=earlier,
                     redeemed_late=True,
@@ -1600,7 +1605,7 @@ class TempoMethod:
             if _zone_past_redemption(earlier.expires):
                 raise ZoneSettlementPendingError(
                     challenge_id=earlier.id,
-                    sender_tags=_zone_sender_tags(task),
+                    sender_tags=_zone_sender_tags(task, state),
                     zone_id=zone_id,
                     challenge=earlier,
                 )
@@ -1638,24 +1643,35 @@ class TempoMethod:
         zone = self.zone
         request = challenge.request
         withdrawal = await asyncio.shield(task)
-        # Derived on every attempt, so a failed read on the Zone is retried without
-        # withdrawing again: the withdrawal stays kept for this Challenge.
-        sender_tags = withdrawal.sender_tags
-        if sender_tags is None:
+        sender_tags = _zone_sender_tags(task, state)
+        if not sender_tags:
+            # Derived until a read succeeds, then kept. A failed or slow read on the Zone
+            # is resumable: the withdrawal stays kept for this Challenge, so a retry reads
+            # again without withdrawing again. The read stops at the Challenge's expiry,
+            # or after a short bound once it expired, since a settlement from before the
+            # expiry can still be redeemed within the server's grace.
+            time_left = _zone_time_left(challenge.expires)
             try:
-                sender_tags = await _zones.sender_tag_candidates(
-                    zone.rpc_url,
-                    block_number=withdrawal.block_number,
-                    sender=withdrawal.sender,
-                    transaction_hash=withdrawal.transaction_hash,
-                    client=zone.http_client,
+                sender_tags = await asyncio.wait_for(
+                    _zones.sender_tag_candidates(
+                        zone.rpc_url,
+                        block_number=withdrawal.block_number,
+                        sender=withdrawal.sender,
+                        transaction_hash=withdrawal.transaction_hash,
+                        client=zone.http_client,
+                    ),
+                    timeout=time_left if time_left else _ZONE_LATE_TAG_LOOKUP,
                 )
             except Exception as cause:
-                raise TransactionError(
+                failure = TransactionError(
                     f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
-                    "its sender tag could not be read from the Zone. Retry the challenge to "
-                    "resume without withdrawing again."
-                ) from cause
+                    "its sender tag could not be read from the Zone."
+                )
+                failure.__cause__ = cause
+                raise ZoneSettlementPendingError(
+                    challenge_id=challenge.id, zone_id=zone_id, challenge=challenge
+                ) from failure
+            state.sender_tags = sender_tags
 
         def searched_from(block: int) -> None:
             if state.search_from is None:
@@ -2019,11 +2035,21 @@ def _zone_past_redemption(expires: str | None) -> bool:
     return datetime.now(UTC) >= deadline
 
 
-def _zone_sender_tags(task: asyncio.Task[_ZoneWithdrawal]) -> tuple[str, ...] | None:
-    """The sender tag a finished withdrawal task's receipt carried, or ``None``."""
-    if not task.done() or task.cancelled() or task.exception() is not None:
-        return None
-    return task.result().sender_tags
+def _zone_sender_tags(
+    task: asyncio.Task[_ZoneWithdrawal], state: _ZoneSend
+) -> tuple[str, ...] | None:
+    """The sender tags known for a kept withdrawal, or ``None`` when none were read yet.
+
+    The tag its late credential carried comes first, then the tag its receipt carried,
+    then the candidates derived from the Zone's outbox.
+    """
+    if state.sender_tag:
+        return (state.sender_tag,)
+    if task.done() and not task.cancelled() and task.exception() is None:
+        tags = task.result().sender_tags
+        if tags is not None:
+            return tags
+    return state.sender_tags
 
 
 def _zone_block_number(value: object) -> int | None:

@@ -2897,12 +2897,18 @@ REDACTED_TX = "0x" + "cd" * 32
 
 
 def redacting_zone(
-    calls: list[str], *, before: int = 4, after: int = 5, fail_reads: Callable[[], bool] = bool
+    calls: list[str],
+    *,
+    before: int = 4,
+    after: int = 5,
+    fail_reads: Callable[[], bool] = bool,
+    stall_reads: Callable[[], bool] = bool,
 ) -> Zone:
     """A Zone RPC that leaves the outbox's event out of receipts, as production Zones do.
 
     Its outbox reports `before` at block 9 and `after` at block 10, the withdrawal's
-    block; historical reads fail while `fail_reads()`.
+    block; historical reads fail while `fail_reads()` and never answer while
+    `stall_reads()`.
     """
 
     async def handle(method: str, params: list[Any]) -> dict[str, Any]:
@@ -2912,6 +2918,8 @@ def redacting_zone(
             if block == "latest":
                 return {"result": "0x" + "00" * 32}
             assert call["to"] == zone_lib.ZONE_OUTBOX
+            if stall_reads():
+                await asyncio.sleep(3600)
             if fail_reads():
                 return {"error": {"code": -32000, "message": "read failed"}}
             return {"result": "0x" + f"{before if block == '0x9' else after:064x}"}
@@ -2955,10 +2963,14 @@ class TestClientZoneRedactedOutbox:
         )
         issued = await zone_challenge([3])
         error = await error_of(method.create_credential(issued))
-        assert isinstance(error, tempo_client.TransactionError)
-        assert "sender tag could not be read" in str(error)
-        assert REDACTED_TX in str(error)
-        assert error.__cause__ is not None
+        # Resumable: the withdrawal was sent, so the error names its Challenge.
+        assert isinstance(error, ZoneSettlementPendingError)
+        assert error.challenge is issued
+        assert error.sender_tags == ()
+        assert isinstance(error.__cause__, tempo_client.TransactionError)
+        assert "sender tag could not be read" in str(error.__cause__)
+        assert REDACTED_TX in str(error.__cause__)
+        assert error.__cause__.__cause__ is not None
 
         failing = False
         credential = await method.create_credential(issued)
@@ -2987,4 +2999,107 @@ class TestClientZoneRedactedOutbox:
         settled = True
         credential = await method.create_credential(issued)
         assert credential.payload["senderTag"] in candidates
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_the_http_transport_resumes_after_a_failed_sender_tag_read(self) -> None:
+        from mpp.client.transport import PaymentTransport
+
+        calls: list[str] = []
+        reads = 0
+
+        def fail_first_read() -> bool:
+            nonlocal reads
+            reads += 1
+            return reads == 1
+
+        method = payer_method(
+            redacting_zone(calls, fail_reads=fail_first_read), stalling_l1(lambda: True)
+        )
+        issued = await zone_challenge([3])
+        paid: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            if "authorization" in request.headers:
+                paid.append(request)
+                return httpx.Response(200)
+            return httpx.Response(
+                402, headers={"WWW-Authenticate": issued.to_www_authenticate(REALM)}
+            )
+
+        transport = PaymentTransport(
+            [tempo_client._client_method(method)], inner=httpx.MockTransport(respond)
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.get(f"https://{REALM}/paid")
+        assert response.status_code == 200
+        assert len(paid) == 1
+        credential = Credential.from_authorization(paid[0].headers["authorization"])
+        assert credential.challenge.id == issued.id
+        assert credential.payload["senderTag"] == zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retry_reuses_the_derived_sender_tags(self) -> None:
+        calls: list[str] = []
+        settled = False
+        reads_fail = False
+        zone = replace(
+            redacting_zone(calls, before=4, after=6, fail_reads=lambda: reads_fail),
+            settlement_timeout=0,
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        pending = await error_of(method.create_credential(issued))
+        assert isinstance(pending, ZoneSettlementPendingError)
+        candidates = pending.sender_tags
+        assert len(candidates) == 2
+
+        # The Zone can no longer serve its history: the kept tags still find the settlement.
+        reads_fail = True
+        settled = True
+        credential = await method.create_credential(issued)
+        assert credential.payload["senderTag"] in candidates
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_sender_tag_read_stops_at_the_challenge_expiry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        stalled = False
+        method = payer_method(
+            redacting_zone(calls, fail_reads=lambda: not stalled, stall_reads=lambda: stalled),
+            stalling_l1(lambda: True),
+        )
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+
+        stalled = True
+        monkeypatch.setattr(tempo_client, "_zone_time_left", lambda expires: 0.05)
+        pending = await error_of(asyncio.wait_for(method.create_credential(issued), 5))
+        assert isinstance(pending, ZoneSettlementPendingError)
+        assert pending.challenge is issued
+        assert isinstance(pending.__cause__, tempo_client.TransactionError)
+        assert isinstance(pending.__cause__.__cause__, TimeoutError)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_retry_past_redemption_names_the_derived_sender_tags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        zone = replace(redacting_zone(calls, before=4, after=6), settlement_timeout=0)
+        method = payer_method(zone, stalling_l1(lambda: False))
+        issued = await zone_challenge([3])
+        first = await error_of(method.create_credential(issued))
+        assert isinstance(first, ZoneSettlementPendingError)
+        assert len(first.sender_tags) == 2
+
+        monkeypatch.setattr(tempo_client, "_zone_past_redemption", lambda expires: True)
+        later = await error_of(method.create_credential(issued))
+        assert isinstance(later, ZoneSettlementPendingError)
+        assert later.sender_tags == first.sender_tags
         assert calls.count("eth_sendRawTransactionSync") == 1
