@@ -45,7 +45,13 @@ from mpp.x402._server import (
     route_nonce,
     route_requires_binding,
 )
-from mpp.x402._types import X402FormatError, parse_eip3009_payload, requirements_match
+from mpp.x402._types import (
+    X402FormatError,
+    parse_eip3009_payload,
+    parse_settle_response,
+    parse_verify_response,
+    requirements_match,
+)
 
 ASSET = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 PAY_TO = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
@@ -179,6 +185,15 @@ class TestHeaders:
         with pytest.raises(X402FormatError):
             encode_payment_response({"success": "yes"})  # type: ignore[arg-type]
 
+    def test_settle_and_verify_extensions_must_be_objects(self) -> None:
+        settled = {"success": True, "transaction": "0x1", "network": "eip155:1"}
+        with pytest.raises(X402FormatError, match="settleResponse.extensions"):
+            parse_settle_response({**settled, "extensions": ["x"]})
+        with pytest.raises(X402FormatError, match="verifyResponse.extensions"):
+            parse_verify_response({"isValid": True, "extensions": "x"})
+        value = {**settled, "extensions": {"payout": {"id": "p"}}}
+        assert parse_settle_response(value) == value
+
     def test_rejects_malformed_settle_responses(self) -> None:
         with pytest.raises(InvalidHeaderError):
             decode_payment_response(
@@ -280,6 +295,21 @@ class TestHttpFacilitator:
         httpx_mock.add_response(url="https://facilitator.example/settle", json=settled)
         facilitator = HttpFacilitator("https://facilitator.example")
         assert await facilitator.settle(payment(), requirements()) == settled  # type: ignore[arg-type]
+
+    async def test_settle_returns_extensions_shaped_by_the_facilitator(
+        self, httpx_mock: HTTPXMock
+    ) -> None:
+        extensions = {"tempoSettlement": {"payoutId": "payout_1", "status": "submitted"}}
+        settled = {
+            "success": True,
+            "transaction": "0x" + "1" * 64,
+            "network": "eip155:84532",
+            "extensions": extensions,
+        }
+        httpx_mock.add_response(url="https://facilitator.example/settle", json=settled)
+        facilitator = HttpFacilitator("https://facilitator.example")
+        result = await facilitator.settle(payment(), requirements())  # type: ignore[arg-type]
+        assert result.get("extensions") == extensions
 
     async def test_reads_json_error_bodies(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(

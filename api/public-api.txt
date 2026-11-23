@@ -661,7 +661,11 @@ module mpp.methods.evm.intents
         field payload: dict[str, Any]
         field request: dict[str, Any]
         field source: str
-    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | collections.abc.Awaitable[str]]
+    class Settlement
+        @dataclass(frozen=True, slots=True)
+        field reference: str
+        field extensions: dict[str, Any] | None = None
+    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | mpp.methods.evm.intents.Settlement | collections.abc.Awaitable[str] | collections.abc.Awaitable[mpp.methods.evm.intents.Settlement]]
     class AuthorizationPayload(pydantic.main.BaseModel)
         field type: Literal['authorization']
         field from_: str (alias 'from')
@@ -1770,6 +1774,7 @@ module mpp.x402
         amount: NotRequired[str]
         errorReason: NotRequired[str]
         errorMessage: NotRequired[str]
+        extensions: NotRequired[dict[str, Any]]
     class SupportedKind(TypedDict)
         x402Version: int
         scheme: str
@@ -1785,6 +1790,7 @@ module mpp.x402
         invalidReason: NotRequired[str]
         invalidMessage: NotRequired[str]
         payer: NotRequired[str]
+        extensions: NotRequired[dict[str, Any]]
     class X402Challenge(mpp.Challenge)
         @dataclass(frozen=True, slots=True)
         field id: str

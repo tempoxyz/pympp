@@ -93,6 +93,8 @@ class VerifyResponse(TypedDict):
     invalidReason: NotRequired[str]
     invalidMessage: NotRequired[str]
     payer: NotRequired[str]
+    extensions: NotRequired[dict[str, Any]]
+    """Response data shaped by each extension, unlike ``PAYMENT-RE`UIRED``'s ``{info, schema}``."""
 
 
 class SettleResponse(TypedDict):
@@ -105,6 +107,8 @@ class SettleResponse(TypedDict):
     amount: NotRequired[str]
     errorReason: NotRequired[str]
     errorMessage: NotRequired[str]
+    extensions: NotRequired[dict[str, Any]]
+    """Settlement data shaped by each extension, such as a payout on another chain."""
 
 
 class SupportedKind(TypedDict):
@@ -252,6 +256,8 @@ def parse_verify_response(value: Any) -> VerifyResponse:
         raise X402FormatError("verifyResponse.isValid must be a boolean")
     for key in ("invalidReason", "invalidMessage", "payer"):
         _optional_string(record, key, "verifyResponse")
+    if "extensions" in record:
+        _object(record["extensions"], "verifyResponse.extensions")
     return record  # type: ignore[return-value]
 
 
@@ -266,6 +272,8 @@ def parse_settle_response(value: Any) -> SettleResponse:
         _optional_string(record, key, "settleResponse")
     if record.get("amount") is not None:
         _pattern(record, "amount", "settleResponse", _ATOMIC_AMOUNT_RE)
+    if "extensions" in record:
+        _object(record["extensions"], "settleResponse.extensions")
     return record  # type: ignore[return-value]
 
 
