@@ -254,3 +254,121 @@ async def test_the_prover_runs_only_in_scope() -> None:
     prover = erc8004.client.prover(account=AGENT_KEY, agent_id=1, scope=[ORIGIN])
     assert prover.covers(URL)
     assert not prover.covers("https://other.example/")
+
+
+# --- Revisions ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("parsed", [True, False])
+async def test_reads_the_payment_kind_from_a_parsed_charge_payload(parsed: bool) -> None:
+    from mpp.methods.tempo.schemas import ChargePayload, TransactionCredentialPayload
+
+    wire = {"type": "transaction", "signature": "0x00"}
+    # A route hands payment checks the parsed payload, not the wire dict.
+    model: Any = (
+        ChargePayload.model_validate(wire)
+        if parsed
+        else TransactionCredentialPayload.model_validate(wire)
+    )
+    agents = setup()
+    request = Request("GET", URL, {"Agent-Id": agent_id(1)})
+    check = payment(request, AGENT_KEY.address)
+    wallet = PaymentCheckInput(
+        request=request,
+        challenge=check.challenge,
+        credential=Credential(
+            challenge=check.credential.challenge, payload=model, source=check.credential.source
+        ),
+    )
+    assert isinstance(await agents.payment_check.verify(wallet), Valid)
+    other = Credential(
+        challenge=check.credential.challenge,
+        payload=model,
+        source=f"did:pkh:eip155:4217:{OTHER_KEY.address}",
+    )
+    signed_request = await signed()
+    outcome = rejected(
+        await agents.payment_check.verify(
+            PaymentCheckInput(request=signed_request, challenge=check.challenge, credential=other)
+        )
+    )
+    assert outcome.status == "forbidden"
+
+
+async def test_a_route_accepts_a_wallet_transaction_without_a_signature() -> None:
+    from mpp import Receipt
+    from mpp.identity import Route
+    from mpp.methods.tempo.schemas import charge
+    from mpp.server import Mpp, PaymentVerified, ServerMethod, VerifyContext
+    from tests import challenges, http_request
+
+    settled: list[str] = []
+
+    async def settle(context: VerifyContext) -> Receipt:
+        settled.append(type(context.credential.payload).__name__)
+        return Receipt.success("tx")
+
+    method = ServerMethod(
+        method=charge,
+        defaults={
+            "amount": "1",
+            "currency": "0x20c0000000000000000000000000000000000000",
+            "recipient": "0x1111111111111111111111111111111111111111",
+        },
+        verify=settle,
+    )
+    agents = setup()
+    mpp = Mpp(methods=[method], realm="api.example", secret_key="secret")
+    handler = mpp.charge(identity=Route(payment=agents.payment_check))
+    [issued] = challenges(await handler(http_request()))
+
+    def paid(payer: str) -> Request:
+        credential = Credential(
+            challenge=issued.to_echo(),
+            payload={"type": "transaction", "signature": "0x00"},
+            source=f"did:pkh:eip155:4217:{payer}",
+        )
+        return http_request(credential.to_authorization(), headers={"Agent-Id": agent_id(1)})
+
+    assert isinstance(await handler(paid(AGENT_KEY.address)), PaymentVerified)
+    assert settled == ["ChargePayload"]
+    assert not isinstance(await handler(paid(OTHER_KEY.address)), PaymentVerified)
+    assert len(settled) == 1
+
+
+def test_an_empty_rpc_url_does_not_fall_back_to_tempo_mainnet() -> None:
+    with pytest.raises(ValueError):
+        erc8004.server.create(chain_id=1, rpc_url="")
+
+
+async def test_holds_a_nonce_claim_past_the_signatures_last_accepted_second() -> None:
+    claims: list[float] = []
+
+    class Recording(MemoryStore):
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+            claims.append(expires_at)
+            return await super().put_if_absent_until(key, value, expires_at)
+
+    agents = erc8004.server.create(store=Recording(), http=Registry().http())
+    request = await signed()
+    assert isinstance(await agents.verifier.verify(request), Valid)
+    created = int(request.headers["agent-signature"].split(".")[0])
+    last_accepted = created + erc8004.MAX_AGE + erc8004.CLOCK_TOLERANCE
+    assert claims == [last_accepted + 1 + 300]
+
+
+async def test_answers_503_when_an_erc1271_wallet_cannot_be_checked() -> None:
+    class Flaky(Registry):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["params"][0]["to"] == CONTRACT_WALLET:
+                return httpx.Response(503)
+            return super().handle(request)
+
+    outcome = rejected(await setup(Flaky()).verifier.verify(await signed(agent_id=3)))
+    assert (outcome.status, outcome.reason) == (
+        "unavailable",
+        "The Identity Registry is unavailable.",
+    )
+    # A wallet that reverts did not sign.
+    reverted = rejected(await setup().verifier.verify(await signed(agent_id=3)))
+    assert reverted.status == "invalid"

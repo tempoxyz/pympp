@@ -14,6 +14,7 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_hash.auto import keccak
+from pydantic import BaseModel, RootModel
 
 from mpp._did import parse_pkh_source
 from mpp.extensions.identity.erc8004 import (
@@ -57,6 +58,9 @@ _ERC1271_MAGIC = bytes.fromhex("1626ba7e")
 _ZERO_ADDRESS = "0x" + "0" * 40
 _CREATED_RE = re.compile(r"\d{1,12}")
 _SIGNATURE_RE = re.compile(r"0x[0-9a-fA-F]+")
+# Seconds a nonce claim outlives the signature's last accepted second, so a verifier whose
+# clock runs behind the store's still finds the claim (as Tempo proof claims do).
+_CLAIM_GRACE = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +77,10 @@ class Erc8004:
 
 class RegistryError(Exception):
     """The registry's chain could not answer a call."""
+
+
+class _Reverted(RegistryError):
+    """The chain answered: the call reverted."""
 
 
 def create(
@@ -103,10 +111,10 @@ def create(
         allow: Decides whether a verified agent may call the API.
 
     Raises:
-        ValueError: For a chain other than Tempo mainnet without ``rpc_url``, or a registry
-            that is not an address.
+        ValueError: For a chain other than Tempo mainnet without ``rpc_url`` (or with an empty
+            one), or a registry that is not an address.
     """
-    if rpc_url is None and chain_id != CHAIN_ID:
+    if not rpc_url and chain_id != CHAIN_ID:
         raise ValueError("Pass rpc_url for a chain other than Tempo mainnet.")
     if re.fullmatch(r"0x[0-9a-fA-F]{40}", registry) is None:
         raise ValueError("registry must be an address")
@@ -152,10 +160,7 @@ def create(
         # Only a tempo charge the source signed binds it to the payer: a transaction or a proof.
         # A hash credential doesn't (the charge can accept another sender), and neither do
         # sessions, Zones or other methods, so they need the agent's signature instead.
-        payload: object = input.credential.payload
-        kind: object = (
-            cast("dict[str, object]", payload).get("type") if isinstance(payload, dict) else None
-        )
+        kind = _payload_type(input.credential.payload)
         if (
             input.challenge.method != "tempo"
             or input.challenge.intent != "charge"
@@ -176,6 +181,17 @@ def create(
         verifier=Verifier(verify=verify_request),
         payment_check=PaymentCheck(requires=(Requirement(type=TYPE),), verify=verify_payment),
     )
+
+
+def _payload_type(payload: object) -> object:
+    """A credential payload's ``type``: a dict on the wire, a parsed model once a route verifies."""
+    if isinstance(payload, RootModel):
+        payload = cast("RootModel[object]", payload).root
+    if isinstance(payload, BaseModel):
+        return getattr(payload, "type", None)
+    if isinstance(payload, dict):
+        return cast("dict[str, object]", payload).get("type")
+    return None
 
 
 class _PerRequest:
@@ -215,7 +231,11 @@ class _Rpc:
                 async with httpx.AsyncClient(timeout=10) as http:
                     response = await http.post(self.url, json=body)
             response.raise_for_status()
-            result: Any = response.json().get("result")
+            answer: Any = response.json()
+            error: Any = answer.get("error")
+            if isinstance(error, dict) and _is_revert(cast("dict[str, Any]", error)):
+                raise _Reverted("reverted")
+            result: Any = answer.get("result")
             if not isinstance(result, str) or not result.startswith("0x"):
                 raise RegistryError("no result")
             return bytes.fromhex(result[2:])
@@ -278,22 +298,28 @@ class _Rules:
             created=created,
             nonce=nonce,
         )
-        if not await self._signed_by(agent.wallet, text, signature):
+        signed = await self._signed_by(agent.wallet, text, signature)
+        if signed is None:
+            return unavailable("The Identity Registry is unavailable.")
+        if not signed:
             return invalid("The agent's wallet did not sign the request.")
         if self.store is not None:
             key = f"mppx:erc8004:nonce:0x{_hash_message(f'{agent.id}:{nonce}').hex()}"
             try:
-                # Held one second past expiry: the signature still verifies through the whole
-                # second `now == expires`.
-                fresh = await self.store.put_if_absent_until(key, "1", expires + 1)
+                # Held past expiry: the signature still verifies through the whole second
+                # `now == expires`, and on verifiers whose clocks run behind the store's.
+                fresh = await self.store.put_if_absent_until(key, "1", expires + 1 + _CLAIM_GRACE)
             except Exception:
                 return unavailable("The replay store is unavailable.")
             if not fresh:
                 return invalid("The agent signature was already used.")
         return Valid(agent)
 
-    async def _signed_by(self, wallet: str, text: str, signature: str) -> bool:
-        """Whether ``wallet`` signed ``text``: by EOA recovery, else by ERC-1271."""
+    async def _signed_by(self, wallet: str, text: str, signature: str) -> bool | None:
+        """Whether ``wallet`` signed ``text``: by EOA recovery, else by ERC-1271.
+
+        None when the chain could not answer the ERC-1271 call; a revert means not signed.
+        """
         hex_signature = signature[2:]
         if len(hex_signature) % 2:
             return False
@@ -306,9 +332,17 @@ class _Rules:
             return True
         try:
             result = await self.rpc.call(wallet, _IS_VALID_SIGNATURE + _encode_1271(text, raw))
-        except RegistryError:
+        except _Reverted:
             return False
+        except RegistryError:
+            return None
         return result[:4] == _ERC1271_MAGIC
+
+
+def _is_revert(error: dict[str, Any]) -> bool:
+    """Whether a JSON-RPC error is the call reverting, not the node failing."""
+    message = error.get("message")
+    return error.get("code") == 3 or (isinstance(message, str) and "revert" in message.lower())
 
 
 def _hash_message(text: str) -> bytes:
