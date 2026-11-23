@@ -3384,6 +3384,39 @@ class TestClientZoneRedactedOutbox:
         assert calls.count("eth_sendRawTransactionSync") == 1
 
     @pytest.mark.asyncio
+    async def test_a_slow_sender_tag_read_keeps_the_search_start_from_before_it(self) -> None:
+        calls: list[str] = []
+        queries: list[dict[str, Any]] = []
+        latest = 10_000
+
+        def tempo_moves_on() -> bool:
+            # Tempo passes the lookback window while the Zone's outbox read is in flight.
+            nonlocal latest
+            latest = 30_000
+            return False
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return hex(latest)
+            if method == "eth_getLogs":
+                queries.append(params[0])
+                tag = params[0]["topics"][2]
+                # The settlement landed at the start of the window pinned before the read.
+                pinned = params[0]["fromBlock"] == hex(10_000 - zone_lib.LOOKBACK_BLOCKS)
+                return [processed_log(sender_tag=tag)] if pinned else []
+            raise AssertionError(method)
+
+        zone = replace(redacting_zone(calls, stall_reads=tempo_moves_on), settlement_timeout=0)
+        method = payer_method(zone, rpc_client(tempo_l1))
+        credential = await method.create_credential(await zone_challenge([3]))
+        assert latest == 30_000
+        assert queries[0]["fromBlock"] == hex(10_000 - zone_lib.LOOKBACK_BLOCKS)
+        assert credential.payload["senderTag"] == zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
     async def test_a_retry_reuses_the_derived_sender_tags(self) -> None:
         calls: list[str] = []
         settled = False

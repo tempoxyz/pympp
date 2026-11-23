@@ -1746,6 +1746,12 @@ class TempoMethod:
             # again. The read stops at the Challenge's expiry, or after a short bound once
             # it expired, since a settlement from before the expiry can still be redeemed
             # within the server's grace.
+            #
+            # Where the settlement search starts is pinned first, while Tempo's tip is
+            # still close to when the withdrawal was sent: a derivation that takes long
+            # would otherwise move the search's lookback window past a settlement made
+            # in the meantime. Retries keep the first pinned start.
+            await self._pin_zone_search_start(request, state, _zone_time_left(challenge.expires))
             time_left = _zone_time_left(challenge.expires)
             deadline = time_left if time_left else _ZONE_LATE_TAG_LOOKUP
             try:
@@ -1766,9 +1772,9 @@ class TempoMethod:
                     challenge, refused, transaction_hash=withdrawal.transaction_hash
                 ) from refusal
             except Exception as cause:
-                # A transient read failure. Pin where the settlement search starts now, so
-                # a retry that reads the tags much later still covers a settlement that
-                # happened in between.
+                # A transient read failure. Pin where the settlement search starts now if
+                # the read before the derivation failed, so a retry that reads the tags
+                # much later still covers a settlement that happened in between.
                 await self._pin_zone_search_start(request, state, time_left)
                 failure = TransactionError(
                     f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
