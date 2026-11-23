@@ -2559,3 +2559,21 @@ async def test_runtime_refuses_legacy_unicode_escaped_challenge() -> None:
     with pytest.raises(LegacyUnicodeEscapedChallengeError):
         await runtime.create_credential(challenge, method.client)
     method.create_credential.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_payment_methods_refuse_legacy_unicode_escaped_challenge() -> None:
+    from mpp.methods.stripe.client import StripeMethod
+    from mpp.methods.tempo.client import _tempo_method  # pyright: ignore[reportPrivateUsage]
+
+    header = _legacy_header("caf\\u2014.example.com").replace('"tempo"', '"stripe"')
+    stripe_challenge = Challenge.from_www_authenticate(header)
+    create_token = AsyncMock(return_value="spt_test")
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        await StripeMethod(create_token=create_token).create_credential(stripe_challenge)
+    create_token.assert_not_awaited()
+
+    # Raised before the account check, so nothing is signed or broadcast.
+    tempo_challenge = Challenge.from_www_authenticate(_legacy_header("caf\\u2014.example.com"))
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        await _tempo_method().create_credential(tempo_challenge)

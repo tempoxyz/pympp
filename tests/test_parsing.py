@@ -18,6 +18,7 @@ from mpp._parsing import (
     is_legacy_unicode_escaped,
     parse_formatted_description,
 )
+from mpp.errors import LegacyUnicodeEscapedChallengeError
 from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
@@ -367,7 +368,8 @@ class TestChallenge:
             ('realm="merchant\\u2014api.example.com"', True),
             ('realm="caf\\u00E9.example.com"', True),
             ('realm="api.example.com", digest="sha-256=\\u00e9"', True),
-            ('realm="api.example.com", opaque-ext="\\u00e9"', True),
+            # Only parameters the challenge ID binds count, as in mppx.
+            ('realm="api.example.com", ext="\\u00e9"', False),
             ('realm="say \\"hi\\" \\\\ api.example.com"', False),
             # An escaped backslash followed by u00e9 is a literal backslash, not an escape.
             ('realm="caf\\\\u00e9.example.com"', False),
@@ -396,7 +398,10 @@ class TestChallenge:
         assert legacy.realm == "cafu00e9.example.com"
         assert legacy == plain
         assert "legacy" not in repr(legacy)
-        assert legacy.to_www_authenticate(legacy.realm) == plain.to_www_authenticate(plain.realm)
+        # Re-serializing a flagged challenge would hide the misread value.
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            legacy.to_www_authenticate(legacy.realm)
+        assert plain.to_www_authenticate(plain.realm)
         assert legacy.to_echo() == plain.to_echo()
 
     @pytest.mark.parametrize("field", ["id", "realm", "intent", "digest"])

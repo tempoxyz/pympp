@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge
-from mpp._parsing import ParseError, is_legacy_unicode_escaped
+from mpp._parsing import (
+    ParseError,
+    assert_not_legacy_unicode_escaped,
+    is_legacy_unicode_escaped,
+)
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.client import (
@@ -439,6 +443,7 @@ class SessionMethod:
         another origin, or to none, raises before anything is signed, and channels this
         credential opens or recovers are stored bound to it.
         """
+        assert_not_legacy_unicode_escaped(params.challenge)
         request = params.request
         origin = (
             self._authorized_origin(_require_http_origin(request.url))

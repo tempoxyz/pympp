@@ -275,6 +275,12 @@ def parse_formatted_description(header: str) -> str | None:
     return _parse_auth_params(header[8:].strip(), _unescape_quoted_text).get("description")
 
 
+# Auth-params the challenge ID binds (mppx); a \uXXXX escape in any of them is legacy.
+_CHALLENGE_ID_BOUND_PARAMS = frozenset(
+    ("realm", "method", "intent", "request", "expires", "digest", "opaque", "header")
+)
+
+
 def _has_unicode_escape(raw: str) -> bool:
     """Whether a raw quoted-string value holds a \\uXXXX escape.
 
@@ -381,6 +387,19 @@ def is_legacy_unicode_escaped(challenge: object) -> bool:
     return getattr(challenge, "_legacy_unicode_escape", False) is True
 
 
+def assert_not_legacy_unicode_escaped(challenge: object) -> None:
+    """Raise :class:`~mpp.errors.LegacyUnicodeEscapedChallengeError` for a flagged challenge.
+
+    Payment methods call this before signing anything, so a challenge whose bound value
+    a pre-upgrade server escaped as \\uXXXX is never paid, even outside the client
+    runtime (mppx ``Challenge.assertNotLegacyUnicodeEscaped``).
+    """
+    if is_legacy_unicode_escaped(challenge):
+        from mpp.errors import LegacyUnicodeEscapedChallengeError
+
+        raise LegacyUnicodeEscapedChallengeError([challenge])
+
+
 def parse_www_authenticate(header: str) -> Challenge:
     """Parse a WWW-Authenticate header into a Challenge.
 
@@ -468,7 +487,9 @@ def parse_www_authenticate(header: str) -> Challenge:
         # a bound value now reads as ``uXXXX``, which the challenge ID does not bind, so
         # clients refuse the challenge before paying. ``description`` is not bound.
         _legacy_unicode_escape=any(
-            _has_unicode_escape(raw) for key, raw in quoted_raw.items() if key != "description"
+            _has_unicode_escape(raw)
+            for key, raw in quoted_raw.items()
+            if key in _CHALLENGE_ID_BOUND_PARAMS
         ),
     )
     return with_received_credential_header(challenge, credential_header)
@@ -481,6 +502,9 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
     from mpp import advertised_credential_header
+
+    # Re-serializing a flagged challenge would hide that its bound values were misread.
+    assert_not_legacy_unicode_escaped(challenge)
 
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mpp import Challenge, Credential
+from mpp._parsing import assert_not_legacy_unicode_escaped
 from mpp._typing import is_dict, is_list
 from mpp.runtime import ClientMethod, CredentialParams
 
@@ -72,6 +73,7 @@ class StripeMethod:
         Raises:
             ValueError: If no ``create_token`` callback or ``payment_method`` is configured.
         """
+        assert_not_legacy_unicode_escaped(challenge)
         if self.create_token is None:
             raise ValueError("No create_token callback configured")
 

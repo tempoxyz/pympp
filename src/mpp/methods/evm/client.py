@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, overload
 from eth_utils.address import to_checksum_address
 
 from mpp import Challenge, Credential
+from mpp._parsing import assert_not_legacy_unicode_escaped
 from mpp._typing import is_list, is_mapping
 from mpp._units import parse_units
 from mpp.methods import CanOfferFn, PaymentSuccessHandler
@@ -177,6 +178,7 @@ class _Config:
 
     async def create_credential(self, challenge: Challenge) -> Credential:
         """Sign a native ``evm/charge`` credential for a challenge."""
+        assert_not_legacy_unicode_escaped(challenge)
         if self.account is None:
             raise ValueError("No account configured for EVM credentials")
         request = self._check_challenge(challenge)

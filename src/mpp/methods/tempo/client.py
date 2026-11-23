@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 import rfc8785
 
 from mpp import Challenge, Credential
+from mpp._parsing import assert_not_legacy_unicode_escaped
 from mpp._typing import is_dict, is_list
 from mpp.errors import (
     PaymentExpiredError,
@@ -799,6 +800,7 @@ class TempoMethod:
                 ``expected_recipients`` policy.
             TransactionError: If transaction building fails.
         """
+        assert_not_legacy_unicode_escaped(challenge)
         if self.account is None:
             raise ValueError("No account configured for signing")
 
