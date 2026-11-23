@@ -155,13 +155,15 @@ def sign_close_authorization(
     return _sign_digest(account, digest)
 
 
-def _recover_canonical(signature: str, digest: str) -> str | None:
+def _recover_canonical(signature: str, digest: str, *, low_s: bool = True) -> str | None:
     """Recover the signer of a canonical primitive secp256k1 signature, else None.
 
     Keychain wrappers, multisig, magic-suffixed and non-canonical encodings
     (`v` other than 27 or 28) are rejected, as ox's `SignatureEnvelope` round trip
-    does in mppx, and so are high-s signatures, which Tempo does not accept. P256 and
-    WebAuthn primitive signatures are not supported yet.
+    does in mppx. With `low_s` (the default, for vouchers and close authorizations), high-s
+    signatures are rejected too, since Tempo does not accept them; off-chain proofs pass
+    `low_s=False`, as mppx accepts either form there. P256 and WebAuthn primitive signatures
+    are not supported yet.
     """
     from eth_account import Account
 
@@ -173,7 +175,7 @@ def _recover_canonical(signature: str, digest: str) -> str | None:
         return None
     # Tempo rejects high-s signatures, so a voucher carrying one could never be settled.
     s = int.from_bytes(raw[32:64], "big")
-    if s == 0 or s > _SECP256K1_N // 2:
+    if s == 0 or (low_s and s > _SECP256K1_N // 2):
         return None
     try:
         return Account._recover_hash(  # pyright: ignore[reportPrivateUsage]
