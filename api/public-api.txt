@@ -665,7 +665,7 @@ module mpp.methods.evm.intents
         @dataclass(frozen=True, slots=True)
         field reference: str
         field extensions: dict[str, Any] | None = None
-    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | mpp.methods.evm.intents.Settlement | collections.abc.Awaitable[str] | collections.abc.Awaitable[mpp.methods.evm.intents.Settlement]]
+    SettleFn = collections.abc.Callable[[mpp.methods.evm.intents.Authorization], str | mpp.methods.evm.intents.Settlement | collections.abc.Awaitable[str | mpp.methods.evm.intents.Settlement]]
     class AuthorizationPayload(pydantic.main.BaseModel)
         field type: Literal['authorization']
         field from_: str (alias 'from')

@@ -249,6 +249,17 @@ def parse_payment_payload(value: Any) -> PaymentPayload:
     return record  # type: ignore[return-value]
 
 
+def _response_extensions(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop a null or non-object response ``extensions`` rather than reject the response.
+
+    A facilitator may send ``"extensions": null`` for none, and a successful
+    ``/settle`` must not fail over optional metadata after funds have moved.
+    """
+    if "extensions" in record and not is_mapping(record["extensions"]):
+        record = {key: value for key, value in record.items() if key != "extensions"}
+    return record
+
+
 def parse_verify_response(value: Any) -> VerifyResponse:
     """Validate a facilitator ``/verify`` response."""
     record = _object(value, "verifyResponse")
@@ -256,9 +267,7 @@ def parse_verify_response(value: Any) -> VerifyResponse:
         raise X402FormatError("verifyResponse.isValid must be a boolean")
     for key in ("invalidReason", "invalidMessage", "payer"):
         _optional_string(record, key, "verifyResponse")
-    if "extensions" in record:
-        _object(record["extensions"], "verifyResponse.extensions")
-    return record  # type: ignore[return-value]
+    return _response_extensions(record)  # type: ignore[return-value]
 
 
 def parse_settle_response(value: Any) -> SettleResponse:
@@ -272,9 +281,7 @@ def parse_settle_response(value: Any) -> SettleResponse:
         _optional_string(record, key, "settleResponse")
     if record.get("amount") is not None:
         _pattern(record, "amount", "settleResponse", _ATOMIC_AMOUNT_RE)
-    if "extensions" in record:
-        _object(record["extensions"], "settleResponse.extensions")
-    return record  # type: ignore[return-value]
+    return _response_extensions(record)  # type: ignore[return-value]
 
 
 def parse_supported_response(value: Any) -> SupportedResponse:

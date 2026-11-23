@@ -25,6 +25,7 @@ from mpp.methods.evm import (
     Authorization,
     ChargeIntent,
     EvmAsset,
+    SettleFn,
     Settlement,
     challenge_hash,
     evm,
@@ -627,8 +628,23 @@ class TestBroadcast:
             {"nested": nested_object(20)},
             {},
             ["not", "an", "object"],
+            {"payout": "\ud800"},
+            {"payout": {"amount": 2**53}},
+            {"note": "\U0001f600" * 1020},
+            {"wide": list(range(100_000))},
         ],
-        ids=["not-json", "nan", "too-large", "too-deep", "empty", "not-an-object"],
+        ids=[
+            "not-json",
+            "nan",
+            "too-large",
+            "too-deep",
+            "empty",
+            "not-an-object",
+            "lone-surrogate",
+            "unsafe-integer",
+            "too-large-escaped",
+            "too-wide",
+        ],
     )
     async def test_drops_settle_extensions_the_receipt_cannot_carry(self, extensions: Any) -> None:
         method = evm(
@@ -654,6 +670,30 @@ class TestBroadcast:
         req = request(method)
         receipt = await charge_intent(method).broadcast(native_credential(req), req)
         assert receipt.extensions == {"extensions": {"n": extensions}}
+
+    async def test_keeps_non_ascii_settle_extensions_within_the_escaped_budget(self) -> None:
+        extensions = {"note": "\u00e9" * 600, "amount": 2**53 - 1}
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(reference="0xhook", extensions=extensions),
+        )
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.extensions == {"extensions": extensions}
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+        assert parsed.extensions == {"extensions": extensions}
+
+    async def test_accepts_an_async_hook_returning_str_or_settlement(self) -> None:
+        async def settle(authorization: Authorization) -> str | Settlement:
+            return Settlement(reference="0xhook")
+
+        hook: SettleFn = settle
+        method = evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=hook)
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions is None
 
     async def test_hook_must_return_a_reference(self) -> None:
         method = evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=lambda a: "")

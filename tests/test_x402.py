@@ -185,12 +185,12 @@ class TestHeaders:
         with pytest.raises(X402FormatError):
             encode_payment_response({"success": "yes"})  # type: ignore[arg-type]
 
-    def test_settle_and_verify_extensions_must_be_objects(self) -> None:
+    @pytest.mark.parametrize("extensions", [None, ["x"], "x", 5])
+    def test_drops_null_or_non_object_response_extensions(self, extensions: Any) -> None:
         settled = {"success": True, "transaction": "0x1", "network": "eip155:1"}
-        with pytest.raises(X402FormatError, match="settleResponse.extensions"):
-            parse_settle_response({**settled, "extensions": ["x"]})
-        with pytest.raises(X402FormatError, match="verifyResponse.extensions"):
-            parse_verify_response({"isValid": True, "extensions": "x"})
+        assert parse_settle_response({**settled, "extensions": extensions}) == settled
+        verified = {"isValid": True}
+        assert parse_verify_response({**verified, "extensions": extensions}) == verified
         value = {**settled, "extensions": {"payout": {"id": "p"}}}
         assert parse_settle_response(value) == value
 
@@ -310,6 +310,14 @@ class TestHttpFacilitator:
         facilitator = HttpFacilitator("https://facilitator.example")
         result = await facilitator.settle(payment(), requirements())  # type: ignore[arg-type]
         assert result.get("extensions") == extensions
+
+    async def test_settle_succeeds_with_null_extensions(self, httpx_mock: HTTPXMock) -> None:
+        settled = {"success": True, "transaction": "0x" + "1" * 64, "network": "eip155:84532"}
+        httpx_mock.add_response(
+            url="https://facilitator.example/settle", json={**settled, "extensions": None}
+        )
+        facilitator = HttpFacilitator("https://facilitator.example")
+        assert await facilitator.settle(payment(), requirements()) == settled  # type: ignore[arg-type]
 
     async def test_reads_json_error_bodies(self, httpx_mock: HTTPXMock) -> None:
         httpx_mock.add_response(

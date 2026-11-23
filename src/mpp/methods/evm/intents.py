@@ -189,9 +189,7 @@ class Settlement:
     extensions: dict[str, Any] | None = None
 
 
-SettleFn: TypeAlias = Callable[
-    [Authorization], str | Settlement | Awaitable[str] | Awaitable[Settlement]
-]
+SettleFn: TypeAlias = Callable[[Authorization], str | Settlement | Awaitable[str | Settlement]]
 """Settles a verified authorization and returns its reference (a transaction hash),
 or a :class:`Settlement` that also carries settlement extensions."""
 
@@ -201,44 +199,62 @@ _MAX_EXTENSIONS_DEPTH = 8
 """Deepest nesting settle extensions may have; deeper ones are dropped."""
 
 
-def _within_depth(value: Any, limit: int) -> bool:
-    """Check nesting without recursion, so hostile depth can't overflow the stack."""
+def _within_bounds(value: Any, depth_limit: int, size_limit: int) -> bool:
+    """Check nesting and a lower bound on serialized size without recursion.
+
+    Every node, key and string character costs at least one byte of JSON, so the walk
+    stops as soon as the value can't fit in ``size_limit`` bytes, before any
+    serialization, and hostile depth can't overflow the stack.
+    """
     stack: list[tuple[Any, int]] = [(value, 1)]
-    visited = 0
+    budget = size_limit
     while stack:
         node, depth = stack.pop()
+        budget -= 1
         children: list[Any]
         if is_mapping(node):
-            children = list(node.values())
+            mapping: Mapping[Any, Any] = node
+            budget -= sum(len(key) if isinstance(key, str) else 1 for key in mapping)
+            children = list(mapping.values())
         elif isinstance(node, list | tuple):
             children = list(cast("list[Any] | tuple[Any, ...]", node))
+        elif isinstance(node, str):
+            budget -= len(node)
+            continue
         else:
             continue
-        visited += 1
-        if depth > limit or visited > 10_000:
+        if depth > depth_limit or budget < 0:
+            return False
+        if budget - len(children) < 0:
             return False
         stack.extend((child, depth + 1) for child in children)
-    return True
+    return budget >= 0
 
 
 def _json_extensions(extensions: Any) -> dict[str, Any] | None:
     """Normalize settler extensions to the JSON the receipt header carries.
 
-    A value that isn't a JSON object, nests deeper than 8 levels or serializes
-    past 4 KiB is dropped, as in mppx, so a settled payment never fails on its
-    receipt or overflows a client's header limit.
+    A value that isn't a JSON object, nests deeper than 8 levels, serializes past
+    4 KiB as the receipt encodes it (ASCII-escaped JSON), or holds a value the
+    x402 header codec can't canonicalize (such as a lone surrogate or an integer
+    beyond 2**53 - 1) is dropped, as in mppx, so a settled payment never fails on
+    its receipt or overflows a client's header limit.
     """
-    if not is_mapping(extensions) or not _within_depth(extensions, _MAX_EXTENSIONS_DEPTH):
+    if not is_mapping(extensions) or not _within_bounds(
+        extensions, _MAX_EXTENSIONS_DEPTH, _MAX_EXTENSIONS_BYTES
+    ):
         return None
     try:
-        serialized = json.dumps(
-            extensions, allow_nan=False, ensure_ascii=False, separators=(",", ":")
-        )
-    except (TypeError, ValueError):
+        # Payment-Receipt serializes with json.dumps' default ensure_ascii, so measure that.
+        serialized = json.dumps(extensions, allow_nan=False, separators=(",", ":"))
+        if len(serialized) > _MAX_EXTENSIONS_BYTES:
+            return None
+        value = json.loads(serialized)
+        # PAYMENT-RESPONSE decoding canonicalizes with RFC 8785, which also rejects
+        # lone surrogates and integers a JavaScript number can't hold exactly.
+        rfc8785.dumps(value)
+    except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError):
         return None
-    if len(serialized.encode()) > _MAX_EXTENSIONS_BYTES:
-        return None
-    value = json.loads(serialized)
     return cast("dict[str, Any]", value) if isinstance(value, dict) and value else None
 
 
