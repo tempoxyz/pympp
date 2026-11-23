@@ -355,6 +355,45 @@ module mpp.extensions
 
 module mpp.extensions.identity
 
+module mpp.extensions.identity.erc8004
+    CHAIN_ID = 4217
+    CLOCK_TOLERANCE = 60
+    IDENTITY_REGISTRY = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432'
+    ID_HEADER = 'Agent-Id'
+    MAX_AGE = 300
+    RPC_URL = 'https://rpc.tempo.xyz'
+    SIGNATURE_HEADER = 'Agent-Signature'
+    TYPE = 'erc8004'
+    class Agent
+        @dataclass(frozen=True, slots=True)
+        field id: str
+        field agent_id: int
+        field wallet: str
+    class AgentRef
+        @dataclass(frozen=True, slots=True)
+        field chain_id: int
+        field registry: str
+        field agent_id: int
+        def format(self) -> str
+        @classmethod def parse(cls, value: str) -> AgentRef | None
+    def checksum(address: str) -> str
+    client: module
+    def message(*, id: str, method: str, url: str, created: int, nonce: str) -> str
+    server: module
+    def target(url: str | httpx.URL) -> str
+
+module mpp.extensions.identity.erc8004.client
+    def prover(*, account: Any, agent_id: int, scope: Sequence[str] | Literal['*'], chain_id: int = 4217, registry: str = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432') -> Prover
+
+module mpp.extensions.identity.erc8004.server
+    Allow = collections.abc.Callable[[mpp.extensions.identity.erc8004.Agent], bool | collections.abc.Awaitable[bool]]
+    class Erc8004
+        @dataclass(frozen=True, slots=True)
+        field verifier: Verifier[Agent]
+        field payment_check: PaymentCheck[Agent]
+    class RegistryError(Exception)
+    def create(*, store: ExpiringStore | None = None, chain_id: int = 4217, registry: str = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432', rpc_url: str | None = None, http: httpx.AsyncClient | None = None, allow: Allow | None = None) -> Erc8004
+
 module mpp.extensions.identity.tempo
     CLOCK_TOLERANCE = 60
     DEFAULT_CHAIN_ID = 4217
@@ -502,7 +541,7 @@ module mpp.identity
     _DEFAULT_REASONS: mappingproxy
     IDENTITY_REQUIRED_HEADER = 'Identity-Required'
     PRECEDENCE = ('forbidden', 'unavailable', 'invalid', 'missing')
-    REQUEST_HEADERS = ('dpop', 'identity-attestation', 'identity-presentation', 'tempo-id-token')
+    REQUEST_HEADERS = ('agent-id', 'agent-signature', 'dpop', 'identity-attestation', 'identity-presentation', 'tempo-id-token')
     STATUS_CODES: mappingproxy
     class AnyOf(mpp.identity.Verifier[mpp.identity.AnyOfValue])
         @dataclass(frozen=True, slots=True)

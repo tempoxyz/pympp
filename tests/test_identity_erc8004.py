@@ -1,0 +1,256 @@
+"""ERC-8004 agent identity (mppx `extensions/identity/erc8004`)."""
+
+from __future__ import annotations
+
+import json
+import time
+from typing import Any
+
+import httpx
+import pytest
+from eth_account import Account
+from eth_hash.auto import keccak
+
+from mpp import Challenge, Credential
+from mpp.extensions.identity import erc8004
+from mpp.extensions.identity.erc8004 import IDENTITY_REGISTRY, Agent, AgentRef, message
+from mpp.identity import REQUEST_HEADERS, PaymentCheckInput, ProveContext, Rejected, Valid
+from mpp.server.http import Request
+from mpp.store import MemoryStore
+
+ORIGIN = "https://api.example"
+URL = f"{ORIGIN}/haiku?q=1"
+AGENT_KEY = Account.from_key("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
+OTHER_KEY = Account.from_key("0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a")
+CONTRACT_WALLET = "0x3333333333333333333333333333333333333333"
+ZERO = "0x" + "0" * 40
+GET_AGENT_WALLET = "0x" + keccak(b"getAgentWallet(uint256)")[:4].hex()
+IS_VALID_SIGNATURE = "0x" + keccak(b"isValidSignature(bytes32,bytes)")[:4].hex()
+
+
+class Registry:
+    """A stand-in for the Identity Registry: agent 1's wallet is AGENT_KEY, agent 2 has none,
+    agent 3 is a contract wallet."""
+
+    def __init__(self, *, down: bool = False, erc1271: bool = False) -> None:
+        self.down = down
+        self.erc1271 = erc1271
+        self.calls = 0
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["method"] == "eth_call"
+        if self.down:
+            return httpx.Response(503)
+        self.calls += 1
+        call = body["params"][0]
+        data: str = call["data"]
+        to: str = call["to"]
+        if data.startswith(GET_AGENT_WALLET) and to.lower() == IDENTITY_REGISTRY.lower():
+            agent_id = int(data[10:], 16)
+            wallet = {1: AGENT_KEY.address, 3: CONTRACT_WALLET}.get(agent_id, ZERO)
+            result = "0x" + "0" * 24 + wallet[2:].lower()
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+        if data.startswith(IS_VALID_SIGNATURE) and self.erc1271 and to == CONTRACT_WALLET:
+            result = "0x1626ba7e" + "0" * 56
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+        return httpx.Response(
+            200, json={"jsonrpc": "2.0", "id": 1, "error": {"code": 3, "message": "reverted"}}
+        )
+
+    def http(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+def setup(registry: Registry | None = None, **options: Any) -> erc8004.server.Erc8004:
+    return erc8004.server.create(
+        store=MemoryStore(), http=(registry or Registry()).http(), **options
+    )
+
+
+async def signed(account: Any = AGENT_KEY, agent_id: int = 1, method: str = "GET") -> Request:
+    """A request to URL signed by the client prover, as the server sees it."""
+    prover = erc8004.client.prover(account=account, agent_id=agent_id, scope=[ORIGIN])
+    proved = await prover.prove(httpx.Request(method, URL), ProveContext.new())
+    headers = {name: proved.headers[name] for name in ("agent-id", "agent-signature")}
+    return Request(method, URL, headers)
+
+
+def agent_id(number: int) -> str:
+    return AgentRef(4217, IDENTITY_REGISTRY, number).format()
+
+
+def payment(request: Request, payer: str, *, intent: str = "charge", type: str | None = None):
+    challenge = Challenge(id="c1", realm="api.example", method="tempo", intent=intent, request={})
+    payload = {} if type is None else {"type": type}
+    credential = Credential(
+        challenge=challenge.to_echo(), payload=payload, source=f"did:pkh:eip155:4217:{payer}"
+    )
+    return PaymentCheckInput(request=request, challenge=challenge, credential=credential)
+
+
+def rejected(outcome: Any) -> Rejected:
+    assert isinstance(outcome, Rejected), outcome
+    return outcome
+
+
+def test_formats_and_parses_agent_ids() -> None:
+    assert agent_id(42) == "eip155:4217:0x8004A169FB4a3325136EB29fA0ceB6D2e539a432:42"
+    lower = "eip155:4217:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:42"
+    parsed = AgentRef.parse(lower)
+    assert parsed is not None and parsed.format() == agent_id(42)
+    for malformed in (
+        "",
+        "eip155:4217:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432",
+        "eip155:4217:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:42:1",
+        "eip155:4217:0x8004:42",
+        "cosmos:4217:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:42",
+        "eip155:4217:0x8004a169fb4a3325136eb29fa0ceb6d2e539a432:" + "9" * 78,
+    ):
+        assert AgentRef.parse(malformed) is None, malformed
+    assert message(id="a", method="GET", url=URL, created=10, nonce="n") == (
+        f"mppx:erc8004\na\nGET {URL}\n10\nn"
+    )
+    assert erc8004.target("https://api.example") == "https://api.example/"
+    assert erc8004.target("https://api.example:443/x?") == "https://api.example/x"
+
+
+def test_marks_the_agent_headers_as_bearer_identity_headers() -> None:
+    assert "agent-id" in REQUEST_HEADERS
+    assert "agent-signature" in REQUEST_HEADERS
+
+
+def test_advertises_erc8004_and_needs_an_rpc_off_tempo_mainnet() -> None:
+    assert setup().payment_check.requires[0].type == "erc8004"
+    with pytest.raises(ValueError):
+        erc8004.server.create(chain_id=1)
+    with pytest.raises(ValueError):
+        erc8004.server.create(registry="nope")
+    erc8004.server.create(chain_id=1, rpc_url="http://localhost:8545")
+
+
+async def test_an_agent_signs_and_pays_from_its_registered_wallet() -> None:
+    registry = Registry()
+    agents = setup(registry)
+    request = await signed()
+    expected = Agent(id=agent_id(1), agent_id=1, wallet=AGENT_KEY.address)
+    assert await agents.verifier.verify(request) == Valid(expected)
+    outcome = await agents.payment_check.verify(
+        payment(request, AGENT_KEY.address, type="transaction")
+    )
+    assert outcome == Valid(expected)
+    # The verifier and the payment check share one registry lookup.
+    assert registry.calls == 1
+
+
+async def test_a_tempo_transaction_from_the_wallet_proves_the_agent_without_a_signature() -> None:
+    agents = setup()
+    request = Request("GET", URL, {"Agent-Id": agent_id(1)})
+    outcome = await agents.payment_check.verify(payment(request, AGENT_KEY.address, type="proof"))
+    assert isinstance(outcome, Valid)
+
+
+async def test_rejects_a_request_without_an_agent() -> None:
+    outcome = rejected(await setup().verifier.verify(Request("GET", URL)))
+    assert outcome.status == "missing"
+
+
+async def test_rejects_a_signature_from_a_key_other_than_the_wallet() -> None:
+    outcome = rejected(await setup().verifier.verify(await signed(OTHER_KEY)))
+    assert (outcome.status, outcome.reason) == (
+        "invalid",
+        "The agent's wallet did not sign the request.",
+    )
+
+
+async def test_rejects_a_signature_for_another_request() -> None:
+    request = await signed()
+    moved = Request("POST", URL, dict(request.headers))
+    outcome = rejected(await setup().verifier.verify(moved))
+    assert outcome.reason == "The agent's wallet did not sign the request."
+
+
+async def test_rejects_a_payment_from_an_account_other_than_the_wallet() -> None:
+    agents = setup()
+    check = payment(await signed(), OTHER_KEY.address, type="transaction")
+    outcome = rejected(await agents.payment_check.verify(check))
+    assert (outcome.status, outcome.reason) == (
+        "forbidden",
+        "The payment is not from the agent's wallet.",
+    )
+
+
+async def test_rejects_an_agent_without_a_wallet() -> None:
+    outcome = rejected(await setup().verifier.verify(await signed(agent_id=2)))
+    assert outcome.status == "forbidden"
+
+
+async def test_rejects_an_agent_in_another_registry() -> None:
+    request = Request("GET", URL, {"Agent-Id": f"eip155:1:{IDENTITY_REGISTRY}:1"})
+    outcome = rejected(await setup().verifier.verify(request))
+    assert outcome.status == "invalid"
+
+
+async def test_accepts_an_erc1271_wallet_that_approves_the_signature() -> None:
+    agents = setup(Registry(erc1271=True))
+    outcome = await agents.verifier.verify(await signed(agent_id=3))
+    assert isinstance(outcome, Valid) and outcome.value.wallet == CONTRACT_WALLET
+
+
+async def test_rejects_a_replayed_signature() -> None:
+    agents = setup()
+    first = await signed()
+    assert isinstance(await agents.verifier.verify(first), Valid)
+    replay = Request("GET", URL, dict(first.headers))
+    outcome = rejected(await agents.verifier.verify(replay))
+    assert outcome.status == "invalid" and "already used" in outcome.reason
+
+
+async def test_rejects_an_expired_or_malformed_signature() -> None:
+    agents = setup()
+    stale = f"{int(time.time()) - 400}.n.0x00"
+    for value in (stale, "", "1.2", "x.n.0x00", "1.n.zz", "1..0x00", "1.n.0x0.extra"):
+        request = Request("GET", URL, {"Agent-Id": agent_id(1), "Agent-Signature": value})
+        assert rejected(await agents.verifier.verify(request)).status == "invalid", value
+
+
+async def test_answers_503_when_the_registry_is_unavailable() -> None:
+    outcome = rejected(await setup(Registry(down=True)).verifier.verify(await signed()))
+    assert outcome.status == "unavailable"
+
+
+async def test_answers_503_when_the_replay_store_fails() -> None:
+    class Broken(MemoryStore):
+        async def put_if_absent_until(self, key: str, value: Any, expires_at: float) -> bool:
+            raise RuntimeError("down")
+
+    agents = erc8004.server.create(store=Broken(), http=Registry().http())
+    outcome = rejected(await agents.verifier.verify(await signed()))
+    assert outcome.status == "unavailable"
+
+
+async def test_allow_decides_by_agent() -> None:
+    async def allow(agent: Agent) -> bool:
+        return agent.agent_id != 1
+
+    outcome = rejected(await setup(allow=allow).verifier.verify(await signed()))
+    assert outcome.status == "forbidden"
+
+
+@pytest.mark.parametrize(
+    ("intent", "type"),
+    [("session", "topUp"), ("charge", "hash"), ("charge", "zone"), ("charge", None)],
+)
+async def test_needs_the_agents_signature_when_the_payment_does_not_bind_its_source(
+    intent: str, type: str | None
+) -> None:
+    agents = setup()
+    request = Request("GET", URL, {"Agent-Id": agent_id(1)})
+    check = payment(request, AGENT_KEY.address, intent=intent, type=type)
+    assert rejected(await agents.payment_check.verify(check)).status == "invalid"
+
+
+async def test_the_prover_runs_only_in_scope() -> None:
+    prover = erc8004.client.prover(account=AGENT_KEY, agent_id=1, scope=[ORIGIN])
+    assert prover.covers(URL)
+    assert not prover.covers("https://other.example/")

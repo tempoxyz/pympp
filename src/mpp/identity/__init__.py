@@ -76,6 +76,8 @@ IDENTITY_REQUIRED_HEADER = _requirements.HEADER
 """The `402` response header listing the identities a payment check requires."""
 
 REQUEST_HEADERS: tuple[str, ...] = (
+    "agent-id",
+    "agent-signature",
     "dpop",
     "identity-attestation",
     "identity-presentation",
