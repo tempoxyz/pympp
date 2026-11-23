@@ -219,9 +219,7 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
 
     Consumes the input sequentially like mppx's `parseAuthParams`: a position that
     cannot begin an auth-param is rejected rather than skipped, and parsing stops
-    at a token without `=`, which begins another auth scheme. Following the
-    grammar `auth-param *( OWS "," OWS auth-param )`, a value must be followed by
-    a comma or the end of the input.
+    at a token without `=`, which begins another auth scheme.
     """
     if len(params_str) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authentication parameters exceed maximum size")
