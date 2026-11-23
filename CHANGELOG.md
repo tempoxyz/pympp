@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.27.0 (2026-11-23)
+
+### Minor Changes
+
+- Restricted payment method names to lowercase letters (a-z), as the spec requires: parsing and formatting a Challenge now reject any other name, and `Mpp` refuses one at startup. Custom methods that use digits, hyphens, underscores, colons or capitals must be renamed. (by @brendanjryan, [#447](https://github.com/tempoxyz/pympp/pull/447))
+- Added TIP-1166 configurable account voucher signers: `voucher_signer=ConfigurableAccount(...)` on the session client and `configurable_vouchers=True` on the server `session()` (off by default), with `SignerConfigChangedError` and `ConfigurableVouchersUnsupportedError`. Servers now record each channel's opening commitment (looking it up on chain once for channels stored without one) and reject primitive vouchers on channels the escrow bound to a configurable account. (by @brendanjryan, [#432](https://github.com/tempoxyz/pympp/pull/432))
+
+### Patch Changes
+
+- Bound a session credential's source to the channel's funding payer rather than the voucher signer, so a delegated voucher signer still names the funding account; the server accepts only the channel payer as the source and checks voucher signing authority separately (mppx#1326). (by @brendanjryan, [#448](https://github.com/tempoxyz/pympp/pull/448))
+- Fixed Tempo session voucher and close authorization verification to reject secp256k1 signatures with a high `s` value, which Tempo does not accept onchain, matching the behavior of mppx. Voucher signing now normalizes a signer's high-`s` signature to its low-`s` equivalent. (by @brendanjryan, [#454](https://github.com/tempoxyz/pympp/pull/454))
+- Fixed base64url decoding of credentials, receipts and the challenge `request` and `opaque` parameters to reject characters outside the base64url alphabet instead of discarding them; a challenge whose `opaque` is not base64url now fails to parse. Credentials now require the challenge echo's `id`, `realm`, `method`, `intent` and `request` to be strings, as mppx's `ChallengeEcho` schema does. (by @brendanjryan, [#456](https://github.com/tempoxyz/pympp/pull/456))
+- Fixed quoted-string auth-param parsing to follow RFC 9110 quoted-pair semantics: a backslash yields the next character, so `\uXXXX` reads as `uXXXX` instead of being decoded. Formatting now rejects characters above U+00FF in bound parameters (`realm`, `id`, `method`, `intent`, `digest`, `expires`, `header`), and `Mpp` raises `ValueError` at construction for such a realm (explicit or from the environment) or method intent. `description` still writes `\uXXXX` escapes, and the MCP transport keeps the configured description in its challenges. Clients now refuse a challenge whose bound parameter a pre-upgrade server escaped as `\uXXXX`, before creating a credential, and raise `LegacyUnicodeEscapedChallengeError` when no other challenge is payable. (by @brendanjryan, [#449](https://github.com/tempoxyz/pympp/pull/449))
+- Fixed auth-param parsing to require comma separators between auth-params, following the grammar `auth-param *( OWS "," OWS auth-param )`. Whitespace-separated or otherwise malformed auth-params are now correctly rejected with a `ParseError`. (by @brendanjryan, [#455](https://github.com/tempoxyz/pympp/pull/455))
+
 ## 0.26.0 (2026-11-18)
 
 ### Minor Changes
