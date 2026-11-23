@@ -67,7 +67,9 @@ def _url(scope: Scope, headers: list[tuple[str, str]]) -> str:
     if raw_path:
         url = url.copy_with(raw_path=raw_path.split(b"?", 1)[0] + (b"?" + query if query else b""))
     else:
-        url = url.copy_with(path=scope.get("path") or "/", query=query or None)
+        # Keep a decoded "?" or "#" in the path from becoming the query or a fragment.
+        path = (scope.get("path") or "/").replace("?", "%3F").replace("#", "%23")
+        url = url.copy_with(path=path, query=query or None)
     return str(url)
 
 

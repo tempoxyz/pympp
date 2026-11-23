@@ -58,15 +58,26 @@ def get_request_url(request: Any) -> str | None:
     text = str(url)
     if not text.startswith(("http://", "https://")):
         return None
-    # Starlette rebuilds the URL from the decoded path; take the path from ASGI raw_path
-    # so encoded delimiters such as %2F stay distinct from the characters they encode.
+    # Starlette versions before 1.x rebuild the URL from the decoded path, so an encoded
+    # "#" or "?" in it would turn the query into a fragment or part of the path into the
+    # query. Take the path and query from the ASGI scope (raw_path keeps percent-encoding,
+    # so %2F and %23 stay distinct from the characters they encode) and only the origin
+    # from the URL.
     scope = getattr(request, "scope", None)
-    raw_path = scope.get("raw_path") if is_dict(scope) else None
-    if isinstance(raw_path, bytes) and raw_path:
+    if is_dict(scope):
+        raw_path = scope.get("raw_path")
+        path = scope.get("path")
+        query = scope.get("query_string")
         try:
             parsed = httpx.URL(text)
-            query = parsed.query
-            text = str(parsed.copy_with(raw_path=raw_path + (b"?" + query if query else b"")))
+            if not isinstance(query, bytes):
+                query = parsed.query
+            if isinstance(raw_path, bytes) and raw_path:
+                target = raw_path.split(b"?", 1)[0] + (b"?" + query if query else b"")
+                text = str(parsed.copy_with(raw_path=target, fragment=None))
+            elif isinstance(path, str) and path:
+                path = path.replace("?", "%3F").replace("#", "%23")
+                text = str(parsed.copy_with(path=path, query=query or None, fragment=None))
         except (httpx.InvalidURL, UnicodeError):
             pass
     return text

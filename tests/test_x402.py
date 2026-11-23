@@ -9,7 +9,7 @@ import json
 import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import anyio
 import httpx
@@ -474,6 +474,22 @@ class TestServerHelpers:
                 raise RuntimeError("no host")
 
         assert get_request_url(Starletteish()) == "https://api.example.com/paid?x=1"
+
+        class DecodedPath:
+            # Starlette before 1.x rebuilds url from the decoded path.
+            url = "https://api.example.com/a#b?x=1"
+            scope: ClassVar[dict[str, object]] = {
+                "path": "/a#b",
+                "raw_path": b"/a%23b",
+                "query_string": b"x=1",
+            }
+
+        class DecodedPathWithoutRaw:
+            url = "https://api.example.com/a?b#c?x=1"
+            scope: ClassVar[dict[str, object]] = {"path": "/a?b#c", "query_string": b"x=1"}
+
+        assert get_request_url(DecodedPath()) == "https://api.example.com/a%23b?x=1"
+        assert get_request_url(DecodedPathWithoutRaw()) == "https://api.example.com/a%3Fb%23c?x=1"
         assert get_request_url(Djangoish()) == "https://api.example.com/django"
         assert get_request_url(Broken()) is None
         assert get_request_url(object()) is None

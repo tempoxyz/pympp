@@ -372,3 +372,39 @@ async def test_answers_503_when_an_erc1271_wallet_cannot_be_checked() -> None:
     # A wallet that reverts did not sign.
     reverted = rejected(await setup().verifier.verify(await signed(agent_id=3)))
     assert reverted.status == "invalid"
+
+
+class _DecodedPathRequest:
+    """A framework request as Starlette before 1.x exposes it: ``url`` rebuilt from the
+    decoded path, so an encoded "#" in the path puts the query inside a fragment."""
+
+    method = "GET"
+
+    def __init__(self, raw_path: bytes, query: bytes, headers: dict[str, str]) -> None:
+        path = raw_path.decode().replace("%23", "#")
+        self.url = f"{ORIGIN}{path}?{query.decode()}" if query else f"{ORIGIN}{path}"
+        self.headers = headers
+        self.scope = {"type": "http", "path": path, "raw_path": raw_path, "query_string": query}
+
+
+async def _prove(url: str) -> dict[str, str]:
+    prover = erc8004.client.prover(account=AGENT_KEY, agent_id=1, scope=[ORIGIN])
+    proved = await prover.prove(httpx.Request("GET", url), ProveContext.new())
+    return {name: proved.headers[name] for name in ("agent-id", "agent-signature")}
+
+
+async def test_binds_the_query_on_an_encoded_hash_path_from_a_framework_request() -> None:
+    from mpp.server.decorator import to_request
+
+    agents = setup()
+    signed_url = f"{ORIGIN}/notes/a%23b?q=1"
+    framework = _DecodedPathRequest(b"/notes/a%23b", b"q=1", await _prove(signed_url))
+    request = await to_request(framework, read_body=False)
+    assert str(request.url) == signed_url
+    assert isinstance(await agents.verifier.verify(request), Valid)
+
+    # A proof signed without the query does not verify for a request that has one.
+    queryless = await _prove(f"{ORIGIN}/notes/a%23b")
+    framework = _DecodedPathRequest(b"/notes/a%23b", b"q=1", queryless)
+    outcome = await agents.verifier.verify(await to_request(framework, read_body=False))
+    assert isinstance(outcome, Rejected)

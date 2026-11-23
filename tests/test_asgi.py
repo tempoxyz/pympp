@@ -187,3 +187,9 @@ async def test_paid_response_keeps_non_ascii_header_bytes():
     headers = {name.lower(): value for name, value in sent[0]["headers"]}
     assert headers[b"x-name"] == "café €".encode()
     assert headers[b"payment-receipt"]
+
+
+@pytest.mark.asyncio
+async def test_fallback_url_keeps_a_decoded_hash_in_the_path():
+    sent = await _call(_middleware(), _scope(path="/items/a#b", query_string=b"x=1"))
+    assert _challenge(sent).request["_mppx_scope"]["resource"] == "/items/a%23b"
