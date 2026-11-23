@@ -3052,6 +3052,7 @@ def redacting_zone(
     after: int = 5,
     fail_reads: Callable[[], bool] = bool,
     stall_reads: Callable[[], bool] = bool,
+    stall_receipts: Callable[[], bool] = bool,
     included_in: Callable[[], Any] = lambda: ZONE_BLOCK_10,
     reads: list[Any] | None = None,
     nonces: dict[str, int] | None = None,
@@ -3061,7 +3062,8 @@ def redacting_zone(
     The send's receipt names block 10. Its outbox reports `before` at block 9 and
     `after` at block 10 (`nonces` adds other blocks by hash); historical reads fail
     while `fail_reads()` and never answer while `stall_reads()`. A later receipt lookup
-    names `included_in()`: a block hash, `None` for no receipt, or a whole receipt.
+    names `included_in()`: a block hash, `None` for no receipt, or a whole receipt; it
+    never answers while `stall_receipts()`.
     """
     outbox = {ZONE_BLOCK_9: before, ZONE_BLOCK_10: after, **(nonces or {})}
 
@@ -3083,6 +3085,8 @@ def redacting_zone(
         if method == "eth_getBlockByHash":
             return {"result": block_header(params[0])}
         if method == "eth_getTransactionReceipt":
+            if stall_receipts():
+                await asyncio.sleep(3600)
             included = included_in()
             if included is None or isinstance(included, dict):
                 return {"result": included}
@@ -3400,6 +3404,34 @@ class TestClientZoneRedactedOutbox:
         settled = True
         credential = await method.create_credential(issued)
         assert credential.payload["senderTag"] == candidates[-1]
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_stalled_receipt_lookup_keeps_the_derived_sender_tags(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+        settled = False
+        stalled = False
+        zone = replace(
+            redacting_zone(calls, before=4, after=6, stall_receipts=lambda: stalled),
+            settlement_timeout=0,
+        )
+        method = payer_method(zone, stalling_l1(lambda: settled))
+        issued = await zone_challenge([3])
+        pending = await error_of(method.create_credential(issued))
+        assert isinstance(pending, ZoneSettlementPendingError)
+        candidates = pending.sender_tags
+        assert len(candidates) == 2
+
+        # The Zone's receipt lookup never answers within the derivation's deadline: the
+        # retry falls back to the tags derived for the last known block.
+        stalled = True
+        settled = True
+        monkeypatch.setattr(tempo_client, "_zone_time_left", lambda expires: 0.2)
+        credential = await asyncio.wait_for(method.create_credential(issued), 5)
+        assert credential.payload["senderTag"] == candidates[-1]
+        assert "eth_getTransactionReceipt" in calls
         assert calls.count("eth_sendRawTransactionSync") == 1
 
     @pytest.mark.asyncio

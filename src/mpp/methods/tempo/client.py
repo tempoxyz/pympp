@@ -335,6 +335,9 @@ _ZONE_GAS_MARGIN = 5_000
 # Seconds a sender tag lookup on the Zone may take once the Challenge expired: a
 # settlement from before the expiry can still be redeemed within the server's grace.
 _ZONE_LATE_TAG_LOOKUP = 5.0
+# Seconds a retry's lookup of a withdrawal's Zone receipt may take before the sender
+# tag derivation falls back to the last known block (at most half its own deadline).
+_ZONE_RECEIPT_REFRESH_TIMEOUT = 2.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1661,7 +1664,7 @@ class TempoMethod:
             state.search_from = max(block - _zones.LOOKBACK_BLOCKS, 0)
 
     async def _derive_zone_sender_tags(
-        self, withdrawal: _ZoneWithdrawal, state: _ZoneSend
+        self, withdrawal: _ZoneWithdrawal, state: _ZoneSend, deadline: float
     ) -> tuple[str, ...]:
         """The sender tags a withdrawal whose receipt had no event may carry, derived
         from the state of the Zone block that includes it (mpp-rs ``derived_sender_tags``).
@@ -1669,7 +1672,9 @@ class TempoMethod:
         A retry looks the transaction's receipt up again first: if the Zone moved it to
         another block, as after a reorg, the tags come from that block, and tags derived
         from the earlier one are dropped. A lookup that proves nothing keeps the last
-        known block. The outbox reads are pinned to that block's hash and its parent's.
+        known block. The lookup stops well before the derivation's ``deadline``, so a
+        stalled one never keeps a retry from the tags already derived for that block.
+        The outbox reads are pinned to that block's hash and its parent's.
 
         Raises:
             SenderTagUnderivableError: If no receipt named a block, or the block's
@@ -1684,11 +1689,14 @@ class TempoMethod:
             block_hash = withdrawal.block_hash
         else:
             try:
-                receipt = await _rpc_call(
-                    zone.rpc_url,
-                    "eth_getTransactionReceipt",
-                    [withdrawal.transaction_hash],
-                    **rpc,
+                receipt = await asyncio.wait_for(
+                    _rpc_call(
+                        zone.rpc_url,
+                        "eth_getTransactionReceipt",
+                        [withdrawal.transaction_hash],
+                        **rpc,
+                    ),
+                    timeout=min(_ZONE_RECEIPT_REFRESH_TIMEOUT, deadline / 2),
                 )
             except Exception:
                 receipt = None
@@ -1739,10 +1747,11 @@ class TempoMethod:
             # it expired, since a settlement from before the expiry can still be redeemed
             # within the server's grace.
             time_left = _zone_time_left(challenge.expires)
+            deadline = time_left if time_left else _ZONE_LATE_TAG_LOOKUP
             try:
                 sender_tags = await asyncio.wait_for(
-                    self._derive_zone_sender_tags(withdrawal, state),
-                    timeout=time_left if time_left else _ZONE_LATE_TAG_LOOKUP,
+                    self._derive_zone_sender_tags(withdrawal, state, deadline),
+                    timeout=deadline,
                 )
             except _zones.SenderTagUnderivableError as refusal:
                 # The Zone's outbox state is fixed, so every retry would be refused the
