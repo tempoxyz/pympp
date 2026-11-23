@@ -51,6 +51,7 @@ module mpp
     InternalPaymentError -> mpp.errors.InternalPaymentError
     InvalidChallengeError -> mpp.errors.InvalidChallengeError
     InvalidPayloadError -> mpp.errors.InvalidPayloadError
+    LegacyUnicodeEscapedChallengeError -> mpp.errors.LegacyUnicodeEscapedChallengeError
     MalformedCredentialError -> mpp.errors.MalformedCredentialError
     MemoryStore -> mpp.store.MemoryStore
     Method -> mpp.methods.Method
@@ -201,6 +202,10 @@ module mpp.errors
         def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = (), *, message: str | None = None) -> None
         title = 'No Method Found'
         type = 'https://paymentauth.org/problems/no-method-found'
+    class LegacyUnicodeEscapedChallengeError(mpp.errors.NoMethodFoundError)
+        def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = ()) -> None
+        title = 'Legacy Unicode Escaped Challenge'
+        type = 'https://paymentauth.org/problems/legacy-unicode-escaped-challenge'
     class PaymentRequiredError(mpp.errors.PaymentError)
         def __init__(self, realm: str | None = None, description: str | None = None) -> None
         hint = 'Use a supported wallet to pay for this resource using one of the supported payment methods returned in the WWW-Authenticate header. See https://mpp.dev/tools/wallet.md'

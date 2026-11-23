@@ -10,7 +10,15 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from mpp import Challenge, ChallengeEcho, Credential, Receipt
-from mpp._parsing import MAX_AUTHORIZATION_SIZE, MAX_HEADER_PAYLOAD_SIZE, ParseError
+from mpp._parsing import (
+    MAX_AUTHORIZATION_SIZE,
+    MAX_HEADER_PAYLOAD_SIZE,
+    ParseError,
+    _unescape_quoted_text,
+    is_legacy_unicode_escaped,
+    parse_formatted_description,
+)
+from mpp.errors import LegacyUnicodeEscapedChallengeError
 from mpp.server.verify import _extract_payment_scheme
 from tests import make_credential
 
@@ -355,11 +363,11 @@ class TestChallenge:
     @pytest.mark.parametrize(
         ("escaped", "expected"),
         [
-            (r"em dash \u2014 and coffee \u2615", "em dash — and coffee ☕"),
-            (r"grinning \ud83d\ude00 face", "grinning 😀 face"),
+            (r"em dash \u2014 and coffee \u2615", "em dash u2014 and coffee u2615"),
+            (r"grinning \ud83d\ude00 face", "grinning ud83dude00 face"),
             ("café naïve", "café naïve"),
-            (r"lone \ud83d here", "lone \ufffd here"),
-            (r"lone \ude00 here", "lone \ufffd here"),
+            (r"lone \ud83d here", "lone ud83d here"),
+            (r"lone \ude00 here", "lone ude00 here"),
             (r"not an escape \\u2014", r"not an escape \u2014"),
             (r"short \u12 tail", "short u12 tail"),
         ],
@@ -384,7 +392,84 @@ class TestChallenge:
         header = challenge.to_www_authenticate("api.example.com")
 
         assert 'description="Payment \\u2014 coffee \\u2615 \\ud83d\\ude00"' in header
-        assert Challenge.from_www_authenticate(header).description == challenge.description
+        # Quoted-pair semantics: the escapes are not decoded on parse.
+        assert (
+            Challenge.from_www_authenticate(header).description
+            == "Payment u2014 coffee u2615 ud83dude00"
+        )
+
+    def test_unicode_escape_in_realm_is_a_quoted_pair(self) -> None:
+        header = (
+            'Payment id="ch_unicode_realm", realm="merchant\\u2014api.example.com", '
+            'method="tempo", intent="charge", request="e30"'
+        )
+
+        assert Challenge.from_www_authenticate(header).realm == "merchantu2014api.example.com"
+
+    @pytest.mark.parametrize(
+        ("params", "legacy"),
+        [
+            ('realm="caf\\u00e9.example.com"', True),
+            ('realm="merchant\\u2014api.example.com"', True),
+            ('realm="caf\\u00E9.example.com"', True),
+            ('realm="api.example.com", digest="sha-256=\\u00e9"', True),
+            # Only parameters the challenge ID binds count, as in mppx.
+            ('realm="api.example.com", ext="\\u00e9"', False),
+            ('realm="say \\"hi\\" \\\\ api.example.com"', False),
+            # An escaped backslash followed by u00e9 is a literal backslash, not an escape.
+            ('realm="caf\\\\u00e9.example.com"', False),
+            ('realm="caf\\u00g9.example.com"', False),
+            ('realm="caf\\u00e"', False),
+            ('realm="api.example.com", description="caf\\u00e9 \\u2014"', False),
+        ],
+    )
+    def test_flags_legacy_unicode_escapes_in_bound_params(self, params: str, legacy: bool) -> None:
+        header = f'Payment id="x", {params}, method="tempo", intent="charge", request="e30"'
+
+        challenge = Challenge.from_www_authenticate(header)
+
+        assert is_legacy_unicode_escaped(challenge) is legacy
+
+    def test_legacy_flag_is_not_part_of_the_challenge(self) -> None:
+        header = (
+            'Payment id="x", realm="caf\\u00e9.example.com", method="tempo", '
+            'intent="charge", request="e30"'
+        )
+        legacy = Challenge.from_www_authenticate(header)
+        plain = replace(legacy, _legacy_unicode_escape=False)
+
+        assert is_legacy_unicode_escaped(legacy)
+        assert not is_legacy_unicode_escaped(plain)
+        assert legacy.realm == "cafu00e9.example.com"
+        assert legacy == plain
+        assert "legacy" not in repr(legacy)
+        # Re-serializing a flagged challenge would hide the misread value.
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            legacy.to_www_authenticate(legacy.realm)
+        assert plain.to_www_authenticate(plain.realm)
+        assert legacy.to_echo() == plain.to_echo()
+
+    @pytest.mark.parametrize("field", ["id", "realm", "intent", "digest"])
+    def test_format_rejects_non_latin1_in_bound_params(self, field: str) -> None:
+        values = {"id": "test", "realm": "api.example.com", "intent": "charge", "digest": None}
+        values[field] = "merchant—api"
+        challenge = Challenge(
+            id=values["id"],
+            method="tempo",
+            intent=values["intent"],
+            request={},
+            digest=values["digest"],
+        )
+
+        with pytest.raises(ParseError, match="outside Latin-1"):
+            challenge.to_www_authenticate(values["realm"])
+
+    def test_format_keeps_latin1_in_realm(self) -> None:
+        challenge = Challenge(id="test", method="tempo", intent="charge", request={})
+
+        header = challenge.to_www_authenticate("café.example.com")
+
+        assert Challenge.from_www_authenticate(header).realm == "café.example.com"
 
     def test_www_authenticate_roundtrip_preserves_credential_header(self) -> None:
         challenge = Challenge.create(
@@ -1116,28 +1201,36 @@ class TestEncodingBoundaries:
         ],
         ids=["latin1-max", "bmp-min", "bmp-max", "astral-min", "astral-max"],
     )
-    def test_escape_quoted_boundaries(self, raw: str, escaped: str) -> None:
-        from mpp._parsing import _escape_quoted, _unescape_quoted
+    def test_escape_quoted_text_boundaries(self, raw: str, escaped: str) -> None:
+        from mpp._parsing import _escape_quoted_text, _unescape_quoted
 
-        assert _escape_quoted(raw) == escaped
-        assert _unescape_quoted(escaped) == raw
+        assert _escape_quoted_text(raw) == escaped
+        assert _unescape_quoted(escaped) == escaped.replace("\\", "")
+
+    @pytest.mark.parametrize("raw", ["\u0100", "\uffff", "\U00010000", "\U0010ffff"])
+    def test_escape_quoted_rejects_non_latin1(self, raw: str) -> None:
+        from mpp._parsing import _escape_quoted
+
+        assert _escape_quoted("\u00ff") == "\u00ff"
+        with pytest.raises(ParseError, match="outside Latin-1"):
+            _escape_quoted(raw)
 
     @pytest.mark.parametrize(
         ("escaped", "raw"),
         [
-            ("\\ud7ff", "\ud7ff"),
-            ("\\ue000", "\ue000"),
-            ("\\ud800\\udc00", "\U00010000"),
-            ("\\udbff\\udfff", "\U0010ffff"),
-            ("\\ud800", "\ufffd"),
-            ("\\udbff", "\ufffd"),
-            ("\\udc00", "\ufffd"),
-            ("\\udfff", "\ufffd"),
-            ("\\ud800\\ud800", "\ufffd\ufffd"),
-            ("\\ud800\\ue000", "\ufffd\ue000"),
-            ("\\udbffx", "\ufffdx"),
-            ("\\ud800\\x", "\ufffdx"),
-            ("\\ud800\\udc0", "\ufffdudc0"),
+            ("\\ud7ff", "ud7ff"),
+            ("\\ue000", "ue000"),
+            ("\\ud800\\udc00", "ud800udc00"),
+            ("\\udbff\\udfff", "udbffudfff"),
+            ("\\ud800", "ud800"),
+            ("\\udbff", "udbff"),
+            ("\\udc00", "udc00"),
+            ("\\udfff", "udfff"),
+            ("\\ud800\\ud800", "ud800ud800"),
+            ("\\ud800\\ue000", "ud800ue000"),
+            ("\\udbffx", "udbffx"),
+            ("\\ud800\\x", "ud800x"),
+            ("\\ud800\\udc0", "ud800udc0"),
             ("\\u12", "u12"),
             ("\\u12g4", "u12g4"),
             ("a\\", "a"),
@@ -1161,7 +1254,7 @@ class TestEncodingBoundaries:
             "trailing-backslash",
         ],
     )
-    def test_unescape_quoted_surrogate_edges(self, escaped: str, raw: str) -> None:
+    def test_unescape_quoted_never_decodes_unicode_escapes(self, escaped: str, raw: str) -> None:
         from mpp._parsing import _unescape_quoted
 
         assert _unescape_quoted(escaped) == raw
@@ -1176,12 +1269,12 @@ class TestEncodingBoundaries:
     def test_unescape_quoted_pairs_only_an_adjacent_escape(self) -> None:
         from mpp._parsing import _unescape_quoted
 
-        assert _unescape_quoted("\\ud800xudc00") == "\ufffdxudc00"
+        assert _unescape_quoted("\\ud800xudc00") == "ud800xudc00"
 
     def test_unquoted_auth_param_keeps_backslashes(self) -> None:
         from mpp._parsing import _parse_auth_params
 
-        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xA"}
+        assert _parse_auth_params('a=x\\u0041, b="x\\u0041"') == {"a": "x\\u0041", "b": "xu0041"}
 
     def test_receipt_timestamp_is_formatted_with_z(self) -> None:
         receipt = Receipt.success("0xabc", timestamp=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC))
@@ -1511,3 +1604,77 @@ def test_receipt_with_valid_method_replaces_non_string_method(bad: object) -> No
         method=bad,  # type: ignore[arg-type]
     )
     assert receipt_with_valid_method(receipt, "tempo").method == "tempo"
+
+
+class TestFormattedDescription:
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "plain",
+            "caf\u00e9 \u2014 \u2615",
+            "emoji \U0001f600",
+            "back\\slash \\u2014 literal",
+            'quote "x"',
+        ],
+    )
+    def test_round_trips_formatted_description(self, description: str) -> None:
+        challenge = Challenge(
+            id="x",
+            method="tempo",
+            intent="charge",
+            request={"amount": "1"},
+            description=description,
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert parse_formatted_description(header) == description
+
+    @pytest.mark.parametrize(
+        ("description", "expected"),
+        [
+            ("lone \ud800 high", "lone \ufffd high"),
+            ("lone \udc00 low", "lone \ufffd low"),
+            ("high \ud800A then text", "high \ufffdA then text"),
+            ("trailing \ud800", "trailing \ufffd"),
+            ("two highs \ud800\ud83d\ude00", "two highs \ufffd\U0001f600"),
+        ],
+    )
+    def test_lone_surrogates_decode_to_replacement(self, description: str, expected: str) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description=description
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        decoded = parse_formatted_description(header)
+        assert decoded == expected
+        assert decoded is not None
+        decoded.encode("utf-8")
+
+    def test_peer_parse_keeps_quoted_pair_semantics(self) -> None:
+        challenge = Challenge(
+            id="x", method="tempo", intent="charge", request={}, description="a\u2014b"
+        )
+        header = challenge.to_www_authenticate("api.example.com")
+
+        assert Challenge.from_www_authenticate(header).description == "au2014b"
+        assert parse_formatted_description(header) == "a\u2014b"
+
+    def test_missing_description(self) -> None:
+        header = 'Payment id="x", realm="r", method="tempo", intent="charge", request="e30"'
+        assert parse_formatted_description(header) is None
+
+    def test_rejects_other_scheme(self) -> None:
+        with pytest.raises(ParseError):
+            parse_formatted_description('Bearer realm="r"')
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("\\u12", "u12"),
+            ("\\uzzzz", "uzzzz"),
+            ("trailing\\", "trailing"),
+            ('\\"', '"'),
+        ],
+    )
+    def test_unescape_text_edge_cases(self, raw: str, expected: str) -> None:
+        assert _unescape_quoted_text(raw) == expected

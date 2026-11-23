@@ -58,6 +58,7 @@ from mpp.methods.tempo.session.client import (
 )
 from mpp.methods.tempo.session.client._manager import (
     _FetchUse,  # pyright: ignore[reportPrivateUsage]
+    _zero_amount_charge,  # pyright: ignore[reportPrivateUsage]
 )
 from mpp.methods.tempo.session.client._ops import (
     read_optional_address,
@@ -1110,6 +1111,26 @@ class TestSessionMethod:
         assert sorted(int(p["cumulativeAmount"]) for p in payloads) == list(range(100, 1100, 100))
         assert len({p["channelId"] for p in payloads}) == 1
 
+    async def test_legacy_unicode_escaped_challenge_is_refused_before_signing(self) -> None:
+        from mpp.errors import LegacyUnicodeEscapedChallengeError
+        from mpp.runtime import CredentialParams
+
+        header = make_challenge().to_www_authenticate("api.test")
+        legacy = Challenge.from_www_authenticate(
+            header.replace('realm="api.test"', 'realm="caf\\u2014.test"')
+        )
+        store = create_channel_store()
+        updates: list[ChannelEntry] = []
+        method = SessionMethod(
+            account=ACCOUNT, channel_store=store, on_channel_update=updates.append
+        )
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_session_credential(legacy)
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_credential(CredentialParams(challenge=legacy))
+        assert updates == []
+        assert store.get(KEY) is None
+
     async def test_manual_close_marks_channel_closed(self) -> None:
         store = create_channel_store()
         updates: list[ChannelEntry] = []
@@ -1300,6 +1321,39 @@ class TestManagementHelpers:
             ],
         )
         assert [c.id for c in _session.session_challenges(response)] == [session_challenge.id]
+
+    def test_session_challenges_skip_legacy_unicode_escapes(self) -> None:
+        legacy = make_challenge(challenge_id="legacy").to_www_authenticate("api.test")
+        legacy = legacy.replace('realm="api.test"', 'realm="caf\\u00e9.test"')
+        plain = make_challenge(challenge_id="plain")
+        response = httpx.Response(
+            402,
+            headers=[
+                ("WWW-Authenticate", legacy),
+                ("WWW-Authenticate", plain.to_www_authenticate("api.test")),
+            ],
+        )
+        assert [c.id for c in _session.session_challenges(response)] == ["plain"]
+
+    def test_bootstrap_skips_legacy_unicode_escaped_zero_charge(self) -> None:
+        def zero(challenge_id: str, realm: str) -> str:
+            challenge = Challenge(
+                id=challenge_id, method="tempo", intent="charge", request={"amount": "0"}
+            )
+            return challenge.to_www_authenticate("api.test").replace(
+                'realm="api.test"', f'realm="{realm}"'
+            )
+
+        legacy = zero("legacy", "caf\\u00e9.test")
+        assert (
+            _zero_amount_charge(httpx.Response(402, headers={"WWW-Authenticate": legacy})) is None
+        )
+        response = httpx.Response(
+            402,
+            headers=[("WWW-Authenticate", legacy), ("WWW-Authenticate", zero("plain", "api.test"))],
+        )
+        found = _zero_amount_charge(response)
+        assert found is not None and found.id == "plain"
 
     def test_read_receipt(self) -> None:
         assert _session.read_receipt(httpx.Response(200)) is None

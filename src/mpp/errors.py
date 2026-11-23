@@ -215,6 +215,27 @@ class NoMethodFoundError(PaymentError, ValueError):
         )
 
 
+class LegacyUnicodeEscapedChallengeError(NoMethodFoundError):
+    """Every payable challenge escaped a bound parameter as \\uXXXX.
+
+    Servers before quoted-pair parsing (RFC 9110) wrote characters above U+00FF that
+    way. Such a value now reads as ``uXXXX``, which the challenge ID does not bind, so
+    the server would reject the credential, possibly after a pushed payment moved funds.
+    Clients refuse these challenges before creating a credential (mppx
+    ``LegacyUnicodeEscapedChallengeError``).
+    """
+
+    def __init__(self, challenges: Sequence[Any] = (), methods: Sequence[Any] = ()) -> None:
+        super().__init__(
+            challenges,
+            methods,
+            message=(
+                "Legacy unicode-escaped challenge: the server escaped a bound parameter "
+                "as \\uXXXX; upgrade the server."
+            ),
+        )
+
+
 class PaymentRequiredError(PaymentError):
     """No credential was provided but payment is required."""
 

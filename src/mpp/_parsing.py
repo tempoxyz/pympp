@@ -16,6 +16,7 @@ import base64
 import json
 import re
 import string
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -142,7 +143,25 @@ def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[s
 
 
 def _escape_quoted(s: str) -> str:
-    """Escape a string for use in a quoted-string. Rejects CRLF."""
+    """Escape a string for use in a quoted-string.
+
+    A quoted-pair can only carry Latin-1 (RFC 9110 qdtext and obs-text), so
+    characters above U+00FF are rejected rather than encoded in a form the
+    peer would parse back differently. Rejects CRLF.
+    """
+    if any(ord(character) > 0xFF for character in s):
+        raise ParseError("Header value contains characters outside Latin-1")
+    return _escape_quoted_text(s)
+
+
+def _escape_quoted_text(s: str) -> str:
+    """Escape display text, such as a description, for use in a quoted-string.
+
+    Header values must be ByteStrings (code points up to U+00FF), so characters
+    above Latin-1 are written as \\uXXXX UTF-16 escapes, as mppx does. Parsers
+    follow quoted-pair semantics and read them back as ``uXXXX`` text, so use
+    this only for unbound display fields. Rejects CRLF.
+    """
     if "\r" in s or "\n" in s:
         raise ParseError("Header value contains invalid CRLF characters")
     escaped: list[str] = []
@@ -163,48 +182,22 @@ def _escape_quoted(s: str) -> str:
     return "".join(escaped)
 
 
-def _read_unicode_escape(s: str, index: int) -> int | None:
-    """Return the UTF-16 code unit in a ``uXXXX`` escape body, if present."""
-    if not s.startswith("u", index):
-        return None
-    digits = s[index + 1 : index + 5]
-    if len(digits) != 4 or not all(character in string.hexdigits for character in digits):
-        return None
-    return int(digits, 16)
-
-
 def _unescape_quoted(s: str) -> str:
-    """Unescape quoted-pairs and the UTF-16 escapes emitted by mppx."""
+    """Unescape quoted-pairs (RFC 9110): a backslash yields the next character.
+
+    A \\uXXXX escape is an ordinary quoted-pair, so it reads as ``uXXXX`` and
+    is never decoded: the realm and other bound values must parse the same way
+    in every SDK.
+    """
     result: list[str] = []
     index = 0
     while index < len(s):
-        if s[index] != "\\":
-            result.append(s[index])
+        if s[index] == "\\":
             index += 1
-            continue
-
+            if index >= len(s):
+                break
+        result.append(s[index])
         index += 1
-        if index >= len(s):
-            break
-
-        code = _read_unicode_escape(s, index)
-        if code is None:
-            result.append(s[index])
-            index += 1
-            continue
-        index += 5
-
-        if 0xD800 <= code <= 0xDBFF:
-            low = _read_unicode_escape(s, index + 1) if s.startswith("\\", index) else None
-            if low is not None and 0xDC00 <= low <= 0xDFFF:
-                result.append(chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)))
-                index += 6
-                continue
-            result.append("\ufffd")
-        elif 0xDC00 <= code <= 0xDFFF:
-            result.append("\ufffd")
-        else:
-            result.append(chr(code))
     return "".join(result)
 
 
@@ -219,12 +212,113 @@ def validate_payment_method_id(method: object) -> None:
         raise ParseError(f"Invalid payment method id: {method!r}")
 
 
-def _parse_auth_params(params_str: str) -> dict[str, str]:
+def _unescape_quoted_text(s: str) -> str:
+    """Invert :func:`_escape_quoted_text`: decode its \\uXXXX escapes and quoted-pairs.
+
+    A lone UTF-16 surrogate escape decodes to U+FFFD, so the result is always
+    encodable and a Credential echoing it still parses.
+
+    Only for display text this SDK formatted itself, such as re-reading a
+    description from a header the server just built: that formatter always
+    doubles a literal backslash, so a bare \\u only comes from an escape.
+    Never use it for values from a peer, which follow quoted-pair semantics.
+    """
+    result: list[str] = []
+    pending_high: int | None = None
+    index = 0
+    while index < len(s):
+        character = s[index]
+        unit: int | None = None
+        if character == "\\" and index + 1 < len(s):
+            digits = s[index + 2 : index + 6]
+            if (
+                s[index + 1] == "u"
+                and len(digits) == 4
+                and all(digit in string.hexdigits for digit in digits)
+            ):
+                unit = int(digits, 16)
+                index += 6
+            else:
+                character = s[index + 1]
+                index += 2
+        elif character == "\\":
+            break
+        else:
+            index += 1
+        if pending_high is not None:
+            if unit is not None and 0xDC00 <= unit <= 0xDFFF:
+                result.append(chr(0x10000 + ((pending_high - 0xD800) << 10) + (unit - 0xDC00)))
+                pending_high = None
+                continue
+            # A lone surrogate can't be encoded, so it reads as U+FFFD.
+            result.append("\ufffd")
+            pending_high = None
+        if unit is None:
+            result.append(character)
+        elif 0xD800 <= unit <= 0xDBFF:
+            pending_high = unit
+        elif 0xDC00 <= unit <= 0xDFFF:
+            result.append("\ufffd")
+        else:
+            result.append(chr(unit))
+    if pending_high is not None:
+        result.append("\ufffd")
+    return "".join(result)
+
+
+def parse_formatted_description(header: str) -> str | None:
+    """Read the description of a WWW-Authenticate header this SDK formatted.
+
+    :func:`format_www_authenticate` writes characters above Latin-1 in the
+    description as \\uXXXX escapes, which :func:`parse_www_authenticate` reads
+    as quoted-pairs (``uXXXX``). A server re-reading its own header, such as
+    the MCP transport, uses this to recover the configured description.
+    """
+    header = header.strip()
+    if not header.lower().startswith("payment "):
+        raise ParseError("Expected 'Payment' authentication scheme")
+    return _parse_auth_params(header[8:].strip(), _unescape_quoted_text).get("description")
+
+
+# Auth-params the challenge ID binds (mppx); a \uXXXX escape in any of them is legacy.
+_CHALLENGE_ID_BOUND_PARAMS = frozenset(
+    ("realm", "method", "intent", "request", "expires", "digest", "opaque", "header")
+)
+
+
+def _has_unicode_escape(raw: str) -> bool:
+    """Whether a raw quoted-string value holds a \\uXXXX escape.
+
+    Walks the quoted-pairs, so an escaped backslash followed by ``uXXXX`` (a literal
+    backslash in the value) is not one.
+    """
+    index = 0
+    while index < len(raw):
+        if raw[index] == "\\":
+            digits = raw[index + 2 : index + 6]
+            if (
+                raw[index + 1 : index + 2] == "u"
+                and len(digits) == 4
+                and all(digit in string.hexdigits for digit in digits)
+            ):
+                return True
+            index += 2
+        else:
+            index += 1
+    return False
+
+
+def _parse_auth_params(
+    params_str: str,
+    unescape: Callable[[str], str] = _unescape_quoted,
+    quoted_raw: dict[str, str] | None = None,
+) -> dict[str, str]:
     """Parse RFC 9110 auth-params: key="value" or key=token pairs.
 
     Consumes the input sequentially like mppx's `parseAuthParams`: a position that
     cannot begin an auth-param is rejected rather than skipped, and parsing stops
-    at a token without `=`, which begins another auth scheme.
+    at a token without `=`, which begins another auth scheme. When ``quoted_raw``
+    is given, it receives each quoted value as written, before unescaping.
     """
     if len(params_str) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authentication parameters exceed maximum size")
@@ -254,7 +348,10 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
             index += 1
 
         if index < length and params_str[index] == '"':
-            value, index = _read_quoted_auth_param(params_str, index + 1)
+            start = index + 1
+            value, index = _read_quoted_auth_param(params_str, start, unescape)
+            if quoted_raw is not None:
+                quoted_raw[key] = params_str[start : index - 1]
         else:
             # A token value ends at whitespace or the comma that separates auth-params.
             value_end = index
@@ -279,7 +376,9 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
     return params
 
 
-def _read_quoted_auth_param(params_str: str, start: int) -> tuple[str, int]:
+def _read_quoted_auth_param(
+    params_str: str, start: int, unescape: Callable[[str], str] = _unescape_quoted
+) -> tuple[str, int]:
     """Read a quoted-string value starting after its opening quote."""
     index = start
     escaped = False
@@ -291,8 +390,31 @@ def _read_quoted_auth_param(params_str: str, start: int) -> tuple[str, int]:
         elif character == "\\":
             escaped = True
         elif character == '"':
-            return _unescape_quoted(params_str[start : index - 1]), index
+            return unescape(params_str[start : index - 1]), index
     raise ParseError("Unterminated quoted-string")
+
+
+def is_legacy_unicode_escaped(challenge: object) -> bool:
+    """Whether a parsed challenge escaped a bound parameter as \\uXXXX.
+
+    Servers before quoted-pair parsing wrote characters above U+00FF that way. The value
+    read differs from the one the challenge ID binds, so clients never pay such a
+    challenge (mppx ``Challenge.isLegacyUnicodeEscaped``).
+    """
+    return getattr(challenge, "_legacy_unicode_escape", False) is True
+
+
+def assert_not_legacy_unicode_escaped(challenge: object) -> None:
+    """Raise :class:`~mpp.errors.LegacyUnicodeEscapedChallengeError` for a flagged challenge.
+
+    Payment methods call this before signing anything, so a challenge whose bound value
+    a pre-upgrade server escaped as \\uXXXX is never paid, even outside the client
+    runtime (mppx ``Challenge.assertNotLegacyUnicodeEscaped``).
+    """
+    if is_legacy_unicode_escaped(challenge):
+        from mpp.errors import LegacyUnicodeEscapedChallengeError
+
+        raise LegacyUnicodeEscapedChallengeError([challenge])
 
 
 def parse_www_authenticate(header: str) -> Challenge:
@@ -314,7 +436,8 @@ def parse_www_authenticate(header: str) -> Challenge:
         raise ParseError("Expected 'Payment' authentication scheme")
 
     params_str = header[8:].strip()
-    params = _parse_auth_params(params_str)
+    quoted_raw: dict[str, str] = {}
+    params = _parse_auth_params(params_str, quoted_raw=quoted_raw)
 
     # Extract required fields
     id_ = params.get("id")
@@ -377,6 +500,14 @@ def parse_www_authenticate(header: str) -> Challenge:
         # Keep the issuer's string only when it is strict base64url, so that
         # echoing or re-formatting it cannot inject header parameters.
         _opaque_b64=opaque_b64 if opaque_b64 and _BASE64URL.fullmatch(opaque_b64) else None,
+        # Servers before quoted-pair parsing wrote characters above U+00FF as \uXXXX. Such
+        # a bound value now reads as ``uXXXX``, which the challenge ID does not bind, so
+        # clients refuse the challenge before paying. ``description`` is not bound.
+        _legacy_unicode_escape=any(
+            _has_unicode_escape(raw)
+            for key, raw in quoted_raw.items()
+            if key in _CHALLENGE_ID_BOUND_PARAMS
+        ),
     )
     return with_received_credential_header(challenge, credential_header)
 
@@ -388,6 +519,9 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
         Payment id="...", realm="...", method="...", intent="...", request="<base64url>"
     """
     from mpp import advertised_credential_header
+
+    # Re-serializing a flagged challenge would hide that its bound values were misread.
+    assert_not_legacy_unicode_escaped(challenge)
 
     # Encode request as base64url JSON
     request_b64 = canonical_b64url(challenge.request)
@@ -409,7 +543,7 @@ def format_www_authenticate(challenge: Challenge, realm: str) -> str:
     if challenge.expires:
         parts.append(f'expires="{_escape_quoted(challenge.expires)}"')
     if challenge.description:
-        parts.append(f'description="{_escape_quoted(challenge.description)}"')
+        parts.append(f'description="{_escape_quoted_text(challenge.description)}"')
     # Emit the challenge's own spelling: a received challenge keeps the issuer's.
     credential_header = advertised_credential_header(challenge.header)
     if credential_header:
@@ -476,7 +610,7 @@ def parse_authorization(header: str) -> Credential:
     )
     if description is not None:
         # A retry can reflect this unsigned display field into WWW-Authenticate.
-        _escape_quoted(description)
+        _escape_quoted_text(description)
         if any(
             (ord(character) < 0x20 and character != "\t") or ord(character) == 0x7F
             for character in description

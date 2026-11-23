@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge
-from mpp._parsing import ParseError
+from mpp._parsing import (
+    ParseError,
+    assert_not_legacy_unicode_escaped,
+    is_legacy_unicode_escaped,
+)
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.methods.tempo.client import (
@@ -129,7 +133,8 @@ def session_challenges(response: httpx.Response) -> list[Challenge]:
                 challenge = Challenge.from_www_authenticate(field)
             except ParseError:
                 continue
-            if is_tip1034_session_challenge(challenge):
+            # A legacy \uXXXX-escaped challenge would be rejected after signing: skip it.
+            if is_tip1034_session_challenge(challenge) and not is_legacy_unicode_escaped(challenge):
                 found.append(challenge)
     return found
 
@@ -448,6 +453,9 @@ class SessionMethod:
 
     async def _create(self, params: CredentialParams, origin: str | None) -> str:
         challenge = params.challenge
+        # Every public entry (create_credential, create_session_credential, top-ups) lands
+        # here: refuse a legacy escaped Challenge before any policy, signing or state change.
+        assert_not_legacy_unicode_escaped(challenge)
         context = params.context
         if context is not None and not isinstance(context, SessionContext):
             raise TypeError("tempo session context must be a SessionContext")

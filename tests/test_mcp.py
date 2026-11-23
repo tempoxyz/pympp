@@ -1338,6 +1338,28 @@ class TestChallengeIssuance:
 
         assert challenge.description == "API call fee"
 
+    async def test_challenge_description_replaces_lone_surrogate(self) -> None:
+        challenge = await self._issue(description="fee \ud800 here")
+
+        assert challenge.description == "fee \ufffd here"
+        # The challenge can be echoed in a credential the server parses.
+        credential = MCPCredential(challenge=challenge, payload={})
+        credential.to_core().to_authorization()
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "Merchant\u2014API fee \u2615",
+            "Fee \U0001f600 for caf\u00e9",
+            "Literal \\u2014 and \\ backslash",
+            'Quoted "fee"',
+        ],
+    )
+    async def test_challenge_description_round_trips_through_header(self, description: str) -> None:
+        challenge = await self._issue(description=description)
+
+        assert challenge.description == description
+
     async def test_challenge_id_is_hmac_bound(self) -> None:
         challenge = await self._issue()
 

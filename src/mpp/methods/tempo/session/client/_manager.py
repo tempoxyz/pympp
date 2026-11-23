@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from mpp import AUTHORIZATION_HEADER, Challenge, Credential
-from mpp._parsing import ParseError
+from mpp._parsing import ParseError, is_legacy_unicode_escaped
 from mpp._typing import is_dict
 from mpp._units import parse_units
 from mpp.events import CHALLENGE_RECEIVED
@@ -79,6 +79,9 @@ def _zero_amount_charge(response: httpx.Response) -> Challenge | None:
             try:
                 challenge = Challenge.from_www_authenticate(value)
             except ParseError:
+                continue
+            if is_legacy_unicode_escaped(challenge):
+                # Its proof would sign a realm the challenge ID doesn't bind.
                 continue
             if challenge.method == "tempo" and challenge.intent == "charge":
                 return challenge if _is_zero_tempo_charge(challenge) else None

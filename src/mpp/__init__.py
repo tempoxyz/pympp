@@ -32,6 +32,7 @@ from mpp.errors import (
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
+    LegacyUnicodeEscapedChallengeError,
     MalformedCredentialError,
     NoMethodFoundError,
     PaymentActionRequiredError,
@@ -299,6 +300,10 @@ class Challenge:
     # echoes it unchanged (clients MUST NOT modify opaque). Used only while it
     # still decodes to opaque; otherwise the canonical encoding is used.
     _opaque_b64: str | None = field(default=None, repr=False, compare=False)
+    # Set by the header parser when a bound parameter held a \uXXXX escape: the value
+    # read differs from the one the issuer bound, so clients refuse to pay it. Never
+    # serialized.
+    _legacy_unicode_escape: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         # A locally constructed challenge emits the canonical spelling. The parser keeps a
@@ -620,6 +625,7 @@ __all__ = [
     "InternalPaymentError",
     "InvalidChallengeError",
     "InvalidPayloadError",
+    "LegacyUnicodeEscapedChallengeError",
     "MalformedCredentialError",
     "MemoryStore",
     "Method",

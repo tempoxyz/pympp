@@ -15,6 +15,7 @@ from pytest_httpx import HTTPXMock
 from mpp import (
     Challenge,
     Credential,
+    LegacyUnicodeEscapedChallengeError,
     NoMethodFoundError,
     ParseError,
     PaymentError,
@@ -2462,3 +2463,117 @@ async def test_binds_tempo_session_challenges_to_the_request_host(amount):
         response = await transport.handle_async_request(httpx.Request("GET", url))
         assert response.status_code == 200
         method.create_credential.assert_awaited_once()
+
+
+def _legacy_header(realm: str, *, challenge_id: str = "legacy", description: str = "") -> str:
+    """A charge challenge as written by a server that escapes auth-params as \\uXXXX."""
+    extra = f', description="{description}"' if description else ""
+    return (
+        f'Payment id="{challenge_id}", realm="{realm}", method="tempo", intent="charge", '
+        f'request="eyJhbW91bnQiOiIxMDAwIn0"{extra}'
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("realm", ["caf\\u00e9.example.com", "merchant\\u2014api.example.com"])
+async def test_refuses_legacy_unicode_escaped_challenge(realm: str) -> None:
+    method = MockMethod()
+    failed: list[ClientPaymentFailedPayload] = []
+    inner = MockTransport(
+        [httpx.Response(402, headers={"www-authenticate": _legacy_header(realm)})]
+    )
+    transport = PaymentTransport(methods=[method.client], inner=inner)
+    transport.on_payment_failed(lambda payload: failed.append(payload))
+
+    with pytest.raises(LegacyUnicodeEscapedChallengeError) as raised:
+        await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+    assert str(raised.value) == (
+        "Legacy unicode-escaped challenge: the server escaped a bound parameter as "
+        "\\uXXXX; upgrade the server."
+    )
+    assert isinstance(raised.value, NoMethodFoundError)
+    method.create_credential.assert_not_awaited()
+    assert len(inner.requests) == 1
+    assert [payload["error"] for payload in failed] == [raised.value]
+
+
+@pytest.mark.asyncio
+async def test_skips_legacy_unicode_escaped_challenge_for_another_offer() -> None:
+    method = MockMethod()
+    plain = Challenge(id="plain", method="tempo", intent="charge", request={"amount": "1000"})
+    inner = MockTransport(
+        [
+            httpx.Response(
+                402,
+                headers=[
+                    ("www-authenticate", _legacy_header("caf\\u00e9.example.com")),
+                    ("www-authenticate", plain.to_www_authenticate("example.com")),
+                ],
+            ),
+            httpx.Response(200),
+        ]
+    )
+    transport = PaymentTransport(methods=[method.client], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+    awaited = method.create_credential.await_args
+    assert awaited is not None and awaited.args[0].id == "plain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("realm", "description"),
+    [
+        ('say \\"hi\\" example.com', ""),
+        ("back\\\\slash.example.com", ""),
+        ("example.com", "caf\\u00e9 \\u2014"),
+    ],
+)
+async def test_pays_challenge_without_bound_unicode_escapes(realm: str, description: str) -> None:
+    method = MockMethod()
+    header = _legacy_header(realm, description=description)
+    inner = MockTransport(
+        [httpx.Response(402, headers={"www-authenticate": header}), httpx.Response(200)]
+    )
+    transport = PaymentTransport(methods=[method.client], inner=inner)
+
+    response = await transport.handle_async_request(httpx.Request("GET", "https://example.com"))
+
+    assert response.status_code == 200
+    method.create_credential.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_refuses_legacy_unicode_escaped_challenge() -> None:
+    method = MockMethod()
+    runtime = PaymentRuntime([method.client])
+    challenge = Challenge.from_www_authenticate(_legacy_header("caf\\u00e9.example.com"))
+
+    assert runtime.challenge_candidates([challenge]) == []
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        runtime.match_challenge([challenge])
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        await runtime.create_credential(challenge, method.client)
+    method.create_credential.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_payment_methods_refuse_legacy_unicode_escaped_challenge() -> None:
+    from mpp.methods.stripe.client import StripeMethod
+    from mpp.methods.tempo.client import _tempo_method  # pyright: ignore[reportPrivateUsage]
+
+    header = _legacy_header("caf\\u2014.example.com").replace('"tempo"', '"stripe"')
+    stripe_challenge = Challenge.from_www_authenticate(header)
+    create_token = AsyncMock(return_value="spt_test")
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        await StripeMethod(create_token=create_token).create_credential(stripe_challenge)
+    create_token.assert_not_awaited()
+
+    # Raised before the account check, so nothing is signed or broadcast.
+    tempo_challenge = Challenge.from_www_authenticate(_legacy_header("caf\\u2014.example.com"))
+    with pytest.raises(LegacyUnicodeEscapedChallengeError):
+        await _tempo_method().create_credential(tempo_challenge)
