@@ -16,6 +16,7 @@ someone else's wallet.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import inspect
 import json
@@ -189,7 +190,8 @@ class Persona:
 
         Raises:
             ValueError: Without a reference ID or an inquiry template.
-            PersonaError: When the Persona API fails or answers malformed.
+            PersonaError: When the Persona API fails, times out, is unreachable or answers
+                malformed.
         """
         inquiry_template_id = template_id if template_id is not None else self._template_id
         if not reference_id:
@@ -244,6 +246,8 @@ class Persona:
                 ``Link: <url>; rel="kyc"`` with 401 and 403 responses, such as your endpoint
                 that calls :meth:`start_inquiry`.
             cache: Caches approvals by reference ID, so a paid request skips the Persona API.
+                A Store that fails is skipped. An :class:`~mpp.store.ExpiringStore` drops an
+                approval once ``cache_ttl`` passes; a plain Store keeps it.
             cache_ttl: Seconds an approval stays cached.
 
         Raises:
@@ -286,8 +290,10 @@ class Persona:
         self, reference_id: str | None, options: _LookupOptions, request: Request
     ) -> Verification[VerifiedInquiry]:
         """Look a reference ID up, through the cache when set, and map it to a verification."""
-        headers = await _onboarding_headers(options.onboarding, request, reference_id)
+        # Onboarding resolves only on a rejection: a callable that starts an inquiry must not
+        # run, or fail, for a payer who passes.
         if not reference_id:
+            headers = await _onboarding_headers(options.onboarding, request, reference_id)
             return missing("Persona KYC requires a payer.", headers)
 
         # Scoped to the Persona organization and environment, so clients sharing a Store never
@@ -295,7 +301,11 @@ class Persona:
         key = f"mppx:persona:{self._scope}:{self._template_id or ''}:{reference_id}"
         now = time.time()
         if options.cache is not None:
-            cached = _CacheEntry.read(await options.cache.get(key))
+            # The cache is an optimization: a failing Store falls through to the API.
+            try:
+                cached = _CacheEntry.read(await options.cache.get(key))
+            except Exception:
+                cached = None
             if (
                 cached is not None
                 # Each check applies its own lifetime, so a longer-lived check sharing the Store
@@ -318,6 +328,7 @@ class Persona:
         except Exception:
             return unavailable("Persona KYC verification is unavailable.")
         if inquiry is None:
+            headers = await _onboarding_headers(options.onboarding, request, reference_id)
             return forbidden("The payer has not passed Persona KYC.", headers)
         # Only approvals are cached, so a person who just passed KYC is never kept waiting.
         if options.cache is not None:
@@ -327,7 +338,9 @@ class Persona:
                 status=inquiry.status,
                 verified_at=inquiry.verified_at,
             )
-            await options.cache.put(key, entry.dump())
+            # A failing Store never turns an approval Persona confirmed into an error.
+            with contextlib.suppress(Exception):
+                await _cache_put(options.cache, key, entry.dump(), now + options.cache_ttl)
         return Valid(inquiry)
 
     async def _find(
@@ -418,15 +431,22 @@ class _Api:
             headers["Content-Type"] = "application/json"
             content = json.dumps(body).encode()
         transport = _unwrapped(self.transport)
-        # A whole-call deadline: httpx's own timeout applies to each phase separately.
-        with anyio.fail_after(self.timeout):
-            async with httpx.AsyncClient(
-                transport=_Borrowed(transport) if transport is not None else None,
-                # A redirect is a failure: never send the key on, nor read another origin's body.
-                follow_redirects=False,
-                timeout=self.timeout,
-            ) as client:
-                response = await client.request(method, url, headers=headers, content=content)
+        try:
+            # A whole-call deadline: httpx's own timeout applies to each phase separately.
+            with anyio.fail_after(self.timeout):
+                async with httpx.AsyncClient(
+                    transport=_Borrowed(transport) if transport is not None else None,
+                    # A redirect is a failure: never send the key on, nor read another origin's
+                    # body.
+                    follow_redirects=False,
+                    timeout=self.timeout,
+                ) as client:
+                    response = await client.request(method, url, headers=headers, content=content)
+        except TimeoutError:
+            raise PersonaError("The Persona API timed out.") from None
+        except httpx.HTTPError:
+            # Never surface the transport's error: it may carry request details.
+            raise PersonaError("The Persona API is unreachable.") from None
         # Never surface the upstream body: it may carry request details.
         if not response.is_success:
             raise PersonaError(f"The Persona API returned {response.status_code}.")
@@ -531,6 +551,25 @@ def _options(
         cache=cache,
         cache_ttl=float(ttl),
     )
+
+
+async def _cache_put(cache: Store, key: str, value: str, expires_at: float) -> None:
+    """Write an approval that leaves the Store once this check's cache_ttl passes.
+
+    A plain :class:`~mpp.store.Store` has no expiry, so it keeps the entry until deleted;
+    each read still applies its own cache_ttl.
+    """
+    from mpp.store import ExpiringStore
+
+    if not isinstance(cache, ExpiringStore):
+        await cache.put(key, value)
+        return
+    # An entry that expires at once is useless to this check.
+    if expires_at <= time.time():
+        return
+    # Replace a stale entry: put_if_absent_until never overwrites a live key.
+    await cache.delete(key)
+    await cache.put_if_absent_until(key, value, expires_at)
 
 
 async def _onboarding_headers(

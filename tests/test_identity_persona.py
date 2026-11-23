@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -663,3 +664,90 @@ def test_the_package_exposes_its_constants_and_server_lazily() -> None:
     assert persona.server.create is create
     with pytest.raises(AttributeError):
         _ = persona.nope  # pyright: ignore[reportAttributeAccessIssue]
+
+
+async def test_resolves_onboarding_only_when_rejecting() -> None:
+    api = FakePersona([approved("inq_1")])
+    calls: list[str | None] = []
+
+    def onboarding(request: Any, reference_id: str | None) -> str:
+        calls.append(reference_id)
+        raise RuntimeError("onboarding must not run for an approved payer")
+
+    kyc = create(api_key="k", transport=api.transport).payment_check(
+        reference_id=from_source, onboarding=onboarding, cache=MemoryStore()
+    )
+    assert (await pay(kyc, PAYER)).status == 200
+    # A cache hit does not resolve it either.
+    assert (await pay(kyc, PAYER)).status == 200
+    assert calls == []
+
+
+class FailingStore(MemoryStore):
+    async def get(self, key: str) -> Any:
+        raise ConnectionError("store down")
+
+    async def put(self, key: str, value: Any) -> None:
+        raise ConnectionError("store down")
+
+    async def delete(self, key: str) -> None:
+        raise ConnectionError("store down")
+
+
+async def test_a_failing_cache_store_never_decides_the_outcome() -> None:
+    api = FakePersona([approved("inq_1")])
+    client = create(api_key="k", transport=api.transport)
+    kyc = client.payment_check(reference_id=from_source, cache=FailingStore())
+    paid = await pay(kyc, PAYER)
+    assert paid.status == 200
+    assert isinstance(paid.value, VerifiedInquiry)
+    assert (await pay(kyc, did(OTHER, 4217))).status == 403
+    assert len(api.calls) == 2
+
+
+async def test_cached_approvals_expire_from_an_expiring_store() -> None:
+    api = FakePersona([approved("inq_1")])
+    store = MemoryStore()
+    client = create(api_key="k", transport=api.transport)
+    before = time.time()
+    assert (
+        await pay(client.payment_check(reference_id=from_source, cache=store, cache_ttl=60), PAYER)
+    ).status == 200
+    [key] = list(store._data)  # pyright: ignore[reportPrivateUsage]
+    deadline = store._expiry_deadlines[key]  # pyright: ignore[reportPrivateUsage]
+    assert before + 60 <= deadline <= time.time() + 60
+
+    # A later write replaces the stale entry with a new deadline.
+    strict = client.payment_check(reference_id=from_source, cache=store, cache_ttl=120)
+    store._data[key] = json.dumps({"cachedAt": 0, "inquiryId": "old", "status": "approved"})  # pyright: ignore[reportPrivateUsage]
+    assert (await pay(strict, PAYER)).status == 200
+    assert json.loads(str(await store.get(key)))["inquiryId"] == "inq_1"
+    assert store._expiry_deadlines[key] >= before + 120  # pyright: ignore[reportPrivateUsage]
+
+    # A check with cache_ttl=0 writes nothing it could never read back.
+    fresh = MemoryStore()
+    zero = client.payment_check(reference_id=from_source, cache=fresh, cache_ttl=0)
+    assert (await pay(zero, PAYER)).status == 200
+    assert fresh._data == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_start_inquiry_raises_persona_error_on_timeouts_and_network_failures() -> None:
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={})
+
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connect failed to secret-host", request=request)
+
+    slow_client = create(
+        api_key="k", template_id="t", transport=httpx.MockTransport(slow), timeout=0.05
+    )
+    with pytest.raises(PersonaError, match="timed out"):
+        await slow_client.start_inquiry("ref")
+    down_client = create(api_key="k", template_id="t", transport=httpx.MockTransport(down))
+    with pytest.raises(PersonaError, match="unreachable") as error:
+        await down_client.start_inquiry("ref")
+    assert "secret-host" not in str(error.value)
+    assert error.value.__cause__ is None
+    paid = await pay(down_client.payment_check(reference_id=from_source), PAYER)
+    assert paid.status == 503
