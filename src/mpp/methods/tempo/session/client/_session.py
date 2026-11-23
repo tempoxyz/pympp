@@ -443,7 +443,6 @@ class SessionMethod:
         another origin, or to none, raises before anything is signed, and channels this
         credential opens or recovers are stored bound to it.
         """
-        assert_not_legacy_unicode_escaped(params.challenge)
         request = params.request
         origin = (
             self._authorized_origin(_require_http_origin(request.url))
@@ -454,6 +453,9 @@ class SessionMethod:
 
     async def _create(self, params: CredentialParams, origin: str | None) -> str:
         challenge = params.challenge
+        # Every public entry (create_credential, create_session_credential, top-ups) lands
+        # here: refuse a legacy escaped Challenge before any policy, signing or state change.
+        assert_not_legacy_unicode_escaped(challenge)
         context = params.context
         if context is not None and not isinstance(context, SessionContext):
             raise TypeError("tempo session context must be a SessionContext")

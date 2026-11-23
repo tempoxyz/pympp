@@ -1090,6 +1090,26 @@ class TestSessionMethod:
         assert sorted(int(p["cumulativeAmount"]) for p in payloads) == list(range(100, 1100, 100))
         assert len({p["channelId"] for p in payloads}) == 1
 
+    async def test_legacy_unicode_escaped_challenge_is_refused_before_signing(self) -> None:
+        from mpp.errors import LegacyUnicodeEscapedChallengeError
+        from mpp.runtime import CredentialParams
+
+        header = make_challenge().to_www_authenticate("api.test")
+        legacy = Challenge.from_www_authenticate(
+            header.replace('realm="api.test"', 'realm="caf\\u2014.test"')
+        )
+        store = create_channel_store()
+        updates: list[ChannelEntry] = []
+        method = SessionMethod(
+            account=ACCOUNT, channel_store=store, on_channel_update=updates.append
+        )
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_session_credential(legacy)
+        with pytest.raises(LegacyUnicodeEscapedChallengeError):
+            await method.create_credential(CredentialParams(challenge=legacy))
+        assert updates == []
+        assert store.get(KEY) is None
+
     async def test_manual_close_marks_channel_closed(self) -> None:
         store = create_channel_store()
         updates: list[ChannelEntry] = []
