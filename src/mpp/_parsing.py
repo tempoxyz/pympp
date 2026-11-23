@@ -219,7 +219,9 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
 
     Consumes the input sequentially like mppx's `parseAuthParams`: a position that
     cannot begin an auth-param is rejected rather than skipped, and parsing stops
-    at a token without `=`, which begins another auth scheme.
+    at a token without `=`, which begins another auth scheme. Following the
+    grammar `auth-param *( OWS "," OWS auth-param )`, a value must be followed by
+    a comma or the end of the input.
     """
     if len(params_str) > MAX_AUTHORIZATION_SIZE:
         raise ParseError("Authentication parameters exceed maximum size")
@@ -251,10 +253,22 @@ def _parse_auth_params(params_str: str) -> dict[str, str]:
         if index < length and params_str[index] == '"':
             value, index = _read_quoted_auth_param(params_str, index + 1)
         else:
-            value_end = params_str.find(",", index)
-            if value_end == -1:
-                value_end = length
-            value, index = params_str[index:value_end].strip(), value_end
+            # A token value ends at whitespace or the comma that separates auth-params.
+            value_end = index
+            while (
+                value_end < length
+                and params_str[value_end] != ","
+                and not params_str[value_end].isspace()
+            ):
+                value_end += 1
+            value, index = params_str[index:value_end], value_end
+
+        # Auth-params are separated by OWS "," OWS: anything else after a value,
+        # such as text after a closing quote or another auth-param, is malformed.
+        while index < length and params_str[index].isspace():
+            index += 1
+        if index < length and params_str[index] != ",":
+            raise ParseError("Malformed auth-param")
 
         if key in params:
             raise ParseError(f"Duplicate parameter: {key}")

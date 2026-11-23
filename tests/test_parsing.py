@@ -140,13 +140,49 @@ class TestChallenge:
             'intent="charge", request="e30"',
             'Payment id="test", realm="api.example.com", method="tempo", '
             'intent="charge", request="e30", description="unterminated',
+            'Payment id="test", method="tempo", intent="charge", request="e30", '
+            'realm="Example API\\"',
+            'Payment id="test", realm="p"ay.example.com, method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", method="tempo", intent="charge", request="e30", '
+            'realm="p"ay.example.com:8443"',
+            'Payment method="tempo" realm="api.example.com" intent="charge" '
+            'request="e30" id="test"',
+            'Payment id=test realm="api.example.com", method="tempo", '
+            'intent="charge", request="e30"',
+            'Payment id="test", realm=api example, method="tempo", intent="charge", request="e30"',
         ],
-        ids=["junk", "missing-name", "unterminated"],
+        ids=[
+            "junk",
+            "missing-name",
+            "unterminated",
+            "trailing-backslash",
+            "text-after-quote",
+            "text-after-final-quote",
+            "whitespace-separated",
+            "whitespace-after-token",
+            "whitespace-in-token",
+        ],
     )
     def test_parse_rejects_malformed_auth_params(self, header: str) -> None:
-        """Like mppx, a position that cannot begin an auth-param fails parsing."""
+        """A position that cannot begin an auth-param fails parsing, and auth-params
+        must be separated by OWS "," OWS."""
         with pytest.raises(ParseError):
             Challenge.from_www_authenticate(header)
+
+    def test_parse_accepts_whitespace_around_separators(self) -> None:
+        header = (
+            'Payment id="test" ,realm=api.example.com ,  method=tempo\t,'
+            'intent="charge",,request="e30"  '
+        )
+
+        challenge = Challenge.from_www_authenticate(header)
+        assert (challenge.id, challenge.realm, challenge.method, challenge.intent) == (
+            "test",
+            "api.example.com",
+            "tempo",
+            "charge",
+        )
 
     def test_parse_stops_at_next_auth_scheme(self) -> None:
         header = (
