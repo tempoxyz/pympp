@@ -109,6 +109,8 @@ def _sign_digest(account: Any, digest: str) -> str:
     if v in (0, 1):
         v += 27
     sig_s = int.from_bytes(signature[32:64], "big")
+    if v in (27, 28) and not 0 < sig_s < _SECP256K1_N:
+        raise ValueError("signer returned a secp256k1 signature with s out of range")
     if v in (27, 28) and sig_s > _SECP256K1_N // 2:
         # Tempo accepts only low-s signatures: use the equivalent (r, n - s) with flipped parity.
         return (

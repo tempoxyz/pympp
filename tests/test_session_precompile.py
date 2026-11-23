@@ -197,6 +197,23 @@ class TestVoucher:
         )
         assert voucher.verify_voucher(vector["escrow"], vector["chainId"], signed, PAYER)
 
+    @pytest.mark.parametrize(
+        "bad_s", [0, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141]
+    )
+    def test_sign_voucher_rejects_out_of_range_s(self, bad_s: int) -> None:
+        class BadSigner:
+            def sign_hash(self, msg_hash: bytes) -> bytes:
+                return b"" * 32 + bad_s.to_bytes(32, "big") + bytes([27])
+
+        with pytest.raises(ValueError, match="out of range"):
+            voucher.sign_voucher(
+                BadSigner(),
+                channel_id="0x" + "11" * 32,
+                cumulative_amount=1,
+                chain_id=1,
+                escrow=voucher.ESCROW_ADDRESS,
+            )
+
     def test_parse_voucher_from_payload_checks_uint96(self) -> None:
         channel_id = "0x" + "11" * 32
         parsed = voucher.parse_voucher_from_payload(channel_id, "5", "0x12")
