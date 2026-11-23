@@ -408,3 +408,149 @@ async def test_binds_the_query_on_an_encoded_hash_path_from_a_framework_request(
     framework = _DecodedPathRequest(b"/notes/a%23b", b"q=1", queryless)
     outcome = await agents.verifier.verify(await to_request(framework, read_body=False))
     assert isinstance(outcome, Rejected)
+
+
+# --- Hardening -----------------------------------------------------------------------------------
+
+
+class Wallet1271(Registry):
+    """Agent 3's contract wallet answers isValidSignature with a fixed return."""
+
+    def __init__(self, result: str) -> None:
+        super().__init__()
+        self.result = result
+        self.gas: list[str | None] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        call = json.loads(request.content)["params"][0]
+        if call["to"] == CONTRACT_WALLET:
+            self.gas.append(call.get("gas"))
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": self.result})
+        return super().handle(request)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        "0x1626ba7e",  # a bare bytes4
+        "0x1626ba7e" + "0" * 55 + "1",  # a dirty word
+        "0x1626ba7e" + "00" * 200,  # the calldata echoed back
+    ],
+)
+async def test_rejects_an_erc1271_return_that_is_not_the_encoded_magic(result: str) -> None:
+    outcome = rejected(await setup(Wallet1271(result)).verifier.verify(await signed(agent_id=3)))
+    assert outcome.status == "invalid"
+
+
+async def test_caps_the_gas_of_the_erc1271_check() -> None:
+    wallet = Wallet1271("0x1626ba7e" + "0" * 56)
+    assert isinstance(await setup(wallet).verifier.verify(await signed(agent_id=3)), Valid)
+    assert wallet.gas == [hex(1_000_000)]
+
+
+async def test_answers_503_for_an_oversized_rpc_reply() -> None:
+    wallet = Wallet1271("0x" + "00" * 100_000)
+    outcome = rejected(await setup(wallet).verifier.verify(await signed(agent_id=3)))
+    assert outcome.status == "unavailable"
+
+
+async def test_a_denied_agent_claims_no_nonce() -> None:
+    store = MemoryStore()
+    request = await signed()
+    denied = erc8004.server.create(store=store, http=Registry().http(), allow=lambda _: False)
+    assert rejected(await denied.verifier.verify(request)).status == "forbidden"
+    allowed = erc8004.server.create(store=store, http=Registry().http(), allow=lambda _: True)
+    assert isinstance(await allowed.verifier.verify(request), Valid)
+
+
+async def test_rejects_a_signature_that_expires_during_the_wallet_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mpp.extensions.identity.erc8004 import server
+
+    request = await signed(agent_id=3)
+    created = int(request.headers["agent-signature"].split(".")[0])
+    clock = [float(created)]
+    monkeypatch.setattr(server.time, "time", lambda: clock[0])
+
+    class Slow(Registry):
+        def handle(self, request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["params"][0]["to"] == CONTRACT_WALLET:
+                clock[0] += erc8004.MAX_AGE + erc8004.CLOCK_TOLERANCE + 1
+            return super().handle(request)
+
+    outcome = rejected(await setup(Slow(erc1271=True)).verifier.verify(request))
+    assert (outcome.status, outcome.reason) == ("invalid", "The agent signature has expired.")
+
+
+async def test_allow_needs_the_agents_signature_on_a_wallet_transaction() -> None:
+    seen: list[Agent] = []
+
+    def allow(agent: Agent) -> bool:
+        seen.append(agent)
+        return True
+
+    agents = setup(allow=allow)
+    unsigned = Request("GET", URL, {"Agent-Id": agent_id(1)})
+    check = payment(unsigned, AGENT_KEY.address, type="transaction")
+    assert rejected(await agents.payment_check.verify(check)).status == "invalid"
+    assert seen == []
+    check = payment(await signed(), AGENT_KEY.address, type="transaction")
+    assert isinstance(await agents.payment_check.verify(check), Valid)
+    assert len(seen) == 1
+
+
+async def test_require_signature_needs_it_on_a_wallet_transaction() -> None:
+    agents = setup(require_signature=True)
+    unsigned = Request("GET", URL, {"Agent-Id": agent_id(1)})
+    check = payment(unsigned, AGENT_KEY.address, type="transaction")
+    assert rejected(await agents.payment_check.verify(check)).status == "invalid"
+    check = payment(await signed(), AGENT_KEY.address, type="transaction")
+    assert isinstance(await agents.payment_check.verify(check), Valid)
+
+
+async def test_reuses_one_rpc_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = Registry()
+    real = httpx.AsyncClient
+    made: list[httpx.AsyncClient] = []
+
+    def client(**options: Any) -> httpx.AsyncClient:
+        made.append(real(transport=httpx.MockTransport(registry.handle), **options))
+        return made[-1]
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    agents = erc8004.server.create(store=MemoryStore())
+    for _ in range(3):
+        assert isinstance(await agents.verifier.verify(await signed()), Valid)
+    assert len(made) == 1 and registry.calls == 3
+
+
+def test_rejects_a_cleartext_rpc_url_to_a_remote_host() -> None:
+    with pytest.raises(ValueError, match="https"):
+        erc8004.server.create(rpc_url="http://rpc.example")
+    erc8004.server.create(rpc_url="http://127.0.0.1:8545")
+    erc8004.server.create(rpc_url="https://rpc.example")
+
+
+def test_signs_the_ascii_form_of_an_idn_host() -> None:
+    assert erc8004.target("https://bücher.example/a?b=1") == "https://xn--bcher-kva.example/a?b=1"
+    assert erc8004.target("https://XN--BCHER-KVA.example/") == "https://xn--bcher-kva.example/"
+
+
+async def test_verifies_against_the_configured_origin() -> None:
+    agents = setup(origin="https://api.example/")
+    # The request reached the server under another host, such as behind a proxy.
+    proxied = await signed()
+    behind = Request("GET", "http://internal:8080/haiku?q=1", dict(proxied.headers))
+    assert isinstance(await agents.verifier.verify(behind), Valid)
+
+    # A signature for another origin does not verify, whatever Host the request carries.
+    prover = erc8004.client.prover(account=AGENT_KEY, agent_id=1, scope=["https://evil.example"])
+    proved = await prover.prove(
+        httpx.Request("GET", "https://evil.example/haiku?q=1"), ProveContext.new()
+    )
+    headers = {name: proved.headers[name] for name in ("agent-id", "agent-signature")}
+    forged = Request("GET", "https://evil.example/haiku?q=1", headers)
+    assert rejected(await agents.verifier.verify(forged)).status == "invalid"
+    with pytest.raises(ValueError):
+        erc8004.server.create(origin="api.example")

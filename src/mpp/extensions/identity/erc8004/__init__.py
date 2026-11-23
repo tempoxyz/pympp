@@ -102,12 +102,22 @@ def message(*, id: str, method: str, url: str, created: int, nonce: str) -> str:
 
 
 def target(url: str | httpx.URL) -> str:
-    """``url``'s origin, path and query, as mppx reads ``origin + pathname + search``."""
-    from mpp.identity import _origin  # pyright: ignore[reportPrivateUsage]
+    """``url``'s origin, path and query, as mppx reads ``origin + pathname + search``.
 
+    The host is in its ASCII (IDNA) form, as the WHATWG origin mppx signs.
+    """
     parsed = httpx.URL(str(url))
     path, _, query = parsed.raw_path.decode("ascii").partition("?")
-    return f"{_origin(str(parsed))}{path or '/'}{'?' + query if query else ''}"
+    return f"{_ascii_origin(parsed)}{path or '/'}{'?' + query if query else ''}"
+
+
+def _ascii_origin(url: httpx.URL) -> str:
+    """``url``'s origin as ``scheme://host[:port]``, the host IDNA-encoded and lowercased."""
+    default = {"http": 80, "https": 443}.get(url.scheme)
+    port = "" if url.port in (None, default) else f":{url.port}"
+    host = url.raw_host.decode("ascii").lower()
+    host = f"[{host}]" if ":" in host else host
+    return f"{url.scheme}://{host}{port}"
 
 
 def checksum(address: str) -> str:

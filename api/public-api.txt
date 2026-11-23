@@ -392,7 +392,7 @@ module mpp.extensions.identity.erc8004.server
         field verifier: Verifier[Agent]
         field payment_check: PaymentCheck[Agent]
     class RegistryError(Exception)
-    def create(*, store: ExpiringStore | None = None, chain_id: int = 4217, registry: str = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432', rpc_url: str | None = None, http: httpx.AsyncClient | None = None, allow: Allow | None = None) -> Erc8004
+    def create(*, store: ExpiringStore | None = None, chain_id: int = 4217, registry: str = '0x8004A169FB4a3325136EB29fA0ceB6D2e539a432', rpc_url: str | None = None, http: httpx.AsyncClient | None = None, allow: Allow | None = None, origin: str | None = None, require_signature: bool = False) -> Erc8004
 
 module mpp.extensions.identity.tempo
     CLOCK_TOLERANCE = 60
