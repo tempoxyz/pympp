@@ -280,6 +280,11 @@ def sender_tag(sender: str, transaction_hash: str, fallback_nonce: int) -> str:
     return "0x" + keccak(packed).hex()
 
 
+class SenderTagUnderivableError(ValueError):
+    """The Zone's outbox state names no withdrawal for a transaction, so its sender
+    tags can't be derived. The state is fixed, so reading it again doesn't help."""
+
+
 async def sender_tag_candidates(
     rpc_url: str,
     *,
@@ -297,8 +302,9 @@ async def sender_tag_candidates(
     withdrawal can match one (mppx ``senderTagCandidates``).
 
     Raises:
-        ValueError: If the block added no withdrawal, or more than
-            ``MAX_SENDER_TAG_CANDIDATES``.
+        SenderTagUnderivableError: If the block added no withdrawal, or more than
+            ``MAX_SENDER_TAG_CANDIDATES``. Reading again returns the same state.
+        ValueError: If the outbox returned no nonce.
     """
     from mpp.methods.tempo._rpc import _rpc_call
 
@@ -315,18 +321,27 @@ async def sender_tag_candidates(
             raise ValueError("Zone outbox returned no lastFallbackNonce.")
         return int(result, 16)
 
-    before, after = await asyncio.gather(
-        last_fallback_nonce(block_number - 1), last_fallback_nonce(block_number)
-    )
+    # Both reads share one lifetime: when one fails, or the caller stops waiting, the
+    # other is cancelled and awaited, so no read outlives the derivation's deadline.
+    reads = [
+        asyncio.ensure_future(last_fallback_nonce(block_number - 1)),
+        asyncio.ensure_future(last_fallback_nonce(block_number)),
+    ]
+    try:
+        before, after = await asyncio.gather(*reads)
+    finally:
+        for read in reads:
+            read.cancel()
+        await asyncio.gather(*reads, return_exceptions=True)
     if after <= before:
-        raise ValueError(
+        raise SenderTagUnderivableError(
             f"Zone withdrawal transaction {transaction_hash} did not request a withdrawal "
             "from the outbox."
         )
     # The nonces come from the Zone RPC, so a range no block could hold is refused
     # rather than hashed.
     if after - before > MAX_SENDER_TAG_CANDIDATES:
-        raise ValueError(
+        raise SenderTagUnderivableError(
             f"Zone withdrawal transaction {transaction_hash} has {after - before} candidate "
             f"sender tags, more than {MAX_SENDER_TAG_CANDIDATES}."
         )

@@ -1629,6 +1629,30 @@ class TempoMethod:
                 on_submission(state.raw_tx)
         return await self._settle_zone_withdrawal(challenge, zone_id, key, task, state, wanted)
 
+    async def _pin_zone_search_start(
+        self, request: dict[str, Any], state: _ZoneSend, time_left: float | None
+    ) -> None:
+        """Record the first Tempo block a kept withdrawal's settlement search covers,
+        when none is recorded yet: the lookback window before Tempo's latest block.
+
+        The withdrawal was sent before now, so its settlement can't precede that
+        window. A failed read leaves it unrecorded; the read stops at the Challenge's
+        expiry, or after a short bound once it expired.
+        """
+        if state.search_from is not None:
+            return
+        timeout = min(time_left, _ZONE_LATE_TAG_LOOKUP) if time_left else _ZONE_LATE_TAG_LOOKUP
+        try:
+            latest = await asyncio.wait_for(
+                _rpc_call(self._rpc_url_for(request), "eth_blockNumber", [], **self._rpc),
+                timeout=timeout,
+            )
+            block = int(latest, 16)
+        except Exception:
+            return
+        if state.search_from is None:
+            state.search_from = max(block - _zones.LOOKBACK_BLOCKS, 0)
+
     async def _settle_zone_withdrawal(
         self,
         challenge: Challenge,
@@ -1662,7 +1686,23 @@ class TempoMethod:
                     ),
                     timeout=time_left if time_left else _ZONE_LATE_TAG_LOOKUP,
                 )
+            except _zones.SenderTagUnderivableError as refusal:
+                # The Zone's outbox state is fixed, so every retry would be refused the
+                # same way: report the sent withdrawal by its hash to reconcile instead.
+                refused = TransactionError(
+                    f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
+                    "the Zone's outbox names no withdrawal for it, so its sender tag can't "
+                    "be derived."
+                )
+                refused.__cause__ = refusal
+                raise PaymentOutcomeUnknownError(
+                    challenge, refused, transaction_hash=withdrawal.transaction_hash
+                ) from refusal
             except Exception as cause:
+                # A transient read failure. Pin where the settlement search starts now, so
+                # a retry that reads the tags much later still covers a settlement that
+                # happened in between.
+                await self._pin_zone_search_start(request, state, time_left)
                 failure = TransactionError(
                     f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
                     "its sender tag could not be read from the Zone."

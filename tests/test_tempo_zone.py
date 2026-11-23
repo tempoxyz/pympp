@@ -2829,13 +2829,43 @@ class TestSenderTagCandidates:
 
     @pytest.mark.asyncio
     async def test_rejects_a_block_that_added_no_withdrawal(self) -> None:
-        with pytest.raises(ValueError, match="did not request a withdrawal"):
+        with pytest.raises(
+            zone_lib.SenderTagUnderivableError, match="did not request a withdrawal"
+        ):
             await self.candidates(4, 4)
 
     @pytest.mark.asyncio
     async def test_rejects_a_nonce_range_no_block_could_hold(self) -> None:
-        with pytest.raises(ValueError, match="more than 64"):
+        with pytest.raises(zone_lib.SenderTagUnderivableError, match="more than 64"):
             await self.candidates(0, 2**63)
+
+    @pytest.mark.asyncio
+    async def test_a_failed_read_cancels_the_other(self) -> None:
+        stalled = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+            if params[1] == "0x9":
+                await stalled.wait()
+                return {"error": {"code": -32000, "message": "read failed"}}
+            stalled.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            raise AssertionError("unreachable")
+
+        with pytest.raises(Exception, match="read failed"):
+            await zone_lib.sender_tag_candidates(
+                "https://zone.test",
+                block_number=10,
+                sender=self.SENDER,
+                transaction_hash=self.TX,
+                client=zone_rpc_client(handle),
+            )
+        # The other read ended with the derivation, not after it.
+        assert cancelled.is_set()
 
     @pytest.mark.asyncio
     async def test_waits_for_any_of_several_sender_tags(self) -> None:
@@ -3036,6 +3066,57 @@ class TestClientZoneRedactedOutbox:
         assert len(paid) == 1
         credential = Credential.from_authorization(paid[0].headers["authorization"])
         assert credential.challenge.id == issued.id
+        assert credential.payload["senderTag"] == zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_an_outbox_naming_no_withdrawal_reports_the_transaction(self) -> None:
+        calls: list[str] = []
+        method = payer_method(redacting_zone(calls, before=4, after=4), stalling_l1(lambda: True))
+        issued = await zone_challenge([3])
+        error = await error_of(method.create_credential(issued))
+        # Retrying reads the same outbox state, so the sent withdrawal is reported by its
+        # hash rather than as a resumable read failure.
+        assert isinstance(error, PaymentOutcomeUnknownError)
+        assert error.challenge is issued
+        assert error.transaction_hash == REDACTED_TX
+        assert isinstance(error.__cause__, zone_lib.SenderTagUnderivableError)
+        again = await error_of(method.create_credential(issued))
+        assert isinstance(again, PaymentOutcomeUnknownError)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_sender_tag_read_pins_the_settlement_search(self) -> None:
+        calls: list[str] = []
+        queries: list[dict[str, Any]] = []
+        failing = True
+        latest = 10_000
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_chainId":
+                return hex(MODERATO)
+            if method == "eth_blockNumber":
+                return hex(latest)
+            if method == "eth_getLogs":
+                queries.append(params[0])
+                tag = params[0]["topics"][2]
+                pinned = params[0]["fromBlock"] == hex(10_000 - zone_lib.LOOKBACK_BLOCKS)
+                return [processed_log(sender_tag=tag)] if pinned else []
+            raise AssertionError(method)
+
+        zone = replace(redacting_zone(calls, fail_reads=lambda: failing), settlement_timeout=0)
+        method = payer_method(zone, rpc_client(tempo_l1))
+        issued = await zone_challenge([3])
+        assert isinstance(
+            await error_of(method.create_credential(issued)), ZoneSettlementPendingError
+        )
+
+        # Tempo moved past the lookback window before the tags could be read: the search
+        # still starts where it would have when the read first failed.
+        failing = False
+        latest = 30_000
+        credential = await method.create_credential(issued)
+        assert queries[0]["fromBlock"] == hex(10_000 - zone_lib.LOOKBACK_BLOCKS)
         assert credential.payload["senderTag"] == zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
         assert calls.count("eth_sendRawTransactionSync") == 1
 
