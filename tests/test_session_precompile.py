@@ -164,6 +164,39 @@ class TestVoucher:
         )
         assert signature == vector["signature"]
 
+    def test_sign_voucher_normalizes_high_s_signers(self) -> None:
+        from eth_account import Account
+
+        n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+        key = Account.from_key(VECTORS["keys"]["payer"])
+
+        class HighSSigner:
+            """Returns the high-s twin of each signature, as some KMS backends do."""
+
+            def sign_hash(self, msg_hash: bytes) -> bytes:
+                signed = key.unsafe_sign_hash(msg_hash)
+                return (
+                    signed.r.to_bytes(32, "big")
+                    + (n - signed.s).to_bytes(32, "big")
+                    + bytes([55 - signed.v])
+                )
+
+        vector = VECTORS["vouchers"][0]
+        kwargs: dict[str, Any] = {
+            "channel_id": vector["channelId"],
+            "cumulative_amount": int(vector["cumulativeAmount"]),
+            "chain_id": vector["chainId"],
+            "escrow": vector["escrow"],
+        }
+        signature = voucher.sign_voucher(HighSSigner(), **kwargs)
+        assert signature == vector["signature"]
+        signed = SignedVoucher(
+            channel_id=vector["channelId"],
+            cumulative_amount=int(vector["cumulativeAmount"]),
+            signature=signature,
+        )
+        assert voucher.verify_voucher(vector["escrow"], vector["chainId"], signed, PAYER)
+
     def test_parse_voucher_from_payload_checks_uint96(self) -> None:
         channel_id = "0x" + "11" * 32
         parsed = voucher.parse_voucher_from_payload(channel_id, "5", "0x12")

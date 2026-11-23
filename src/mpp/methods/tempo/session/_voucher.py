@@ -108,6 +108,13 @@ def _sign_digest(account: Any, digest: str) -> str:
     v = signature[64]
     if v in (0, 1):
         v += 27
+    sig_s = int.from_bytes(signature[32:64], "big")
+    if v in (27, 28) and sig_s > _SECP256K1_N // 2:
+        # Tempo accepts only low-s signatures: use the equivalent (r, n - s) with flipped parity.
+        return (
+            "0x"
+            + (signature[:32] + (_SECP256K1_N - sig_s).to_bytes(32, "big") + bytes([55 - v])).hex()
+        )
     return "0x" + (signature[:64] + bytes([v])).hex()
 
 
