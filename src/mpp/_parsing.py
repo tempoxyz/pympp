@@ -108,7 +108,9 @@ def _b64_encode(data: dict[str, Any]) -> str:
     return encoded.rstrip("=")
 
 
-_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
+# base64url (RFC 4648 §5). Trailing padding is still accepted, as mppx does. The
+# possessive quantifier keeps rejection linear: no backtracking on a bad suffix.
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]++={0,2}")
 
 
 def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[str, Any]:
@@ -119,6 +121,9 @@ def _b64_decode(encoded: str, max_size: int = MAX_HEADER_PAYLOAD_SIZE) -> dict[s
     """
     if len(encoded) > max_size:
         raise ParseError("Header payload exceeds maximum size")
+    # urlsafe_b64decode discards characters outside the alphabet, so check it first.
+    if not _BASE64URL.fullmatch(encoded):
+        raise ParseError("Invalid base64 or JSON encoding")
 
     try:
         padded = encoded + "=" * (-len(encoded) % 4)
@@ -450,10 +455,14 @@ def parse_authorization(header: str) -> Credential:
     challenge_data = data["challenge"]
     if not is_dict(challenge_data):
         raise ParseError("Credential challenge must be an object")
-    if "id" not in challenge_data:
-        raise ParseError("Credential challenge missing required field: id")
+    # Match mppx's ChallengeEcho schema: these fields are required strings.
+    for field in ("id", "realm", "method", "intent", "request"):
+        if field not in challenge_data:
+            raise ParseError(f"Credential challenge missing required field: {field}")
+        if not isinstance(challenge_data[field], str):
+            raise ParseError(f"Credential challenge field {field} must be a string")
 
-    method = str(challenge_data.get("method", ""))
+    method = challenge_data["method"]
     validate_payment_method_id(method)
 
     credential_header = _received_credential_header(
@@ -475,11 +484,11 @@ def parse_authorization(header: str) -> Credential:
             raise ParseError("Header value contains invalid control characters")
 
     echo = ChallengeEcho(
-        id=str(challenge_data["id"]),
-        realm=str(challenge_data.get("realm", "")),
+        id=challenge_data["id"],
+        realm=challenge_data["realm"],
         method=method,
-        intent=str(challenge_data.get("intent", "")),
-        request=str(challenge_data.get("request", "")),
+        intent=challenge_data["intent"],
+        request=challenge_data["request"],
         expires=str(challenge_data["expires"]) if challenge_data.get("expires") else None,
         digest=str(challenge_data["digest"]) if challenge_data.get("digest") else None,
         opaque=str(challenge_data["opaque"]) if challenge_data.get("opaque") else None,
