@@ -56,6 +56,14 @@ PROCESS_WITHDRAWALS_SELECTOR = "91aa3f04"
 REQUEST_WITHDRAWAL_SELECTOR = "b3b200aa"
 # calculateWithdrawalFee(uint64)
 CALCULATE_WITHDRAWAL_FEE_SELECTOR = "7b9c9aa4"
+# lastFallbackNonce()
+LAST_FALLBACK_NONCE_SELECTOR = "3d1c5a93"
+
+MAX_SENDER_TAG_CANDIDATES = 64
+"""Most sender tags derived for one withdrawal: the withdrawals its Zone block may hold.
+
+Each candidate is a topic in every settlement poll's ``eth_getLogs`` filter.
+"""
 
 _WITHDRAWAL_TUPLE = "(address,bytes32,address,uint128,bytes32,uint64,uint64,bytes,bytes)"
 REQUESTED_DATA_TYPES = (
@@ -272,6 +280,61 @@ def sender_tag(sender: str, transaction_hash: str, fallback_nonce: int) -> str:
     return "0x" + keccak(packed).hex()
 
 
+async def sender_tag_candidates(
+    rpc_url: str,
+    *,
+    block_number: int,
+    sender: str,
+    transaction_hash: str,
+    client: Any | None = None,
+) -> tuple[str, ...]:
+    """Derive the sender tags a withdrawal transaction may carry when its receipt
+    has no ``WithdrawalRequested`` event, as on a Zone RPC that redacts logs.
+
+    The outbox numbers each withdrawal with the next ``lastFallbackNonce``, so the
+    transaction's withdrawal took one of the nonces its block added. Every
+    candidate hashes the payer's address and transaction, so only the payer's
+    withdrawal can match one (mppx ``senderTagCandidates``).
+
+    Raises:
+        ValueError: If the block added no withdrawal, or more than
+            ``MAX_SENDER_TAG_CANDIDATES``.
+    """
+    from mpp.methods.tempo._rpc import _rpc_call
+
+    rpc: dict[str, Any] = {} if client is None else {"client": client}
+
+    async def last_fallback_nonce(block: int) -> int:
+        result = await _rpc_call(
+            rpc_url,
+            "eth_call",
+            [{"to": ZONE_OUTBOX, "data": "0x" + LAST_FALLBACK_NONCE_SELECTOR}, hex(block)],
+            **rpc,
+        )
+        if not isinstance(result, str):
+            raise ValueError("Zone outbox returned no lastFallbackNonce.")
+        return int(result, 16)
+
+    before, after = await asyncio.gather(
+        last_fallback_nonce(block_number - 1), last_fallback_nonce(block_number)
+    )
+    if after <= before:
+        raise ValueError(
+            f"Zone withdrawal transaction {transaction_hash} did not request a withdrawal "
+            "from the outbox."
+        )
+    # The nonces come from the Zone RPC, so a range no block could hold is refused
+    # rather than hashed.
+    if after - before > MAX_SENDER_TAG_CANDIDATES:
+        raise ValueError(
+            f"Zone withdrawal transaction {transaction_hash} has {after - before} candidate "
+            f"sender tags, more than {MAX_SENDER_TAG_CANDIDATES}."
+        )
+    return tuple(
+        sender_tag(sender, transaction_hash, nonce) for nonce in range(before + 1, after + 1)
+    )
+
+
 def _same(a: object, b: str) -> bool:
     return isinstance(a, str) and a.lower() == b.lower()
 
@@ -377,6 +440,37 @@ async def wait_for_settlement(
 ) -> Settlement:
     """Wait until a portal emits ``WithdrawalProcessed`` for a sender tag on Tempo.
 
+    :func:`wait_for_settled_withdrawal` for one sender tag.
+    """
+    settlement, _ = await wait_for_settled_withdrawal(
+        rpc_url,
+        portal=portal,
+        sender_tags=(sender_tag,),
+        to=to,
+        timeout=timeout,
+        first_scan_limit=first_scan_limit,
+        from_block=from_block,
+        on_search_start=on_search_start,
+        client=client,
+    )
+    return settlement
+
+
+async def wait_for_settled_withdrawal(
+    rpc_url: str,
+    *,
+    portal: str,
+    sender_tags: Sequence[str],
+    to: str | None = None,
+    timeout: float = DEFAULT_SETTLEMENT_TIMEOUT,
+    first_scan_limit: float | None = None,
+    from_block: int | None = None,
+    on_search_start: Callable[[int], None] | None = None,
+    client: Any | None = None,
+) -> tuple[Settlement, str]:
+    """Wait until a portal emits ``WithdrawalProcessed`` for any of several sender
+    tags on Tempo (mppx ``waitForSettledWithdrawal``).
+
     Searches the last ``LOOKBACK_BLOCKS`` blocks once, then the blocks added
     since every ``POLLING_INTERVAL`` seconds, for up to ``timeout`` seconds.
     The first search may take ``FIRST_SCAN_TIMEOUT`` seconds even when
@@ -391,12 +485,12 @@ async def wait_for_settlement(
 
     Returns:
         The Tempo transaction that processed the withdrawal, with the event's
-        ``callbackSuccess``: when it is false, the withdrawal bounced back to the
-        payer's Zone balance and paid nothing.
+        ``callbackSuccess`` (when it is false, the withdrawal bounced back to the
+        payer's Zone balance and paid nothing), and the sender tag of the event.
 
     Raises:
         ValueError: If ``timeout`` or ``first_scan_limit`` is not a finite,
-            non-negative number.
+            non-negative number, or ``sender_tags`` is empty.
         TimeoutError: If the withdrawal did not settle in time.
     """
     from mpp.methods.tempo._rpc import _rpc_call
@@ -407,10 +501,14 @@ async def wait_for_settlement(
         not math.isfinite(first_scan_limit) or first_scan_limit < 0
     ):
         raise ValueError("Zone first scan limit must be a finite, non-negative number.")
-    topics: list[str | None] = [
+    tags = tuple(dict.fromkeys(tag.lower() for tag in sender_tags))
+    if not tags:
+        raise ValueError("Zone settlement needs at least one sender tag.")
+    # Several candidates match as an OR list of the sender tag topic.
+    topics: list[str | list[str] | None] = [
         WITHDRAWAL_PROCESSED_TOPIC,
         None if to is None else "0x" + to.removeprefix("0x").lower().zfill(64),
-        sender_tag.lower(),
+        tags[0] if len(tags) == 1 else list(tags),
     ]
 
     started = time.monotonic()
@@ -426,7 +524,7 @@ async def wait_for_settlement(
 
     def timed_out() -> TimeoutError:
         return TimeoutError(
-            f"Zone withdrawal {sender_tag} did not settle on Tempo within {timeout}s."
+            f"Zone withdrawal {' or '.join(tags)} did not settle on Tempo within {timeout}s."
         )
 
     async def call(method: str, params: list[Any]) -> Any:
@@ -469,14 +567,24 @@ async def wait_for_settlement(
             for log in logs if is_list(logs) else []:
                 tx_hash = log.get("transactionHash") if is_dict(log) else None
                 callback_success = _callback_success(log.get("data")) if is_dict(log) else None
-                if isinstance(tx_hash, str) and callback_success is not None:
-                    return Settlement(tx_hash, callback_success)
+                tag = _log_sender_tag(log, tags)
+                if isinstance(tx_hash, str) and callback_success is not None and tag is not None:
+                    return Settlement(tx_hash, callback_success), tag
             from_block = to_block + 1
         first_scan = False
         if time.monotonic() + POLLING_INTERVAL > deadline:
             raise timed_out()
         await asyncio.sleep(POLLING_INTERVAL)
         latest = await block_number()
+
+
+def _log_sender_tag(log: object, tags: tuple[str, ...]) -> str | None:
+    """The sender tag of a ``WithdrawalProcessed`` log, when it is one of ``tags``."""
+    topics = log.get("topics") if is_dict(log) else None
+    if not is_list(topics) or len(topics) != 3 or not isinstance(topics[2], str):
+        return None
+    tag = topics[2].lower()
+    return tag if tag in tags else None
 
 
 def _callback_success(data: object) -> bool | None:

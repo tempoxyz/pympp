@@ -923,6 +923,7 @@ class TestClientZonePayment:
             expected_tag,
             ZONE_ID,
         )
+        assert pending.sender_tags == (expected_tag,)
         assert isinstance(pending.__cause__, TimeoutError)
         assert pending.challenge is issued
 
@@ -1030,7 +1031,7 @@ class TestClientZoneCancellation:
         method = payer_method(zone)
         original = method._request_zone_withdrawal  # pyright: ignore[reportPrivateUsage]
 
-        async def recording(challenge: Challenge, state: Any) -> str:
+        async def recording(challenge: Challenge, state: Any) -> Any:
             report = state.on_submission
             state.on_submission = lambda raw: (sent.append(raw), report(raw))
             return await original(challenge, state)
@@ -2096,6 +2097,8 @@ def stalling_l1(settled: Callable[[], bool], queries: list[dict[str, Any]] | Non
             if queries is not None:
                 queries.append(params[0])
             tag = params[0]["topics"][2]
+            # Several candidate tags: the last one settled.
+            tag = tag[-1] if isinstance(tag, list) else tag
             return [processed_log(sender_tag=tag)] if settled() else []
         raise AssertionError(method)
 
@@ -2785,3 +2788,203 @@ class TestClientZoneOneWithdrawalPerIntent:
         assert origin(httpx.Request("GET", "https://API.example.com/paid")) == ORIGIN
         assert origin(httpx.Request("GET", "http://localhost:8443/x")) == "http://localhost:8443"
         assert origin(None) is None
+
+
+class TestSenderTagCandidates:
+    """Sender tags derived from the outbox when a Zone RPC redacts its event (mppx)."""
+
+    SENDER = "0x0000000000000000000000000000000000000001"
+    TX = "0x" + "ab" * 32
+
+    @staticmethod
+    def client_with(before: int, after: int) -> httpx.AsyncClient:
+        """A Zone whose outbox reports `before` at block 9 and `after` at block 10."""
+
+        def handle(method: str, params: list[Any]) -> Any:
+            assert method == "eth_call"
+            call, block = params
+            assert call == {
+                "to": zone_lib.ZONE_OUTBOX,
+                "data": "0x" + zone_lib.LAST_FALLBACK_NONCE_SELECTOR,
+            }
+            return "0x" + f"{before if int(block, 16) == 9 else after:064x}"
+
+        return rpc_client(handle)
+
+    async def candidates(self, before: int, after: int) -> tuple[str, ...]:
+        return await zone_lib.sender_tag_candidates(
+            "https://zone.test",
+            block_number=10,
+            sender=self.SENDER,
+            transaction_hash=self.TX,
+            client=self.client_with(before, after),
+        )
+
+    @pytest.mark.asyncio
+    async def test_derives_one_tag_per_nonce_the_block_added(self) -> None:
+        assert await self.candidates(4, 6) == (
+            zone_lib.sender_tag(self.SENDER, self.TX, 5),
+            zone_lib.sender_tag(self.SENDER, self.TX, 6),
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_block_that_added_no_withdrawal(self) -> None:
+        with pytest.raises(ValueError, match="did not request a withdrawal"):
+            await self.candidates(4, 4)
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_nonce_range_no_block_could_hold(self) -> None:
+        with pytest.raises(ValueError, match="more than 64"):
+            await self.candidates(0, 2**63)
+
+    @pytest.mark.asyncio
+    async def test_waits_for_any_of_several_sender_tags(self) -> None:
+        queries: list[dict[str, Any]] = []
+
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            if method == "eth_blockNumber":
+                return "0x20"
+            queries.append(params[0])
+            return [processed_log(sender_tag=TAG_B)]
+
+        settlement, tag = await zone_lib.wait_for_settled_withdrawal(
+            "https://tempo.test",
+            portal=PORTAL,
+            sender_tags=[TAG_A, TAG_B],
+            timeout=0,
+            client=rpc_client(tempo_l1),
+        )
+        assert (settlement, tag) == (zone_lib.Settlement(SETTLEMENT_HASH, True), TAG_B)
+        assert queries[0]["topics"][2] == [TAG_A, TAG_B]
+
+    @pytest.mark.asyncio
+    async def test_settlement_needs_a_sender_tag(self) -> None:
+        with pytest.raises(ValueError, match="at least one sender tag"):
+            await zone_lib.wait_for_settled_withdrawal(
+                "https://tempo.test", portal=PORTAL, sender_tags=[]
+            )
+
+    @pytest.mark.asyncio
+    async def test_times_out_naming_every_candidate(self) -> None:
+        def tempo_l1(method: str, params: list[Any]) -> Any:
+            # A log for another withdrawal is not a settlement of these.
+            return "0x20" if method == "eth_blockNumber" else [processed_log(sender_tag=TAG_A)]
+
+        with pytest.raises(TimeoutError, match=f"{TAG_B} or 0x"):
+            await zone_lib.wait_for_settled_withdrawal(
+                "https://tempo.test",
+                portal=PORTAL,
+                sender_tags=[TAG_B, "0x" + "c3" * 32],
+                timeout=0,
+                client=rpc_client(tempo_l1),
+            )
+
+    def test_pending_error_carries_every_candidate(self) -> None:
+        several = ZoneSettlementPendingError(
+            challenge_id="id", sender_tags=[TAG_A, TAG_B], zone_id=ZONE_ID
+        )
+        assert several.sender_tags == (TAG_A, TAG_B)
+        assert several.sender_tag is None
+        assert f"withdrawal with sender tag {TAG_A} or {TAG_B} for challenge" in str(several)
+        one = ZoneSettlementPendingError(challenge_id="id", sender_tag=TAG_A, zone_id=ZONE_ID)
+        assert (one.sender_tag, one.sender_tags) == (TAG_A, (TAG_A,))
+        assert f"withdrawal {TAG_A} for challenge" in str(one)
+        unread = ZoneSettlementPendingError(challenge_id="id", zone_id=ZONE_ID)
+        assert (unread.sender_tag, unread.sender_tags) == (None, ())
+
+
+REDACTED_TX = "0x" + "cd" * 32
+
+
+def redacting_zone(
+    calls: list[str], *, before: int = 4, after: int = 5, fail_reads: Callable[[], bool] = bool
+) -> Zone:
+    """A Zone RPC that leaves the outbox's event out of receipts, as production Zones do.
+
+    Its outbox reports `before` at block 9 and `after` at block 10, the withdrawal's
+    block; historical reads fail while `fail_reads()`.
+    """
+
+    async def handle(method: str, params: list[Any]) -> dict[str, Any]:
+        calls.append(method)
+        if method == "eth_call":
+            call, block = params
+            if block == "latest":
+                return {"result": "0x" + "00" * 32}
+            assert call["to"] == zone_lib.ZONE_OUTBOX
+            if fail_reads():
+                return {"error": {"code": -32000, "message": "read failed"}}
+            return {"result": "0x" + f"{before if block == '0x9' else after:064x}"}
+        if method == "eth_sendRawTransactionSync":
+            return {
+                "result": {
+                    "status": "0x1",
+                    "transactionHash": REDACTED_TX,
+                    "blockNumber": "0xa",
+                    "logs": [],
+                }
+            }
+        return {"result": "0x1"}
+
+    return Zone(
+        rpc_url="https://zone.test", chain_id=1_424_310_003, http_client=zone_rpc_client(handle)
+    )
+
+
+class TestClientZoneRedactedOutbox:
+    """Paying from a Zone whose RPC redacts the outbox's events (mppx#1284)."""
+
+    @pytest.mark.asyncio
+    async def test_pays_when_the_zone_rpc_redacts_outbox_logs(self) -> None:
+        calls: list[str] = []
+        queries: list[dict[str, Any]] = []
+        expected_tag = zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
+        method = payer_method(redacting_zone(calls), stalling_l1(lambda: True, queries))
+        credential = await method.create_credential(await zone_challenge([3]))
+        assert credential.payload["senderTag"] == expected_tag
+        assert credential.payload["hash"] == SETTLEMENT_HASH
+        assert queries[0]["topics"][2] == expected_tag
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_retries_a_failed_sender_tag_read_without_withdrawing_again(self) -> None:
+        calls: list[str] = []
+        failing = True
+        method = payer_method(
+            redacting_zone(calls, fail_reads=lambda: failing), stalling_l1(lambda: True)
+        )
+        issued = await zone_challenge([3])
+        error = await error_of(method.create_credential(issued))
+        assert isinstance(error, tempo_client.TransactionError)
+        assert "sender tag could not be read" in str(error)
+        assert REDACTED_TX in str(error)
+        assert error.__cause__ is not None
+
+        failing = False
+        credential = await method.create_credential(issued)
+        assert credential.challenge.id == issued.id
+        assert credential.payload["senderTag"] == zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5)
+        assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_pending_error_carries_every_candidate_sender_tag(self) -> None:
+        calls: list[str] = []
+        queries: list[dict[str, Any]] = []
+        settled = False
+        zone = replace(redacting_zone(calls, before=4, after=6), settlement_timeout=0)
+        method = payer_method(zone, stalling_l1(lambda: settled, queries))
+        issued = await zone_challenge([3])
+        candidates = (
+            zone_lib.sender_tag(PAYER.address, REDACTED_TX, 5),
+            zone_lib.sender_tag(PAYER.address, REDACTED_TX, 6),
+        )
+        pending = await error_of(method.create_credential(issued))
+        assert isinstance(pending, ZoneSettlementPendingError)
+        assert pending.sender_tags == candidates
+        assert pending.sender_tag is None
+        assert queries[0]["topics"][2] == list(candidates)
+
+        settled = True
+        credential = await method.create_credential(issued)
+        assert credential.payload["senderTag"] in candidates
+        assert calls.count("eth_sendRawTransactionSync") == 1

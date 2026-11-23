@@ -332,6 +332,18 @@ _ZONE_RECEIPT_FIRST_LOOKUP = 0.5
 _ZONE_GAS_MARGIN = 5_000
 
 
+@dataclass(frozen=True, slots=True)
+class _ZoneWithdrawal:
+    """A sent Zone withdrawal: its sender tag when the receipt carried it, and what
+    derives it otherwise (mppx ``ZoneWithdrawal``)."""
+
+    block_number: int
+    sender: str
+    transaction_hash: str
+    # ``None`` when a Zone RPC left the outbox's event out of the receipt.
+    sender_tags: tuple[str, ...] | None
+
+
 @dataclass
 class _ZoneSend:
     """Whether a Zone withdrawal may have reached the Zone, so retrying could pay twice.
@@ -422,8 +434,10 @@ class TempoMethod:
     zone: Zone | None = field(default=None, kw_only=True)
     # Zone withdrawals by challenge, kept after a failed wait so a retry resumes
     # waiting instead of withdrawing again.
-    _zone_withdrawals: dict[str, tuple[asyncio.Task[str], _ZoneSend]] = field(
-        default_factory=dict[str, tuple[asyncio.Task[str], _ZoneSend]], init=False, repr=False
+    _zone_withdrawals: dict[str, tuple[asyncio.Task[_ZoneWithdrawal], _ZoneSend]] = field(
+        default_factory=dict[str, tuple[asyncio.Task[_ZoneWithdrawal], _ZoneSend]],
+        init=False,
+        repr=False,
     )
     _zone_chain_id: int | None = field(default=None, init=False, repr=False)
     _cached_chain_ids: dict[str, int] = field(
@@ -1478,7 +1492,9 @@ class TempoMethod:
             if state.redeemed_late:
                 raise ZoneSettlementPendingError(
                     challenge_id=earlier.id,
-                    sender_tag=state.sender_tag or _zone_sender_tag(task),
+                    sender_tags=(state.sender_tag,)
+                    if state.sender_tag
+                    else _zone_sender_tags(task),
                     zone_id=zone_id,
                     challenge=earlier,
                     redeemed_late=True,
@@ -1553,7 +1569,7 @@ class TempoMethod:
             self._zone_withdrawals[key] = (new_task, state)
             new_key = key
 
-            def finished(done: asyncio.Task[str]) -> None:
+            def finished(done: asyncio.Task[_ZoneWithdrawal]) -> None:
                 # Only a failure before the transaction was sent is safe to retry,
                 # cancellation included. After that, the withdrawal may have gone
                 # through, so retries of this payment keep failing.
@@ -1584,7 +1600,7 @@ class TempoMethod:
             if _zone_past_redemption(earlier.expires):
                 raise ZoneSettlementPendingError(
                     challenge_id=earlier.id,
-                    sender_tag=_zone_sender_tag(task),
+                    sender_tags=_zone_sender_tags(task),
                     zone_id=zone_id,
                     challenge=earlier,
                 )
@@ -1613,7 +1629,7 @@ class TempoMethod:
         challenge: Challenge,
         zone_id: int,
         key: str,
-        task: asyncio.Task[str],
+        task: asyncio.Task[_ZoneWithdrawal],
         state: _ZoneSend,
         wanted: Callable[[], bool],
     ) -> Credential:
@@ -1621,7 +1637,25 @@ class TempoMethod:
         assert self.zone is not None
         zone = self.zone
         request = challenge.request
-        sender_tag = await asyncio.shield(task)
+        withdrawal = await asyncio.shield(task)
+        # Derived on every attempt, so a failed read on the Zone is retried without
+        # withdrawing again: the withdrawal stays kept for this Challenge.
+        sender_tags = withdrawal.sender_tags
+        if sender_tags is None:
+            try:
+                sender_tags = await _zones.sender_tag_candidates(
+                    zone.rpc_url,
+                    block_number=withdrawal.block_number,
+                    sender=withdrawal.sender,
+                    transaction_hash=withdrawal.transaction_hash,
+                    client=zone.http_client,
+                )
+            except Exception as cause:
+                raise TransactionError(
+                    f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
+                    "its sender tag could not be read from the Zone. Retry the challenge to "
+                    "resume without withdrawing again."
+                ) from cause
 
         def searched_from(block: int) -> None:
             if state.search_from is None:
@@ -1631,10 +1665,10 @@ class TempoMethod:
         # settlement from before the expiry can still be redeemed.
         expired = _zone_challenge_expired(challenge.expires)
         try:
-            settlement = await _zones.wait_for_settlement(
+            settlement, sender_tag = await _zones.wait_for_settled_withdrawal(
                 self._rpc_url_for(request),
                 portal=_zones.portal_address(zone_id),
-                sender_tag=sender_tag,
+                sender_tags=sender_tags,
                 to=request["recipient"],
                 timeout=0.0
                 if expired
@@ -1647,7 +1681,7 @@ class TempoMethod:
         except Exception as cause:
             raise ZoneSettlementPendingError(
                 challenge_id=challenge.id,
-                sender_tag=sender_tag,
+                sender_tags=sender_tags,
                 zone_id=zone_id,
                 challenge=challenge,
             ) from cause
@@ -1688,11 +1722,15 @@ class TempoMethod:
             },
         )
 
-    async def _request_zone_withdrawal(self, challenge: Challenge, state: _ZoneSend) -> str:
-        """Withdraw the challenge amount from the Zone to its recipient and return the sender tag.
+    async def _request_zone_withdrawal(
+        self, challenge: Challenge, state: _ZoneSend
+    ) -> _ZoneWithdrawal:
+        """Withdraw the challenge amount from the Zone to its recipient and return it sent.
 
         The withdrawal carries the challenge-bound memo. Its bounce refunds the
-        payer, not the payee's Zone address.
+        payer, not the payee's Zone address. It has its sender tag when the receipt
+        carries the outbox's ``WithdrawalRequested`` event, and leaves it to be derived
+        when the Zone RPC redacts that event.
         """
         # pytempo ships no type information.
         from eth_abi.abi import decode, encode
@@ -1841,6 +1879,7 @@ class TempoMethod:
         if receipt.get("status") == "0x0":
             state.sent = False
             raise TransactionError(f"Zone withdrawal transaction {receipt_hash} reverted.")
+        block_number = _zone_block_number(receipt.get("blockNumber"))
         logs = receipt.get("logs")
         for log in logs if is_list(logs) else []:
             topics = log.get("topics") if is_dict(log) else None
@@ -1859,15 +1898,34 @@ class TempoMethod:
                 fields = decode(list(_zones.REQUESTED_DATA_TYPES), bytes.fromhex(data[2:]))
             except Exception:
                 continue
-            return _zones.sender_tag(
-                sender="0x" + topics[2][-40:],
+            return _ZoneWithdrawal(
+                block_number=block_number if block_number is not None else 0,
+                sender=sender,
                 transaction_hash=receipt_hash,
-                fallback_nonce=int(fields[6]),
+                sender_tags=(
+                    _zones.sender_tag(
+                        sender="0x" + topics[2][-40:],
+                        transaction_hash=receipt_hash,
+                        fallback_nonce=int(fields[6]),
+                    ),
+                ),
+            )
+        # A Zone RPC that redacts logs leaves the outbox's event out of the payer's
+        # receipt: its sender tag is derived from the outbox's ``lastFallbackNonce``.
+        if block_number is not None:
+            return _ZoneWithdrawal(
+                block_number=block_number,
+                sender=sender,
+                transaction_hash=receipt_hash,
+                sender_tags=None,
             )
         # It went through but its sender tag can't be read, so it may still pay.
         raise PaymentOutcomeUnknownError(
             challenge,
-            TransactionError("Zone withdrawal request did not emit WithdrawalRequested."),
+            TransactionError(
+                "Zone withdrawal request did not emit WithdrawalRequested, and its receipt "
+                "has no block number to derive its sender tag from."
+            ),
             transaction_hash=receipt_hash,
         )
 
@@ -1961,11 +2019,22 @@ def _zone_past_redemption(expires: str | None) -> bool:
     return datetime.now(UTC) >= deadline
 
 
-def _zone_sender_tag(task: asyncio.Task[str]) -> str | None:
-    """The sender tag a finished withdrawal task returned, or ``None``."""
+def _zone_sender_tags(task: asyncio.Task[_ZoneWithdrawal]) -> tuple[str, ...] | None:
+    """The sender tag a finished withdrawal task's receipt carried, or ``None``."""
     if not task.done() or task.cancelled() or task.exception() is not None:
         return None
-    return task.result()
+    return task.result().sender_tags
+
+
+def _zone_block_number(value: object) -> int | None:
+    """A Zone receipt's positive block number, or ``None`` when it has none."""
+    if not isinstance(value, str):
+        return None
+    try:
+        number = int(value, 16)
+    except ValueError:
+        return None
+    return number if number > 0 else None
 
 
 def _zone_challenge_expired(expires: str | None) -> bool:
