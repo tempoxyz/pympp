@@ -86,6 +86,15 @@ class TestChallenge:
         with pytest.raises(ParseError):
             Challenge.from_www_authenticate(header)
 
+    @pytest.mark.parametrize("request_b64", ["e3....0", "e30....", "e3!!!!0", "e3 0", "e3==0"])
+    def test_parse_rejects_non_base64url_request(self, request_b64: str) -> None:
+        header = (
+            'Payment id="test", realm="test", method="tempo", '
+            f'intent="charge", request="{request_b64}"'
+        )
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Challenge.from_www_authenticate(header)
+
     def test_parse_non_dict_json(self) -> None:
         """Should reject JSON that decodes to non-dict in request field."""
         import base64
@@ -471,7 +480,10 @@ class TestCredential:
         data = {
             "challenge": {
                 "id": "test",
+                "realm": "api.example.com",
                 "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
                 "description": description,
             },
             "payload": {},
@@ -481,7 +493,14 @@ class TestCredential:
 
     def test_accepts_tab_in_description(self) -> None:
         data = {
-            "challenge": {"id": "test", "method": "tempo", "description": "a\tb"},
+            "challenge": {
+                "id": "test",
+                "realm": "api.example.com",
+                "method": "tempo",
+                "intent": "charge",
+                "request": "e30",
+                "description": "a\tb",
+            },
             "payload": {},
         }
         credential = Credential.from_authorization("Payment " + _b64_json(data))
@@ -566,6 +585,54 @@ class TestCredential:
         )
         with pytest.raises(ParseError, match="Credential challenge missing required field: id"):
             Credential.from_authorization(header)
+
+    @pytest.mark.parametrize("field", ["id", "realm", "method", "intent", "request"])
+    @pytest.mark.parametrize("value", [None, 1, True, ["x"], {"x": "y"}, "missing"])
+    def test_parse_rejects_missing_or_non_string_echo_fields(
+        self, field: str, value: object
+    ) -> None:
+        """Like mppx's ChallengeEcho schema, required echo fields are strings."""
+        challenge: dict[str, object] = {
+            "id": "test-id",
+            "realm": "api.example.com",
+            "method": "tempo",
+            "intent": "charge",
+            "request": "e30",
+        }
+        if value == "missing":
+            del challenge[field]
+        else:
+            challenge[field] = value
+        header = "Payment " + _b64_json({"challenge": challenge, "payload": {}})
+
+        with pytest.raises(ParseError, match="Credential challenge (missing required )?field"):
+            Credential.from_authorization(header)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda token: f'"{token}"',
+            lambda token: token[:12] + "...." + token[12:],
+            lambda token: token[:12] + "!!!!" + token[12:],
+            lambda token: token[:12] + "    " + token[12:],
+            lambda token: token[:12] + "++++" + token[12:],
+            lambda token: token[:12] + "////" + token[12:],
+            lambda token: token[:12] + "====" + token[12:],
+        ],
+        ids=["quoted", "dots", "bangs", "spaces", "plus", "slash", "inner-padding"],
+    )
+    def test_parse_rejects_non_base64url_characters(self, mutate) -> None:
+        token = make_credential({"k": "v"}).to_authorization().removeprefix("Payment ")
+
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Credential.from_authorization("Payment " + mutate(token))
+
+    def test_parse_accepts_trailing_padding(self) -> None:
+        credential = make_credential({"k": "v"})
+        token = credential.to_authorization().removeprefix("Payment ")
+
+        padded = Credential.from_authorization("Payment " + token + "=" * (-len(token) % 4))
+        assert padded.challenge.id == credential.challenge.id
 
     @pytest.mark.parametrize("method", INVALID_PAYMENT_METHOD_IDS)
     def test_parse_rejects_invalid_challenge_method_id(self, method: str) -> None:
@@ -721,6 +788,13 @@ class TestReceipt:
         assert receipt.reference == "0xabc123"
         assert isinstance(receipt.timestamp, datetime)
         assert receipt.timestamp.tzinfo is not None
+
+    @pytest.mark.parametrize("inserted", ["....", "====", "!!!!", "++++", "////", "    "])
+    def test_parse_rejects_non_base64url_characters(self, inserted: str) -> None:
+        header = Receipt.success("0xabc").to_payment_receipt()
+
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Receipt.from_payment_receipt(header[:8] + inserted + header[8:])
 
     def test_parse_invalid_status(self) -> None:
         """Should reject invalid status values."""
@@ -1078,12 +1152,12 @@ class TestEncodingBoundaries:
         decoded = json.loads(base64.urlsafe_b64decode(receipt.to_payment_receipt() + "=="))
         assert decoded["timestamp"] == "2026-01-02T03:04:05Z"
 
-    def test_credential_echo_fields_default_to_empty(self) -> None:
+    def test_credential_echo_fields_are_required(self) -> None:
         header = "Payment " + _b64_json(
             {"challenge": {"id": "c", "method": "tempo"}, "payload": {}}
         )
-        echo = Credential.from_authorization(header).challenge
-        assert (echo.realm, echo.intent, echo.request) == ("", "", "")
+        with pytest.raises(ParseError, match="missing required field: realm"):
+            Credential.from_authorization(header)
 
     def test_receipt_extra_must_be_an_object(self) -> None:
         receipt = {
@@ -1148,19 +1222,16 @@ class TestOpaqueEcho:
         assert challenge.verify("secret", "api.example.com")
 
     @pytest.mark.parametrize("suffix", [" ,!@", "!!!!"])
-    def test_non_base64url_opaque_is_not_retained(self, suffix: str) -> None:
+    def test_non_base64url_opaque_is_rejected(self, suffix: str) -> None:
         from mpp import Challenge
-        from mpp._canonical import canonical_b64url
 
         raw = "eyJyb3V0ZSI6Ii92MS9zZWFyY2giLCJwbGFuIjoicHJvIn0"
         header = (
             'Payment id="abc", realm="api.example.com", method="tempo", intent="charge", '
             f'request="e30", opaque="{raw}{suffix}"'
         )
-        challenge = Challenge.from_www_authenticate(header)
-        canonical = canonical_b64url({"plan": "pro", "route": "/v1/search"})
-        assert challenge.to_echo().opaque == canonical
-        assert f'opaque="{canonical}"' in challenge.to_www_authenticate("api.example.com")
+        with pytest.raises(ParseError, match="Invalid base64"):
+            Challenge.from_www_authenticate(header)
 
     def test_undecodable_stored_opaque_falls_back_to_canonical(self) -> None:
         from mpp import Challenge
