@@ -1699,10 +1699,10 @@ class TempoMethod:
         another block, as after a reorg, the tags come from that block, and replace the
         tags derived from the earlier one once they are derived. A lookup that proves
         nothing retries the newest block a receipt named if its tags weren't derived,
-        falling back to the last derived ones, and otherwise keeps those. The lookup stops well before the
-        derivation's ``deadline``, so a stalled one never keeps a retry from the tags
-        already derived for that block. The outbox reads are pinned to that block's hash
-        and its parent's.
+        falling back to the last derived ones, and otherwise keeps those. The lookup stops
+        well before the derivation's ``deadline``, so a stalled one never keeps a retry
+        from the tags already derived for that block. The outbox reads are pinned to that
+        block's hash and its parent's.
 
         Each derivation that learns its block from a receipt takes the next observation
         number. Its tags are kept only if no derivation that observed a block later kept
