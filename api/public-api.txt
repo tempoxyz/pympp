@@ -48,6 +48,7 @@ module mpp
     CredentialReplayedError -> mpp.errors.CredentialReplayedError
     EventDispatcher -> mpp.events.EventDispatcher
     Expires: module
+    InsufficientBalanceError -> mpp.errors.InsufficientBalanceError
     InternalPaymentError -> mpp.errors.InternalPaymentError
     InvalidChallengeError -> mpp.errors.InvalidChallengeError
     InvalidPayloadError -> mpp.errors.InvalidPayloadError
@@ -86,6 +87,7 @@ module mpp
         @classmethod def from_payment_receipt(cls, header: str) -> Receipt
         @classmethod def success(cls, reference: str, timestamp: datetime | None = None, method: str = 'tempo', external_id: str | None = None, subscription_id: str | None = None, funding_currency: str | None = None) -> Receipt
         def to_payment_receipt(self) -> str
+    SpendingLimitExceededError -> mpp.errors.SpendingLimitExceededError
     Store -> mpp.store.Store
     VerificationFailedError -> mpp.errors.VerificationFailedError
     WILDCARD_EVENT = <PaymentEventName.WILDCARD: '*'>
@@ -268,6 +270,15 @@ module mpp.errors
         def __init__(self, message: str = 'Payment verification failed.', *, phase: Literal['sender', 'sponsored'], sender: str | None = None, fee_payer: str | None = None, payment_token: str | None = None, details: dict[str, Any] | None = None) -> None
         title = 'Verification Failed'
         type = 'https://paymentauth.org/problems/verification-failed'
+    class InsufficientBalanceError(mpp.errors.PaymentError)
+        def __init__(self, reason: str | None = None) -> None
+        status = 402
+        title = 'Insufficient Balance'
+        type = 'https://paymentauth.org/problems/session/insufficient-balance'
+    class SpendingLimitExceededError(Exception)
+        account: str
+        access_key: str | None
+        def __init__(self, account: str, access_key: str | None = None) -> None
     class CredentialReplayedError(mpp.errors.VerificationError)
         def __init__(self, reason: str = 'Credential has already been used', *, details: dict[str, Any] | None = None) -> None
         status = 403

@@ -487,6 +487,52 @@ def _rebuild_payment_simulation_error(
     )
 
 
+class InsufficientBalanceError(PaymentError):
+    """The payer's balance cannot cover the payment.
+
+    Session servers raise it when a channel's available voucher balance cannot cover the
+    requested amount. The Tempo charge client and session open and top-up raise it, with
+    the failed simulation as ``__cause__``, when the gas estimate before signing reverts
+    with the token's ``InsufficientBalance``, as mppx's ``Errors.InsufficientBalanceError``.
+    """
+
+    status = 402
+    type = f"{_BASE_URI}/session/insufficient-balance"
+    title = "Insufficient Balance"
+
+    def __init__(self, reason: str | None = None) -> None:
+        super().__init__(f"Insufficient balance: {reason}." if reason else "Insufficient balance.")
+
+
+class SpendingLimitExceededError(Exception):
+    """The access key that signs a Tempo payment has less spending limit left than it needs.
+
+    The client simulates a payment (estimates its gas as the signing key) before it signs.
+    On chain the transaction would revert with the account keychain's
+    ``SpendingLimitExceeded()`` error, and a fee payer would still pay for it, so the client
+    did not sign it. Raise the key's limit, wait for its period to reset, or pay with another
+    key. The simulation error is ``__cause__``. Matches mppx's
+    ``Errors.SpendingLimitExceededError``.
+    """
+
+    account: str
+    """Account that pays."""
+    access_key: str | None
+    """Access key that signs the payment, when the account pays through an access key."""
+
+    def __init__(self, account: str, access_key: str | None = None) -> None:
+        key = f"key {access_key} of " if access_key else ""
+        super().__init__(
+            f"Access key spending limit exceeded: {key}account {account} cannot pay this "
+            "amount, so the payment was not signed."
+        )
+        self.account = account
+        self.access_key = access_key
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (type(self), (self.account, self.access_key), self.__dict__)
+
+
 class CredentialReplayedError(VerificationError):
     """The payment behind a credential is already used or bound elsewhere.
 

@@ -44,6 +44,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 from mpp.methods.tempo._rpc import _rpc_call, _tip20_balance, estimate_gas
+from mpp.methods.tempo._simulation import simulation_error
 from mpp.methods.tempo.fee_payer_policy import (
     MIN_REMAINING_VALIDITY_SECONDS,
     _get_payer_policy,
@@ -1182,6 +1183,9 @@ class TempoMethod:
             # Keep sponsored envelopes inside the server's default policy.
             max_priority_fee_per_gas = min(gas_price, get_policy(chain_id).max_priority_fee_per_gas)
 
+        # Name the signing access key so the node checks its spending limits, as viem does.
+        key_id = self.account.address if self.root_account else None
+
         async def estimate_gas_limit(calls: tuple[Call, ...], swapping: bool) -> int:
             gas_limit = DEFAULT_GAS_LIMIT
             try:
@@ -1195,12 +1199,12 @@ class TempoMethod:
                         }
                         for c in calls
                     ]
+                    request: dict[str, Any] = {"from": sender, "calls": batch}
+                    if key_id is not None:
+                        request["keyId"] = key_id
                     estimated = int(
                         await _rpc_call(
-                            resolved_rpc,
-                            "eth_estimateGas",
-                            [{"from": sender, "calls": batch}, "latest"],
-                            **self._rpc,
+                            resolved_rpc, "eth_estimateGas", [request, "latest"], **self._rpc
                         ),
                         16,
                     )
@@ -1209,16 +1213,26 @@ class TempoMethod:
                     total_estimated = 0
                     for c in calls:
                         total_estimated += await estimate_gas(
-                            resolved_rpc, sender, currency, c.data.hex(), **self._rpc
+                            resolved_rpc, sender, currency, c.data.hex(), key_id=key_id, **self._rpc
                         )
                     gas_limit = max(gas_limit, total_estimated + 5_000 * len(calls))
                 elif gas_estimate_data is not None:
                     estimated = await estimate_gas(
-                        resolved_rpc, sender, currency, gas_estimate_data, **self._rpc
+                        resolved_rpc,
+                        sender,
+                        currency,
+                        gas_estimate_data,
+                        key_id=key_id,
+                        **self._rpc,
                     )
                     gas_limit = max(gas_limit, estimated + 5_000)
-            except Exception:
-                pass
+            except Exception as error:
+                # The estimate simulates the calls as the signing key. A spending-limit or
+                # balance revert there would also revert on chain, at the fee payer's cost when
+                # sponsored, so stop before signing (mppx#1293). Other failures keep the default.
+                mapped = simulation_error(error, account=sender, access_key=key_id)
+                if mapped is not None:
+                    raise mapped from error
             return gas_limit
 
         def fee_requirement(gas_limit: int) -> int:

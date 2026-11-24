@@ -31,7 +31,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
-from mpp.errors import PaymentError, VerificationFailedError
+from mpp.errors import InsufficientBalanceError, PaymentError, VerificationFailedError
 from mpp.methods.tempo.session._protocol import ChannelDescriptor, SignedVoucher, uint96
 from mpp.store import CompareAndSetStore, Store
 
@@ -42,17 +42,6 @@ _R = TypeVar("_R")
 # --------------------------------------------------------------------------------------------
 
 _SESSION_PROBLEMS = "https://paymentauth.org/problems/session"
-
-
-class InsufficientBalanceError(PaymentError):
-    """The channel's available voucher balance cannot cover the requested amount."""
-
-    status = 402
-    type = f"{_SESSION_PROBLEMS}/insufficient-balance"
-    title = "Insufficient Balance"
-
-    def __init__(self, reason: str | None = None) -> None:
-        super().__init__(f"Insufficient balance: {reason}." if reason else "Insufficient balance.")
 
 
 class InvalidSignatureError(PaymentError):
