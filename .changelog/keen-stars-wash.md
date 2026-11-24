@@ -1,5 +1,0 @@
----
-pympp: patch
----
-
-Session opens now reject a Credential whose `source` is not the payer the signed transaction authenticates, as mppx does.

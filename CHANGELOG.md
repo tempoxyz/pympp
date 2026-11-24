@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.27.1 (2026-11-24)
+
+### Patch Changes
+
+- Added `Settlement`, which a custom EVM `settle` hook can return to report settlement `extensions`. Facilitator settle extensions now reach the receipt and the x402 `PAYMENT-RESPONSE` header. (by @brendanjryan, [#450](https://github.com/tempoxyz/pympp/pull/450))
+- Added two new public error classes, `InsufficientBalanceError` and `SpendingLimitExceededError`, to `mpp.errors` and the top-level `mpp` namespace. The Tempo charge client and session open/top-up transactions now raise these typed errors before signing when the pre-signing gas estimate simulation reverts due to an insufficient token balance or exceeded access key spending limit, rather than silently falling back to the default gas limit. (by @brendanjryan, [#461](https://github.com/tempoxyz/pympp/pull/461))
+- Session opens now reject a Credential whose `source` is not the payer the signed transaction authenticates, as mppx does. (by @brendanjryan, [#446](https://github.com/tempoxyz/pympp/pull/446))
+- Fixed a race condition in Zone sender tag derivation where a slow retry could overwrite a newer block's tags with older ones, using compare-and-swap semantics instead of block hash comparison. Improved error messages for underivable sender tags to report the specific reason (no withdrawal found, or too many candidates). (by @brendanjryan, [#460](https://github.com/tempoxyz/pympp/pull/460))
+- Fixed paying from a Zone whose RPC redacts outbox events from receipts. Added `sender_tags` to `ZoneSettlementPendingError`, listing every sender tag a pending withdrawal may carry. (by @brendanjryan, [#458](https://github.com/tempoxyz/pympp/pull/458))
+
 ## 0.27.0 (2026-11-23)
 
 ### Minor Changes
