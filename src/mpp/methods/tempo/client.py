@@ -400,6 +400,9 @@ class _ZoneSend:
     # observed block wins however the reads interleave.
     observations: int = 0
     derived_observation: int = 0
+    # The block a receipt named most recently, with its observation number, kept even
+    # when reading its outbox failed, so a later lookup that proves nothing retries it.
+    observed_block: tuple[str, int] | None = None
     # IDs of the newly issued Challenges that resumed this withdrawal. A later attempt
     # for one of them is the same request, even while it waits on the withdrawal itself.
     resumed_by: set[str] = field(default_factory=lambda: set[str]())
@@ -1681,7 +1684,8 @@ class TempoMethod:
         A retry looks the transaction's receipt up again first: if the Zone moved it to
         another block, as after a reorg, the tags come from that block, and replace the
         tags derived from the earlier one once they are derived. A lookup that proves
-        nothing keeps the last derived block. The lookup stops well before the
+        nothing retries the newest block a receipt named if its tags weren't derived,
+        falling back to the last derived ones, and otherwise keeps those. The lookup stops well before the
         derivation's ``deadline``, so a stalled one never keeps a retry from the tags
         already derived for that block. The outbox reads are pinned to that block's hash
         and its parent's.
@@ -1701,6 +1705,9 @@ class TempoMethod:
         # 0 for a block no receipt proved (a lookup that proved nothing): kept only when
         # no tags were derived yet.
         observation = 0
+        # Tags to fall back to when retrying an observed block whose outbox read failed.
+        fallback: tuple[str, tuple[str, ...]] | None = None
+        started = asyncio.get_running_loop().time()
         if not state.derivation_started:
             # The first derivation uses the receipt the send returned.
             state.derivation_started = True
@@ -1708,6 +1715,7 @@ class TempoMethod:
             if block_hash is not None:
                 state.observations += 1
                 observation = state.observations
+                state.observed_block = (block_hash, observation)
         else:
             try:
                 receipt = await asyncio.wait_for(
@@ -1726,11 +1734,19 @@ class TempoMethod:
                 state.observations += 1
                 observation = state.observations
                 block_hash = included
+                state.observed_block = (block_hash, observation)
             else:
                 # Read after the lookup, so a block a concurrent retry derived meanwhile
                 # wins.
                 derived = state.derived_sender_tags
-                block_hash = derived[0] if derived is not None else withdrawal.block_hash
+                observed = state.observed_block
+                if observed is not None and observed[1] > state.derived_observation:
+                    # A receipt named a newer block whose outbox read failed: retry it,
+                    # keeping the last derived tags if this read fails too.
+                    block_hash, observation = observed
+                    fallback = derived
+                else:
+                    block_hash = derived[0] if derived is not None else withdrawal.block_hash
         if block_hash is None:
             raise _zones.SenderTagUnderivableError(
                 f"Zone withdrawal transaction {withdrawal.transaction_hash} has no block."
@@ -1741,13 +1757,22 @@ class TempoMethod:
             # still reading must not replace it.
             state.derived_observation = max(state.derived_observation, observation)
             return derived[1]
-        tags = await _zones.sender_tag_candidates(
+        read = _zones.sender_tag_candidates(
             zone.rpc_url,
             block_hash=block_hash,
             sender=withdrawal.sender,
             transaction_hash=withdrawal.transaction_hash,
             client=zone.http_client,
         )
+        if fallback is None:
+            tags = await read
+        else:
+            # Bounded so a stalled read still leaves time to use the fallback tags.
+            elapsed = asyncio.get_running_loop().time() - started
+            try:
+                tags = await asyncio.wait_for(read, timeout=max((deadline - elapsed) / 2, 0))
+            except Exception:
+                return fallback[1]
         # Kept only if no derivation that observed its block later kept others.
         if state.derived_sender_tags is None or observation > state.derived_observation:
             state.derived_sender_tags = (block_hash, tags)

@@ -30,6 +30,7 @@ from mpp.methods.tempo import _zone as zone_lib
 from mpp.methods.tempo import client as tempo_client
 from mpp.methods.tempo import server as tempo_server
 from mpp.methods.tempo._attribution import encode as encode_attribution
+from mpp.methods.tempo._rpc import RpcError
 from mpp.methods.tempo.client import Zone, _tempo_method
 from mpp.methods.tempo.intents import TRANSFER_WITH_MEMO_TOPIC, ChargeIntent
 from mpp.server import Mpp
@@ -3547,6 +3548,53 @@ class TestClientZoneRedactedOutbox:
         credential = await method.create_credential(issued)
         assert credential.payload["senderTag"] == first.sender_tags[-1]
         assert calls.count("eth_sendRawTransactionSync") == 1
+
+    @pytest.mark.asyncio
+    async def test_an_inconclusive_lookup_retries_the_observed_block_once_reads_recover(
+        self,
+    ) -> None:
+        calls: list[str] = []
+        reads: list[Any] = []
+        failing = False
+        included: Any = ZONE_BLOCK_11_FORK
+        zone = redacting_zone(
+            calls,
+            fail_reads=lambda: failing,
+            included_in=lambda: included,
+            reads=reads,
+            nonces={ZONE_BLOCK_10_FORK: 7, ZONE_BLOCK_11_FORK: 8},
+        )
+        method = payer_method(zone)
+        withdrawal = tempo_client._ZoneWithdrawal(
+            block_hash=ZONE_BLOCK_10,
+            sender=PAYER.address,
+            transaction_hash=REDACTED_TX,
+            sender_tags=None,
+        )
+        kept = (ZONE_BLOCK_10, ("0x" + "01" * 32,))
+        state = tempo_client._ZoneSend(
+            derivation_started=True, derived_sender_tags=kept, observations=1, derived_observation=1
+        )
+        # After a reorg the receipt names block 11, but its outbox read fails.
+        failing = True
+        with pytest.raises(RpcError):
+            await method._derive_zone_sender_tags(withdrawal, state, 5)
+        assert state.derived_sender_tags is kept
+
+        # The next lookup proves nothing while block 11's reads recover: its tags are
+        # derived and kept, rather than block 10's reused.
+        included = None
+        failing = False
+        reads.clear()
+        tags = await method._derive_zone_sender_tags(withdrawal, state, 5)
+        assert set(reads) == {ZONE_BLOCK_10_FORK, ZONE_BLOCK_11_FORK}
+        assert tags != kept[1]
+        assert state.derived_sender_tags == (ZONE_BLOCK_11_FORK, tags)
+
+        # Once kept, a lookup that proves nothing reuses them without reading again.
+        reads.clear()
+        assert await method._derive_zone_sender_tags(withdrawal, state, 5) == tags
+        assert reads == []
 
     @pytest.mark.asyncio
     async def test_a_timed_out_receipt_lookup_keeps_a_concurrent_retrys_block(self) -> None:
