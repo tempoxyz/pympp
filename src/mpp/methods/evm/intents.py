@@ -243,11 +243,13 @@ def _json_extensions(extensions: Any) -> dict[str, Any] | None:
     beyond 2**53 - 1) is dropped, as in mppx, so a settled payment never fails on
     its receipt or overflows a client's header limit.
     """
-    if not is_mapping(extensions) or not _within_bounds(
-        extensions, _MAX_EXTENSIONS_DEPTH, _MAX_EXTENSIONS_BYTES
-    ):
+    if not is_mapping(extensions):
         return None
     try:
+        # A settler's custom mapping can fail while it is walked; the payment has already
+        # settled, so drop its extensions instead of failing the receipt.
+        if not _within_bounds(extensions, _MAX_EXTENSIONS_DEPTH, _MAX_EXTENSIONS_BYTES):
+            return None
         # Payment-Receipt serializes with json.dumps' default ensure_ascii, so measure that.
         serialized = json.dumps(extensions, allow_nan=False, separators=(",", ":"))
         if len(serialized) > _MAX_EXTENSIONS_BYTES:
@@ -256,7 +258,7 @@ def _json_extensions(extensions: Any) -> dict[str, Any] | None:
         # PAYMENT-RESPONSE decoding canonicalizes with RFC 8785, which also rejects
         # lone surrogates and integers a JavaScript number can't hold exactly.
         rfc8785.dumps(value)
-    except (TypeError, ValueError, RecursionError, rfc8785.CanonicalizationError):
+    except Exception:
         return None
     return cast("dict[str, Any]", value) if isinstance(value, dict) and value else None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
@@ -661,6 +662,34 @@ class TestBroadcast:
         assert receipt.reference == "0xhook"
         assert receipt.extensions is None
         receipt.to_payment_receipt()
+
+    async def test_drops_settle_extensions_whose_traversal_fails(self) -> None:
+        class Invalidated(Mapping[str, Any]):
+            def __getitem__(self, key: str) -> Any:
+                raise KeyError(key)
+
+            def __iter__(self) -> Iterator[str]:
+                raise TypeError("source invalidated")
+
+            def __len__(self) -> int:
+                return 1
+
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(
+                reference="0xhook", extensions={"payout": Invalidated()}
+            ),
+        )
+        intent = charge_intent(method)
+        req = request(method)
+        credential = native_credential(req)
+        receipt = await intent.broadcast(credential, req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions is None
+        # The settled claim is recorded, so the same authorization is a replay.
+        with pytest.raises(CredentialReplayedError):
+            await intent.broadcast(credential, req)
 
     async def test_snapshots_settle_extensions_before_recording_the_claim(self) -> None:
         shared: dict[str, Any] = {"payout": "first"}
