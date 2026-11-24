@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rpc-url",
-        help="Tempo RPC URL (or set TEMPO_RPC_URL, default: rpc.testnet.tempo.xyz)",
+        help="Tempo RPC URL (or set TEMPO_RPC_URL, default: https://rpc.tempo.xyz)",
     )
     return parser.parse_args()
 

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+import textwrap
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -292,6 +295,53 @@ def test_tempo_split_amounts_are_emitted_without_leading_zeros() -> None:
     split = Split(amount="000100", recipient="0x" + "11" * 20)
     wire = ChargeInput(amount="1", currency=PATH_USD, recipient=recipient, splits=[split])
     assert wire.model_dump()["methodDetails"]["splits"][0]["amount"] == "100"
+
+
+def test_direct_submodule_import_names_the_extra() -> None:
+    script = textwrap.dedent("""\
+        import sys
+        sys.modules["attrs"] = None
+        try:
+            from mpp.methods.tempo import server
+        except ImportError as error:
+            print(error)
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert 'pip install "pympp[tempo]"' in result.stdout, result.stderr
+
+
+def test_evm_client_import_names_the_extra_for_every_extra_dependency() -> None:
+    """eth_account is needed only through mpp.methods.evm._eip3009: still hinted."""
+    script = textwrap.dedent("""\
+        import sys
+        sys.modules["eth_account"] = None
+        try:
+            from mpp.methods.evm import client
+        except ImportError as error:
+            print(type(error).__name__, error)
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert 'pip install "pympp[evm]"' in result.stdout, result.stderr
+    assert result.stdout.startswith("ModuleNotFoundError"), result.stdout
+
+
+def test_install_hint_keeps_the_import_error_class_name_and_path() -> None:
+    from mpp._lazy_exports import install_hint
+
+    with pytest.raises(ModuleNotFoundError) as raised, install_hint("evm"):
+        raise ModuleNotFoundError("No module named 'eth_account'", name="eth_account", path="/x")
+    assert 'pip install "pympp[evm]"' in str(raised.value)
+    assert (raised.value.name, raised.value.path) == ("eth_account", "/x")
+    assert isinstance(raised.value.__cause__, ModuleNotFoundError)
+
+    class Strict(ImportError):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+
+    with pytest.raises(ImportError) as fallback, install_hint("evm"):
+        raise Strict("broken")
+    assert type(fallback.value) is ImportError
+    assert 'pip install "pympp[evm]"' in str(fallback.value)
 
 
 class TestMethodIdAtConfiguration:

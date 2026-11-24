@@ -37,9 +37,6 @@ tempo = [
     "eth-hash[pycryptodome]>=0.7",
     "attrs>=23.0",
     "rlp>=4.0",
-    "propcache==0.5.2",
-    "urllib3==2.8.0",
-    "yarl==1.24.5",
 ]
 stripe = [
     "pydantic>=2.0",
@@ -49,10 +46,7 @@ stripe = [
     "eth-hash[pycryptodome]>=0.7",
     "attrs>=23.0",
     "rlp>=4.0",
-    "propcache==0.5.2",
     "stripe>=8.0.0",
-    "urllib3==2.8.0",
-    "yarl==1.24.5",
 ]
 evm = [
     "eth-account>=0.11",
@@ -74,10 +68,8 @@ x402 = [
 mcp = [
     "anyio>=4.5",
     "mcp>=1.1,<2",
-    "propcache==0.5.2",
     "pyjwt==2.15.1",
     "uvicorn==0.52.4",
-    "yarl==1.24.5",
 ]
 dev = [
     "pytest>=8.0",

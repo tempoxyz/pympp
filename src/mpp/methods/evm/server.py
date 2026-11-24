@@ -23,11 +23,14 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from mpp.methods.evm.client import AuthorizationConfig, _config
-from mpp.methods.evm.intents import ChargeIntent, SettleFn
-from mpp.methods.evm.intents import charge as definition
+from mpp._lazy_exports import install_hint
 from mpp.server.method import ServerMethod, ValidateContext, VerifyContext
 from mpp.x402.facilitator import Facilitator, resolve_facilitator
+
+with install_hint("evm"):
+    from mpp.methods.evm.client import AuthorizationConfig, _config
+    from mpp.methods.evm.intents import ChargeIntent, SettleFn
+    from mpp.methods.evm.intents import charge as definition
 
 if TYPE_CHECKING:
     from mpp import Credential, Receipt

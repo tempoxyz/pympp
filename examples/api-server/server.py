@@ -6,9 +6,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
 from mpp import Credential, Receipt
-from mpp.methods.tempo import TempoAccount
+from mpp.methods.tempo import PATH_USD, TESTNET_CHAIN_ID, TempoAccount
 from mpp.methods.tempo import server as tempo
-from mpp.methods.tempo._defaults import PATH_USD, TESTNET_CHAIN_ID
 from mpp.server import Mpp, pay
 from mpp.server import Request as PaymentRequest
 

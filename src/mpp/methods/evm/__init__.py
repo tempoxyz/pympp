@@ -26,7 +26,7 @@ Example:
 
 from typing import Any
 
-from mpp._lazy_exports import load_lazy_attr
+from mpp._lazy_exports import extra_install_hint, load_lazy_attr
 from mpp.methods.evm.assets import (
     BASE,
     BASE_SEPOLIA,
@@ -40,7 +40,7 @@ from mpp.methods.evm.assets import (
     EvmAsset,
 )
 
-_EXTRA_INSTALL_HINT = 'Install the "evm" extra to use this module: pip install "pympp[evm]"'
+_EXTRA_INSTALL_HINT = extra_install_hint("evm")
 
 _LAZY_EXPORTS = {
     "mpp.methods.evm.client": ("AuthorizationConfig", "evm"),

@@ -12,26 +12,49 @@ Full documentation, API reference, and guides are available at **[mpp.dev/sdk/py
 ## Install
 
 ```bash
-pip install pympp
+pip install pympp            # core: Challenges, Credentials, Receipts
+pip install "pympp[tempo]"   # the Tempo payment method
 ```
 
 ## Quick Start
 
 ### Server
 
-```python
-from mpp import Credential, Receipt
-from mpp.server import Mpp, pay
-from mpp.methods.tempo import server as tempo
+Install the Tempo method with FastAPI and uvicorn, set the secret that signs
+Challenges (at least 32 bytes), and the address you want paid:
 
-server = Mpp(methods=tempo.charge(recipient="0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"))
+```bash
+pip install "pympp[tempo]" fastapi uvicorn
+export MPP_SECRET_KEY="$(openssl rand -base64 32)"
+export MPP_RECIPIENT="0x..."  # your own Tempo address
+```
+
+Save this as `app.py`:
+
+```python
+import os
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from mpp import Credential, Receipt
+from mpp.methods.tempo import server as tempo
+from mpp.server import Mpp, pay
+
+app = FastAPI()
+# Charges on the Moderato testnet; drop chain_id to charge on mainnet.
+server = Mpp(methods=tempo.charge(recipient=os.environ["MPP_RECIPIENT"], chain_id=42431))
 
 
 @app.get("/paid")
 @pay(server.charge(amount="0.50"))
-async def handler(request, credential: Credential, receipt: Receipt):
+async def handler(request: Request, credential: Credential, receipt: Receipt):
     return JSONResponse({"data": "...", "payer": receipt.payer})
 ```
+
+Run it with `uvicorn app:app`. `curl -i http://localhost:8000/paid` answers `402` with a
+`WWW-Authenticate: Payment` Challenge; a client such as `mpp.client.Mpp` pays it and
+retries. The handler takes the framework's `request` so `@pay` can read the Credential.
 
 Without a framework decorator, call the route handler with the framework-neutral
 `Request`. It returns `PaymentRequired` (a `402` response to send as-is) or

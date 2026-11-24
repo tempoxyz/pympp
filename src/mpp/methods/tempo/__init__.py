@@ -20,7 +20,7 @@ Example:
 from typing import Any
 
 from mpp._did import PkhSource, parse_pkh_source
-from mpp._lazy_exports import load_lazy_attr
+from mpp._lazy_exports import extra_install_hint, load_lazy_attr
 from mpp.methods.tempo._defaults import (
     CHAIN_ID,
     ESCROW_CONTRACTS,
@@ -36,7 +36,7 @@ from mpp.methods.tempo._defaults import (
     rpc_url_for_chain,
 )
 
-_EXTRA_INSTALL_HINT = 'Install the "tempo" extra to use this module: pip install "pympp[tempo]"'
+_EXTRA_INSTALL_HINT = extra_install_hint("tempo")
 
 _LAZY_EXPORTS = {
     "mpp.methods.tempo.account": ("TempoAccount",),
