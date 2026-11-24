@@ -242,11 +242,32 @@ async def test_client_does_not_pay_again_after_invalid_challenge() -> None:
     assert len(created) == 1
 
 
+def test_tempo_split_amounts_are_emitted_without_leading_zeros() -> None:
+    from mpp.methods.tempo import PATH_USD
+    from mpp.methods.tempo.schemas import ChargeInput, Split
+
+    recipient = "0x742d35Cc6634c0532925a3b844bC9e7595F8fE00"
+    split = Split(amount="000100", recipient="0x" + "11" * 20)
+    wire = ChargeInput(amount="1", currency=PATH_USD, recipient=recipient, splits=[split])
+    assert wire.model_dump()["methodDetails"]["splits"][0]["amount"] == "100"
+
+
 class TestMethodIdAtConfiguration:
     @pytest.mark.parametrize("name", ["stripe-pi", "tempo2", "Tempo"])
     def test_mpp_rejects_invalid_method_ids_at_startup(self, name: str) -> None:
         with pytest.raises(ValueError, match="Invalid payment method id"):
             make_server(ContractMethod(name=name))
+
+
+def test_hash_credentials_require_a_bound_memo() -> None:
+    """Push (hash) credentials need the challenge-bound memo; pull transactions do not."""
+    from mpp.errors import VerificationError
+    from mpp.methods.tempo.intents import ChargeIntent
+
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+    intent._assert_challenge_bound_memo([], challenge_id="c", realm="r")
+    with pytest.raises(VerificationError, match="memo is not bound"):
+        intent._assert_challenge_bound_memo([], challenge_id="c", realm="r", require=True)
 
 
 async def test_mixed_case_problem_media_type_is_still_final() -> None:
@@ -334,3 +355,33 @@ async def test_client_does_not_pay_again_after_a_head_replay() -> None:
     assert response.status_code == 402
     assert response.content == b""
     assert len(created) == 1
+
+
+def test_attribution_memo_rules_for_pull_and_push() -> None:
+    """Pull accepts plain and non-attribution memos; any other attribution memo fails."""
+    from mpp.errors import VerificationError
+    from mpp.methods.tempo._attribution import encode as encode_attribution
+    from mpp.methods.tempo.intents import ChargeIntent, MatchedTransferLog
+
+    intent = ChargeIntent(rpc_url="https://rpc.test")
+
+    def legs(memo: str | None) -> list[MatchedTransferLog]:
+        if memo is None:
+            return [MatchedTransferLog(kind="transfer")]
+        return [MatchedTransferLog(kind="memo", memo=memo)]
+
+    bound = encode_attribution(challenge_id="c", server_id="r")
+    other_challenge = encode_attribution(challenge_id="other", server_id="r")
+    other_realm = encode_attribution(challenge_id="c", server_id="elsewhere")
+    for memo in (None, "0x" + "ab" * 32, bound):
+        intent._assert_challenge_bound_memo(legs(memo), challenge_id="c", realm="r")
+    # Another realm's memo could later be redeemed there as a hash credential.
+    for memo in (other_challenge, other_realm):
+        with pytest.raises(VerificationError, match="memo is not bound"):
+            intent._assert_challenge_bound_memo(legs(memo), challenge_id="c", realm="r")
+    intent._assert_challenge_bound_memo(legs(bound), challenge_id="c", realm="r", require=True)
+    for memo in (None, "0x" + "ab" * 32, other_realm, other_challenge):
+        with pytest.raises(VerificationError, match="memo is not bound"):
+            intent._assert_challenge_bound_memo(
+                legs(memo), challenge_id="c", realm="r", require=True
+            )

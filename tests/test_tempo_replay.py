@@ -134,7 +134,7 @@ Scenario = Callable[[Route, str], Awaitable[Any]]
         # An already-used challenge gets a fresh one (core spec status table).
         ("ok", _replayed, "invalid-challenge"),
         ("ok", _in_flight, "invalid-challenge"),
-        ("memo", _once, "invalid-challenge"),
+        ("memo", _once, "verification-failed"),
         ("amount", _once, "verification-failed"),
         ("reverted", _once, "verification-failed"),
     ],

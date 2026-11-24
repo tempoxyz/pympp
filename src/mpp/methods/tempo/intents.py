@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import re
@@ -105,6 +106,17 @@ TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523
 TRANSFER_WITH_MEMO_TOPIC = "0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0"
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
+
+
+class _AttributionMismatchError(VerificationError):
+    """A transfer's attribution memo names another challenge or realm.
+
+    A final ``verification-failed`` answer even after broadcast: the transfer paid
+    for another challenge, so reporting an internal error would hide why.
+    """
+
+    type = VerificationError.type
+    title = VerificationError.title
 
 
 class _TransactionReverted(VerificationError):
@@ -578,6 +590,152 @@ def _is_ambiguous_broadcast_error(
             return True
         cause = cause.__cause__ or cause.__context__
     return False
+
+
+# Seconds an unsponsored pull's broadcast marker outlives its deadline, and the
+# most a payer-chosen ``valid_before`` extends that deadline from now.
+_UNSPONSORED_MARKER_GRACE = 60
+_UNSPONSORED_MARKER_TTL = 3600
+
+
+def _unsponsored_marker_expiry(challenge_expires_at: float | None, raw_tx: str) -> float:
+    """Return when an unsponsored pull's broadcast marker expires (Unix seconds).
+
+    A minute after the later of the Challenge's expiry and the transaction's
+    ``valid_before``, so a retry while the transaction can still mine reconciles
+    it. The payer chooses ``valid_before``, so it counts for at most an hour from
+    now, as mpp-rs's ``broadcast_record_ttl`` caps it; without either bound the
+    marker lives an hour (plus the minute).
+    """
+    now = time.time()
+    cap = now + _UNSPONSORED_MARKER_TTL
+    valid_before = _transaction_valid_before(raw_tx)
+    bounds = [min(valid_before, cap) if valid_before is not None else None, challenge_expires_at]
+    present = [bound for bound in bounds if bound is not None]
+    deadline = max(present) if present else cap
+    return max(deadline, now) + _UNSPONSORED_MARKER_GRACE
+
+
+_TIMEOUT_MESSAGE_RE = re.compile(r"\btime(?:d)? ?out\b", re.I)
+
+
+def _is_undelivered_send_error(error: Exception) -> bool:
+    """Return true when a failed send shows the node never took this submission.
+
+    ``error`` is matched anywhere in its ``__cause__``/``__context__`` chain.
+    Connect and pool failures never sent the request, an HTTP 4xx refused it,
+    and "already known" means the node already held the transaction from
+    another submission. Timeouts, lost connections, HTTP 5xx responses and
+    unreadable replies may still have delivered it.
+    """
+    import httpx
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+            return True
+        if isinstance(cause, httpx.HTTPStatusError):
+            return 400 <= cause.response.status_code < 500
+        if isinstance(
+            cause,
+            (TimeoutError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError),
+        ):
+            return False
+        if ALREADY_KNOWN_TRANSACTION_RE.search(str(cause)):
+            return True
+        cause = cause.__cause__ or cause.__context__
+    return False
+
+
+# Message fragments of node validation errors that reject a transaction before
+# it enters the pool, as mpp-rs's ``broadcast_refused`` lists them.
+_NODE_REFUSAL_FRAGMENTS = (
+    "insufficient funds",
+    "insufficient balance",
+    "invalid signature",
+    "signature is invalid",
+    "intrinsic gas",
+    "gas limit too low",
+    "exceeds block gas limit",
+    "fee too low",
+    "underpriced",
+    "max fee per gas less than",
+    "fee cap",
+    "valid_before",
+    "validbefore",
+    "valid_after",
+    "validafter",
+    "transaction expired",
+    "transaction type not supported",
+    "invalid chain id",
+    "chain id mismatch",
+)
+
+# JSON-RPC parse error, invalid request and invalid params: the request was
+# refused before the transaction was looked at.
+_MALFORMED_REQUEST_CODES = frozenset({-32700, -32600, -32602})
+
+
+def _is_definite_node_rejection(result: dict[str, Any]) -> bool:
+    """Return true when a JSON-RPC error shows the node refused the transaction.
+
+    Only an error that names a validation failure counts: a malformed request
+    or invalid params, insufficient funds or balance, a bad signature, too
+    little gas, a fee below what the node takes, an expired or out-of-range
+    ``valid_before``, or "already known" (the node already held the
+    transaction from another submission). Nonce errors (the nonce may have
+    been used by this very submission), EIP-7966 timeouts (code 4), internal
+    errors (-32603), messages that mention a timeout and any error the node
+    does not explain leave the outcome open, so the broadcast marker is kept
+    for a retry to reconcile.
+    """
+    rpc_error = result.get("error")
+    code = rpc_error.get("code") if is_dict(rpc_error) else None
+    message = _rpc_error_msg(result).lower()
+    if (
+        code in (SYNC_CONFIRMATION_TIMEOUT_CODE, -32603)
+        or "nonce" in message
+        or _TIMEOUT_MESSAGE_RE.search(message) is not None
+    ):
+        return False
+    return (
+        code in _MALFORMED_REQUEST_CODES
+        or ALREADY_KNOWN_TRANSACTION_RE.search(message) is not None
+        or any(fragment in message for fragment in _NODE_REFUSAL_FRAGMENTS)
+    )
+
+
+def _encode_broadcast_marker(challenge_id: str, raw_tx: str) -> str:
+    """Encode a broadcast marker: the transaction sent and the Challenge it paid."""
+    return json.dumps({"challengeId": challenge_id, "transaction": raw_tx}, sort_keys=True)
+
+
+def _decode_broadcast_marker(value: Any) -> tuple[str | None, Any]:
+    """Return a broadcast marker's Challenge ID and transaction.
+
+    Markers written before the Challenge was recorded hold only the
+    transaction (or, for the oldest sponsored ones, the fee token) and have no
+    Challenge ID. An unreadable marker fails closed.
+    """
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InternalPaymentError() from error
+    if isinstance(value, str) and value.startswith("{"):
+        try:
+            parsed: object = json.loads(value)
+        except ValueError as error:
+            raise InternalPaymentError() from error
+        if is_dict(parsed):
+            challenge_id = parsed.get("challengeId")
+            transaction = parsed.get("transaction")
+            if isinstance(challenge_id, str) and isinstance(transaction, str):
+                return challenge_id, transaction
+        raise InternalPaymentError() from ValueError("Malformed broadcast marker")
+    return None, value
 
 
 # Kept for tests/test_tempo.py; nothing in the package calls it.
@@ -1409,7 +1567,12 @@ class ChargeIntent:
         return payer
 
     async def _is_active_access_key(self, account: str, access_key: str, chain_id: int) -> bool:
-        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``."""
+        """Whether ``access_key`` is an unrevoked, unexpired access key of ``account``.
+
+        As the Tempo charge spec says: the returned keyId is non-zero and equals the
+        signer, it is not revoked, and its expiry is non-zero and after now (expiry 0
+        means no key is registered).
+        """
         await self._assert_rpc_chain_id(chain_id)
         data = "0x" + GET_KEY_SELECTOR + _strip_0x(account).lower().zfill(64)
         data += _strip_0x(access_key).lower().zfill(64)
@@ -1420,12 +1583,17 @@ class ChargeIntent:
                 [{"to": ACCOUNT_KEYCHAIN, "data": data}, "latest"],
                 client=await self._get_client(),
             )
-            _, _, expiry, _, revoked = decode(
+            _, key_id, expiry, _, revoked = decode(
                 ["uint8", "address", "uint64", "bool", "bool"], bytes.fromhex(_strip_0x(result))
             )
         except Exception:
             return False
-        return not revoked and expiry > int(time.time())
+        return (
+            int(key_id, 16) != 0
+            and key_id.lower() == access_key.lower()
+            and not revoked
+            and expiry > int(time.time())
+        )
 
     def _parse_hash_credential_source(
         self, source: str | None, expected_chain_id: int
@@ -1542,6 +1710,9 @@ class ChargeIntent:
             source=source,
             source_address=source_address,
             validate_sender=self._validate_sender,
+            # Anyone can submit a public transaction hash: only the
+            # challenge-bound memo ties the transfer to this challenge.
+            require_bound_memo=True,
         )
 
         senders = {matched_log.sender for matched_log in matched_logs}
@@ -1555,14 +1726,22 @@ class ChargeIntent:
         matched_logs: list[MatchedTransferLog],
         challenge_id: str,
         realm: str,
+        *,
+        require: bool = False,
     ) -> None:
-        """Require a challenge-bound memo and reject conflicting attribution.
+        """Reject attribution memos not bound to this realm and challenge.
 
-        Every matched transfer carrying an MPP attribution memo must be bound to
-        this challenge and realm; otherwise one split payment could authorize
-        another challenge after this challenge's replay marker expires. Plain
-        transfers and non-MPP memos remain allowed. A fixed split memo cannot
-        exempt a transfer that is attributed to another challenge.
+        With ``require``, a transfer must also carry a memo bound to this challenge:
+        hash (push) credentials need it, since anyone can submit a public
+        transaction hash.
+
+        Without ``require`` (pull transactions, which the server broadcasts from the
+        client's own signature, and their simulated legs), plain transfers and memos
+        not in attribution format are accepted. Every matched transfer whose memo
+        is in attribution format must be bound to this realm and challenge: once
+        settled, a transfer attributed to another challenge, of this realm or
+        another one, could be claimed for that challenge as a hash credential at a
+        server with no record of it. A fixed split memo cannot exempt it either.
         """
         from mpp.methods.tempo._attribution import (
             is_mpp_memo,
@@ -1576,12 +1755,13 @@ class ChargeIntent:
             if memo is None or not is_mpp_memo(memo):
                 continue
             if not verify_server(memo, realm) or not verify_challenge_binding(memo, challenge_id):
-                raise CredentialReplayedError("memo is not bound to this challenge")
+                # A transfer bound to another challenge, here or at another realm
+                # with its own replay store, could later be claimed for that
+                # challenge as a hash credential.
+                raise _AttributionMismatchError("memo is not bound to this challenge")
             bound = True
-        if not bound:
-            # The transfer already settled to the recipient, so another payment
-            # would not help this credential.
-            raise CredentialReplayedError("memo is not bound to this challenge")
+        if require and not bound:
+            raise _AttributionMismatchError("memo is not bound to this challenge")
 
     async def _fetch_transaction_receipt(self, client: Any, tx_hash: str) -> dict[str, Any]:
         receipt_data = await self._get_transaction_receipt(client, tx_hash)
@@ -1608,6 +1788,17 @@ class ChargeIntent:
 
         return receipt_data
 
+    async def _assert_not_already_included(self, client: Any, tx_hash: str) -> None:
+        """Reject a pull transaction that is already on chain before this server sends it.
+
+        A transaction mined before this server's own broadcast was settled by
+        someone else, and replay records can be per server or expire, so it
+        cannot pay for this credential. It is a replay: retrying it, or paying
+        a fresh Challenge for it, cannot succeed. A failed lookup fails closed.
+        """
+        if await self._get_transaction_receipt(client, tx_hash) is not None:
+            raise CredentialReplayedError("Transaction was already included on chain")
+
     async def _recover_broadcast_receipt(
         self,
         client: Any,
@@ -1618,6 +1809,7 @@ class ChargeIntent:
         realm: str,
         deadline: float,
         error: Exception,
+        require_bound_memo: bool = False,
     ) -> Receipt:
         """Verify a broadcast transaction whose outcome is unknown.
 
@@ -1661,7 +1853,12 @@ class ChargeIntent:
             raise error
 
         return self._verify_recovered_receipt(
-            receipt_data, tx_hash, request, challenge_id=challenge_id, realm=realm
+            receipt_data,
+            tx_hash,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+            require_bound_memo=require_bound_memo,
         )
 
     async def _lookup_broadcast_receipt(
@@ -1673,6 +1870,7 @@ class ChargeIntent:
         realm: str,
         deadline: float,
         error: Exception,
+        require_bound_memo: bool = False,
     ) -> Receipt:
         """Verify a transaction whose broadcast returned a definitive-looking error.
 
@@ -1693,8 +1891,27 @@ class ChargeIntent:
             raise error
 
         return self._verify_recovered_receipt(
-            receipt_data, tx_hash, request, challenge_id=challenge_id, realm=realm
+            receipt_data,
+            tx_hash,
+            request,
+            challenge_id=challenge_id,
+            realm=realm,
+            require_bound_memo=require_bound_memo,
         )
+
+    @staticmethod
+    def _recovery_requires_bound_memo(request: ChargeRequest, *, own_marker: bool) -> bool:
+        """Return true when a receipt recovered after a failed send needs a bound memo.
+
+        ``own_marker`` is true when this server's broadcast marker covers the
+        send: an earlier attempt's, or this attempt's when its send was neither
+        undelivered nor refused. That receipt is of this server's own
+        broadcast, checked unmined right before it, so it is adopted without a
+        memo bound to this Challenge, as the reconciling retry does. Without
+        one, the transaction may have been submitted by someone else.
+        Sponsored pulls never require one here.
+        """
+        return not request.methodDetails.feePayer and not own_marker
 
     def _verify_recovered_receipt(
         self,
@@ -1703,18 +1920,38 @@ class ChargeIntent:
         request: ChargeRequest,
         challenge_id: str,
         realm: str,
+        require_bound_memo: bool = False,
     ) -> Receipt:
-        """Verify a receipt found after a failed broadcast belongs to ``tx_hash``."""
+        """Verify a receipt found after a failed broadcast belongs to ``tx_hash``.
+
+        With ``require_bound_memo``, a receipt whose matched transfers carry no
+        attribution memo bound to this realm and Challenge is not adopted: its
+        transaction may have been submitted by someone else. That raises
+        ``InternalPaymentError``, since the transaction may still be this
+        server's own payment.
+        """
         receipt_tx_hash = receipt_data.get("transactionHash")
         if not isinstance(receipt_tx_hash, str) or receipt_tx_hash.lower() != tx_hash.lower():
             raise VerificationError("Receipt transaction hash does not match submitted transaction")
 
-        self._verify_receipt_transfers(
+        matched_logs = self._verify_receipt_transfers(
             receipt_data,
             request,
             challenge_id=challenge_id,
             realm=realm,
         )
+        if require_bound_memo:
+            from mpp.methods.tempo._attribution import verify_challenge_binding, verify_server
+
+            if not any(
+                log.memo is not None
+                and verify_server(log.memo, realm)
+                and verify_challenge_binding(log.memo, challenge_id)
+                for log in matched_logs
+            ):
+                raise InternalPaymentError() from RuntimeError(
+                    "Recovered receipt lacks this challenge's attribution memo"
+                )
         return Receipt.success(tx_hash)
 
     def _verify_receipt_transfers(
@@ -1726,6 +1963,7 @@ class ChargeIntent:
         source: str | None = None,
         source_address: str | None = None,
         validate_sender: ValidateSender | None = None,
+        require_bound_memo: bool = False,
     ) -> list[MatchedTransferLog]:
         if receipt_data.get("status") == "0x0":
             raise _TransactionReverted("Transaction reverted")
@@ -1754,6 +1992,7 @@ class ChargeIntent:
             matched_logs,
             challenge_id=challenge_id,
             realm=realm,
+            require=require_bound_memo,
         )
 
         # A neutral leg cannot be assigned to one of several challenges in a
@@ -1780,9 +2019,12 @@ class ChargeIntent:
                     and len(topics) == 4
                     and topics[0] == TRANSFER_WITH_MEMO_TOPIC
                     and is_mpp_memo(topics[3])
+                    and verify_server(topics[3], realm)
                     and not is_bound(topics[3])
                 ):
-                    raise CredentialReplayedError("Unbound split leg in a multi-challenge receipt")
+                    raise _AttributionMismatchError(
+                        "Unbound split leg in a multi-challenge receipt"
+                    )
 
         return matched_logs
 
@@ -2119,6 +2361,10 @@ class ChargeIntent:
         this SDK. For regular transactions, submits directly.
         """
         legs = self._validate_transaction_payload(payload.signature, request)
+        # A transaction this SDK cannot decode was never checked against the
+        # request: its receipt must carry a transfer whose memo binds it to this
+        # Challenge, as a hash credential's must, never just any plain transfer.
+        undecodable = legs is None
         if legs is not None:
             # Reject unbound or conflicting MPP memos before any funds move.
             self._assert_challenge_bound_memo(legs, challenge_id=challenge_id, realm=realm)
@@ -2171,11 +2417,8 @@ class ChargeIntent:
                     if await self._store.get(client_store_key) is not None:
                         raise CredentialReplayedError("Transaction hash already used")
                     prior_transaction = await self._store.get(broadcast_key)
-                if isinstance(prior_transaction, bytes):
-                    try:
-                        prior_transaction = prior_transaction.decode("utf-8")
-                    except UnicodeDecodeError as error:
-                        raise InternalPaymentError() from error
+                if prior_transaction is not None:
+                    prior_transaction = self._own_sponsored_marker(prior_transaction, challenge_id)
                 if prior_transaction is not None:
                     if isinstance(prior_transaction, str) and re.fullmatch(
                         r"0x[0-9a-fA-F]{40}", prior_transaction
@@ -2235,11 +2478,8 @@ class ChargeIntent:
                     if await self._store.get(client_store_key) is not None:
                         raise CredentialReplayedError("Transaction hash already used")
                     prior_hosted = await self._store.get(broadcast_key)
-                if isinstance(prior_hosted, bytes):
-                    try:
-                        prior_hosted = prior_hosted.decode("utf-8")
-                    except UnicodeDecodeError as error:
-                        raise InternalPaymentError() from error
+                if prior_hosted is not None:
+                    prior_hosted = self._own_sponsored_marker(prior_hosted, challenge_id)
                 if prior_hosted is not None:
                     # A submission whose outcome was lost: reconcile the exact
                     # transaction the sponsor signed, never ask it to sign again
@@ -2294,13 +2534,23 @@ class ChargeIntent:
         broadcast_attempted = False
         # True while a submitted transaction may still be included. The broadcast
         # marker is then kept: unlike the replay reservation it survives the
-        # failure, so a retry of a locally sponsored submission whose outcome is
-        # unknown is reconciled instead of refused as unpaid. Definitive
-        # rejections and unsponsored submissions retain nothing.
+        # failure, so a retry of a submission whose outcome is unknown is
+        # reconciled instead of refused as unpaid or as already on chain.
+        # Definitive rejections retain nothing.
         outcome_unknown = False
         # True when this attempt created the broadcast marker, so a definitive
         # outcome removes it again.
         marker_created = False
+        # True when an unsponsored pull's broadcast marker for these exact bytes
+        # existed before this attempt: this server broadcast them earlier, so
+        # the attempt reconciles that submission and only settling removes it.
+        prior_marker = False
+        # True when this attempt's own send never reached the node, or the
+        # node refused it outright.
+        node_rejected = False
+        # True when the node answered the send with a JSON-RPC error that leaves
+        # the outcome open (such as -32603): the transaction may still mine.
+        open_rpc_error = False
         verified = False
         admission_store: CompareAndSetStore | None = None
         challenge_claim: _sponsored_admission.Claim | None = None
@@ -2331,6 +2581,35 @@ class ChargeIntent:
                 challenge_claim = payer_claim = None
 
         try:
+            if reserved_tx_hash is not None and not request.methodDetails.feePayer:
+                # Keyed on the exact bytes this server broadcasts. Read after the
+                # replay reservation, so no attempt for them is still running.
+                broadcast_key = f"mpp:charge-broadcast:{reserved_tx_hash.lower()}"
+                try:
+                    prior_broadcast = (
+                        await self._store.get(broadcast_key) if self._store is not None else None
+                    )
+                except Exception as err:
+                    raise InternalPaymentError() from err
+                if prior_broadcast is not None:
+                    marker_challenge, marker_transaction = _decode_broadcast_marker(prior_broadcast)
+                    if marker_challenge != challenge_id:
+                        # Another Challenge broadcast these bytes: not this
+                        # Credential's own submission. Check the chain as if no
+                        # marker existed, and leave that Challenge's marker alone.
+                        broadcast_key = None
+                    elif not (
+                        isinstance(marker_transaction, str)
+                        and marker_transaction.lower() == raw_tx.lower()
+                    ):
+                        raise InternalPaymentError() from RuntimeError(
+                            "Recovery record does not match the submitted transaction"
+                        )
+                    else:
+                        # This server broadcast these exact bytes for this Challenge
+                        # and lost the outcome: reconcile the submission instead of
+                        # refusing a transaction it may have mined itself.
+                        reconciling = prior_marker = True
             if request.methodDetails.feePayer and self.fee_payer is not None:
                 # The implicit fallback store is per intent; admission must be
                 # process-wide so separate charge methods serialize one payer.
@@ -2393,7 +2672,22 @@ class ChargeIntent:
                     is_settled=payer_settled,
                 )
             admitting = False
-            if reconciling:
+            if reconciling and not request.methodDetails.feePayer:
+                tx_hash = reserved_tx_hash or _raw_transaction_hash(raw_tx)
+                prior_receipt = await self._get_transaction_receipt(client, tx_hash)
+                if prior_receipt is not None:
+                    receipt = self._verify_recovered_receipt(
+                        prior_receipt,
+                        tx_hash,
+                        request,
+                        challenge_id=challenge_id,
+                        realm=realm,
+                        require_bound_memo=undecodable,
+                    )
+                    verified = True
+                    await self._clear_broadcast_marker(broadcast_key)
+                    return receipt
+            elif reconciling:
                 prior = await self._check_sponsored_validity(
                     client,
                     raw_tx,
@@ -2448,29 +2742,21 @@ class ChargeIntent:
             deadline = time.monotonic() + self._confirmation_timeout
             send_timeout_ms = round(self._confirmation_timeout * 1000) * 2 // 3
             send_timeout = send_timeout_ms / 1000
-            if self._store is not None and broadcast_key is not None and not reconciling:
+            if request.methodDetails.feePayer and broadcast_key is not None and not reconciling:
                 # Persist the marker before sending, and fail closed: a submission
                 # whose outcome could be lost must not be broadcast at all.
-                try:
-                    if recovery_expires_at is not None and isinstance(self._store, ExpiringStore):
-                        valid_before = _transaction_valid_before(raw_tx)
-                        marker_expires_at = max(
-                            recovery_expires_at,
-                            valid_before + VALID_BEFORE_GRACE
-                            if valid_before is not None
-                            else recovery_expires_at,
-                        )
-                        marker_created = await self._store.put_if_absent_until(
-                            broadcast_key, raw_tx, marker_expires_at
-                        )
-                    else:
-                        marker_created = await self._store.put_if_absent(broadcast_key, raw_tx)
-                except Exception as err:
-                    raise InternalPaymentError() from err
-                if not marker_created:
-                    raise InternalPaymentError() from RuntimeError(
-                        "Another submission owns this credential's recovery record"
+                marker_expires_at: float | None = None
+                if recovery_expires_at is not None:
+                    valid_before = _transaction_valid_before(raw_tx)
+                    marker_expires_at = max(
+                        recovery_expires_at,
+                        valid_before + VALID_BEFORE_GRACE
+                        if valid_before is not None
+                        else recovery_expires_at,
                     )
+                marker_created = await self._put_broadcast_marker(
+                    broadcast_key, raw_tx, marker_expires_at, challenge_id
+                )
             # Authorize before the irreversible send: a challenge that expired
             # during sponsorship or simulation must not be settled.
             if expires is not None and _challenge_expired(expires):
@@ -2487,6 +2773,37 @@ class ChargeIntent:
                 raise VerificationError(
                     "Sponsor budget reservation ownership was lost before broadcast"
                 )
+            if not reconciling:
+                # Another server, or an earlier settlement whose replay record has
+                # expired, may already have counted a mined transaction: accept
+                # only one this server broadcasts itself. Checking right before
+                # the send also means receipt recovery below can only adopt a
+                # transaction that was still unmined here, as mppx does.
+                await self._assert_not_already_included(
+                    client, reserved_tx_hash or _raw_transaction_hash(raw_tx)
+                )
+                if not request.methodDetails.feePayer and broadcast_key is not None:
+                    # Record this server's own broadcast of these exact bytes, so a
+                    # retry after a lost outcome reconciles the transaction instead
+                    # of refusing it as mined by someone else.
+                    marker_created = await self._put_broadcast_marker(
+                        broadcast_key,
+                        raw_tx,
+                        _unsponsored_marker_expiry(recovery_expires_at, raw_tx),
+                        challenge_id,
+                    )
+            # The awaits since the check above (budget transition, receipt lookup,
+            # marker write) can outlast the Challenge: check again with no await
+            # between this check and the send.
+            if expires is not None and _challenge_expired(expires):
+                if reconciling:
+                    raise InternalPaymentError() from RuntimeError(
+                        "Earlier submission of this transaction has an unknown outcome"
+                    )
+                # Nothing was sent: drop the marker this attempt wrote, as for a send
+                # that never reached the node.
+                node_rejected = True
+                raise PaymentExpiredError(expires)
             broadcast_attempted = True
             outcome_unknown = True
             try:
@@ -2511,6 +2828,10 @@ class ChargeIntent:
                     send_error = TimeoutError(
                         f"Transaction submission timed out after {send_timeout:g}s"
                     )
+                node_rejected = _is_undelivered_send_error(send_error)
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
+                    request, own_marker=prior_marker or (marker_created and not node_rejected)
+                )
                 if not _is_ambiguous_broadcast_error(send_error, resubmitted=reconciling):
                     outcome_unknown = False
                     raise
@@ -2523,6 +2844,7 @@ class ChargeIntent:
                     realm=realm,
                     deadline=deadline,
                     error=send_error,
+                    require_bound_memo=require_bound_memo,
                 )
                 verified = True
                 await self._clear_broadcast_marker(broadcast_key)
@@ -2531,6 +2853,11 @@ class ChargeIntent:
             if "error" in result:
                 rpc_error = VerificationError(
                     f"Transaction submission failed: {_rpc_error_msg(result)}"
+                )
+                node_rejected = _is_definite_node_rejection(result)
+                open_rpc_error = not node_rejected
+                require_bound_memo = undecodable or self._recovery_requires_bound_memo(
+                    request, own_marker=prior_marker or (marker_created and not node_rejected)
                 )
                 if not _is_ambiguous_broadcast_error(result, resubmitted=reconciling):
                     outcome_unknown = False
@@ -2544,6 +2871,7 @@ class ChargeIntent:
                         realm=realm,
                         deadline=deadline,
                         error=rpc_error,
+                        require_bound_memo=require_bound_memo,
                     )
                     verified = True
                     await self._clear_broadcast_marker(broadcast_key)
@@ -2557,6 +2885,7 @@ class ChargeIntent:
                     realm=realm,
                     deadline=deadline,
                     error=rpc_error,
+                    require_bound_memo=require_bound_memo,
                 )
                 verified = True
                 await self._clear_broadcast_marker(broadcast_key)
@@ -2575,6 +2904,7 @@ class ChargeIntent:
                 request,
                 challenge_id=challenge_id,
                 realm=realm,
+                require_bound_memo=undecodable,
             )
 
             receipt_tx_hash = receipt_data.get("transactionHash")
@@ -2603,7 +2933,24 @@ class ChargeIntent:
             # Only successful verification consumes a payment. Failed or cancelled
             # attempts must let retries acquire the reservation and verify again.
             if not verified and self._store is not None:
-                if marker_created and not outcome_unknown:
+                if request.methodDetails.feePayer:
+                    # Keep the marker after a JSON-RPC error that leaves the outcome
+                    # open, as for an unsponsored pull: if the transaction mines, a
+                    # retry reconciles it instead of refusing it as a replay.
+                    if (
+                        marker_created
+                        and not outcome_unknown
+                        and (
+                            not open_rpc_error
+                            or isinstance(err, (_TransactionReverted, _TransactionNotIncluded))
+                        )
+                    ):
+                        await self._clear_broadcast_marker(broadcast_key)
+                elif marker_created and node_rejected:
+                    # Keep an unsponsored pull's marker unless this attempt's own
+                    # send never reached the node or the node refused it: a lost
+                    # connection, a timeout or an HTTP 5xx may still have
+                    # delivered it.
                     await self._clear_broadcast_marker(broadcast_key)
                 for key in store_keys:
                     await self._store.delete(key)
@@ -2611,7 +2958,8 @@ class ChargeIntent:
             # while this request was signing or simulating. Absence no longer
             # proves that asking for a new payment is safe.
             if (
-                broadcast_key is not None
+                request.methodDetails.feePayer
+                and broadcast_key is not None
                 and recovery_expires_at is not None
                 and recovery_expires_at <= time.time()
                 and isinstance(err, VerificationError)
@@ -2622,7 +2970,10 @@ class ChargeIntent:
             if (
                 broadcast_attempted
                 and isinstance(err, Exception)
-                and not isinstance(err, (CredentialReplayedError, InternalPaymentError))
+                and not isinstance(
+                    err,
+                    (CredentialReplayedError, _AttributionMismatchError, InternalPaymentError),
+                )
             ):
                 raise InternalPaymentError() from err
             if (
@@ -2820,6 +3171,48 @@ class ChargeIntent:
         if block_timestamp < valid_before:
             return False
         return await self._get_transaction_receipt(client, tx_hash) is None
+
+    @staticmethod
+    def _own_sponsored_marker(value: Any, challenge_id: str) -> Any:
+        """Return the transaction a sponsored broadcast marker recorded for this Challenge.
+
+        A marker another Challenge wrote means the sponsor already signed this
+        client envelope for that Challenge: never sign it again or adopt that
+        submission's receipt here. Markers that predate the recorded
+        Challenge are still reconciled.
+        """
+        marker_challenge, transaction = _decode_broadcast_marker(value)
+        if marker_challenge is not None and marker_challenge != challenge_id:
+            raise CredentialReplayedError("Transaction was already submitted for another challenge")
+        return transaction
+
+    async def _put_broadcast_marker(
+        self, broadcast_key: str, raw_tx: str, expires_at: float | None, challenge_id: str
+    ) -> bool:
+        """Record that this server is about to broadcast ``raw_tx`` for ``challenge_id``.
+
+        The marker outlives the replay reservation until the transaction
+        settles or can no longer be included, so a retry whose earlier outcome
+        was lost reconciles it. It expires at ``expires_at`` (a Unix time) when
+        the store supports expiry, and is kept until removed otherwise. Fails
+        closed: a submission whose outcome could be lost must not be broadcast
+        at all. Returns ``True`` once created.
+        """
+        if self._store is None:
+            return False
+        try:
+            marker = _encode_broadcast_marker(challenge_id, raw_tx)
+            if expires_at is not None and isinstance(self._store, ExpiringStore):
+                created = await self._store.put_if_absent_until(broadcast_key, marker, expires_at)
+            else:
+                created = await self._store.put_if_absent(broadcast_key, marker)
+        except Exception as err:
+            raise InternalPaymentError() from err
+        if not created:
+            raise InternalPaymentError() from RuntimeError(
+                "Another submission owns this credential's recovery record"
+            )
+        return True
 
     async def _clear_broadcast_marker(self, broadcast_key: str | None) -> None:
         """Drop a broadcast outcome marker once its transaction has settled."""

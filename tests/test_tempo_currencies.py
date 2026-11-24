@@ -748,6 +748,9 @@ class FakeRpc:
         self.methods.append(json["method"])
         if json["method"] == "eth_call":
             result: Any = "0x"
+        elif json["method"] == "eth_getTransactionReceipt":
+            # The pre-broadcast lookup: not on chain yet.
+            result = None
         elif json["method"] == "eth_sendRawTransactionSync":
             raw = json["params"][0]
             assert raw.startswith("0x76")
@@ -881,7 +884,12 @@ class TestSponsoredFeeToken:
 
         assert isinstance(paid, PaymentVerified)
         assert paid.receipt.status == "success"
-        assert rpc.methods == ["eth_call", "eth_call", "eth_sendRawTransactionSync"]
+        assert rpc.methods == [
+            "eth_call",
+            "eth_call",
+            "eth_getTransactionReceipt",
+            "eth_sendRawTransactionSync",
+        ]
         assert rpc.broadcast is not None
         assert "0x" + rpc.broadcast[4][0][0].hex() == OUSD.lower()
         assert rpc.fee_token == expected_fee_token.lower()

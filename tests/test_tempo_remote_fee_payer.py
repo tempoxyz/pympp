@@ -171,6 +171,9 @@ class FakeNetwork:
                 reply["error"] = self.simulation_errors[len(self.simulations)]
             else:
                 reply["result"] = "0x"
+        elif method == "eth_getTransactionReceipt":
+            # The pre-broadcast lookup: not on chain yet.
+            reply["result"] = None
         elif method == "eth_sendRawTransactionSync":
             raw = body["params"][0]
             self.broadcasts.append(raw)
@@ -251,12 +254,14 @@ async def test_hosted_fee_payer_sponsors_and_server_broadcasts(
 
     assert receipt.status == "success"
     # Like mppx: simulate from the sender, ask the sponsor, simulate the final
-    # sponsored transaction, then broadcast it here (not through the sponsor).
+    # sponsored transaction, check it is not already on chain, then broadcast
+    # it here (not through the sponsor).
     assert network.methods == [
         "eth_call",
         "eth_fillTransaction",
         "eth_call",
         "eth_call",
+        "eth_getTransactionReceipt",
         "eth_sendRawTransactionSync",
     ]
     [fill] = network.fill_requests

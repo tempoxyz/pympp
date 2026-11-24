@@ -21,6 +21,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from mpp._defaults import DEFAULT_CONFIRMATION_TIMEOUT, DEFAULT_TIMEOUT
+from mpp._typing import is_dict, is_list
 from mpp.methods.tempo._fee_payer import resolve_fee_payer
 from mpp.methods.tempo.client import _CHAIN_ID_UNSET, _tempo_method
 from mpp.methods.tempo.intents import ChargeIntent, ValidateSender
@@ -42,6 +43,29 @@ if TYPE_CHECKING:
     from mpp.store import Store
 
 __all__ = ["charge", "session"]
+
+
+def _charge_binding(request: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A charge request with its split amounts compared by value.
+
+    Challenges now carry split amounts as canonical base-10 strings; one issued
+    before that echoes them as the route configured them (such as ``"0100"``), and
+    still pays for the same route. Every other field must match exactly.
+    """
+    details = request.get("methodDetails")
+    if not is_dict(details):
+        return request
+    splits = details.get("splits")
+    if not is_list(splits):
+        return request
+    canonical: list[Any] = []
+    for split in splits:
+        amount = split.get("amount") if is_dict(split) else None
+        if is_dict(split) and isinstance(amount, str) and amount.isascii() and amount.isdigit():
+            canonical.append({**split, "amount": str(int(amount))})
+        else:
+            canonical.append(split)
+    return {**request, "methodDetails": {**details, "splits": canonical}}
 
 
 def charge(
@@ -186,6 +210,7 @@ def charge(
             validate=validate,
             broadcast=broadcast,
             resolve_request=resolve_request,
+            stable_binding=_charge_binding,
             can_offer=can_offer,
             on_payment_success=on_payment_success,
             defaults={"currency": accepted},
