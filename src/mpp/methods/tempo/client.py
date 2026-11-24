@@ -384,13 +384,25 @@ class _ZoneSend:
     redeemed_late: bool = False
     # Sender tag of a withdrawal whose credential was returned after its Challenge expired.
     sender_tag: str | None = None
-    # For a withdrawal whose receipt left the outbox's event out: the hash of the Zone
-    # block a receipt of the transaction last named (``None`` until the first derivation,
-    # which uses the send's receipt), and the sender tags derived from a block's state
-    # with that block's hash. A retry reuses them while the transaction's receipt still
-    # names that block, so it looks the settlement up without reading the outbox again.
-    derived_block_hash: str | None = None
+    # For a withdrawal whose receipt left the outbox's event out: whether a derivation
+    # of its sender tags started (the first uses the send's receipt, later ones look the
+    # receipt up again), and the hash of the last Zone block whose tags were derived,
+    # with those tags. The two are replaced together, only after the new block's tags are
+    # derived, so a failed read keeps the last derived ones. A retry reuses them while the
+    # transaction's receipt still names that block, so it looks the settlement up without
+    # reading the outbox again.
+    derivation_started: bool = False
     derived_sender_tags: tuple[str, tuple[str, ...]] | None = None
+    # Order in which derivations learned their block: ``observations`` counts the blocks
+    # a receipt named, and ``derived_observation`` is the number of the newest one whose
+    # tags ``derived_sender_tags`` holds or confirmed. A derivation keeps its tags only if
+    # no derivation that learned its block later kept others, so the most recently
+    # observed block wins however the reads interleave.
+    observations: int = 0
+    derived_observation: int = 0
+    # The block a receipt named most recently, with its observation number, kept even
+    # when reading its outbox failed, so a later lookup that proves nothing retries it.
+    observed_block: tuple[str, int] | None = None
     # IDs of the newly issued Challenges that resumed this withdrawal. A later attempt
     # for one of them is the same request, even while it waits on the withdrawal itself.
     resumed_by: set[str] = field(default_factory=lambda: set[str]())
@@ -1670,11 +1682,18 @@ class TempoMethod:
         from the state of the Zone block that includes it (mpp-rs ``derived_sender_tags``).
 
         A retry looks the transaction's receipt up again first: if the Zone moved it to
-        another block, as after a reorg, the tags come from that block, and tags derived
-        from the earlier one are dropped. A lookup that proves nothing keeps the last
-        known block. The lookup stops well before the derivation's ``deadline``, so a
-        stalled one never keeps a retry from the tags already derived for that block.
-        The outbox reads are pinned to that block's hash and its parent's.
+        another block, as after a reorg, the tags come from that block, and replace the
+        tags derived from the earlier one once they are derived. A lookup that proves
+        nothing retries the newest block a receipt named if its tags weren't derived,
+        falling back to the last derived ones, and otherwise keeps those. The lookup stops well before the
+        derivation's ``deadline``, so a stalled one never keeps a retry from the tags
+        already derived for that block. The outbox reads are pinned to that block's hash
+        and its parent's.
+
+        Each derivation that learns its block from a receipt takes the next observation
+        number. Its tags are kept only if no derivation that observed a block later kept
+        others, so an older block derived last never replaces a newer one, and a newer
+        block derived last still replaces an older one.
 
         Raises:
             SenderTagUnderivableError: If no receipt named a block, or the block's
@@ -1683,10 +1702,20 @@ class TempoMethod:
         assert self.zone is not None
         zone = self.zone
         rpc: dict[str, Any] = {} if zone.http_client is None else {"client": zone.http_client}
-        known = state.derived_block_hash
-        if known is None:
+        # 0 for a block no receipt proved (a lookup that proved nothing): kept only when
+        # no tags were derived yet.
+        observation = 0
+        # Tags to fall back to when retrying an observed block whose outbox read failed.
+        fallback: tuple[str, tuple[str, ...]] | None = None
+        started = asyncio.get_running_loop().time()
+        if not state.derivation_started:
             # The first derivation uses the receipt the send returned.
+            state.derivation_started = True
             block_hash = withdrawal.block_hash
+            if block_hash is not None:
+                state.observations += 1
+                observation = state.observations
+                state.observed_block = (block_hash, observation)
         else:
             try:
                 receipt = await asyncio.wait_for(
@@ -1700,27 +1729,54 @@ class TempoMethod:
                 )
             except Exception:
                 receipt = None
-            block_hash = _zone_included_block(receipt, withdrawal.transaction_hash) or known
+            included = _zone_included_block(receipt, withdrawal.transaction_hash)
+            if included is not None:
+                state.observations += 1
+                observation = state.observations
+                block_hash = included
+                state.observed_block = (block_hash, observation)
+            else:
+                # Read after the lookup, so a block a concurrent retry derived meanwhile
+                # wins.
+                derived = state.derived_sender_tags
+                observed = state.observed_block
+                if observed is not None and observed[1] > state.derived_observation:
+                    # A receipt named a newer block whose outbox read failed: retry it,
+                    # keeping the last derived tags if this read fails too.
+                    block_hash, observation = observed
+                    fallback = derived
+                else:
+                    block_hash = derived[0] if derived is not None else withdrawal.block_hash
         if block_hash is None:
             raise _zones.SenderTagUnderivableError(
                 f"Zone withdrawal transaction {withdrawal.transaction_hash} has no block."
             )
-        state.derived_block_hash = block_hash
         derived = state.derived_sender_tags
-        if derived is not None:
-            if derived[0] == block_hash:
-                return derived[1]
-            state.derived_sender_tags = None
-        tags = await _zones.sender_tag_candidates(
+        if derived is not None and derived[0] == block_hash:
+            # A newer observation of the kept block: an older derivation of another block
+            # still reading must not replace it.
+            state.derived_observation = max(state.derived_observation, observation)
+            return derived[1]
+        read = _zones.sender_tag_candidates(
             zone.rpc_url,
             block_hash=block_hash,
             sender=withdrawal.sender,
             transaction_hash=withdrawal.transaction_hash,
             client=zone.http_client,
         )
-        # Kept only while no concurrent retry saw the transaction move.
-        if state.derived_block_hash == block_hash:
+        if fallback is None:
+            tags = await read
+        else:
+            # Bounded so a stalled read still leaves time to use the fallback tags.
+            elapsed = asyncio.get_running_loop().time() - started
+            try:
+                tags = await asyncio.wait_for(read, timeout=max((deadline - elapsed) / 2, 0))
+            except Exception:
+                return fallback[1]
+        # Kept only if no derivation that observed its block later kept others.
+        if state.derived_sender_tags is None or observation > state.derived_observation:
             state.derived_sender_tags = (block_hash, tags)
+            state.derived_observation = observation
         return tags
 
     async def _settle_zone_withdrawal(
@@ -1762,10 +1818,10 @@ class TempoMethod:
             except _zones.SenderTagUnderivableError as refusal:
                 # The Zone's outbox state is fixed, so every retry would be refused the
                 # same way: report the sent withdrawal by its hash to reconcile instead.
+                # The refusal says why (no block, no withdrawal, or too many candidates).
                 refused = TransactionError(
                     f"Zone withdrawal transaction {withdrawal.transaction_hash} was sent, but "
-                    "the Zone's outbox names no withdrawal for it, so its sender tag can't "
-                    "be derived."
+                    f"its sender tag can't be derived: {refusal}"
                 )
                 refused.__cause__ = refusal
                 raise PaymentOutcomeUnknownError(
