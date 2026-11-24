@@ -19,7 +19,12 @@ from mpp.methods.tempo import server as tempo_server
 from mpp.server import Mpp, PaymentRequired, PaymentVerified
 from mpp.server.method import RequestContext
 from mpp.server.verify import verify_or_challenge
-from mpp.x402 import X402Input, decode_payment_required, payment_response_header
+from mpp.x402 import (
+    X402Input,
+    decode_payment_required,
+    decode_payment_response,
+    payment_response_header,
+)
 from tests import MockRequest, challenge, challenges, http_request
 from tests.x402_harness import sign_x402_payment
 
@@ -408,6 +413,79 @@ class TestX402Extra:
         assert isinstance(result, PaymentVerified), result
         assert settled[0]["payTo"].lower() == deposit
         assert settled[0]["extra"]["tempoSettlement"] == "0x" + "55" * 20
+
+    @staticmethod
+    def _extensions_facilitator(extensions: dict[str, Any] | None) -> Any:
+        class Facilitator:
+            async def verify(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                return {"isValid": True, "payer": PAYER.address}
+
+            async def settle(self, payment_payload: Any, payment_requirements: Any) -> Any:
+                settled: dict[str, Any] = {
+                    "success": True,
+                    "transaction": "0x" + "cd" * 32,
+                    "network": "eip155:84532",
+                }
+                if extensions is not None:
+                    settled["extensions"] = extensions
+                return settled
+
+        return Facilitator()
+
+    async def test_facilitator_settle_extensions_reach_the_receipt_and_payment_response(
+        self,
+    ) -> None:
+        extensions = {
+            "tempoSettlement": {
+                "network": "eip155:4217",
+                "payoutId": "payout_1",
+                "status": "submitted",
+                "transaction": "0x" + "9" * 64,
+            }
+        }
+        receipts: list[Receipt] = []
+        server = Mpp(
+            methods=evm_charge(
+                currency=BASE_SEPOLIA_USDC,
+                recipient=RECIPIENT,
+                facilitator=self._extensions_facilitator(extensions),
+                x402_extra={"tempoSettlement": "0x" + "55" * 20},
+                on_payment_success=lambda event: receipts.append(event["receipt"]),
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+
+        result = await server.charge(amount="0.01")(x402_request(await signed(server)))
+
+        assert isinstance(result, PaymentVerified), result
+        assert result.receipt.extensions == {"extensions": extensions}
+        assert receipts and receipts[0].extensions == {"extensions": extensions}
+        header = payment_response_header(result.credential, result.receipt)
+        assert header is not None
+        response = decode_payment_response(header)
+        assert response["transaction"] == "0x" + "cd" * 32
+        assert response.get("extensions") == extensions
+
+    async def test_payment_response_omits_extensions_when_the_facilitator_returns_none(
+        self,
+    ) -> None:
+        server = Mpp(
+            methods=evm_charge(
+                currency=BASE_SEPOLIA_USDC,
+                recipient=RECIPIENT,
+                facilitator=self._extensions_facilitator(None),
+            ),
+            realm=REALM,
+            secret_key="k",
+        )
+
+        result = await server.charge(amount="0.01")(x402_request(await signed(server)))
+
+        assert isinstance(result, PaymentVerified), result
+        header = payment_response_header(result.credential, result.receipt)
+        assert header is not None
+        assert "extensions" not in decode_payment_response(header)
 
     def test_rejects_a_non_object_extra(self) -> None:
         with pytest.raises(ValueError, match="x402_extra"):

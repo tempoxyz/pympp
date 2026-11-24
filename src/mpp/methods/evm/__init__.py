@@ -50,6 +50,7 @@ _LAZY_EXPORTS = {
         "ChargeIntent",
         "ChargeRequest",
         "SettleFn",
+        "Settlement",
         "charge",
     ),
     "mpp.methods.evm._eip3009": ("challenge_hash",),

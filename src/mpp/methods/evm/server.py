@@ -100,7 +100,8 @@ def charge(
             EIP-3009 authorizations with. Inferred from a known asset.
         facilitator: x402 facilitator URL or client that verifies and settles payments.
         settle: Custom settlement hook used instead of a facilitator. It
-            receives the verified authorization and returns its reference.
+            receives the verified authorization and returns its reference, or a
+            ``Settlement`` that also carries settlement ``extensions`` for the receipt.
         max_timeout_seconds: x402 ``maxTimeoutSeconds`` offered to clients.
         route_binding: How x402 payments bind to routes, which are scoped to their
             HTTP method, path and query. ``"required"`` (the default) accepts only

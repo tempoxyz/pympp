@@ -174,8 +174,93 @@ class Authorization:
     source: str
 
 
-SettleFn: TypeAlias = Callable[[Authorization], str | Awaitable[str]]
-"""Settles a verified authorization and returns its reference (a transaction hash)."""
+@dataclass(frozen=True, slots=True)
+class Settlement:
+    """What a custom ``settle`` hook may return instead of a bare reference.
+
+    Attributes:
+        reference: The settlement reference (a transaction hash).
+        extensions: Settlement data to pass through on the receipt and the x402
+            ``PAYMENT-RESPONSE``, keyed by extension name, such as an x402
+            facilitator's ``SettleResponse.extensions``.
+    """
+
+    reference: str
+    extensions: dict[str, Any] | None = None
+
+
+SettleFn: TypeAlias = Callable[[Authorization], str | Settlement | Awaitable[str | Settlement]]
+"""Settles a verified authorization and returns its reference (a transaction hash),
+or a :class:`Settlement` that also carries settlement extensions."""
+
+_MAX_EXTENSIONS_BYTES = 4096
+"""Largest serialized settle extensions a receipt carries; larger ones are dropped."""
+_MAX_EXTENSIONS_DEPTH = 8
+"""Deepest nesting settle extensions may have; deeper ones are dropped."""
+
+
+def _within_bounds(value: Any, depth_limit: int, size_limit: int) -> bool:
+    """Check nesting and a lower bound on serialized size without recursion.
+
+    Every node, key and string character costs at least one byte of JSON, so the walk
+    stops as soon as the value can't fit in ``size_limit`` bytes, before any
+    serialization, and hostile depth can't overflow the stack.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    budget = size_limit
+    while stack:
+        node, depth = stack.pop()
+        budget -= 1
+        children: list[Any]
+        if is_mapping(node):
+            mapping: Mapping[Any, Any] = node
+            # JSON names are strings; a non-string key could collide with one (1 and "1").
+            if not all(isinstance(key, str) for key in mapping):
+                return False
+            budget -= sum(len(key) for key in mapping)
+            children = list(mapping.values())
+        elif isinstance(node, list | tuple):
+            children = list(cast("list[Any] | tuple[Any, ...]", node))
+        elif isinstance(node, str):
+            budget -= len(node)
+            continue
+        else:
+            continue
+        if depth > depth_limit or budget < 0:
+            return False
+        if budget - len(children) < 0:
+            return False
+        stack.extend((child, depth + 1) for child in children)
+    return budget >= 0
+
+
+def _json_extensions(extensions: Any) -> dict[str, Any] | None:
+    """Normalize settler extensions to the JSON the receipt header carries.
+
+    A value that isn't a JSON object, nests deeper than 8 levels, serializes past
+    4 KiB as the receipt encodes it (ASCII-escaped JSON), or holds a value the
+    x402 header codec can't canonicalize (such as a lone surrogate or an integer
+    beyond 2**53 - 1) is dropped, as in mppx, so a settled payment never fails on
+    its receipt or overflows a client's header limit.
+    """
+    if not is_mapping(extensions):
+        return None
+    try:
+        # A settler's custom mapping can fail while it is walked; the payment has already
+        # settled, so drop its extensions instead of failing the receipt.
+        if not _within_bounds(extensions, _MAX_EXTENSIONS_DEPTH, _MAX_EXTENSIONS_BYTES):
+            return None
+        # Payment-Receipt serializes with json.dumps' default ensure_ascii, so measure that.
+        serialized = json.dumps(extensions, allow_nan=False, separators=(",", ":"))
+        if len(serialized) > _MAX_EXTENSIONS_BYTES:
+            return None
+        value = json.loads(serialized)
+        # PAYMENT-RESPONSE decoding canonicalizes with RFC 8785, which also rejects
+        # lone surrogates and integers a JavaScript number can't hold exactly.
+        rfc8785.dumps(value)
+    except Exception:
+        return None
+    return cast("dict[str, Any]", value) if isinstance(value, dict) and value else None
 
 
 def _parse_authorization_payload(payload: Any) -> dict[str, Any]:
@@ -574,12 +659,15 @@ class ChargeIntent:
             self._store.claim_until(claim_key, int(payload["validBefore"]))
 
         try:
-            reference = await self._settle(credential, payload, request)
+            reference, extensions = await self._settle(credential, payload, request)
         except (VerificationFailedError, InvalidPayloadError):
             # Nothing settled: let the payer retry with the same authorization.
             if self._store is not None:
                 await self._store.delete(claim_key)
             raise
+        # Snapshot before the next await so a settler that reuses one mapping across
+        # payments can't change this receipt's extensions.
+        settled_extensions = _json_extensions(extensions)
         if memory is not None:
             # compare_and_set keeps the claim's expiry; put would make it permanent.
             await memory.compare_and_set(claim_key, "pending", reference)
@@ -591,12 +679,15 @@ class ChargeIntent:
             timestamp=datetime.now(UTC),
             reference=reference,
             method="evm",
+            # The receipt's own ``extensions`` member, as mppx writes it. Receipt.extensions
+            # holds the receipt's extra top-level members, so it lands under that key.
+            extensions={"extensions": settled_extensions} if settled_extensions else None,
             payer=payer,
         )
 
     async def _settle(
         self, credential: Credential, payload: dict[str, Any], request: dict[str, Any]
-    ) -> str:
+    ) -> tuple[str, Any]:
         if self.settle is not None:
             authorization = Authorization(
                 credential=credential,
@@ -604,14 +695,16 @@ class ChargeIntent:
                 request=request,
                 source=to_source(address=payload["from"], chain_id=self._chain_id(request)),
             )
-            reference = self.settle(authorization)
-            if inspect.isawaitable(reference):
-                reference = await reference
+            result: Any = self.settle(authorization)
+            if inspect.isawaitable(result):
+                result = await result
+            extensions = result.extensions if isinstance(result, Settlement) else None
+            reference = result.reference if isinstance(result, Settlement) else result
             if not isinstance(reference, str) or not reference:
                 raise InternalPaymentError() from TypeError(
                     "settle hook must return a non-empty reference string"
                 )
-            return reference
+            return reference, extensions
 
         assert self.facilitator is not None
         payment, requirements = self._facilitator_payment(payload, request)
@@ -637,7 +730,7 @@ class ChargeIntent:
             raise InternalPaymentError() from ValueError(
                 "facilitator reported success without a transaction"
             )
-        return settled["transaction"]
+        return settled["transaction"], settled.get("extensions")
 
 
 class _X402ExtraError(ValueError):

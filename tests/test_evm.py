@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 from eth_account import Account
 
-from mpp import Challenge, ChallengeEcho, Credential
+from mpp import Challenge, ChallengeEcho, Credential, Receipt
 from mpp._canonical import canonical_b64url
 from mpp.errors import (
     CredentialReplayedError,
@@ -24,6 +26,8 @@ from mpp.methods.evm import (
     Authorization,
     ChargeIntent,
     EvmAsset,
+    SettleFn,
+    Settlement,
     challenge_hash,
     evm,
 )
@@ -41,6 +45,13 @@ PAYER = Account.from_key("0x" + "11" * 32)
 OTHER = Account.from_key("0x" + "22" * 32)
 RECIPIENT = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 REALM = "api.example.com"
+
+
+def nested_object(levels: int) -> dict[str, Any]:
+    nested: dict[str, Any] = {"leaf": True}
+    for _ in range(levels):
+        nested = {"n": nested}
+    return nested
 
 
 class FakeFacilitator:
@@ -563,6 +574,182 @@ class TestBroadcast:
         assert authorization.source == to_source(address=PAYER.address, chain_id=84532)
         assert authorization.request == req
         assert authorization.payload["from"] == PAYER.address
+
+    async def test_carries_facilitator_settle_extensions_on_the_receipt(self) -> None:
+        extensions = {
+            "tempoSettlement": {"payoutId": "payout_1", "status": "confirmed", "transaction": "0x1"}
+        }
+        facilitator = FakeFacilitator(
+            settle={
+                "success": True,
+                "transaction": "0x" + "ab" * 32,
+                "network": "eip155:84532",
+                "extensions": extensions,
+            }
+        )
+        method = server_method(facilitator)
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.extensions == {"extensions": extensions}
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+        assert parsed.reference == "0x" + "ab" * 32
+        assert parsed.extensions == {"extensions": extensions}
+
+    async def test_receipt_has_no_extensions_when_the_facilitator_returns_none(self) -> None:
+        method = server_method()
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.extensions is None
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+        assert parsed.extensions is None
+
+    @pytest.mark.parametrize("is_async", [False, True])
+    async def test_carries_custom_settle_extensions_on_the_receipt(self, is_async: bool) -> None:
+        settlement = Settlement(reference="0xhook", extensions={"payout": {"id": "payout_1"}})
+
+        async def settle_async(authorization: Authorization) -> Settlement:
+            return settlement
+
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=settle_async if is_async else (lambda authorization: settlement),
+        )
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions == {"extensions": {"payout": {"id": "payout_1"}}}
+
+    @pytest.mark.parametrize(
+        "extensions",
+        [
+            {"amount": Decimal("1")},
+            {"value": float("nan")},
+            {"blob": "x" * 5000},
+            {"nested": nested_object(20)},
+            {},
+            ["not", "an", "object"],
+            {"payout": "\ud800"},
+            {"payout": {"amount": 2**53}},
+            {"note": "\U0001f600" * 1020},
+            {"wide": list(range(100_000))},
+            {1: "a", "1": "b"},
+            {"payout": {True: "a", "true": "b"}},
+        ],
+        ids=[
+            "not-json",
+            "nan",
+            "too-large",
+            "too-deep",
+            "empty",
+            "not-an-object",
+            "lone-surrogate",
+            "unsafe-integer",
+            "too-large-escaped",
+            "too-wide",
+            "non-string-key",
+            "nested-non-string-key",
+        ],
+    )
+    async def test_drops_settle_extensions_the_receipt_cannot_carry(self, extensions: Any) -> None:
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(reference="0xhook", extensions=extensions),
+        )
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions is None
+        receipt.to_payment_receipt()
+
+    async def test_drops_settle_extensions_whose_traversal_fails(self) -> None:
+        class Invalidated(Mapping[str, Any]):
+            def __getitem__(self, key: str) -> Any:
+                raise KeyError(key)
+
+            def __iter__(self) -> Iterator[str]:
+                raise TypeError("source invalidated")
+
+            def __len__(self) -> int:
+                return 1
+
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(
+                reference="0xhook", extensions={"payout": Invalidated()}
+            ),
+        )
+        intent = charge_intent(method)
+        req = request(method)
+        credential = native_credential(req)
+        receipt = await intent.broadcast(credential, req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions is None
+        # The settled claim is recorded, so the same authorization is a replay.
+        with pytest.raises(CredentialReplayedError):
+            await intent.broadcast(credential, req)
+
+    async def test_snapshots_settle_extensions_before_recording_the_claim(self) -> None:
+        shared: dict[str, Any] = {"payout": "first"}
+
+        class RefillingStore(MemoryStore):
+            async def compare_and_set(
+                self, key: str, expected: Any | None, value: Any | None
+            ) -> bool:
+                # Another payment reuses the settler's mapping while this one records its claim.
+                shared["payout"] = "second"
+                return await super().compare_and_set(key, expected, value)
+
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(reference="0xhook", extensions=shared),
+        )
+        intent = charge_intent(method)
+        intent._store = RefillingStore()
+        req = request(method)
+        receipt = await intent.broadcast(native_credential(req), req)
+        assert shared == {"payout": "second"}
+        assert receipt.extensions == {"extensions": {"payout": "first"}}
+
+    async def test_keeps_settle_extensions_at_the_depth_limit(self) -> None:
+        extensions = nested_object(6)  # 7 levels of objects plus the outer one
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(
+                reference="0xhook", extensions={"n": extensions}
+            ),
+        )
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.extensions == {"extensions": {"n": extensions}}
+
+    async def test_keeps_non_ascii_settle_extensions_within_the_escaped_budget(self) -> None:
+        extensions = {"note": "\u00e9" * 600, "amount": 2**53 - 1}
+        method = evm(
+            currency=BASE_SEPOLIA_USDC,
+            recipient=RECIPIENT,
+            settle=lambda authorization: Settlement(reference="0xhook", extensions=extensions),
+        )
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.extensions == {"extensions": extensions}
+        parsed = Receipt.from_payment_receipt(receipt.to_payment_receipt())
+        assert parsed.extensions == {"extensions": extensions}
+
+    async def test_accepts_an_async_hook_returning_str_or_settlement(self) -> None:
+        async def settle(authorization: Authorization) -> str | Settlement:
+            return Settlement(reference="0xhook")
+
+        hook: SettleFn = settle
+        method = evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=hook)
+        req = request(method)
+        receipt = await charge_intent(method).broadcast(native_credential(req), req)
+        assert receipt.reference == "0xhook"
+        assert receipt.extensions is None
 
     async def test_hook_must_return_a_reference(self) -> None:
         method = evm(currency=BASE_SEPOLIA_USDC, recipient=RECIPIENT, settle=lambda a: "")

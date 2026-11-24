@@ -414,4 +414,8 @@ def payment_response_header(credential: Credential, receipt: Receipt) -> str | N
     }
     if isinstance(payer, str):
         response["payer"] = payer
+    # Settlement extensions (a facilitator's SettleResponse.extensions) pass through unchanged.
+    extensions = receipt.extensions.get("extensions") if receipt.extensions else None
+    if is_mapping(extensions) and extensions:
+        response["extensions"] = dict(extensions)
     return encode_payment_response(response)  # type: ignore[arg-type]
