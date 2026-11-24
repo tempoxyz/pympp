@@ -1264,31 +1264,36 @@ async def _estimate_gas(
     *,
     valid_before: int,
     required: bool = False,
+    key_id: str | None = None,
+    payment: bool = False,
 ) -> int:
-    """Estimated gas plus headroom; ``required`` raises instead of using the default limit."""
+    """Estimated gas plus headroom; ``required`` raises instead of using the default limit.
+
+    ``key_id`` names the access key that signs for ``sender``, so the node checks its
+    spending limits. With ``payment``, a spending-limit or balance revert raises
+    ``SpendingLimitExceededError`` or ``InsufficientBalanceError`` (mppx#1293).
+    """
+    request: dict[str, Any] = {
+        "from": sender,
+        "calls": [{"to": to, "value": "0x0", "data": data} for to, data in calls],
+        "nonceKey": hex(EXPIRING_NONCE_KEY),
+        # Expiring-nonce transactions must carry validBefore to execute.
+        "validBefore": hex(valid_before),
+    }
+    if key_id is not None:
+        request["keyId"] = key_id
     try:
-        estimated = int(
-            await _rpc(
-                rpc_url,
-                "eth_estimateGas",
-                [
-                    {
-                        "from": sender,
-                        "calls": [{"to": to, "value": "0x0", "data": data} for to, data in calls],
-                        "nonceKey": hex(EXPIRING_NONCE_KEY),
-                        # Expiring-nonce transactions must carry validBefore to execute.
-                        "validBefore": hex(valid_before),
-                    },
-                    "latest",
-                ],
-                client,
-            ),
-            16,
-        )
+        estimated = int(await _rpc(rpc_url, "eth_estimateGas", [request, "latest"], client), 16)
     except Exception as error:
         mapped = signer_config_error(error)
         if mapped is not None:
             raise mapped from error
+        if payment:
+            from mpp.methods.tempo._simulation import simulation_error
+
+            simulated = simulation_error(error, account=sender, access_key=key_id)
+            if simulated is not None:
+                raise simulated from error
         if required:
             raise
         return DEFAULT_GAS_LIMIT
@@ -1310,6 +1315,7 @@ async def _build_signed_transaction(
     client: httpx.AsyncClient | None,
     estimate_required: bool = False,
     payer_fee_policy: Mapping[str, int] | None = None,
+    payment: bool = False,
 ) -> tuple[Any, int]:
     """Build and sender-sign an expiring-nonce Tempo transaction; returns (tx, chain_id)."""
     # pytempo ships no type information.
@@ -1335,8 +1341,17 @@ async def _build_signed_transaction(
         raise FeePolicyError("RPC gas-price quote exceeds payer fee policy")
     priority_fee = min(gas_price, policy.max_priority_fee_per_gas)
     valid_before = valid_before or int(time.time()) + EXPIRING_NONCE_VALID_BEFORE_SECS
+    # Preparation estimates gas, which simulates the calls as the signing key, so a payment the
+    # key's spending limit or the account's balance cannot cover fails here, before signing.
     gas_limit = await _estimate_gas(
-        rpc_url, sender, calls, client, valid_before=valid_before, required=estimate_required
+        rpc_url,
+        sender,
+        calls,
+        client,
+        valid_before=valid_before,
+        required=estimate_required,
+        key_id=account.address if root_account is not None else None,
+        payment=payment,
     )
     if not awaiting_fee_payer and gas_limit * gas_price > policy.max_total_fee:
         raise FeePolicyError("Transaction exceeds payer total-fee budget")
@@ -1439,6 +1454,7 @@ async def build_open_transaction(
         valid_before=valid_before,
         valid_after=open_valid_after,
         client=client,
+        payment=True,
     )
     raw_tx = _serialize_client_transaction(signed, fee_payer)
     descriptor = ChannelDescriptor(
@@ -1487,6 +1503,7 @@ async def build_top_up_transaction(
             valid_before=valid_before,
             valid_after=_random_valid_after(),
             client=client,
+            payment=True,
         )
     except SignerConfigChangedError as error:
         if chain_id is not None and error.channel_id is None:

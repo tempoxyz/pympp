@@ -29,6 +29,7 @@ from mpp._parsing import (
 from mpp.errors import (
     BadRequestError,
     CredentialReplayedError,
+    InsufficientBalanceError,
     InternalPaymentError,
     InvalidChallengeError,
     InvalidPayloadError,
@@ -43,6 +44,7 @@ from mpp.errors import (
     PaymentOutcomeUnknownError,
     PaymentRequiredError,
     PaymentSimulationError,
+    SpendingLimitExceededError,
     VerificationFailedError,
 )
 from mpp.events import (
@@ -622,6 +624,7 @@ __all__ = [
     "CredentialReplayedError",
     "EventDispatcher",
     "Expires",
+    "InsufficientBalanceError",
     "InternalPaymentError",
     "InvalidChallengeError",
     "InvalidPayloadError",
@@ -646,6 +649,7 @@ __all__ = [
     "PaymentRequiredError",
     "PaymentSimulationError",
     "Receipt",
+    "SpendingLimitExceededError",
     "Store",
     "VerificationFailedError",
     "WILDCARD_EVENT",

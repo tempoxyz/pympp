@@ -86,13 +86,16 @@ async def estimate_gas(
     to: str,
     data: str,
     *,
+    key_id: str | None = None,
     client: Any | None = None,
 ) -> int:
-    """Estimate gas for a call via eth_estimateGas."""
-    result = await _rpc_call(
-        rpc_url,
-        "eth_estimateGas",
-        [{"from": from_addr, "to": to, "data": data}, "latest"],
-        client=client,
-    )
+    """Estimate gas for a call via eth_estimateGas.
+
+    ``key_id`` names the access key that signs for ``from_addr``, so the node checks its
+    spending limits.
+    """
+    request: dict[str, Any] = {"from": from_addr, "to": to, "data": data}
+    if key_id is not None:
+        request["keyId"] = key_id
+    result = await _rpc_call(rpc_url, "eth_estimateGas", [request, "latest"], client=client)
     return int(result, 16)
